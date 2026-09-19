@@ -24,11 +24,13 @@ pip install -e ".[dev]"
 ### 无密钥演示（FakeProvider 一键重放修复过程）
 
 `examples/pagination` 是一个带分页边界 bug 的微型仓库；下面的命令用确定性的 FakeProvider
-脚本重放「读文件 → 改文件 → 跑测试 → 总结」的完整修复过程，不需要任何 API key：
+脚本重放「读文件 → 改文件 → 跑测试 → 总结」的完整修复过程，不需要任何 API key。
+演示会**实际修改**工作区内的文件，建议先复制一份再运行：
 
 ```bash
+cp -r examples/pagination /tmp/pagination-demo   # Windows Git Bash 同样可用
 minicode run "修复分页 bug" \
-  --workspace examples/pagination \
+  --workspace /tmp/pagination-demo \
   --provider fake \
   --script examples/pagination/scripts/fix_pagination.json \
   --yes
@@ -37,6 +39,8 @@ minicode run "修复分页 bug" \
 运行结束后会打印退出原因、轮数、token 用量与「修改摘要」（diff）；
 `minicode report <会话ID>` 可查看完整执行记录。脚本中的测试命令假设 PATH 上的 `python`
 已安装 pytest，详见 [examples/pagination/README.md](examples/pagination/README.md)。
+若直接对仓库内 fixture 运行演示，可用 `git checkout -- examples/pagination/paginate.py`
+恢复 bug 以便重放。
 
 ### 接真实模型
 
@@ -59,11 +63,12 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 
 常用选项（`run` / `chat` 共享）：`--workspace`（默认当前目录）、`--provider auto|fake|anthropic`、
 `--model`（默认 `claude-sonnet-4-5`，仅 anthropic 使用）、`--script`（FakeProvider 脚本 JSON）、
-`--max-rounds`（默认 20）、`--max-tokens`（默认 200000）、`--max-seconds`（默认 600）、
-`--yes/-y`（自动允许全部工具）、`--db`（默认 `~/.minicode/sessions.db`）。
+`--max-rounds`（默认 20）、`--max-tokens`（默认 200000）、`--max-seconds`（默认 600，**每轮**的
+时长上限）、`--yes/-y`（自动允许全部工具）、`--db`（默认 `~/.minicode/sessions.db`）。
 
 会话（消息、事件、用量）实时持久化到 SQLite；Ctrl+C 取消时先落库 `cancelled` 状态再退出
-（退出码 130）。
+（退出码 130）。预算耗尽（如 `max_rounds`）会打印明确的退出原因，但进程退出码为 0；
+脚本化调用方如需区分，请解析退出原因或查询会话状态。
 
 ## P0 能力清单
 
