@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime data
+.minicode/
+*.db
+*.db-journal
+
+# Teaching reference (has its own git repo, kept local only)
+/learn-claude-code/
+
+# Local tool artifacts / stray files
+.playwright-mcp/
+ds-state.png
