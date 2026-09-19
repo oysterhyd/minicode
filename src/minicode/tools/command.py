@@ -13,8 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
-from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
-from minicode.tools.base import BaseTool, ToolContext, truncate_output
+from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, truncate_output
 
 
 class RunCommandArgs(BaseModel):
@@ -34,12 +33,9 @@ class RunCommandTool(BaseTool):
     args_model = RunCommandArgs
 
     async def execute(self, args: RunCommandArgs, ctx: ToolContext) -> ToolOutcome:
-        try:
-            cwd = resolve_in_workspace(ctx.workspace, args.cwd)
-        except PathOutsideWorkspaceError as exc:
-            return ToolOutcome.failure(f"path outside workspace: {exc}")
-        except OSError as exc:
-            return ToolOutcome.failure(f"invalid path: {exc}")
+        cwd, failure = resolve_or_fail(ctx, args.cwd)
+        if failure is not None:
+            return failure
         if not cwd.is_dir():
             return ToolOutcome.failure(f"path is not a directory: {args.cwd}")
 

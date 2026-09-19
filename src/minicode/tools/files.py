@@ -9,8 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from minicode.core.models import ToolOutcome
-from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
-from minicode.tools.base import BaseTool, ToolContext, truncate_output
+from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, truncate_output
 
 # Directory names never descended into by listing / searching tools.
 SKIP_DIRS = {
@@ -23,22 +22,6 @@ SKIP_DIRS = {
     ".pytest_cache",
     ".ruff_cache",
 }
-
-
-def _resolve_or_fail(ctx: ToolContext, user_path: str) -> tuple[Path | None, ToolOutcome | None]:
-    """Resolve *user_path* inside the workspace.
-
-    Returns ``(path, None)`` on success or ``(None, failure_outcome)`` when the
-    path escapes the workspace (or cannot be resolved at all). Every filesystem
-    tool funnels its path handling through here so traversal and symlink
-    escapes become ordinary tool failures instead of exceptions.
-    """
-    try:
-        return resolve_in_workspace(ctx.workspace, user_path), None
-    except PathOutsideWorkspaceError as exc:
-        return None, ToolOutcome.failure(f"path outside workspace: {exc}")
-    except OSError as exc:
-        return None, ToolOutcome.failure(f"invalid path: {exc}")
 
 
 def _relpath(target: Path, ctx: ToolContext) -> str:
@@ -70,9 +53,8 @@ class ReadFileTool(BaseTool):
     args_model = ReadFileArgs
 
     async def execute(self, args: ReadFileArgs, ctx: ToolContext) -> ToolOutcome:
-        target, failure = _resolve_or_fail(ctx, args.path)
-        if failure is not None or target is None:
-            assert failure is not None
+        target, failure = resolve_or_fail(ctx, args.path)
+        if failure is not None:
             return failure
         if not target.is_file():
             return ToolOutcome.failure(f"path is not a file: {args.path}")
@@ -124,9 +106,8 @@ class ListFilesTool(BaseTool):
     _MAX_ENTRIES = 500
 
     async def execute(self, args: ListFilesArgs, ctx: ToolContext) -> ToolOutcome:
-        base, failure = _resolve_or_fail(ctx, args.path)
-        if failure is not None or base is None:
-            assert failure is not None
+        base, failure = resolve_or_fail(ctx, args.path)
+        if failure is not None:
             return failure
         if not base.is_dir():
             return ToolOutcome.failure(f"path is not a directory: {args.path}")
@@ -174,9 +155,8 @@ class ApplyPatchTool(BaseTool):
     args_model = ApplyPatchArgs
 
     async def execute(self, args: ApplyPatchArgs, ctx: ToolContext) -> ToolOutcome:
-        target, failure = _resolve_or_fail(ctx, args.path)
-        if failure is not None or target is None:
-            assert failure is not None
+        target, failure = resolve_or_fail(ctx, args.path)
+        if failure is not None:
             return failure
         relpath = _relpath(target, ctx)
 

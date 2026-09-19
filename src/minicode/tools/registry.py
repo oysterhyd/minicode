@@ -32,7 +32,7 @@ class ToolRegistry:
 
 
 def default_registry() -> ToolRegistry:
-    """Registry preloaded with the P0 built-in tools."""
+    """Registry preloaded with the built-in tools."""
     registry = ToolRegistry()
     for tool in (
         ReadFileTool(),

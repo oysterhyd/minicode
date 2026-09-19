@@ -12,8 +12,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
-from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
-from minicode.tools.base import BaseTool, ToolContext, truncate_output
+from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, truncate_output
 from minicode.tools.files import SKIP_DIRS
 
 _RG_TIMEOUT_S = 30.0
@@ -44,12 +43,9 @@ class SearchTextTool(BaseTool):
     args_model = SearchTextArgs
 
     async def execute(self, args: SearchTextArgs, ctx: ToolContext) -> ToolOutcome:
-        try:
-            base = resolve_in_workspace(ctx.workspace, args.path)
-        except PathOutsideWorkspaceError as exc:
-            return ToolOutcome.failure(f"path outside workspace: {exc}")
-        except OSError as exc:
-            return ToolOutcome.failure(f"invalid path: {exc}")
+        base, failure = resolve_or_fail(ctx, args.path)
+        if failure is not None:
+            return failure
         if not base.is_dir():
             return ToolOutcome.failure(f"path is not a directory: {args.path}")
 

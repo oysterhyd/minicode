@@ -118,7 +118,7 @@ class AnthropicProvider:
                         input=dict(raw_input) if raw_input else {},
                     )
                 )
-            # Other block types (e.g. thinking) are ignored for P0.
+            # Other block types (e.g. thinking) are ignored.
         return blocks
 
     @staticmethod

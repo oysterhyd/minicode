@@ -1,4 +1,4 @@
-"""minicode CLI: the user-facing layer of the P0 minimal closed loop.
+"""minicode CLI: the user-facing layer of the minimal closed loop.
 
 Commands:
 
@@ -50,7 +50,7 @@ from minicode.providers import (
 )
 from minicode.runtime import AgentRuntime
 from minicode.security import AutoAllowPolicy, DefaultPolicy, PermissionPolicy
-from minicode.storage import DEFAULT_DB_PATH, SessionStore, SqliteStore
+from minicode.storage import DEFAULT_DB_PATH, SessionStore, SessionSummary, SqliteStore
 from minicode.tools.registry import default_registry
 
 app = typer.Typer(
@@ -195,15 +195,14 @@ def _build_provider(
     provider_choice: ProviderChoice, model: str, script: Path | None
 ) -> tuple[Provider, str, str]:
     """Resolve ``--provider`` into ``(provider, provider_name, model_label)``."""
-    choice = provider_choice
-    if choice is ProviderChoice.auto:
-        choice = (
+    if provider_choice is ProviderChoice.auto:
+        provider_choice = (
             ProviderChoice.anthropic
             if os.environ.get("ANTHROPIC_API_KEY")
             else ProviderChoice.fake
         )
 
-    if choice is ProviderChoice.anthropic:
+    if provider_choice is ProviderChoice.anthropic:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             _fail("provider 为 anthropic 时需要设置 ANTHROPIC_API_KEY 环境变量。")
         try:
@@ -354,7 +353,7 @@ def _print_tool_result(console: Console, data: dict[str, Any]) -> None:
 def _make_interactive_approval(console: Console) -> ApprovalHandler:
     """Rich-interactive approval prompt used when ``--yes`` is absent.
 
-    ``Confirm.ask`` blocks synchronously on stdin. P0 runs a single event loop
+    ``Confirm.ask`` blocks synchronously on stdin. minicode runs a single event loop
     in the main thread and nothing else needs it while the user answers, so
     briefly blocking inside this async callback is the simplest correct
     behavior. On EOF (non-interactive stdin) we deny instead of crashing.
@@ -648,7 +647,7 @@ def report(
 
 def _render_report(
     console: Console,
-    summary: Any,  # SessionSummary
+    summary: SessionSummary,
     events: list[Event],
     full_outputs: dict[str, str],
     full: bool,

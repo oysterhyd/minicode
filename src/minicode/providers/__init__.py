@@ -1,7 +1,7 @@
 """Model provider adapters for minicode.
 
 Exports the provider contract (:class:`Provider` plus its stream events),
-the provider error hierarchy, and the concrete adapters shipped with P0:
+the provider error hierarchy, and the concrete adapters:
 the deterministic :class:`FakeProvider` used by tests and no-key demos,
 and the real :class:`AnthropicProvider` (which imports the ``anthropic``
 SDK lazily so this package imports fine without it installed).

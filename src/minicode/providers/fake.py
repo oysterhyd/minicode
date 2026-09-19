@@ -33,7 +33,7 @@ class FakeToolCall(BaseModel):
     """One scripted tool invocation requested by the fake model."""
 
     name: str
-    arguments: dict[str, Any] = {}
+    arguments: dict[str, Any] = Field(default_factory=dict)
     # When omitted, auto-generated as "fake_tool_<n>" with a per-provider
     # monotonically increasing counter.
     id: str | None = None

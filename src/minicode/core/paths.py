@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 
 class PathOutsideWorkspaceError(Exception):
@@ -26,8 +26,8 @@ def resolve_in_workspace(workspace: Path, user_path: str) -> Path:
     else:
         resolved = (root / candidate).resolve()
 
-    # normcase makes the comparison case-insensitive on Windows and also
-    # normalizes drive letters; PureWindowsPath guard keeps UNC paths sane.
+    # normcase makes the comparison case-insensitive on Windows and
+    # normalizes drive-letter case.
     root_nc = os.path.normcase(str(root))
     resolved_nc = os.path.normcase(str(resolved))
     if resolved_nc != root_nc and not resolved_nc.startswith(root_nc + os.sep):

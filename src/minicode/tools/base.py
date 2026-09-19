@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ValidationError
 
 from minicode.core.models import ToolOutcome, ToolSpec
+from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
 
 
 class ToolLimits(BaseModel):
@@ -37,6 +38,21 @@ def truncate_output(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[output truncated: {len(text)} chars total]"
+
+
+def resolve_or_fail(ctx: ToolContext, user_path: str) -> tuple[Path | None, ToolOutcome | None]:
+    """Resolve *user_path* inside the workspace.
+
+    Returns ``(path, None)`` on success or ``(None, failure_outcome)`` when the
+    path escapes the workspace (or cannot be resolved at all), so traversal and
+    symlink escapes become ordinary tool failures instead of exceptions.
+    """
+    try:
+        return resolve_in_workspace(ctx.workspace, user_path), None
+    except PathOutsideWorkspaceError as exc:
+        return None, ToolOutcome.failure(f"path outside workspace: {exc}")
+    except OSError as exc:
+        return None, ToolOutcome.failure(f"invalid path: {exc}")
 
 
 class BaseTool(ABC):

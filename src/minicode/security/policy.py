@@ -27,7 +27,6 @@ class PermissionPolicy(Protocol):
         ...
 
 
-# Built-in defaults: read-only tools run freely, mutating tools ask first.
 _BUILTIN_RULES: dict[str, PolicyBehavior] = {
     "read_file": PolicyBehavior.ALLOW,
     "list_files": PolicyBehavior.ALLOW,
