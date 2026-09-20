@@ -36,6 +36,19 @@ minicode run "修复分页 bug" \
   --yes
 ```
 
+PowerShell 用户请改用下面这段（续行符是反引号 `` ` `` 而非 `\`；`/tmp` 会被解析成当前盘符
+根目录，建议用 `$env:TEMP`）：
+
+```powershell
+.\.venv\Scripts\Activate.ps1     # 激活后 minicode 直接可用（若报执行策略错误，见下方说明）
+Copy-Item -Recurse examples\pagination $env:TEMP\pagination-demo
+minicode run "修复分页 bug" --workspace $env:TEMP\pagination-demo --provider fake --script examples\pagination\scripts\fix_pagination.json --yes
+```
+
+> 若 `Activate.ps1` 报「在此系统上禁止运行脚本」，执行一次
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`；或跳过激活，直接用
+> `.\.venv\Scripts\minicode.exe` 调用（此时脚本内的 `python` 用全局解释器）。
+
 运行结束后会打印退出原因、轮数、token 用量与「修改摘要」（diff）；
 `minicode report <会话ID>` 可查看完整执行记录。脚本中的测试命令假设 PATH 上的 `python`
 已安装 pytest，详见 [examples/pagination/README.md](examples/pagination/README.md)。
