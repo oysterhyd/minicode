@@ -18,6 +18,7 @@ import pytest
 from rich.console import Console
 
 from minicode.cli import _Setup, _build_services
+from minicode.core.catalog import MODEL_CATALOG
 from minicode.slash import filter_commands
 from minicode.core.models import Budget
 from minicode.providers import FakeProvider, FakeProviderOptions, FakeTurn
@@ -33,7 +34,9 @@ _WAIT_TIMEOUT_S = 20.0
 # ---------------------------------------------------------------------------
 
 
-def _make_app(tmp_path: Path, turns: list[dict], yes: bool = False) -> tuple[MiniCodeApp, Path]:
+def _make_app(
+    tmp_path: Path, turns: list[dict], yes: bool = False, model_label: str = "fake"
+) -> tuple[MiniCodeApp, Path]:
     """Build the TUI app around a FakeProvider script and a tmp workspace."""
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -42,7 +45,7 @@ def _make_app(tmp_path: Path, turns: list[dict], yes: bool = False) -> tuple[Min
         workspace=ws,
         provider=provider,
         provider_name="fake",
-        model_label="fake",
+        model_label=model_label,
         budget=Budget(max_rounds=10, max_total_tokens=100_000, max_seconds=60.0),
         acceptance=None,
     )
@@ -327,11 +330,11 @@ def test_slash_menu_opens_filters_and_completes(tmp_path):
             await pilot.press("/")
             await pilot.pause()
             assert app.slash_visible
-            assert len(app._slash_items) == len(filter_commands("/"))
+            assert len(app._root_items) == len(filter_commands("/"))
 
             await pilot.press("h")
             await pilot.pause()
-            assert [c.name for c in app._slash_items] == ["/help"]
+            assert [c.name for c in app._root_items] == ["/help"]
             assert app.query_one("#slash-menu").has_class("slash-visible")
 
             # Tab completes the highlighted entry into the prompt.
@@ -360,7 +363,7 @@ def test_slash_menu_navigation_and_escape(tmp_path):
 
             await pilot.press("down")
             await pilot.pause()
-            assert app._slash_index == (first + 1) % len(app._slash_items)
+            assert app._slash_index == (first + 1) % len(app._root_items)
 
             await pilot.press("up")
             await pilot.pause()
@@ -387,9 +390,9 @@ def test_slash_menu_enter_confirms_highlighted_command(tmp_path):
             await pilot.press("/")
             await pilot.pause()
             # Move the highlight onto /clear, then confirm with Enter.
-            index = [c.name for c in app._slash_items].index("/clear")
+            index = [c.name for c in app._root_items].index("/clear")
             app._slash_index = index
-            app._menu().show_items(app._slash_items, index)
+            app._menu().show_root(app._root_items, index)
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
@@ -476,5 +479,206 @@ def test_banner_and_status_bar_content(tmp_path):
             assert "fake" in right
             assert "ctx" in right and "200k" in right
             assert "缓存" in right
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Cascading two-level submenu (/model, /effort)
+# ---------------------------------------------------------------------------
+
+
+def _gateway_env(monkeypatch):
+    """Hermetic gateway credentials so /model can build a real provider."""
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "test-key")
+    monkeypatch.setenv("COMMANDCODE_BASE_URL", "https://gw.test/provider/v1")
+
+
+def test_model_submenu_enter_selects_and_applies(tmp_path, monkeypatch):
+    _gateway_env(monkeypatch)
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            # Typing the full command drops straight into the submenu.
+            await pilot.press(*"/model")
+            await pilot.pause()
+            assert app.slash_view == "submenu"
+            assert [e.value for e in app._submenu_entries] == list(MODEL_CATALOG)
+            # No model is active yet (fake) -> highlight the first entry.
+            assert app._slash_index == 0
+
+            # Enter applies the highlighted model immediately.
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._runtime.model == "deepseek/deepseek-v4.1-flash"
+            assert app.slash_view is None  # menu closed
+            assert app.query_one("#prompt").text == ""  # input idle again
+            texts = app._log_texts()
+            assert any("✔ 已切换模型" in line and "deepseek/deepseek-v4.1-flash" in line
+                       for line in texts)
+
+    _run(scenario())
+
+
+def test_model_submenu_navigation_marks_current(tmp_path, monkeypatch):
+    _gateway_env(monkeypatch)
+    app, _ws = _make_app(
+        tmp_path, turns=[{"text": "好"}], model_label="z.ai/glm-5.3-flash"
+    )
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/model")
+            await pilot.pause()
+            # The active model is highlighted and badged in the submenu.
+            current_index = [e.value for e in app._submenu_entries].index("z.ai/glm-5.3-flash")
+            assert app._slash_index == current_index
+            entry = app._submenu_entries[current_index]
+            assert "当前" in entry.badges and "上下文 1M" in entry.detail
+
+            # Navigate to a neighbour (up wraps to the first entry) and apply.
+            await pilot.press("up")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            expected = list(MODEL_CATALOG)[(current_index - 1) % len(MODEL_CATALOG)]
+            assert app._runtime.model == expected
+
+    _run(scenario())
+
+
+def test_model_submenu_esc_returns_to_root_then_closes(tmp_path, monkeypatch):
+    _gateway_env(monkeypatch)
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/model")
+            await pilot.pause()
+            assert app.slash_view == "submenu"
+
+            # Esc: back to the root command list, input untouched.
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.slash_view == "root"
+            assert [c.name for c in app._root_items] == ["/model"]
+            assert app.query_one("#prompt").text == "/model"
+
+            # Esc again: the floating menu closes completely.
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.slash_view is None
+            # Nothing was executed and the model is unchanged.
+            assert app._runtime.model == "fake"
+
+    _run(scenario())
+
+
+def test_model_submenu_backspace_returns_to_root(tmp_path, monkeypatch):
+    _gateway_env(monkeypatch)
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/model")
+            await pilot.pause()
+            assert app.slash_view == "submenu"
+
+            await pilot.press("backspace")
+            await pilot.pause()
+            # Back to the root list; the typed command is kept intact.
+            assert app.slash_view == "root"
+            assert app.query_one("#prompt").text == "/model"
+
+            # Typing again re-enters the submenu seamlessly.
+            await pilot.press("backspace")
+            await pilot.pause()
+            await pilot.press("l")
+            await pilot.pause()
+            assert app.slash_view == "submenu"
+
+    _run(scenario())
+
+
+def test_model_submenu_tab_fills_value_for_direct_execution(tmp_path, monkeypatch):
+    _gateway_env(monkeypatch)
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/model")
+            await pilot.pause()
+            value = app._submenu_entries[app._slash_index].value
+
+            await pilot.press("tab")
+            await pilot.pause()
+            # Tab fills "/model <value>" and closes the menu (direct-exec form).
+            assert app.slash_view is None
+            assert app.query_one("#prompt").text == f"/model {value} "
+
+            # Enter now bypasses the menu and executes directly.
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._runtime.model == value
+
+    _run(scenario())
+
+
+def test_effort_submenu_six_levels_and_selection(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+    # The fake provider carries the attribute once the feature is in play.
+    app._setup.provider.reasoning_effort = None
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            # Enter on the highlighted /effort command opens the submenu.
+            await pilot.press(*"/effort")
+            await pilot.pause()
+            assert app.slash_view == "submenu"
+            assert [e.value for e in app._submenu_entries] == [
+                "off", "low", "medium", "high", "xhigh", "max",
+            ]
+            assert app._slash_index == 0  # nothing set -> "off" highlighted
+
+            await pilot.press(*["down"] * 5)  # highlight "max"
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._setup.provider.reasoning_effort == "max"
+            assert any("✔ 推理预算已调整为 max" in t for t in app._log_texts())
+
+    _run(scenario())
+
+
+def test_effort_submenu_esc_back_keeps_provider_unchanged(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+    app._setup.provider.reasoning_effort = None
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/effort")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.slash_view == "root"
+            assert app._setup.provider.reasoning_effort is None
+
+    _run(scenario())
+
+
+def test_direct_argument_bypass_skips_menu(tmp_path):
+    """Full "/effort high" with an argument executes directly, menu closed."""
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+    app._setup.provider.reasoning_effort = None
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/effort high")
+            await pilot.pause()
+            assert app.slash_view is None  # argument typed -> no menu
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._setup.provider.reasoning_effort == "high"
 
     _run(scenario())

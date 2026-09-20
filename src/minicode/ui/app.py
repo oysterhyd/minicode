@@ -42,7 +42,12 @@ from minicode.cli import (
     _success_brief,
     _tool_args_summary,
 )
-from minicode.core.catalog import EFFORT_LEVELS, MODEL_CATALOG, parse_effort
+from minicode.core.catalog import (
+    DEFAULT_MODEL,
+    EFFORT_LEVELS,
+    MODEL_CATALOG,
+    parse_effort,
+)
 from minicode.core.models import (
     ApprovalDecision,
     ApprovalRequest,
@@ -59,7 +64,13 @@ from minicode.security import (
     parse_permission_mode,
     permission_mode_lines,
 )
-from minicode.slash import SlashCommand, filter_commands, format_command_lines
+from minicode.slash import (
+    SUBMENU_COMMANDS,
+    SlashCommand,
+    SubmenuItem,
+    filter_commands,
+    format_command_lines,
+)
 
 #: Seconds between two idle Ctrl+C presses that quits the app.
 _DOUBLE_CTRL_C_WINDOW_S = 2.0
@@ -98,30 +109,52 @@ def _set_text_caret_end(area: "TextArea", value: str) -> None:
 
 
 class SlashMenu(Static):
-    """Floating candidate list above the prompt while typing a slash command.
+    """Floating menu above the prompt for slash commands.
 
-    Hidden (``display: none``) unless the ``slash-visible`` class is set;
-    content is a plain :class:`~rich.text.Text` so highlight styling never
-    parses user input as markup.
+    Two cascading views rendered in place: the root command list and the
+    second-level option submenu (``命令 › /model``). Hidden (``display:
+    none``) unless the ``slash-visible`` class is set; content is a plain
+    :class:`~rich.text.Text` so highlight styling never parses user input
+    as markup.
     """
 
-    def show_items(self, items: list[SlashCommand], index: int) -> None:
-        """Render *items* with the entry at *index* highlighted."""
-        start = 0
-        if len(items) > _SLASH_MENU_MAX_ITEMS:
-            start = max(
-                0, min(index - _SLASH_MENU_MAX_ITEMS // 2, len(items) - _SLASH_MENU_MAX_ITEMS)
-            )
-        window = items[start : start + _SLASH_MENU_MAX_ITEMS]
+    def show_root(self, items: list[SlashCommand], index: int) -> None:
+        """Render the root command list with the entry at *index* highlighted."""
         text = Text()
-        for offset, cmd in enumerate(window):
+        start = self._window_start(len(items), index)
+        for offset, cmd in enumerate(items[start : start + _SLASH_MENU_MAX_ITEMS]):
             selected = start + offset == index
             marker = "❯ " if selected else "  "
             text.append(marker + cmd.name, style="bold reverse cyan" if selected else "cyan")
             text.append(f"  {cmd.summary}\n", style="dim")
-        text.append("Tab 补全 · ↑↓ 选择 · Esc 关闭", style="dim italic")
+        text.append("Tab 补全 · ↑↓ 选择 · Enter 确认 · Esc 关闭", style="dim italic")
         self.update(text)
         self.add_class("slash-visible")
+
+    def show_submenu(self, crumb: str, items: list[SubmenuItem], index: int) -> None:
+        """Render the second-level option menu under a breadcrumb header."""
+        text = Text()
+        text.append(crumb + "\n", style="bold")
+        start = self._window_start(len(items), index)
+        for offset, item in enumerate(items[start : start + _SLASH_MENU_MAX_ITEMS]):
+            selected = start + offset == index
+            marker = "❯ " if selected else "  "
+            text.append(marker + item.value, style="bold reverse cyan" if selected else "cyan")
+            if item.detail:
+                text.append(f"  ({item.detail})", style="dim")
+            for badge in item.badges:
+                text.append(f"  [{badge}]", style="green")
+            text.append("\n")
+        text.append("Enter 确认 · Tab 填入参数 · Esc 返回上级", style="dim italic")
+        self.update(text)
+        self.add_class("slash-visible")
+
+    @staticmethod
+    def _window_start(count: int, index: int) -> int:
+        """First visible entry so the highlighted one stays inside the cap."""
+        if count <= _SLASH_MENU_MAX_ITEMS:
+            return 0
+        return max(0, min(index - _SLASH_MENU_MAX_ITEMS // 2, count - _SLASH_MENU_MAX_ITEMS))
 
     def hide(self) -> None:
         self.remove_class("slash-visible")
@@ -131,10 +164,12 @@ class PromptArea(TextArea):
     """Multi-line prompt: Enter submits, Shift+Enter / Alt+Enter newline.
 
     While the app's slash menu is visible, ``Tab`` completes the highlighted
-    candidate, ``up``/``down`` move the selection, ``Esc`` closes the menu
-    and ``Enter`` confirms it (completes the highlighted command and
-    executes it). Every other key falls through to the TextArea and then
-    refreshes the candidate list.
+    candidate, ``up``/``down`` move the selection, ``Enter`` confirms it —
+    descending into the cascading submenu for ``/model`` / ``/effort``, or
+    completing + executing plain commands — and ``Esc`` steps back one menu
+    level (submenu -> root -> closed). In the submenu, ``Backspace`` also
+    steps back to the root list instead of deleting text. Every other key
+    falls through to the TextArea and then refreshes the menu.
     """
 
     class Submitted(Message):
@@ -181,7 +216,21 @@ class PromptArea(TextArea):
             if event.key == "escape":
                 event.stop()
                 event.prevent_default()
-                app.slash_close()
+                app.slash_back()
+                return
+            if event.key == "backspace":
+                # Menu visible: Backspace steps back a level instead of
+                # editing text. In the submenu it returns to the root list;
+                # in the root list it deletes one char (synchronously, since
+                # the TextArea's binding-driven delete lands after this
+                # handler returns and the menu must re-derive on fresh text).
+                event.stop()
+                event.prevent_default()
+                if app.slash_view == "submenu":
+                    app.slash_back()
+                else:
+                    self.action_delete_left()
+                    app.refresh_slash_menu()
                 return
         await super()._on_key(event)
         # The text may have changed: re-filter the candidate list.
@@ -491,9 +540,15 @@ class MiniCodeApp(App[None]):
         self._last_idle_ctrl_c = 0.0
         self._current_reply: StreamedReply | None = None
         self._cards: dict[str, ToolCard] = {}
-        # Slash-autocomplete state: current candidates, highlighted entry and
-        # the prefix they were computed from (index resets on prefix change).
-        self._slash_items: list[SlashCommand] = []
+        # Slash-menu state machine: ``root`` command list or a cascading
+        # ``submenu`` (命令 › /model). The view is re-derived from the prompt
+        # text on every change; ``_backed_out`` keeps Esc'd submenus closed
+        # until the text changes again.
+        self._root_items: list[SlashCommand] = []
+        self._submenu_entries: list[SubmenuItem] = []
+        self._submenu_cmd: str | None = None  # None = root view / closed
+        self._menu_open = False
+        self._backed_out = False
         self._slash_index = 0
         self._slash_prefix = ""
         self._build_runtime()
@@ -610,10 +665,11 @@ class MiniCodeApp(App[None]):
 
     @staticmethod
     def _fmt_tokens(value: int) -> str:
+        """Compact token count: 1M / 200k / 950 (no trailing ``.0``)."""
         if value >= 1_000_000:
-            return f"{value / 1_000_000:.1f}M"
+            return f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
         if value >= 1_000:
-            return f"{value / 1_000:.0f}k"
+            return f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
         return str(value)
 
     @classmethod
@@ -815,12 +871,19 @@ class MiniCodeApp(App[None]):
     def action_clear_log(self) -> None:
         self._clear_log()
 
-    # -- slash autocomplete ---------------------------------------------------
+    # -- slash autocomplete: cascading two-level menu -------------------------
 
     @property
     def slash_visible(self) -> bool:
-        """Whether the candidate menu is currently shown."""
-        return bool(self._slash_items) and not self._busy
+        """Whether the menu (root list or submenu) is currently shown."""
+        return self._menu_open and not self._busy
+
+    @property
+    def slash_view(self) -> str | None:
+        """Active menu view: ``"root"``, ``"submenu"``, or None when closed."""
+        if not self.slash_visible:
+            return None
+        return "submenu" if self._submenu_cmd is not None else "root"
 
     def _prompt(self) -> PromptArea:
         return self.query_one("#prompt", PromptArea)
@@ -829,51 +892,180 @@ class MiniCodeApp(App[None]):
         return self.query_one("#slash-menu", SlashMenu)
 
     def refresh_slash_menu(self) -> None:
-        """Re-filter candidates from the prompt text (called after keypresses)."""
+        """Re-derive the menu view from the prompt text (after key/paste).
+
+        Derivation rules: a bare ``/prefix`` shows the filtered root list; a
+        complete submenu command with no argument yet (``/model``,
+        ``/model ``) opens its cascading submenu; once an argument is being
+        typed the menu closes (direct-execution bypass).
+        """
         prefix = self._prompt().text.strip().lower()
-        if self._busy or not prefix.startswith("/") or " " in prefix:
-            self.slash_close()
-            return
-        items = filter_commands(prefix)
-        if not items:
+        if self._busy or not prefix.startswith("/"):
             self.slash_close()
             return
         if prefix != self._slash_prefix:
-            self._slash_index = 0
             self._slash_prefix = prefix
+            self._backed_out = False
+            self._slash_index = 0
+        tokens = prefix.split()
+        verb = tokens[0] if tokens else prefix
+        if len(tokens) > 1:  # argument being typed: direct execution path
+            self.slash_close()
+            return
+        if self._submenu_cmd is not None and verb == self._submenu_cmd:
+            self._open_submenu(self._submenu_cmd)  # stay in the open submenu
+            return
+        if verb in SUBMENU_COMMANDS and not self._backed_out:
+            self._open_submenu(verb)
+            return
+        # Root list; after an Esc-back we keep the command itself visible.
+        items = filter_commands(verb if self._backed_out else prefix)
+        if not items:
+            self.slash_close()
+            return
+        self._menu_open = True
+        self._submenu_cmd = None
+        self._submenu_entries = []
+        self._root_items = items
         self._slash_index = min(self._slash_index, len(items) - 1)
-        self._slash_items = items
-        self._menu().show_items(items, self._slash_index)
+        self._menu().show_root(items, self._slash_index)
+
+    def _open_submenu(self, cmd: str) -> None:
+        """Enter (or re-render) the submenu for *cmd* (``/model`` / ``/effort``)."""
+        entries = self._build_submenu_entries(cmd)
+        if self._submenu_cmd != cmd:
+            # Entering: highlight the currently active value.
+            self._submenu_cmd = cmd
+            self._slash_index = next(
+                (i for i, entry in enumerate(entries) if "当前" in entry.badges), 0
+            )
+        self._menu_open = True
+        self._submenu_entries = entries
+        self._root_items = []
+        crumb = f"命令 › {cmd} · {SUBMENU_COMMANDS[cmd]}"
+        self._menu().show_submenu(crumb, entries, self._slash_index)
+
+    def _build_submenu_entries(self, cmd: str) -> list[SubmenuItem]:
+        """Submenu options for *cmd*, annotated with live runtime state."""
+        if cmd == "/model":
+            current = self._runtime.model
+            entries = []
+            for info in MODEL_CATALOG.values():
+                badges = []
+                if info.name == current:
+                    badges.append("当前")
+                if info.name == DEFAULT_MODEL:
+                    badges.append("默认")
+                entries.append(
+                    SubmenuItem(
+                        value=info.name,
+                        detail=f"上下文 {self._fmt_tokens(info.context_window)}",
+                        badges=tuple(badges),
+                    )
+                )
+            return entries
+        if cmd == "/effort":
+            current = getattr(self._runtime.provider, "reasoning_effort", None) or "off"
+            details = {
+                "off": "不发送，跟随网关默认",
+                "low": "低推理预算",
+                "medium": "中推理预算（默认档）",
+                "high": "高推理预算",
+                "xhigh": "超高推理预算",
+                "max": "最大推理预算",
+            }
+            return [
+                SubmenuItem(
+                    value=level,
+                    detail=details.get(level, level),
+                    badges=("当前",) if level == current else (),
+                )
+                for level in EFFORT_LEVELS
+            ]
+        return []
 
     def slash_move(self, delta: int) -> None:
         """Move the highlight by *delta* (wrapping both ways)."""
-        if not self._slash_items:
+        items: list[Any] = self._submenu_entries if self._submenu_cmd else self._root_items
+        if not items:
             return
-        self._slash_index = (self._slash_index + delta) % len(self._slash_items)
-        self._menu().show_items(self._slash_items, self._slash_index)
+        self._slash_index = (self._slash_index + delta) % len(items)
+        if self._submenu_cmd is not None:
+            crumb = f"命令 › {self._submenu_cmd} · {SUBMENU_COMMANDS[self._submenu_cmd]}"
+            self._menu().show_submenu(crumb, self._submenu_entries, self._slash_index)
+        else:
+            self._menu().show_root(self._root_items, self._slash_index)
 
     def slash_complete(self) -> None:
-        """Tab: replace the typed prefix with the highlighted command."""
-        if not self._slash_items:
+        """Tab: complete the highlighted entry into the prompt.
+
+        In the root list a submenu command descends into its submenu; in a
+        submenu it fills ``/cmd value`` so Enter executes directly.
+        """
+        if not self.slash_visible:
             return
-        cmd = self._slash_items[self._slash_index]
-        _set_text_caret_end(self._prompt(), cmd.name + " ")
+        prompt = self._prompt()
+        if self._submenu_cmd is not None:
+            entry = self._submenu_entries[self._slash_index]
+            _set_text_caret_end(prompt, f"{self._submenu_cmd} {entry.value} ")
+            self.slash_close()
+            return
+        cmd = self._root_items[self._slash_index]
+        if cmd.name in SUBMENU_COMMANDS:
+            self._backed_out = False
+            _set_text_caret_end(prompt, cmd.name + " ")
+            self.refresh_slash_menu()
+            return
+        _set_text_caret_end(prompt, cmd.name + " ")
         self.slash_close()
 
     def slash_confirm(self) -> None:
-        """Enter with the menu open: complete the highlighted command and run it."""
-        if not self._slash_items:
+        """Enter: descend into a submenu, or complete + execute the command."""
+        if not self.slash_visible:
             return
-        cmd = self._slash_items[self._slash_index]
         prompt = self._prompt()
+        if self._submenu_cmd is not None:
+            entry = self._submenu_entries[self._slash_index]
+            cmd = self._submenu_cmd
+            self.slash_close()
+            _set_text_caret_end(prompt, "")
+            if cmd == "/model":
+                self._switch_model(entry.value)
+            elif cmd == "/effort":
+                self._apply_effort(entry.value)
+            return
+        cmd = self._root_items[self._slash_index]
+        if cmd.name in SUBMENU_COMMANDS:
+            # Seamless switch: the popup becomes the submenu, nothing runs yet.
+            self._backed_out = False
+            _set_text_caret_end(prompt, cmd.name + " ")
+            self.refresh_slash_menu()
+            return
         _set_text_caret_end(prompt, cmd.name)
         self.slash_close()
         self.post_message(PromptArea.Submitted(cmd.name, prompt))
 
+    def slash_back(self) -> None:
+        """Esc / Backspace: submenu -> root list -> closed."""
+        if self._submenu_cmd is not None:
+            self._backed_out = True
+            self._submenu_cmd = None
+            self._submenu_entries = []
+            self._slash_index = 0
+            # Keep _slash_prefix: the text is unchanged, so the derivation
+            # must not treat this as a fresh edit and re-open the submenu.
+            self.refresh_slash_menu()
+            return
+        self.slash_close()
+
     def slash_close(self) -> None:
-        self._slash_items = []
+        self._menu_open = False
+        self._submenu_cmd = None
+        self._root_items = []
+        self._submenu_entries = []
         self._slash_index = 0
         self._slash_prefix = ""
+        self._backed_out = False
         if self.is_mounted:
             self._menu().hide()
 
@@ -961,7 +1153,7 @@ class MiniCodeApp(App[None]):
         self.sub_title = f"{self._setup.workspace} · {info.provider}/{info.name}"
         self._add_line(
             Text(
-                f"已切换模型 {old} → {info.name}"
+                f"✔ 已切换模型 {old} → {info.name}"
                 f"（上下文 {info.context_window:,} token）",
                 style="green",
             ),
@@ -986,6 +1178,11 @@ class MiniCodeApp(App[None]):
                 "msg-warn",
             )
             return
+        self._apply_effort(level)
+
+    def _apply_effort(self, level: str) -> None:
+        """Apply a validated effort level to the active provider (validated)."""
+        provider = self._runtime.provider
         if not hasattr(provider, "reasoning_effort"):
             self._add_line(
                 Text(
@@ -998,7 +1195,7 @@ class MiniCodeApp(App[None]):
             return
         provider.reasoning_effort = None if level == "off" else level
         shown = level if level != "off" else "off（跟随网关默认）"
-        self._add_line(Text(f"推理预算已调整为 {shown}", style="green"), "msg-system")
+        self._add_line(Text(f"✔ 推理预算已调整为 {shown}", style="green"), "msg-system")
 
     def _cmd_permissions(self, arg: str) -> None:
         policy = self._services.policy

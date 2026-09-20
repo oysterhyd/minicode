@@ -20,10 +20,31 @@ class SlashCommand:
     aliases: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class SubmenuItem:
+    """One option inside a cascading second-level menu (submenu)."""
+
+    value: str  # applied value, e.g. "z.ai/glm-5.3-flash" or "low"
+    detail: str = ""  # "(上下文 1M)" style annotation
+    badges: tuple[str, ...] = ()  # ("当前", "默认") markers
+
+
+#: Commands that open a cascading submenu instead of executing directly on
+#: Enter. Maps command name -> submenu title (breadcrumb label).
+SUBMENU_COMMANDS: dict[str, str] = {
+    "/model": "选择模型",
+    "/effort": "选择推理预算",
+}
+
+
 SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/help", "/help", "显示本帮助", aliases=("/?",)),
     SlashCommand("/model", "/model [名称]", "查看或切换活跃模型（z.ai/glm-5.3-flash 等）"),
-    SlashCommand("/effort", "/effort [off|low|medium|high]", "调整推理预算（reasoning effort）"),
+    SlashCommand(
+        "/effort",
+        "/effort [off|low|medium|high|xhigh|max]",
+        "调整推理预算（reasoning effort，六档）",
+    ),
     SlashCommand(
         "/permissions",
         "/permissions [default|accept_edits|bypass]",

@@ -55,7 +55,7 @@ DEFAULT_MODEL = _DEEPSEEK_V41_FLASH.name
 _UNKNOWN_MODEL_WINDOW = 200_000
 
 #: Reasoning-effort levels accepted by effort-capable models, cheapest first.
-EFFORT_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high")
+EFFORT_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high", "xhigh", "max")
 
 
 def parse_effort(text: str) -> str | None:

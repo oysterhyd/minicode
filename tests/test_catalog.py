@@ -45,6 +45,10 @@ def test_parse_effort_accepts_levels_and_rejects_garbage():
     assert parse_effort("LOW") == "low"
     assert parse_effort(" off ") == "off"
     assert parse_effort("medium") == "medium"
+    assert parse_effort("xhigh") == "xhigh"
+    assert parse_effort("max") == "max"
     assert parse_effort("maximum") is None
     assert parse_effort("") is None
-    assert set(EFFORT_LEVELS) == {"off", "low", "medium", "high"}
+    assert set(EFFORT_LEVELS) == {"off", "low", "medium", "high", "xhigh", "max"}
+    # Ordered cheapest -> most expensive.
+    assert list(EFFORT_LEVELS) == ["off", "low", "medium", "high", "xhigh", "max"]
