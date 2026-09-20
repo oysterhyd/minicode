@@ -754,7 +754,7 @@ def run(
             console,
             provider_label=setup.provider_name,
             model_label=setup.model_label,
-            workspace=str(setup.workspace),
+            workspace=str(setup.workspace.resolve()),
         )
         _print_header(console, task, setup)
         try:
@@ -834,7 +834,7 @@ class _ChatRepl:
             self.console,
             provider_label=self.setup.provider_name,
             model_label=self.runtime.model,
-            workspace=str(self.setup.workspace),
+            workspace=str(self.setup.workspace.resolve()),
         )
         self.console.print(_repl_help_text())
         self.console.print()

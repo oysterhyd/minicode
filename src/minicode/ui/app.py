@@ -553,7 +553,7 @@ class MiniCodeApp(App[None]):
                 banner_text(
                     provider_label=self._setup.provider_name,
                     model_label=self._setup.model_label,
-                    workspace=str(self._setup.workspace),
+                    workspace=str(self._setup.workspace.resolve()),
                 ),
                 classes="msg-banner",
             )

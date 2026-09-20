@@ -16,18 +16,23 @@ from rich.console import Console
 from rich.text import Text
 
 #: 5-row block glyphs for the letters used by "OYSTER" and "HARNESS".
+#: Uniform 4-column letters joined with two-space gaps, and one blank row
+#: between the two words, so the art stays compact and never visually merges.
 _GLYPHS: dict[str, tuple[str, str, str, str, str]] = {
-    "O": (" ████ ", "█    █", "█    █", "█    █", " ████ "),
-    "Y": ("█    █", " █  █ ", "  ██  ", "  ██  ", "  ██  "),
-    "S": (" ████ ", "█     ", " ███  ", "    █ ", "████  "),
-    "T": ("██████", "  ██  ", "  ██  ", "  ██  ", "  ██  "),
-    "E": ("██████", "█     ", "████  ", "█     ", "██████"),
-    "R": ("█████ ", "█    █", "█████ ", "█   █ ", "█    █"),
-    "H": ("█    █", "█    █", "██████", "█    █", "█    █"),
-    "A": (" ████ ", "█    █", "██████", "█    █", "█    █"),
-    "N": ("█    █", "██   █", "█ █  █", "█  █ █", "█   ██"),
-    "L": ("█     ", "█     ", "█     ", "█     ", "██████"),
+    "O": (" ██ ", "█  █", "█  █", "█  █", " ██ "),
+    "Y": ("█  █", "█  █", " ██ ", " ██ ", " ██ "),
+    "S": ("███ ", "█   ", " ██ ", "   █", "███ "),
+    "T": ("████", " ██ ", " ██ ", " ██ ", " ██ "),
+    "E": ("████", "█   ", "███ ", "█   ", "████"),
+    "R": ("███ ", "█  █", "███ ", "█ █ ", "█  █"),
+    "H": ("█  █", "█  █", "████", "█  █", "█  █"),
+    "A": (" ██ ", "█  █", "████", "█  █", "█  █"),
+    "N": ("█  █", "██ █", "█ ██", "█  █", "█  █"),
+    "L": ("█   ", "█   ", "█   ", "█   ", "████"),
 }
+
+#: Horizontal gap between two letters (render_word) / between the words.
+_LETTER_GAP = "  "
 
 
 def render_word(word: str) -> str:
@@ -35,7 +40,10 @@ def render_word(word: str) -> str:
     unknown = [ch for ch in word.upper() if ch not in _GLYPHS]
     if unknown:
         raise ValueError(f"banner font lacks glyphs for: {''.join(sorted(set(unknown)))}")
-    rows = [" ".join(row) for row in zip(*(_GLYPHS[ch] for ch in word.upper()))]
+    rows = [
+        _LETTER_GAP.join(row)
+        for row in zip(*(_GLYPHS[ch] for ch in word.upper()))
+    ]
     return "\n".join(rows)
 
 
@@ -69,9 +77,14 @@ def banner_text(
     workspace: str | None = None,
 ) -> Text:
     """The full banner (wordmark + info line) as a rich Text block."""
-    text = Text(render_word("OYSTER") + "\n" + render_word("HARNESS"), style="bold cyan")
+    text = Text(
+        render_word("OYSTER") + "\n\n" + render_word("HARNESS"), style="bold cyan"
+    )
     text.append("\n")
-    text.append(info_line(provider_label=provider_label, model_label=model_label, workspace=workspace), style="dim")
+    text.append(
+        info_line(provider_label=provider_label, model_label=model_label, workspace=workspace),
+        style="dim",
+    )
     return text
 
 
