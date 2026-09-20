@@ -71,15 +71,15 @@ async def kill_process_tree(proc: asyncio.subprocess.Process) -> None:
         await proc.wait()
 
 
-class RunCommandArgs(BaseModel):
+class BashArgs(BaseModel):
     command: str
     timeout_s: float | None = None
     cwd: str = "."
     background: bool = False
 
 
-class RunCommandTool(BaseTool):
-    name = "run_command"
+class BashTool(BaseTool):
+    name = "bash"
     description = (
         "Run a shell command inside the workspace (PowerShell on Windows, "
         "bash elsewhere) and return its combined output and exit code. "
@@ -88,7 +88,7 @@ class RunCommandTool(BaseTool):
         "delivered by the system once the job completes. Requires approval."
     )
     requires_approval = True
-    args_model = RunCommandArgs
+    args_model = BashArgs
 
     async def execute(self, args: RunCommandArgs, ctx: ToolContext) -> ToolOutcome:
         cwd, failure = resolve_or_fail(ctx, args.cwd)

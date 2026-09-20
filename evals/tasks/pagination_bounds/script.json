@@ -3,7 +3,7 @@
     {
       "tool_calls": [
         {
-          "name": "read_file",
+          "name": "read",
           "arguments": {
             "path": "paginate.py"
           }
@@ -13,7 +13,7 @@
     {
       "tool_calls": [
         {
-          "name": "apply_patch",
+          "name": "edit",
           "arguments": {
             "path": "paginate.py",
             "old_text": "    end = start + page_size + 1  # BUG: off-by-one, yields one extra item",
@@ -25,7 +25,7 @@
     {
       "tool_calls": [
         {
-          "name": "run_command",
+          "name": "bash",
           "arguments": {
             "command": "python -m pytest test_paginate.py -q"
           }

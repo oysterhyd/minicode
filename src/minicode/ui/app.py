@@ -29,17 +29,20 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Header, LoadingIndicator, Static, TextArea
 
+from minicode.banner import banner_text
 from minicode.cli import (
     _Setup,
     _attach_compactor,
     _build_services,
     _exit_label,
     _format_timestamp,
+    _provider_for_model,
     _resolve_session_id,
     _status_label,
     _success_brief,
     _tool_args_summary,
 )
+from minicode.core.catalog import EFFORT_LEVELS, MODEL_CATALOG, parse_effort
 from minicode.core.models import (
     ApprovalDecision,
     ApprovalRequest,
@@ -47,7 +50,16 @@ from minicode.core.models import (
     EventType,
     RunResult,
 )
+from minicode.providers import ProviderRequestError
 from minicode.runtime import AgentRuntime
+from minicode.security import (
+    PERMISSION_MODE_LABELS,
+    ModePolicy,
+    PermissionMode,
+    parse_permission_mode,
+    permission_mode_lines,
+)
+from minicode.slash import SlashCommand, filter_commands, format_command_lines
 
 #: Seconds between two idle Ctrl+C presses that quits the app.
 _DOUBLE_CTRL_C_WINDOW_S = 2.0
@@ -56,25 +68,74 @@ _DOUBLE_CTRL_C_WINDOW_S = 2.0
 _PREVIEW_MAX_LINES = 6
 _PREVIEW_MAX_CHARS_PER_LINE = 160
 
-_HELP_TEXT = Text(
-    "可用命令：\n"
-    "  /help             显示本帮助\n"
-    "  /exit             退出（或 Ctrl+Q）\n"
-    "  /sessions         列出历史会话\n"
-    "  /resume <id8>     恢复一个历史会话\n"
-    "  /compact          手动压缩当前会话上下文\n"
-    "  /clear            清空界面显示（不影响会话）\n"
-    "快捷键：Enter 提交 · Shift+Enter 换行 · Ctrl+C 取消回合/再按一次退出 · Ctrl+L 清屏"
-)
+#: Maximum slash-command candidates rendered in the floating menu at once.
+_SLASH_MENU_MAX_ITEMS = 8
+
+#: Short permission-mode labels for the status bar.
+_MODE_SHORT: dict[PermissionMode, str] = {
+    PermissionMode.DEFAULT: "默认",
+    PermissionMode.ACCEPT_EDITS: "自动编辑",
+    PermissionMode.BYPASS: "全部允许",
+}
+
+
+def _help_text() -> Text:
+    """Help block assembled from the shared slash-command registry."""
+    lines = ["可用命令：", *format_command_lines()]
+    lines.append("快捷键：Enter 提交 · Shift+Enter 换行 · Ctrl+C 取消回合/再按一次退出 · Ctrl+L 清屏")
+    return Text("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
-# Input widgets
+# Input widgets and the slash-command menu
 # ---------------------------------------------------------------------------
+
+
+def _set_text_caret_end(area: "TextArea", value: str) -> None:
+    """Replace *area*'s content with *value* and park the cursor at the end."""
+    area.load_text(value)
+    area.move_cursor(area.document.end)
+
+
+class SlashMenu(Static):
+    """Floating candidate list above the prompt while typing a slash command.
+
+    Hidden (``display: none``) unless the ``slash-visible`` class is set;
+    content is a plain :class:`~rich.text.Text` so highlight styling never
+    parses user input as markup.
+    """
+
+    def show_items(self, items: list[SlashCommand], index: int) -> None:
+        """Render *items* with the entry at *index* highlighted."""
+        start = 0
+        if len(items) > _SLASH_MENU_MAX_ITEMS:
+            start = max(
+                0, min(index - _SLASH_MENU_MAX_ITEMS // 2, len(items) - _SLASH_MENU_MAX_ITEMS)
+            )
+        window = items[start : start + _SLASH_MENU_MAX_ITEMS]
+        text = Text()
+        for offset, cmd in enumerate(window):
+            selected = start + offset == index
+            marker = "❯ " if selected else "  "
+            text.append(marker + cmd.name, style="bold reverse cyan" if selected else "cyan")
+            text.append(f"  {cmd.summary}\n", style="dim")
+        text.append("Tab 补全 · ↑↓ 选择 · Esc 关闭", style="dim italic")
+        self.update(text)
+        self.add_class("slash-visible")
+
+    def hide(self) -> None:
+        self.remove_class("slash-visible")
 
 
 class PromptArea(TextArea):
-    """Multi-line prompt: Enter submits, Shift+Enter / Alt+Enter newline."""
+    """Multi-line prompt: Enter submits, Shift+Enter / Alt+Enter newline.
+
+    While the app's slash menu is visible, ``Tab`` completes the highlighted
+    candidate, ``up``/``down`` move the selection, ``Esc`` closes the menu
+    and ``Enter`` confirms it (completes the highlighted command and
+    executes it). Every other key falls through to the TextArea and then
+    refreshes the candidate list.
+    """
 
     class Submitted(Message):
         """Posted when the user presses Enter to submit the prompt."""
@@ -85,18 +146,51 @@ class PromptArea(TextArea):
             self.prompt_area = prompt_area
 
     async def _on_key(self, event: events.Key) -> None:
-        """Intercept Enter (submit) before TextArea turns it into a newline."""
+        """Intercept submit / autocomplete keys before TextArea handles them."""
+        app = self.app
+        menu_visible = getattr(app, "slash_visible", False)
         if event.key == "enter":
             event.stop()
             event.prevent_default()
-            self.post_message(self.Submitted(self.text, self))
+            if menu_visible:
+                app.slash_confirm()
+            else:
+                self.post_message(self.Submitted(self.text, self))
             return
         if event.key in ("shift+enter", "alt+enter"):
             event.stop()
             event.prevent_default()
             self.insert("\n")
             return
+        if menu_visible:
+            if event.key == "tab":
+                event.stop()
+                event.prevent_default()
+                app.slash_complete()
+                return
+            if event.key == "down":
+                event.stop()
+                event.prevent_default()
+                app.slash_move(1)
+                return
+            if event.key == "up":
+                event.stop()
+                event.prevent_default()
+                app.slash_move(-1)
+                return
+            if event.key == "escape":
+                event.stop()
+                event.prevent_default()
+                app.slash_close()
+                return
         await super()._on_key(event)
+        # The text may have changed: re-filter the candidate list.
+        app.refresh_slash_menu()
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        """Pasted text bypasses key events; keep the candidate list in sync."""
+        await super()._on_paste(event)
+        self.app.refresh_slash_menu()
 
 
 class StreamedReply(Static):
@@ -204,6 +298,46 @@ class ApprovalModal(ModalScreen[ApprovalDecision | None]):
         self.dismiss(ApprovalDecision(granted=False))
 
 
+class ModelPickerModal(ModalScreen[str | None]):
+    """Interactive model selection (``/model`` with no argument).
+
+    One button per catalog model, the active one marked; ``dismiss``es with
+    the picked model name, or ``None`` on Escape.
+    """
+
+    BINDINGS = [Binding("escape", "dismiss_dialog", "取消")]
+
+    def __init__(self, current: str) -> None:
+        super().__init__()
+        self._current = current
+        self._names: list[str] = list(MODEL_CATALOG)
+
+    def compose(self) -> ComposeResult:
+        body = Text()
+        for name in self._names:
+            info = MODEL_CATALOG[name]
+            mark = " ← 当前" if name == self._current else ""
+            body.append(
+                f"{name}（上下文 {info.context_window:,} token）{mark}\n",
+                style="bold" if name == self._current else "",
+            )
+        with Vertical(id="model-dialog"):
+            yield Static("选择模型", classes="approval-title")
+            yield Static(body, id="model-body")
+            with Horizontal(id="model-buttons"):
+                for index, name in enumerate(self._names):
+                    yield Button(name, id=f"model-{index}")
+
+    def action_dismiss_dialog(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#model-buttons Button")
+    def _pick(self, event: Button.Pressed) -> None:
+        assert event.button.id is not None
+        index = int(event.button.id.rsplit("-", 1)[1])
+        self.dismiss(self._names[index])
+
+
 # ---------------------------------------------------------------------------
 # Presentation helpers (mirrors of the CLI one-liners, adapted to Text)
 # ---------------------------------------------------------------------------
@@ -291,6 +425,7 @@ class MiniCodeApp(App[None]):
     #log { height: 1fr; padding: 1 1 0 1; }
     .msg-user { margin-top: 1; }
     .msg-assistant { margin-top: 1; }
+    .msg-banner { margin-bottom: 1; }
     .tool-card { height: auto; margin-top: 1; }
     .tool-card > Static { height: auto; }
     .tool-body { color: $text-muted; height: auto; }
@@ -300,12 +435,19 @@ class MiniCodeApp(App[None]):
     .msg-summary { color: $text-muted; margin-top: 1; }
     #input-dock { height: auto; padding: 0 1 1 1; }
     #spinner { display: none; height: 1; }
+    #slash-menu {
+        display: none; height: auto; max-height: 12;
+        border: round $primary; background: $surface; padding: 0 1;
+        margin-bottom: 1;
+    }
+    #slash-menu.slash-visible { display: block; }
     #prompt { height: 4; border: round $primary; margin-bottom: 1; }
     #prompt:focus { border: round $accent; }
     #statusbar { height: 1; }
     #status-left { width: 1fr; color: $text-muted; }
     #status-right { width: auto; color: $text-muted; }
     ApprovalModal { align: center middle; }
+    ModelPickerModal { align: center middle; }
     #approval-dialog {
         width: 64; height: auto;
         border: round $warning; background: $surface; padding: 1 2;
@@ -314,6 +456,13 @@ class MiniCodeApp(App[None]):
     #approval-body { margin-bottom: 1; }
     #approval-buttons { height: auto; align-horizontal: right; }
     #approval-buttons Button { margin-left: 1; }
+    #model-dialog {
+        width: auto; max-width: 90%; height: auto;
+        border: round $accent; background: $surface; padding: 1 2;
+    }
+    #model-body { margin-bottom: 1; }
+    #model-buttons { height: auto; }
+    #model-buttons Button { margin-right: 1; }
     """
 
     def __init__(
@@ -342,6 +491,11 @@ class MiniCodeApp(App[None]):
         self._last_idle_ctrl_c = 0.0
         self._current_reply: StreamedReply | None = None
         self._cards: dict[str, ToolCard] = {}
+        # Slash-autocomplete state: current candidates, highlighted entry and
+        # the prefix they were computed from (index resets on prefix change).
+        self._slash_items: list[SlashCommand] = []
+        self._slash_index = 0
+        self._slash_prefix = ""
         self._build_runtime()
 
     # -- runtime wiring ------------------------------------------------------
@@ -379,8 +533,9 @@ class MiniCodeApp(App[None]):
             pass
         with Vertical(id="input-dock"):
             yield LoadingIndicator(id="spinner")
+            yield SlashMenu("", id="slash-menu")
             yield PromptArea(
-                placeholder="输入任务或问题，/help 查看命令…",
+                placeholder="输入任务或问题，/ 触发命令补全，/help 查看命令…",
                 id="prompt",
             )
             with Horizontal(id="statusbar"):
@@ -392,7 +547,18 @@ class MiniCodeApp(App[None]):
             f"{self._setup.workspace} · {self._setup.provider_name}/"
             f"{self._setup.model_label}"
         )
-        self.query_one("#log", VerticalScroll).anchor()
+        log = self.query_one("#log", VerticalScroll)
+        log.mount(
+            Static(
+                banner_text(
+                    provider_label=self._setup.provider_name,
+                    model_label=self._setup.model_label,
+                    workspace=str(self._setup.workspace),
+                ),
+                classes="msg-banner",
+            )
+        )
+        log.anchor()
         self._refresh_status("就绪")
         self.query_one("#prompt", PromptArea).focus()
 
@@ -427,20 +593,64 @@ class MiniCodeApp(App[None]):
 
     # -- status bar -----------------------------------------------------------
 
+    @staticmethod
+    def _short_path(path: Path) -> str:
+        """Home-abbreviated path for the status bar."""
+        resolved = path.resolve()
+        home = Path.home()
+        try:
+            return "~/" + resolved.relative_to(home).as_posix()
+        except ValueError:
+            return str(resolved)
+
+    def _permission_mode(self) -> PermissionMode | None:
+        """Active permission mode (None for policies without modes)."""
+        policy = self._services.policy
+        return policy.mode if isinstance(policy, ModePolicy) else None
+
+    @staticmethod
+    def _fmt_tokens(value: int) -> str:
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.1f}M"
+        if value >= 1_000:
+            return f"{value / 1_000:.0f}k"
+        return str(value)
+
+    @classmethod
+    def _context_bar(cls, used: int, window: int) -> str:
+        """``ctx 12k/1M ██░░░░░░ 1.2%`` — load of the active context window."""
+        pct = used / window if window > 0 else 0.0
+        cells = 8
+        filled = min(cells, round(pct * cells))
+        bar = "█" * filled + "░" * (cells - filled)
+        return f"ctx {cls._fmt_tokens(used)}/{cls._fmt_tokens(window)} {bar} {pct:.1%}"
+
     def _stats_text(self) -> Text:
         runtime = self._runtime
+        usage = runtime.usage
         session_id = runtime.session_id
-        return Text(
-            f"轮数 {runtime.rounds} · Token {runtime.usage.total_tokens}"
-            f" · 会话 {session_id[:8] if session_id else '未开始'}",
-            style="dim",
+        line = Text(style="dim")
+        line.append(runtime.model)
+        line.append(" · ")
+        line.append(
+            self._context_bar(runtime.context_tokens_used(), runtime.context_window)
         )
+        line.append(f" · 输入 {usage.input_tokens} / 输出 {usage.output_tokens}")
+        line.append(f" · 缓存 {usage.cache_hit_rate:.0%}")
+        line.append(f" · 会话 {session_id[:8] if session_id else '未开始'}")
+        return line
 
     def _refresh_stats(self) -> None:
         self.query_one("#status-right", Static).update(self._stats_text())
 
     def _refresh_status(self, status: str) -> None:
-        self.query_one("#status-left", Static).update(Text(status))
+        mode = self._permission_mode()
+        mode_label = f" · 权限:{_MODE_SHORT[mode]}" if mode is not None else ""
+        left = Text(
+            f"{self._short_path(self._setup.workspace)} · {status}{mode_label}",
+            style="dim",
+        )
+        self.query_one("#status-left", Static).update(left)
         self._refresh_stats()
 
     def _set_busy(self, busy: bool, status: str) -> None:
@@ -576,6 +786,7 @@ class MiniCodeApp(App[None]):
     # -- message handling -----------------------------------------------------
 
     def on_prompt_area_submitted(self, event: PromptArea.Submitted) -> None:
+        self.slash_close()
         text = event.text.strip()
         event.prompt_area.clear()
         if not text or self._busy:
@@ -604,6 +815,68 @@ class MiniCodeApp(App[None]):
     def action_clear_log(self) -> None:
         self._clear_log()
 
+    # -- slash autocomplete ---------------------------------------------------
+
+    @property
+    def slash_visible(self) -> bool:
+        """Whether the candidate menu is currently shown."""
+        return bool(self._slash_items) and not self._busy
+
+    def _prompt(self) -> PromptArea:
+        return self.query_one("#prompt", PromptArea)
+
+    def _menu(self) -> SlashMenu:
+        return self.query_one("#slash-menu", SlashMenu)
+
+    def refresh_slash_menu(self) -> None:
+        """Re-filter candidates from the prompt text (called after keypresses)."""
+        prefix = self._prompt().text.strip().lower()
+        if self._busy or not prefix.startswith("/") or " " in prefix:
+            self.slash_close()
+            return
+        items = filter_commands(prefix)
+        if not items:
+            self.slash_close()
+            return
+        if prefix != self._slash_prefix:
+            self._slash_index = 0
+            self._slash_prefix = prefix
+        self._slash_index = min(self._slash_index, len(items) - 1)
+        self._slash_items = items
+        self._menu().show_items(items, self._slash_index)
+
+    def slash_move(self, delta: int) -> None:
+        """Move the highlight by *delta* (wrapping both ways)."""
+        if not self._slash_items:
+            return
+        self._slash_index = (self._slash_index + delta) % len(self._slash_items)
+        self._menu().show_items(self._slash_items, self._slash_index)
+
+    def slash_complete(self) -> None:
+        """Tab: replace the typed prefix with the highlighted command."""
+        if not self._slash_items:
+            return
+        cmd = self._slash_items[self._slash_index]
+        _set_text_caret_end(self._prompt(), cmd.name + " ")
+        self.slash_close()
+
+    def slash_confirm(self) -> None:
+        """Enter with the menu open: complete the highlighted command and run it."""
+        if not self._slash_items:
+            return
+        cmd = self._slash_items[self._slash_index]
+        prompt = self._prompt()
+        _set_text_caret_end(prompt, cmd.name)
+        self.slash_close()
+        self.post_message(PromptArea.Submitted(cmd.name, prompt))
+
+    def slash_close(self) -> None:
+        self._slash_items = []
+        self._slash_index = 0
+        self._slash_prefix = ""
+        if self.is_mounted:
+            self._menu().hide()
+
     # -- slash commands -------------------------------------------------------
 
     def _handle_slash(self, text: str) -> None:
@@ -612,11 +885,24 @@ class MiniCodeApp(App[None]):
         verb = verb.lower()
         arg = arg.strip()
         if verb in ("/help", "/?"):
-            self._add_line(_HELP_TEXT, "msg-system")
+            self._add_line(_help_text(), "msg-system")
         elif verb in ("/exit", "/quit"):
             self.exit()
         elif verb == "/clear":
+            # 仅清空终端渲染；Agent 的会话上下文与用量保持不变。
             self._clear_log()
+            self._add_line(
+                Text("已清屏（会话上下文与 Token 用量保留）。", style="dim"),
+                "msg-system",
+            )
+        elif verb == "/new":
+            self._cmd_new()
+        elif verb == "/model":
+            self._cmd_model(arg)
+        elif verb == "/effort":
+            self._cmd_effort(arg)
+        elif verb == "/permissions":
+            self._cmd_permissions(arg)
         elif verb == "/sessions":
             self._cmd_sessions()
         elif verb == "/resume":
@@ -628,6 +914,124 @@ class MiniCodeApp(App[None]):
                 Text(f"未知命令 {verb}（/help 查看可用命令）", style="yellow"),
                 "msg-warn",
             )
+
+    def _cmd_new(self) -> None:
+        """彻底重置上下文：重建 runtime，下一条消息开启全新会话。"""
+        self._clear_log()
+        self._build_runtime()
+        self._add_line(
+            Text("已重置对话上下文，新会话将在下一条消息时创建。", style="green"),
+            "msg-system",
+        )
+        self._refresh_status("新会话")
+
+    def _cmd_model(self, arg: str) -> None:
+        if not arg:
+            self.push_screen(
+                ModelPickerModal(self._runtime.model), self._on_model_picked
+            )
+            return
+        self._switch_model(arg)
+
+    def _on_model_picked(self, name: str | None) -> None:
+        if name:
+            self._switch_model(name)
+
+    def _switch_model(self, name: str) -> None:
+        if name not in MODEL_CATALOG:
+            self._add_line(
+                Text(f"未知模型 {name}；可选：{'、'.join(MODEL_CATALOG)}", style="yellow"),
+                "msg-warn",
+            )
+            return
+        try:
+            provider = _provider_for_model(name, carry_effort_from=self._setup.provider)
+        except (ProviderRequestError, RuntimeError) as exc:
+            self._add_line(Text(f"无法切换模型：{exc}", style="red"), "msg-warn")
+            return
+        info = MODEL_CATALOG[name]
+        old = self._runtime.model
+        # Keep /new consistent with the switched model.
+        self._setup.provider = provider
+        self._setup.provider_name = info.provider
+        self._setup.model_label = info.name
+        self._runtime.set_model(
+            provider=provider, provider_name=info.provider, model=info.name
+        )
+        self.sub_title = f"{self._setup.workspace} · {info.provider}/{info.name}"
+        self._add_line(
+            Text(
+                f"已切换模型 {old} → {info.name}"
+                f"（上下文 {info.context_window:,} token）",
+                style="green",
+            ),
+            "msg-system",
+        )
+        self._refresh_status("就绪")
+
+    def _cmd_effort(self, arg: str) -> None:
+        provider = self._runtime.provider
+        current = getattr(provider, "reasoning_effort", None)
+        if not arg:
+            label = current if current else "默认（跟随网关）"
+            self._add_line(
+                Text(f"当前推理预算: {label}；可选: {' / '.join(EFFORT_LEVELS)}"),
+                "msg-system",
+            )
+            return
+        level = parse_effort(arg)
+        if level is None:
+            self._add_line(
+                Text(f"无效档位 {arg}；可选: {' / '.join(EFFORT_LEVELS)}", style="yellow"),
+                "msg-warn",
+            )
+            return
+        if not hasattr(provider, "reasoning_effort"):
+            self._add_line(
+                Text(
+                    f"当前 provider（{getattr(provider, 'name', '?')}）"
+                    "不支持推理预算调整。",
+                    style="yellow",
+                ),
+                "msg-warn",
+            )
+            return
+        provider.reasoning_effort = None if level == "off" else level
+        shown = level if level != "off" else "off（跟随网关默认）"
+        self._add_line(Text(f"推理预算已调整为 {shown}", style="green"), "msg-system")
+
+    def _cmd_permissions(self, arg: str) -> None:
+        policy = self._services.policy
+        if not isinstance(policy, ModePolicy):
+            self._add_line(
+                Text("当前会话的权限策略不支持运行时切换。", style="yellow"), "msg-warn"
+            )
+            return
+        if not arg:
+            lines = [
+                f"当前权限模式: {policy.mode.value}"
+                f"（{PERMISSION_MODE_LABELS[policy.mode]}）",
+                *permission_mode_lines(),
+            ]
+            self._add_line(Text("\n".join(lines)), "msg-system")
+            return
+        mode = parse_permission_mode(arg)
+        if mode is None:
+            options = " / ".join(m.value for m in PermissionMode)
+            self._add_line(
+                Text(f"无效模式 {arg}；可选: {options}", style="yellow"), "msg-warn"
+            )
+            return
+        previous = policy.set_mode(mode)
+        self._add_line(
+            Text(
+                f"权限模式已切换 {previous.value} → {mode.value}"
+                f"（{PERMISSION_MODE_LABELS[mode]}）",
+                style="green",
+            ),
+            "msg-system",
+        )
+        self._refresh_status("就绪")
 
     def _cmd_sessions(self) -> None:
         sessions = self._store.list_sessions()

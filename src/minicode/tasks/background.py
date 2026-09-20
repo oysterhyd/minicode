@@ -97,7 +97,7 @@ class BackgroundManager:
         """Start *command* in *cwd* and return its job id immediately.
 
         The command is wrapped for the platform shell exactly like the
-        foreground ``run_command`` tool; the process is spawned detached and
+        foreground ``bash`` tool; the process is spawned detached and
         watched by a background task that enforces *timeout_s*.
         """
         self._counter += 1

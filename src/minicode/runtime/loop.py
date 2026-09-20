@@ -59,7 +59,7 @@ _SPILL_LIMITS = ToolLimits()
 
 #: Tool names that are safe to re-execute while resuming an interrupted
 #: session: they only read, so re-running them cannot duplicate side effects.
-_READ_ONLY_TOOLS = frozenset({"read_file", "list_files", "search_text"})
+_READ_ONLY_TOOLS = frozenset({"read", "ls", "grep"})
 
 
 def _format_bg_result(job: Any) -> str:
@@ -168,6 +168,56 @@ class AgentRuntime:
     def rounds(self) -> int:
         """Session-cumulative round count."""
         return self._rounds
+
+    @property
+    def model(self) -> str:
+        """The active provider-facing model id."""
+        return self._model
+
+    @property
+    def provider(self) -> Provider:
+        """The active provider adapter (swappable via :meth:`set_model`)."""
+        return self._provider
+
+    @property
+    def context_window(self) -> int:
+        """Prompt-token capacity of the active model (catalog lookup)."""
+        from minicode.core.catalog import lookup_model
+
+        return lookup_model(self._model).context_window
+
+    def context_tokens_used(self) -> int:
+        """Estimated prompt size of the current context (no output reserve).
+
+        Uses the same conservative estimator as compaction, so the status
+        bar's context-window load matches when compaction would trigger.
+        """
+        from minicode.context.estimate import estimate_messages_tokens
+
+        return estimate_messages_tokens(
+            self._system_prompt,
+            self._messages,
+            self._registry.specs(),
+            reserve_output_tokens=0,
+        )
+
+    # -- live configuration ---------------------------------------------------
+
+    def set_model(
+        self, *, provider: Provider, provider_name: str, model: str
+    ) -> None:
+        """Swap the active provider/model mid-session (the ``/model`` command).
+
+        The conversation, usage and session id are kept; only the adapter
+        and its model id change, so subsequent rounds are billed and routed
+        by the new model. The persisted session row is updated so
+        ``sessions list`` reflects reality.
+        """
+        self._provider = provider
+        self._provider_name = provider_name
+        self._model = model
+        if self.session_id is not None:
+            self._store.update_session(self.session_id, model=model)
 
     # -- turn loop -----------------------------------------------------------
     # The loop exits only through finalize paths; budget exhaustion is just
@@ -626,7 +676,7 @@ class AgentRuntime:
     @staticmethod
     def _approval_summary(name: str, arguments: dict[str, Any]) -> str:
         """Compact human-readable description of a pending tool call."""
-        if name == "run_command" and isinstance(arguments.get("command"), str):
+        if name == "bash" and isinstance(arguments.get("command"), str):
             return str(arguments["command"])
         return f"{name}: {json.dumps(arguments, ensure_ascii=False)[:200]}"
 

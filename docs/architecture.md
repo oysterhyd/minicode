@@ -25,8 +25,8 @@
         ┌──────────────────┐ ┌────────────────┐ ┌──────────────────────┐
         │ providers/       │ │ tools/         │ │ security/            │
         │ base.py    契约   │ │ registry.py    │ │ policy.py            │
-        │ anthropic.py     │ │ files.py       │ │ DefaultPolicy        │
-        │ fake.py          │ │ search.py      │ │ AutoAllowPolicy      │
+        │ anthropic.py     │ │ files.py       │ │ ModePolicy           │
+        │ fake.py          │ │ search.py      │ │ DefaultPolicy        │
         └──────────────────┘ │ command.py     │ └──────────────────────┘
                              └────────────────┘
                      ┌──────────────────────────────┐
@@ -71,8 +71,9 @@ SESSION_START                          # 首个 run_turn 时创建会话行
 ## 3. 关键语义
 
 **权限门**。每个工具调用按「参数校验 → ALLOW/ASK/DENY 判定 → 执行」处理。
-`DefaultPolicy`：只读工具（read_file / list_files / search_text）ALLOW，
-apply_patch / run_command ASK，未配置的工具默认 DENY；`AutoAllowPolicy` 全部 ALLOW
+`ModePolicy` 按三态权限模式判定：default 下只读工具（read / ls / grep）ALLOW、
+edit / write / bash ASK、未配置工具默认 DENY；accept_edits 额外自动允许文件编辑；
+bypass 全部 ALLOW。`/permissions` 命令可在运行时切换模式并同步到状态栏
 （`--yes`）。ASK 时审批处理器拿到的是**最终参数**（`ApprovalRequest.arguments`），
 CLI 用 Rich `Confirm` 展示工具名与摘要；拒绝则以错误 tool_result 回填模型，工具不执行。
 参数变化即视为新调用，重新过权限门。
@@ -122,7 +123,7 @@ goals/               spec（验收 YAML）、checker（指纹/快照/检查）�
 tasks/               background（后台命令）、subagent（只读委派）、taskstore（任务依赖）
 tools/artifact.py    read_artifact：按引用回读转存的完整输出
 tools/delegate.py    delegate：一层只读子代理工具
-tools/command.py     run_command 增加 background 参数
+tools/command.py     bash 增加 background 参数
 storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（schema v2）
 reports/             render_session_html：单文件离线 HTML 报告
 ui/                  Textual 全屏 TUI（minicode tui）
@@ -168,17 +169,17 @@ evals/               20 任务离线评测集 + 三基线 runner
 
 | 悬空调用类型 | 结算方式 |
 | --- | --- |
-| 只读（read_file / list_files / search_text） | 重新执行，发出带 `recovered: true` 的新 START/RESULT 事件，结果回填原始 call id |
-| 写 / Shell（apply_patch / run_command / 未知工具） | **不重放**：`SIDE_EFFECT_UNKNOWN` 事件 + 提示性 tool_result（"副作用状态未知，先核实再继续"） |
+| 只读（read / ls / grep） | 重新执行，发出带 `recovered: true` 的新 START/RESULT 事件，结果回填原始 call id |
+| 写 / Shell（edit / write / bash / 未知工具） | **不重放**：`SIDE_EFFECT_UNKNOWN` 事件 + 提示性 tool_result（"副作用状态未知，先核实再继续"） |
 
 已落库的结果永不重复执行；后台任务无进程可继承（一律不凭旧 PID 管理）。
 
 ### 5.5 后台命令与只读子代理（plan.md §6.5 → s06/s11）
 
-- `run_command(background=true)`：`BackgroundManager.start` 立即返回 job id；完成事件
+- `bash(background=true)`：`BackgroundManager.start` 立即返回 job id；完成事件
   `BACKGROUND_JOB_COMPLETED`；结果在下一轮开始时作为 **user 消息**投递（每个 job 恰好
   投递一次，原 tool call 不产生第二个 tool result）；会话结束时 `cancel_all()` 清理进程树。
-- `delegate` 工具：子 AgentRuntime 只注册 read_file / list_files / search_text，独立上下文，
+- `delegate` 工具：子 AgentRuntime 只注册 read / ls / grep，独立上下文，
   返回 `{summary, findings, evidence_refs, unresolved}`（无效引用移入 unresolved）；
   `ToolOutcome.usage` 把子代理 token 归集到父会话预算；事件 `SUBAGENT_STARTED/FINISHED`。
 
@@ -191,7 +192,9 @@ evals/               20 任务离线评测集 + 三基线 runner
 - `minicode report <id> --format html`：单文件 HTML（零外链、可离线打开），时间线、
   工具记录与 diff、验收证据表、用量；所有动态文本经 HTML 转义。
 - `minicode tui`：Textual 全屏界面——流式回复、工具卡片、审批 ModalScreen、
-  斜杠命令（/help /sessions /resume /compact /clear /exit）、Ctrl+C 取消当前回合。
+  斜杠命令与自动补全（/help /model /effort /permissions /clear /new /sessions /resume
+  /compact /exit）、启动 Banner、状态栏（CWD · 权限模式 · 模型 · 上下文负载 · Token ·
+  缓存命中率）、Ctrl+C 取消当前回合。
 
 ### 5.7 P1 → 实现位置映射
 

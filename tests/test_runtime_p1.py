@@ -367,7 +367,7 @@ def test_compaction_not_triggered_when_needs_false(harness_factory):
 def test_background_job_delivered_once_as_user_message(harness_factory):
     provider = FakeProvider(
         FakeProviderOptions(
-            turns=[FakeTurn(tool_calls=[FakeToolCall(name="read_file", arguments={"path": "a.txt"})]), FakeTurn(text="结果看到了")]
+            turns=[FakeTurn(tool_calls=[FakeToolCall(name="read", arguments={"path": "a.txt"})]), FakeTurn(text="结果看到了")]
         )
     )
     manager = FakeBackgroundManager([bg_job()])
@@ -397,7 +397,7 @@ def test_background_job_delivered_once_as_user_message(harness_factory):
 
 
 def test_large_output_spilled_with_readback_reference(harness_factory):
-    # search_text over a big file produces an output above the spill threshold
+    # grep over a big file produces an output above the spill threshold
     # (long lines: the search results cap alone would keep the output small).
     big = "\n".join(f"needle line {i} " + "x" * 200 for i in range(200))
     provider = FakeProvider(
@@ -405,7 +405,7 @@ def test_large_output_spilled_with_readback_reference(harness_factory):
             turns=[
                 FakeTurn(
                     tool_calls=[
-                        FakeToolCall(name="search_text", arguments={"pattern": "needle"})
+                        FakeToolCall(name="grep", arguments={"pattern": "needle"})
                     ]
                 ),
                 FakeTurn(text="done"),
@@ -463,7 +463,7 @@ def _prepare_dangling_session(tmp_path: Path, tool_name: str, arguments: dict):
 
 def test_resume_reexecutes_read_only_call(harness_factory, tmp_path):
     store, session_id, workspace, call = _prepare_dangling_session(
-        tmp_path, "read_file", {"path": "notes.txt"}
+        tmp_path, "read", {"path": "notes.txt"}
     )
     (workspace / "notes.txt").write_text("kept", encoding="utf-8")
     sink = EventSink()
@@ -483,7 +483,7 @@ def test_resume_reexecutes_read_only_call(harness_factory, tmp_path):
     assert result.exit_reason is ExitReason.COMPLETED
     # The read-only call was re-executed under a fresh event record.
     starts = [e for e in sink.of_type(EventType.TOOL_CALL_START) if e.data.get("recovered")]
-    assert len(starts) == 1 and starts[0].data["name"] == "read_file"
+    assert len(starts) == 1 and starts[0].data["name"] == "read"
     # Result stored with the ORIGINAL call id (the model conversation stays valid).
     recovered = [
         b
@@ -497,7 +497,7 @@ def test_resume_reexecutes_read_only_call(harness_factory, tmp_path):
 
 def test_resume_marks_write_side_effect_unknown(harness_factory, tmp_path):
     store, session_id, workspace, call = _prepare_dangling_session(
-        tmp_path, "apply_patch", {"path": "x.txt", "new_text": "??"}
+        tmp_path, "edit", {"path": "x.txt", "old_text": "a", "new_text": "??"}
     )
     sink = EventSink()
     provider = FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="明白，先核实")]))
@@ -516,7 +516,7 @@ def test_resume_marks_write_side_effect_unknown(harness_factory, tmp_path):
     assert result.exit_reason is ExitReason.COMPLETED
     unknown = sink.of_type(EventType.SIDE_EFFECT_UNKNOWN)
     assert len(unknown) == 1
-    assert unknown[0].data["name"] == "apply_patch"
+    assert unknown[0].data["name"] == "edit"
     assert unknown[0].data["call_id"] == call.id
     # The file must NOT have been written by recovery.
     assert not (workspace / "x.txt").exists()

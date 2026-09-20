@@ -50,7 +50,7 @@ def _read_then_json_turns():
     return [
         FakeTurn(
             tool_calls=[
-                FakeToolCall(name="read_file", arguments={"path": "notes.txt"})
+                FakeToolCall(name="read", arguments={"path": "notes.txt"})
             ]
         ),
         FakeTurn(

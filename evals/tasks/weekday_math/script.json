@@ -3,7 +3,7 @@
     {
       "tool_calls": [
         {
-          "name": "read_file",
+          "name": "read",
           "arguments": {
             "path": "weekday.py"
           }
@@ -13,7 +13,7 @@
     {
       "tool_calls": [
         {
-          "name": "apply_patch",
+          "name": "edit",
           "arguments": {
             "path": "weekday.py",
             "old_text": "    return _NAMES[day.weekday() + 1]  # BUG: off by one, Sunday overflows",
@@ -25,7 +25,7 @@
     {
       "tool_calls": [
         {
-          "name": "run_command",
+          "name": "bash",
           "arguments": {
             "command": "python -m pytest test_weekday.py -q"
           }

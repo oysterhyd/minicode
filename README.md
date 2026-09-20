@@ -12,6 +12,13 @@ Claude Code。
 20 任务离线评测集（三基线对照）与可离线查看的 HTML 执行报告，外加一个类 Claude Code 的
 全屏 TUI。MCP 接入、Skills 加载、多 worker 协作属于 P2，尚未实现。
 
+**交互与运行时增强**：启动 ASCII Banner（Oyster Harness + 版本/环境信息）、斜杠命令
+自动补全（Tab 补全 / ↑↓ 选择 / Esc 关闭 / Enter 确认）、`/model`（z.ai/glm-5.3-flash 与
+DeepSeek V4.1 Flash，1M 上下文）与 `/effort`（off/low/medium/high 推理预算）、三态权限
+状态机 `/permissions`（default / accept_edits / bypass，运行时切换并实时显示于状态栏）、
+`/clear` 仅清屏保留上下文、`/new` 彻底重置开启新会话、状态栏实时显示 CWD / Token 用量 /
+缓存命中率 / 上下文窗口负载 / 权限模式 / 模型。
+
 ## 快速开始
 
 要求 Python 3.11+（Windows / Linux 均可）。
@@ -75,7 +82,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 ```
 
 `--provider` 默认 `auto`：设置了 `ANTHROPIC_API_KEY` 就用 anthropic，否则回退 fake。
-不使用 `--yes` 时，`apply_patch` / `run_command` 会在每次执行前请求确认（y/N）。
+不使用 `--yes` 时，`edit` / `write` / `bash` 会在每次执行前请求确认（y/N）。
 
 ## CLI 命令
 
@@ -83,7 +90,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 | --- | --- |
 | `minicode run "任务"` | 执行一个单轮任务：流式输出回复、`▸/✓/✗` 工具行、修改摘要与统计；`--acceptance` 挂验收配置后，模型自述完成不等于通过 |
 | `minicode chat` | 交互式多轮会话（同一会话累积上下文）；`exit` / `quit` / Ctrl+D 退出，回合内 Ctrl+C 只取消当前轮 |
-| `minicode tui` | 全屏交互界面（Textual）：流式回复、工具卡片、审批弹窗、斜杠命令（/help /sessions /resume /compact /clear /exit） |
+| `minicode tui` | 全屏交互界面（Textual）：流式回复、工具卡片、审批弹窗、斜杠命令自动补全（/help /model /effort /permissions /clear /new /sessions /resume /compact /exit） |
 | `minicode sessions list` | 会话列表：ID、创建时间、工作区、模型、状态、轮数、token |
 | `minicode resume <会话ID>` | 恢复历史会话并继续交互：已落库结果不重复执行；只读调用重新执行留痕；未知副作用标记 `unknown` 并要求模型先核实 |
 | `minicode report <会话ID>` | 执行报告（text）；`--format html` 生成单文件离线 HTML（时间线、工具记录、diff、验收证据、用量） |
@@ -104,7 +111,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 
 - CLI 单轮执行、交互会话、流式文本展示、Ctrl+C 取消（取消前先持久化）。
 - 模型适配器：CommandCode（OpenAI 兼容，默认）、Anthropic（流式）、FakeProvider（确定性脚本）。
-- 基础工具：`read_file`、`list_files`、`search_text`、`apply_patch`、`run_command`。
+- 基础工具（对齐 Pi Agent 的 4 核心工具）：`read`、`bash`、`edit`、`write`，外加只读辅助 `ls`、`grep`。
 - 工具参数校验（pydantic schema）、工作区路径边界（含符号链接/junction）、修改与命令审批
   （ALLOW/ASK/DENY 权限门）、命令超时与输出截断。
 - 会话持久化（SQLite）、逐事件执行追踪、diff 与命令退出码报告。
@@ -121,7 +128,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 - **Goal 验收**：验收 YAML 定义命令 / 产物 / 受保护路径三类检查；模型回答后由宿主执行检查，
   通过才判定完成；失败回填结构化报告继续修复（`max_fix_attempts` 上限）；通过的证据绑定
   工作区内容指纹，代码再变即失效重验；受保护路径在会话开始时快照比对。
-- **后台命令与只读子代理**：`run_command` 支持 `background` 参数返回 job id，完成后作为
+- **后台命令与只读子代理**：`bash` 支持 `background` 参数返回 job id，完成后作为
   用户消息投递（幂等，不产生第二个 tool result）；`delegate` 工具把只读调研委派给一层
   子代理（仅 read/list/search 工具），返回 summary/findings/evidence_refs/unresolved，
   token 计入同一会话预算。

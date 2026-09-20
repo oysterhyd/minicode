@@ -7,7 +7,7 @@ import asyncio
 from pathlib import Path
 
 from minicode.tools.base import ToolContext
-from minicode.tools.command import RunCommandTool
+from minicode.tools.command import BashTool
 
 
 class RecordingManager:
@@ -23,7 +23,7 @@ class RecordingManager:
 
 def run(raw_args, tmp_path, manager=None):
     ctx = ToolContext(workspace=tmp_path, background_manager=manager)
-    return asyncio.run(RunCommandTool().run(raw_args, ctx))
+    return asyncio.run(BashTool().run(raw_args, ctx))
 
 
 # ---------------------------------------------------------------------------

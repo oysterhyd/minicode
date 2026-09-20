@@ -1,8 +1,8 @@
 """Read-only research subagents: a sandboxed AgentRuntime over three tools.
 
 :class:`SubagentRunner` spins up a child :class:`~minicode.runtime.loop.AgentRuntime`
-whose registry only contains the read-only tools (``read_file``,
-``list_files``, ``search_text``), so the model physically cannot modify the
+whose registry only contains the read-only tools (``read``,
+``ls``, ``grep``), so the model physically cannot modify the
 workspace. The child shares the parent's :class:`~minicode.storage.SqliteStore`
 (child events/messages land in the same database, in their own session row)
 and runs under a dedicated system prompt that forces the final answer to be a
@@ -28,16 +28,16 @@ from minicode.runtime.loop import AgentRuntime, TextDeltaCallback
 from minicode.runtime.events import EventCallback
 from minicode.security.policy import DefaultPolicy, PermissionPolicy
 from minicode.storage import SessionStore, SqliteStore
-from minicode.tools.files import ListFilesTool, ReadFileTool
+from minicode.tools.files import LsTool, ReadTool
 from minicode.tools.registry import ToolRegistry
-from minicode.tools.search import SearchTextTool
+from minicode.tools.search import GrepTool
 
 #: Dedicated system prompt: read-only researcher that must answer in JSON.
 SUBAGENT_SYSTEM_PROMPT = (
     "你是一个只读研究子代理（read-only research subagent），在父代理的工作区内"
     "完成调研、代码定位和信息汇总任务。\n"
     "硬性约束：\n"
-    "- 你只能使用只读工具（read_file / list_files / search_text）；\n"
+    "- 你只能使用只读工具（read / ls / grep）；\n"
     "- 禁止修改、创建或删除任何文件，禁止执行任何命令；\n"
     "- 不要输出与任务无关的对话内容。\n"
     "完成研究后，最终回复必须且只能是一个 JSON 对象（不要包 markdown 围栏、"
@@ -190,7 +190,7 @@ class SubagentRunner:
             store = own_store
 
         registry = ToolRegistry()
-        for tool in (ReadFileTool(), ListFilesTool(), SearchTextTool()):
+        for tool in (ReadTool(), LsTool(), GrepTool()):
             registry.register(tool)
 
         budget = Budget(

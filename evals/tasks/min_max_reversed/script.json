@@ -3,7 +3,7 @@
     {
       "tool_calls": [
         {
-          "name": "read_file",
+          "name": "read",
           "arguments": {
             "path": "boundary.py"
           }
@@ -13,7 +13,7 @@
     {
       "tool_calls": [
         {
-          "name": "apply_patch",
+          "name": "edit",
           "arguments": {
             "path": "boundary.py",
             "old_text": "    return max(high, min(low, value))  # BUG: min/max swapped",
@@ -25,7 +25,7 @@
     {
       "tool_calls": [
         {
-          "name": "run_command",
+          "name": "bash",
           "arguments": {
             "command": "python -m pytest test_boundary.py -q"
           }

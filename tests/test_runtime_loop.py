@@ -108,11 +108,9 @@ def tool_result_blocks(store: SqliteStore, session_id: str) -> list[ToolResultBl
     ]
 
 
-def _patch_turn(path: str = "new.txt") -> FakeTurn:
+def _write_turn(path: str = "new.txt") -> FakeTurn:
     return FakeTurn(
-        tool_calls=[
-            FakeToolCall(name="apply_patch", arguments={"path": path, "new_text": "hello"})
-        ]
+        tool_calls=[FakeToolCall(name="write", arguments={"path": path, "content": "hello"})]
     )
 
 
@@ -164,7 +162,7 @@ def test_completed_turn_persists_messages_events_and_deltas(harness_factory):
 
 def test_tool_roundtrip_creates_file_and_backfills_result(harness_factory):
     provider = FakeProvider(
-        FakeProviderOptions(turns=[_patch_turn(), FakeTurn(text="done")])
+        FakeProviderOptions(turns=[_write_turn(), FakeTurn(text="done")])
     )
     harness = harness_factory(provider)  # AutoAllowPolicy
 
@@ -183,7 +181,7 @@ def test_tool_roundtrip_creates_file_and_backfills_result(harness_factory):
     starts = harness.events.of_type(EventType.TOOL_CALL_START)
     results = harness.events.of_type(EventType.TOOL_CALL_RESULT)
     assert len(starts) == 1 and len(results) == 1
-    assert starts[0].data["name"] == "apply_patch"
+    assert starts[0].data["name"] == "write"
     assert results[0].data["success"] is True
 
 
@@ -222,8 +220,8 @@ def test_invalid_arguments_backfilled_and_loop_continues(harness_factory):
     provider = FakeProvider(
         FakeProviderOptions(
             turns=[
-                # apply_patch without the required new_text
-                FakeTurn(tool_calls=[FakeToolCall(name="apply_patch", arguments={"path": "x.txt"})]),
+                # edit without the required new_text
+                FakeTurn(tool_calls=[FakeToolCall(name="edit", arguments={"path": "x.txt", "old_text": "a"})]),
                 FakeTurn(text="will fix it"),
             ]
         )
@@ -247,10 +245,10 @@ def test_invalid_arguments_backfilled_and_loop_continues(harness_factory):
 
 def test_policy_deny_blocks_execution_and_backfills(harness_factory):
     provider = FakeProvider(
-        FakeProviderOptions(turns=[_patch_turn(), FakeTurn(text="understood")])
+        FakeProviderOptions(turns=[_write_turn(), FakeTurn(text="understood")])
     )
     harness = harness_factory(
-        provider, policy=DefaultPolicy(rules={"apply_patch": PolicyBehavior.DENY})
+        provider, policy=DefaultPolicy(rules={"write": PolicyBehavior.DENY})
     )
 
     result = asyncio.run(harness.runtime.run_turn("go"))
@@ -269,7 +267,7 @@ def test_policy_deny_blocks_execution_and_backfills(harness_factory):
 
 def test_approval_granted_runs_tool(harness_factory):
     provider = FakeProvider(
-        FakeProviderOptions(turns=[_patch_turn(), FakeTurn(text="done")])
+        FakeProviderOptions(turns=[_write_turn(), FakeTurn(text="done")])
     )
 
     async def approve(request: ApprovalRequest) -> ApprovalDecision:
@@ -284,7 +282,7 @@ def test_approval_granted_runs_tool(harness_factory):
 
     requests = harness.events.of_type(EventType.APPROVAL_REQUEST)
     assert len(requests) == 1
-    assert requests[0].data["tool_name"] == "apply_patch"
+    assert requests[0].data["tool_name"] == "write"
     assert requests[0].data["summary"]  # compact human-readable summary present
 
     decisions = harness.events.of_type(EventType.APPROVAL_DECISION)
@@ -299,7 +297,7 @@ def test_approval_granted_runs_tool(harness_factory):
 
 def test_approval_denied_blocks_execution(harness_factory):
     provider = FakeProvider(
-        FakeProviderOptions(turns=[_patch_turn(), FakeTurn(text="ok, skipping")])
+        FakeProviderOptions(turns=[_write_turn(), FakeTurn(text="ok, skipping")])
     )
 
     async def deny(request: ApprovalRequest) -> ApprovalDecision:
@@ -329,7 +327,7 @@ def test_approval_denied_blocks_execution(harness_factory):
 
 def test_ask_without_handler_backfills_error(harness_factory):
     provider = FakeProvider(
-        FakeProviderOptions(turns=[_patch_turn(), FakeTurn(text="noted")])
+        FakeProviderOptions(turns=[_write_turn(), FakeTurn(text="noted")])
     )
     harness = harness_factory(provider, policy=DefaultPolicy(), approval_handler=None)
 
@@ -353,9 +351,9 @@ def test_max_rounds_exit(harness_factory):
     provider = FakeProvider(
         FakeProviderOptions(
             turns=[
-                _patch_turn("a.txt"),
-                _patch_turn("b.txt"),
-                _patch_turn("c.txt"),  # never streamed: budget spent after 2 rounds
+                _write_turn("a.txt"),
+                _write_turn("b.txt"),
+                _write_turn("c.txt"),  # never streamed: budget spent after 2 rounds
             ]
         )
     )
@@ -388,7 +386,7 @@ def test_token_budget_stops_before_tool_execution(harness_factory):
                 FakeTurn(
                     tool_calls=[
                         FakeToolCall(
-                            name="apply_patch",
+                            name="write",
                             arguments={"path": "new.txt", "new_text": "hello"},
                         )
                     ],
@@ -410,7 +408,7 @@ def test_token_budget_stops_before_tool_execution(harness_factory):
     # The assistant response of round 1 was fully processed...
     assistant_events = harness.events.of_type(EventType.ASSISTANT_MESSAGE)
     assert len(assistant_events) == 1
-    assert assistant_events[0].data["tool_calls"] == ["apply_patch"]
+    assert assistant_events[0].data["tool_calls"] == ["write"]
 
     # ...but its tool call must NOT have executed (no side effects on a blown budget).
     assert not (harness.workspace / "new.txt").exists()
@@ -536,3 +534,50 @@ def test_chat_continuity_accumulates_across_turns(harness_factory):
 
     # The second turn reused the session: SESSION_START emitted exactly once.
     assert len(harness.events.of_type(EventType.SESSION_START)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Live model switching and context-window accounting
+# ---------------------------------------------------------------------------
+
+
+def test_set_model_swaps_provider_and_updates_session(harness_factory, tmp_path):
+    from minicode.core.catalog import MODEL_CATALOG
+
+    harness = harness_factory(FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="嗨")])))
+    runtime = harness.runtime
+    result = asyncio.run(runtime.run_turn("开始"))
+    assert result.exit_reason.value == "completed"
+
+    new_provider = FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="换了")]))
+    glm = MODEL_CATALOG["z.ai/glm-5.3-flash"]
+    runtime.set_model(provider=new_provider, provider_name="commandcode", model=glm.name)
+
+    assert runtime.model == glm.name
+    assert runtime.provider is new_provider
+    assert runtime.context_window == 1_000_000
+    # The persisted session row reflects the switch.
+    summary = harness.store.get_session(result.session_id)
+    assert summary is not None and summary.model == glm.name
+
+
+def test_context_tokens_used_grows_with_messages(harness_factory):
+    harness = harness_factory(FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="回复")])))
+    runtime = harness.runtime
+    assert runtime.context_tokens_used() >= 0
+    asyncio.run(runtime.run_turn("一句用户输入"))
+    # The user message plus the assistant reply now sit in the context.
+    assert runtime.context_tokens_used() > 0
+
+
+def test_runtime_usage_includes_cache_read_tokens(harness_factory):
+    provider = FakeProvider(
+        FakeProviderOptions(
+            turns=[FakeTurn(text="回复", input_tokens=100, cache_read_tokens=60)]
+        )
+    )
+    harness = harness_factory(provider)
+    asyncio.run(harness.runtime.run_turn("x"))
+    usage = harness.runtime.usage
+    assert usage.input_tokens == 100
+    assert usage.cache_read_tokens == 60

@@ -36,6 +36,14 @@ from rich.prompt import Confirm
 from rich.table import Table
 from rich.text import Text
 
+from minicode.banner import print_banner
+from minicode.core.catalog import (
+    DEFAULT_MODEL,
+    EFFORT_LEVELS,
+    MODEL_CATALOG,
+    lookup_model,
+    parse_effort,
+)
 from minicode.core.models import (
     ApprovalDecision,
     ApprovalHandler,
@@ -52,9 +60,18 @@ from minicode.providers import (
     FakeToolCall,
     FakeTurn,
     Provider,
+    ProviderRequestError,
 )
 from minicode.runtime import AgentRuntime
-from minicode.security import AutoAllowPolicy, DefaultPolicy, PermissionPolicy
+from minicode.security import (
+    PERMISSION_MODE_LABELS,
+    ModePolicy,
+    PermissionMode,
+    PermissionPolicy,
+    parse_permission_mode,
+    permission_mode_lines,
+)
+from minicode.slash import format_command_lines
 from minicode.storage import DEFAULT_DB_PATH, SessionStore, SessionSummary, SqliteStore
 from minicode.tools.registry import default_registry
 
@@ -115,6 +132,20 @@ def _status_label(status: str, exit_reason: str | None) -> str:
 def _format_timestamp(iso_timestamp: str) -> str:
     """'2026-09-19T15:04:05.123+00:00' -> '2026-09-19 15:04:05'."""
     return iso_timestamp[:19].replace("T", " ")
+
+
+def _session_list_lines(sessions: list[SessionSummary]) -> list[str]:
+    """Formatted lines for the /sessions listing (latest first, capped at 20)."""
+    return [
+        f"  {session.session_id[:8]}"
+        f"  {_status_label(session.status, session.exit_reason)}"
+        f"  · 轮数 {session.rounds}"
+        f"  · Token {session.input_tokens + session.output_tokens}"
+        f"  · {session.provider}/{session.model}"
+        f"  · {session.workspace}"
+        f"  · {_format_timestamp(session.created_at)}"
+        for session in sessions[:20]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -203,31 +234,62 @@ def _commandcode_available() -> bool:
     return discover_commandcode() is not None
 
 
+def _provider_for_model(
+    name: str, *, carry_effort_from: Provider | None = None
+) -> Provider:
+    """Build a provider for a *catalog* model name (caller validates it).
+
+    Shared by the ``/model`` command in both frontends; the current
+    reasoning effort is carried over so switching models keeps it. Raises
+    :class:`ProviderRequestError` (missing gateway credentials) or
+    ``RuntimeError`` (missing ``ANTHROPIC_API_KEY``); callers surface the
+    message.
+    """
+    info = MODEL_CATALOG[name]
+    effort = getattr(carry_effort_from, "reasoning_effort", None)
+    if info.provider == "commandcode":
+        from minicode.providers.commandcode import CommandCodeProvider
+
+        return CommandCodeProvider(model=info.name, reasoning_effort=effort)
+    if info.provider == "anthropic":
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError("切换到 anthropic 模型需要设置 ANTHROPIC_API_KEY 环境变量。")
+        from minicode.providers.anthropic_provider import AnthropicProvider
+
+        return AnthropicProvider(model=info.name)
+    return FakeProvider()
+
+
 def _build_provider(
     provider_choice: ProviderChoice, model: str | None, script: Path | None
 ) -> tuple[Provider, str, str]:
-    """Resolve ``--provider`` into ``(provider, provider_name, model_label)``."""
+    """Resolve ``--provider`` into ``(provider, provider_name, model_label)``.
+
+    An explicit ``--model`` that names a catalog model pins the provider
+    choice too: ``--model z.ai/glm-5.3-flash`` routes through the
+    commandcode gateway even under ``--provider auto``.
+    """
     if provider_choice is ProviderChoice.auto:
-        provider_choice = (
-            ProviderChoice.commandcode
-            if _commandcode_available()
-            else (
-                ProviderChoice.anthropic
-                if os.environ.get("ANTHROPIC_API_KEY")
-                else ProviderChoice.fake
+        if model is not None and lookup_model(model).provider != "anthropic":
+            provider_choice = ProviderChoice.commandcode
+        else:
+            provider_choice = (
+                ProviderChoice.commandcode
+                if _commandcode_available()
+                else (
+                    ProviderChoice.anthropic
+                    if os.environ.get("ANTHROPIC_API_KEY")
+                    else ProviderChoice.fake
+                )
             )
-        )
 
     if provider_choice is ProviderChoice.commandcode:
         try:
             # Lazy import: keeps startup light and test environments hermetic.
-            from minicode.providers.commandcode import (
-                DEFAULT_MODEL as _CC_DEFAULT_MODEL,
-                CommandCodeProvider,
-            )
+            from minicode.providers.commandcode import CommandCodeProvider
         except ImportError as exc:
             _fail(f"无法加载 commandcode provider：{exc}")
-        chosen = model or _CC_DEFAULT_MODEL
+        chosen = model or DEFAULT_MODEL
         return CommandCodeProvider(model=chosen), "commandcode", chosen
 
     if provider_choice is ProviderChoice.anthropic:
@@ -343,9 +405,9 @@ class _StreamPrinter:
 
 def _tool_args_summary(name: str, arguments: dict[str, Any]) -> str:
     """Compact one-line description of a tool call's arguments."""
-    if name == "run_command" and isinstance(arguments.get("command"), str):
+    if name == "bash" and isinstance(arguments.get("command"), str):
         return str(arguments["command"])
-    if name == "apply_patch":
+    if name in ("edit", "write"):
         return str(arguments.get("path", ""))
     parts: list[str] = []
     for key, value in arguments.items():
@@ -359,11 +421,11 @@ def _success_brief(name: str, data: dict[str, Any]) -> str:
     """Short excerpt shown after '✓ <tool>' on TOOL_CALL_RESULT."""
     preview = str(data.get("output_preview") or "")
     lines = [line for line in preview.splitlines() if line.strip()]
-    if name == "run_command" and lines:
+    if name == "bash" and lines:
         brief = lines[-1]  # e.g. pytest's "4 passed in 0.03s"
-    elif name == "apply_patch" and lines:
-        brief = lines[0]  # "Applied patch to x.py (+1 -1)"
-    elif name == "read_file" and lines:
+    elif name in ("edit", "write") and lines:
+        brief = lines[0]  # "Applied change to x.py (+1 -1)"
+    elif name == "read" and lines:
         brief = f"{len(lines)} 行"
     else:
         brief = "完成"
@@ -420,9 +482,8 @@ def _make_interactive_approval(console: Console) -> ApprovalHandler:
 
 
 def _print_header(console: Console, goal: str, setup: _Setup) -> None:
+    """Task header below the banner: goal plus the budget envelope."""
     console.print(f"[bold]目标[/]   {goal}")
-    console.print(f"[bold]工作区[/] {setup.workspace}")
-    console.print(f"[bold]模型[/]   {setup.provider_name}/{setup.model_label}")
     console.print(
         f"[bold]预算[/]   ≤ {setup.budget.max_rounds} 轮"
         f" · ≤ {setup.budget.max_total_tokens} token"
@@ -444,12 +505,12 @@ def _print_turn_summary(console: Console, result: RunResult) -> None:
 
 
 def _print_diff_summary(console: Console, store: SessionStore, session_id: str) -> None:
-    """Show the diffs produced by apply_patch calls (from persisted events)."""
+    """Show the diffs produced by edit / write calls (from persisted events)."""
     patches = [
         event
         for event in store.get_events(session_id)
         if event.type is EventType.TOOL_CALL_RESULT
-        and event.data.get("name") == "apply_patch"
+        and event.data.get("name") in ("edit", "write")
     ]
     if not patches:
         return
@@ -457,7 +518,8 @@ def _print_diff_summary(console: Console, store: SessionStore, session_id: str) 
     console.print("[bold]修改摘要[/]")
     for event in patches:
         preview = str(event.data.get("output_preview") or "（无 diff 输出）")
-        console.print(Panel(Text(preview), title="apply_patch", border_style="cyan"))
+        title = str(event.data.get("name") or "edit")
+        console.print(Panel(Text(preview), title=title, border_style="cyan"))
 
 
 # ---------------------------------------------------------------------------
@@ -521,11 +583,12 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
     policy: PermissionPolicy
     approval_handler: ApprovalHandler | None
     if yes:
-        policy = AutoAllowPolicy()
-        approval_handler = None
+        # --yes maps to the BYPASS permission mode; the interactive handler
+        # is still created so /permissions can later tighten the mode.
+        policy = ModePolicy(PermissionMode.BYPASS)
     else:
-        policy = DefaultPolicy()
-        approval_handler = _make_interactive_approval(console)
+        policy = ModePolicy(PermissionMode.DEFAULT)
+    approval_handler = _make_interactive_approval(console)
 
     goal_checker = None
     evidence_ledger = None
@@ -567,11 +630,8 @@ def _attach_compactor(runtime: Any, artifact_store: Any, max_total_tokens: int) 
     )
 
 
-def _make_runtime(setup: _Setup, store: SqliteStore, console: Console, yes: bool) -> Any:
-    """Build a fresh AgentRuntime with presentation callbacks and P1 services."""
-    from minicode.runtime import AgentRuntime
-
-    services = _build_services(setup, store, console, yes)
+def _new_runtime(setup: _Setup, store: SqliteStore, services: Any) -> Any:
+    """Build a fresh AgentRuntime from an already-assembled services bundle."""
     runtime = AgentRuntime(
         provider=setup.provider,
         registry=services.registry,
@@ -689,7 +749,13 @@ def run(
     console = Console()
     store = SqliteStore(db)
     try:
-        runtime = _make_runtime(setup, store, console, yes)
+        runtime = _new_runtime(setup, store, _build_services(setup, store, console, yes))
+        print_banner(
+            console,
+            provider_label=setup.provider_name,
+            model_label=setup.model_label,
+            workspace=str(setup.workspace),
+        )
         _print_header(console, task, setup)
         try:
             result = _run_one_turn(runtime, task)
@@ -715,48 +781,262 @@ def chat(
     acceptance: AcceptanceOpt = None,
     db: DbOpt = DEFAULT_DB_PATH,
 ) -> None:
-    """交互式多轮会话：同一会话持续累积上下文，exit / quit / Ctrl+D 退出。"""
+    """交互式多轮会话：/help 查看斜杠命令，exit / quit / Ctrl+D 退出。"""
     setup = _prepare(
         workspace, provider, model, script, max_rounds, max_tokens, max_seconds, acceptance
     )
     console = Console()
     store = SqliteStore(db)
     try:
-        runtime = _make_runtime(setup, store, console, yes)
-        _chat_repl(runtime, store, console, setup)
+        services = _build_services(setup, store, console, yes)
+        _ChatRepl(setup=setup, store=store, console=console, services=services).loop()
     finally:
         store.close()
 
 
-def _chat_repl(runtime: Any, store: SqliteStore, console: Console, setup: _Setup) -> None:
-    """Shared interactive loop for fresh sessions and resumed ones."""
-    _print_header(console, "交互会话（exit / quit / Ctrl+D 退出）", setup)
-    while True:
+def _repl_help_text() -> str:
+    """Slash-command help assembled from the shared registry."""
+    lines = ["可用命令：", *format_command_lines()]
+    lines.append("快捷键：Ctrl+C 取消当前回合 · Ctrl+D 退出")
+    return "\n".join(lines)
+
+
+class _ChatRepl:
+    """Interactive chat loop with runtime slash commands (chat / resume).
+
+    Slash commands are intercepted at the input layer and never sent to the
+    model. ``/clear`` only clears the terminal rendering; the agent keeps
+    its context. ``/new`` rebuilds the runtime so the next message starts a
+    brand-new session.
+    """
+
+    def __init__(
+        self,
+        *,
+        setup: _Setup,
+        store: SqliteStore,
+        console: Console,
+        services: Any,
+        initial_runtime: Any | None = None,
+    ) -> None:
+        self.setup = setup
+        self.store = store
+        self.console = console
+        self.services = services
+        self.runtime = initial_runtime if initial_runtime is not None else _new_runtime(
+            setup, store, services
+        )
+
+    # -- loop -----------------------------------------------------------------
+
+    def loop(self) -> None:
+        print_banner(
+            self.console,
+            provider_label=self.setup.provider_name,
+            model_label=self.runtime.model,
+            workspace=str(self.setup.workspace),
+        )
+        self.console.print(_repl_help_text())
+        self.console.print()
+        while True:
+            try:
+                user_input = self.console.input("[bold cyan]你 >[/] ")
+            except EOFError:  # Ctrl+D
+                self.console.print()
+                break
+            except KeyboardInterrupt:  # Ctrl+C at the prompt exits cleanly
+                self.console.print()
+                self.console.print("再见。")
+                break
+            text = user_input.strip()
+            if not text:
+                continue
+            if text in {"exit", "quit"}:
+                break
+            if text.startswith("/"):
+                if not self._handle_slash(text):
+                    break
+                continue
+            try:
+                result = _run_one_turn(self.runtime, text)
+            except asyncio.CancelledError:  # pragma: no cover - defensive
+                continue
+            except KeyboardInterrupt:
+                # Ctrl+C during a turn cancels that turn only; the session
+                # was persisted and the REPL continues.
+                self.console.print()
+                continue
+            _print_turn_summary(self.console, result)
+            _print_diff_summary(self.console, self.store, result.session_id)
+
+    # -- slash commands -------------------------------------------------------
+
+    def _handle_slash(self, text: str) -> bool:
+        """Dispatch one slash command; False means the REPL should exit."""
+        verb, _, arg = text.partition(" ")
+        verb = verb.lower()
+        arg = arg.strip()
+        if verb in ("/help", "/?"):
+            self.console.print(_repl_help_text())
+        elif verb in ("/exit", "/quit"):
+            return False
+        elif verb == "/clear":
+            self._cmd_clear()
+        elif verb == "/new":
+            self._cmd_new()
+        elif verb == "/model":
+            self._cmd_model(arg)
+        elif verb == "/effort":
+            self._cmd_effort(arg)
+        elif verb == "/permissions":
+            self._cmd_permissions(arg)
+        elif verb == "/sessions":
+            self._cmd_sessions()
+        elif verb == "/compact":
+            self.console.print(Text("/compact 需要全屏界面，请使用 minicode tui。", style="yellow"))
+        elif verb == "/resume":
+            self.console.print(
+                Text("请退出后使用 minicode resume <会话ID> 恢复会话。", style="yellow")
+            )
+        else:
+            self.console.print(f"[yellow]未知命令 {verb}（/help 查看可用命令）[/]")
+        return True
+
+    def _cmd_clear(self) -> None:
+        """Clear the terminal rendering only; the agent keeps its context.
+
+        ANSI ``2J``/``3J`` clear the viewport and scrollback, ``H`` homes the
+        cursor; Rich enables VT processing on Windows terminals, so this is
+        portable without an extra dependency.
+        """
+        self.console.file.write("\033[2J\033[3J\033[H")
+        self.console.file.flush()
+        usage = self.runtime.usage
+        self.console.print(
+            Text(
+                "已清屏（会话上下文与 Token 用量保留："
+                f"输入 {usage.input_tokens} / 输出 {usage.output_tokens}）。",
+                style="dim",
+            )
+        )
+
+    def _cmd_new(self) -> None:
+        """Reset the conversation: the next message starts a brand-new session."""
+        self.runtime = _new_runtime(self.setup, self.store, self.services)
+        self.console.print(
+            "[green]已重置对话上下文，新会话将在下一条消息时创建。[/]"
+        )
+
+    def _cmd_model(self, arg: str) -> None:
+        if not arg:
+            lines = ["可用模型："]
+            for info in MODEL_CATALOG.values():
+                mark = " ← 当前" if info.name == self.runtime.model else ""
+                effort = " · 支持推理预算" if info.supports_effort else ""
+                lines.append(
+                    f"  {info.name}（上下文 {info.context_window:,}{effort}）{mark}"
+                )
+            lines.append("用法: /model <名称>")
+            self.console.print("\n".join(lines))
+            return
+        if arg not in MODEL_CATALOG:
+            self.console.print(
+                f"[yellow]未知模型 {arg}；可选：{'、'.join(MODEL_CATALOG)}[/]"
+            )
+            return
+        provider = self._provider_for(MODEL_CATALOG[arg])
+        if provider is None:
+            return
+        info = MODEL_CATALOG[arg]
+        old = self.runtime.model
+        # Keep /new consistent with the switched model.
+        self.setup.provider = provider
+        self.setup.provider_name = info.provider
+        self.setup.model_label = info.name
+        self.runtime.set_model(
+            provider=provider, provider_name=info.provider, model=info.name
+        )
+        self.console.print(
+            f"[green]已切换模型[/] {old} → {info.name}"
+            f"（上下文 {info.context_window:,} token）"
+        )
+
+    def _provider_for(self, info: Any) -> Provider | None:
+        """Build a provider for a catalog entry, surfacing failures inline."""
         try:
-            user_input = console.input("[bold cyan]你 >[/] ")
-        except EOFError:  # Ctrl+D
-            console.print()
-            break
-        except KeyboardInterrupt:  # Ctrl+C at the prompt exits cleanly
-            console.print()
-            console.print("再见。")
-            break
-        text = user_input.strip()
-        if not text:
-            continue
-        if text in {"exit", "quit"}:
-            break
-        try:
-            result = _run_one_turn(runtime, text)
-        except asyncio.CancelledError:  # pragma: no cover - defensive
-            continue
-        except KeyboardInterrupt:
-            # Ctrl+C during a turn cancels that turn only; the session
-            # was persisted and the REPL continues.
-            console.print()
-            continue
-        _print_turn_summary(console, result)
-        _print_diff_summary(console, store, result.session_id)
+            return _provider_for_model(
+                info.name, carry_effort_from=self.runtime.provider
+            )
+        except (ProviderRequestError, RuntimeError) as exc:
+            self.console.print(f"[red]无法切换 provider：{exc}[/]")
+            return None
+
+    def _cmd_effort(self, arg: str) -> None:
+        provider = self.runtime.provider
+        current = getattr(provider, "reasoning_effort", None)
+        if not arg:
+            label = current if current else "默认（跟随网关）"
+            self.console.print(
+                f"当前推理预算: {label}；可选: {' / '.join(EFFORT_LEVELS)}"
+            )
+            return
+        level = parse_effort(arg)
+        if level is None:
+            self.console.print(
+                f"[yellow]无效档位 {arg}；可选: {' / '.join(EFFORT_LEVELS)}[/]"
+            )
+            return
+        if not hasattr(provider, "reasoning_effort"):
+            self.console.print(
+                f"[yellow]当前 provider（{getattr(provider, 'name', '?')}）"
+                "不支持推理预算调整。[/]"
+            )
+            return
+        provider.reasoning_effort = None if level == "off" else level
+        shown = level if level != "off" else "off（跟随网关默认）"
+        self.console.print(f"[green]推理预算已调整为 {shown}[/]")
+
+    def _cmd_permissions(self, arg: str) -> None:
+        policy = self.services.policy
+        if not isinstance(policy, ModePolicy):
+            self.console.print("[yellow]当前会话的权限策略不支持运行时切换。[/]")
+            return
+        if not arg:
+            self.console.print(
+                f"当前权限模式: {policy.mode.value}"
+                f"（{PERMISSION_MODE_LABELS[policy.mode]}）"
+            )
+            for line in permission_mode_lines():
+                self.console.print(line)
+            return
+        mode = parse_permission_mode(arg)
+        if mode is None:
+            options = " / ".join(m.value for m in PermissionMode)
+            self.console.print(f"[yellow]无效模式 {arg}；可选: {options}[/]")
+            return
+        previous = policy.set_mode(mode)
+        self.console.print(
+            f"[green]权限模式已切换[/] {previous.value} → {mode.value}"
+            f"（{PERMISSION_MODE_LABELS[mode]}）"
+        )
+
+    def _cmd_sessions(self) -> None:
+        sessions = self.store.list_sessions()
+        if not sessions:
+            self.console.print("暂无会话记录。")
+            return
+        lines = ["会话列表（最新在前）："]
+        for session in sessions[:20]:
+            lines.append(
+                f"  {session.session_id[:8]}"
+                f"  {_status_label(session.status, session.exit_reason)}"
+                f"  · 轮数 {session.rounds}"
+                f"  · Token {session.input_tokens + session.output_tokens}"
+                f"  · {session.provider}/{session.model}"
+                f"  · {session.workspace}"
+                f"  · {_format_timestamp(session.created_at)}"
+            )
+        self.console.print("\n".join(lines))
 
 
 @app.command()
@@ -795,23 +1075,27 @@ def resume(
         setup = _prepare(
             ws, provider, model, script, max_rounds, max_tokens, max_seconds, acceptance
         )
-        runtime = _make_resumed_runtime(setup, store, console, yes, summary)
+        services = _build_services(setup, store, console, yes)
+        runtime = _make_resumed_runtime(setup, store, summary, services)
         console.print(f"[bold]恢复会话[/] {summary.session_id[:8]} ·"
                       f" 轮数 {summary.rounds} ·"
                       f" Token {summary.input_tokens + summary.output_tokens}")
-        _chat_repl(runtime, store, console, setup)
+        _ChatRepl(
+            setup=setup,
+            store=store,
+            console=console,
+            services=services,
+            initial_runtime=runtime,
+        ).loop()
     finally:
         store.close()
 
 
 def _make_resumed_runtime(
-    setup: _Setup, store: SqliteStore, console: Console, yes: bool, summary: Any
+    setup: _Setup, store: SqliteStore, summary: Any, services: Any
 ) -> Any:
     """Build the runtime for ``resume`` from shared services and validate
     the stored session against it."""
-    from minicode.runtime import AgentRuntime
-
-    services = _build_services(setup, store, console, yes)
     try:
         runtime = AgentRuntime.resume(
             store=store,
@@ -976,7 +1260,7 @@ def _render_report(
                 line.append(f"  错误: {data['error']}", style="red")
             console.print(line)
             call_id = str(data.get("call_id", ""))
-            if (name == "apply_patch" or full) and call_id in full_outputs:
+            if (name in ("edit", "write") or full) and call_id in full_outputs:
                 output = full_outputs[call_id]
             else:
                 output = str(data.get("output_preview") or "")

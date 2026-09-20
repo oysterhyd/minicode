@@ -210,7 +210,7 @@ def _summarize_call(call: ToolUseBlock, limit: int = 40) -> str:
 
 def _unit_line(unit_messages: Sequence[Message], ordinal: int) -> str:
     """One digest line for one archived unit: assistant excerpt, tool calls,
-    modified files (apply_patch ``path`` arguments)."""
+    modified files (edit / write ``path`` arguments)."""
     calls: list[str] = []
     files: list[str] = []
     texts: list[str] = []
@@ -218,7 +218,7 @@ def _unit_line(unit_messages: Sequence[Message], ordinal: int) -> str:
         for block in message.content:
             if isinstance(block, ToolUseBlock):
                 calls.append(_summarize_call(block))
-                if block.name == "apply_patch":
+                if block.name in ("edit", "write"):
                     path = block.input.get("path")
                     if isinstance(path, str) and path not in files:
                         files.append(path)
@@ -264,7 +264,7 @@ def _structured_summary(groups: list[list[Message]]) -> str:
                             todos.append(_shorten(stripped, 80))
                     refs.extend(match.group(0) for match in _ARTIFACT_REF.finditer(block.text))
                 elif isinstance(block, ToolUseBlock):
-                    if block.name == "apply_patch":
+                    if block.name in ("edit", "write"):
                         path = block.input.get("path")
                         if isinstance(path, str) and path not in files:
                             files.append(path)

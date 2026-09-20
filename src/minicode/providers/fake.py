@@ -46,6 +46,8 @@ class FakeTurn(BaseModel):
     tool_calls: list[FakeToolCall] = Field(default_factory=list)
     input_tokens: int | None = None  # deterministic usage override
     output_tokens: int | None = None
+    # Cache-served subset of input_tokens (status-bar cache-hit demos).
+    cache_read_tokens: int | None = None
     # Default: TOOL_USE if tool_calls else END_TURN.
     stop_reason: StopReason | None = None
 
@@ -136,6 +138,7 @@ class FakeProvider:
                 if turn.output_tokens is not None
                 else options.default_output_tokens
             ),
+            cache_read_tokens=turn.cache_read_tokens or 0,
         )
 
         yield ResponseDone(

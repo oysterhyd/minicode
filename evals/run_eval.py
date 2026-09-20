@@ -211,7 +211,7 @@ def discover_tasks(tasks_dir: Path, only: list[str] | None) -> list[TaskDef]:
 
 def ensure_python_on_path() -> None:
     """Prepend this interpreter's directory to PATH so ``python``/``pytest``
-    inside tool subprocesses (run_command) and acceptance checks resolve to the
+    inside tool subprocesses (bash) and acceptance checks resolve to the
     same environment the runner was started with, regardless of shell state."""
     exe_dir = str(Path(sys.executable).resolve().parent)
     parts = os.environ.get("PATH", "").split(os.pathsep)
@@ -280,7 +280,7 @@ def build_continuation_message(failures: list[str]) -> str:
     """The message fed into the next run_turn when b2 continues after failure."""
     lines = ["上一轮修复未通过验收，必须修复以下问题后重新验收："]
     lines.extend(f"- {failure}" for failure in failures)
-    lines.append("必须修复，不得改受保护文件。请先读取相关文件，再用 apply_patch 修复，并重新运行验收命令确认。")
+    lines.append("必须修复，不得改受保护文件。请先读取相关文件，再用 edit 修复，并重新运行验收命令确认。")
     return "\n".join(lines)
 
 
@@ -536,7 +536,7 @@ def build_analysis(records: list[RunRecord], baselines: list[str]) -> list[str]:
     if "completed" in by_reason:
         paragraphs.append(
             "exit_reason=completed 但验收失败：模型侧已自述完成（脚本走到最终总结），"
-            "但修复未生效 —— 常见原因是 apply_patch 的 old_text 与源文件不一致（脚本与"
+            "但修复未生效 —— 常见原因是 edit 的 old_text 与源文件不一致（脚本与"
             " repo 不同步），或续跑轮次耗尽后仍未收敛。应先核对 script.json 与 repo/"
             " 源文件是否由同一份模板生成。"
         )

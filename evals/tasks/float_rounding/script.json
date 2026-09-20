@@ -3,7 +3,7 @@
     {
       "tool_calls": [
         {
-          "name": "read_file",
+          "name": "read",
           "arguments": {
             "path": "money.py"
           }
@@ -13,7 +13,7 @@
     {
       "tool_calls": [
         {
-          "name": "apply_patch",
+          "name": "edit",
           "arguments": {
             "path": "money.py",
             "old_text": "    return round(price * (1 - percent_off / 100))  # BUG: rounds to integer",
@@ -25,7 +25,7 @@
     {
       "tool_calls": [
         {
-          "name": "run_command",
+          "name": "bash",
           "arguments": {
             "command": "python -m pytest test_money.py -q"
           }

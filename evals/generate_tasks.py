@@ -3,7 +3,7 @@
 
 每个任务是一个带 bug 的微型仓库（``repo/``）+ 任务定义（``task.yaml``）+
 FakeProvider 修复脚本（``script.json``）。源码与脚本出自同一份模板字典：
-脚本里的 ``old_text`` 直接取自模板中标记的 bug 行，因此 ``apply_patch``
+脚本里的 ``old_text`` 直接取自模板中标记的 bug 行，因此 ``edit``
 必然精确命中；``--verify`` 会在临时目录里对每个任务做"红→绿"自检
 （修复前 pytest 有失败、修复后全部通过），不污染任务目录。
 
@@ -32,7 +32,7 @@ DEFAULT_INPUT_TOKENS = 120
 DEFAULT_OUTPUT_TOKENS = 40
 
 # ---------------------------------------------------------------------------
-# 20 个任务模板。source 为带 bug 的原文件；old_text/new_text 是 apply_patch
+# 20 个任务模板。source 为带 bug 的原文件；old_text/new_text 是 edit
 # 的精确替换串；修复后的文件由 source.replace(old_text, new_text, 1) 推导，
 # 生成器断言 old_text 在源文件中恰好出现一次。
 # ---------------------------------------------------------------------------
@@ -743,11 +743,11 @@ def _script_json(spec: dict) -> str:
     module = spec["module"]
     script = {
         "turns": [
-            {"tool_calls": [{"name": "read_file", "arguments": {"path": f"{module}.py"}}]},
+            {"tool_calls": [{"name": "read", "arguments": {"path": f"{module}.py"}}]},
             {
                 "tool_calls": [
                     {
-                        "name": "apply_patch",
+                        "name": "edit",
                         "arguments": {
                             "path": f"{module}.py",
                             "old_text": spec["old_text"],
@@ -759,7 +759,7 @@ def _script_json(spec: dict) -> str:
             {
                 "tool_calls": [
                     {
-                        "name": "run_command",
+                        "name": "bash",
                         "arguments": {"command": f"python -m pytest test_{module}.py -q"},
                     }
                 ]

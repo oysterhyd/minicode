@@ -3,7 +3,7 @@
     {
       "tool_calls": [
         {
-          "name": "read_file",
+          "name": "read",
           "arguments": {
             "path": "cart.py"
           }
@@ -13,7 +13,7 @@
     {
       "tool_calls": [
         {
-          "name": "apply_patch",
+          "name": "edit",
           "arguments": {
             "path": "cart.py",
             "old_text": "def add_item(item: str, cart: list[str] = []) -> list[str]:\n    \"\"\"Append *item* to *cart* (a fresh cart by default) and return it.\"\"\"\n    cart.append(item)  # BUG: mutable default shared across calls\n    return cart",
@@ -25,7 +25,7 @@
     {
       "tool_calls": [
         {
-          "name": "run_command",
+          "name": "bash",
           "arguments": {
             "command": "python -m pytest test_cart.py -q"
           }

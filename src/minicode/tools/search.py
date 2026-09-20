@@ -24,7 +24,7 @@ _BINARY_SNIFF_BYTES = 8192
 _RG_LINE_RE = re.compile(r"^(?P<path>[^:]+):(?P<lineno>\d+):(?P<text>.*)$")
 
 
-class SearchTextArgs(BaseModel):
+class GrepArgs(BaseModel):
     pattern: str
     path: str = "."
     glob: str | None = None
@@ -32,15 +32,15 @@ class SearchTextArgs(BaseModel):
     case_sensitive: bool = False
 
 
-class SearchTextTool(BaseTool):
-    name = "search_text"
+class GrepTool(BaseTool):
+    name = "grep"
     description = (
         "Search file contents in the workspace with a regular expression and "
         "return 'path:line: text' match lines. Optional filename glob filter; "
         "case-insensitive by default."
     )
     requires_approval = False
-    args_model = SearchTextArgs
+    args_model = GrepArgs
 
     async def execute(self, args: SearchTextArgs, ctx: ToolContext) -> ToolOutcome:
         base, failure = resolve_or_fail(ctx, args.path)

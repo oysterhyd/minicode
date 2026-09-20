@@ -2,7 +2,7 @@
 and the task dependency store.
 
 - :mod:`minicode.tasks.background` — :class:`BackgroundManager` tracks shell
-  commands started with ``run_command(background=True)`` and hands finished
+  commands started with ``bash(background=True)`` and hands finished
   jobs back exactly once.
 - :mod:`minicode.tasks.subagent` — :class:`SubagentRunner` runs read-only
   child agents that answer in structured JSON.

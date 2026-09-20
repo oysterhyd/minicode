@@ -18,6 +18,7 @@ import pytest
 from rich.console import Console
 
 from minicode.cli import _Setup, _build_services
+from minicode.slash import filter_commands
 from minicode.core.models import Budget
 from minicode.providers import FakeProvider, FakeProviderOptions, FakeTurn
 from minicode.storage import SqliteStore
@@ -86,23 +87,14 @@ async def _submit(pilot, text: str) -> None:
     await pilot.press("enter")
 
 
-async def _wait_log_empty(app: MiniCodeApp) -> None:
-    """/clear removes children asynchronously; wait for the removal to land."""
-    deadline = time.monotonic() + _WAIT_TIMEOUT_S
-    while list(app.query_one("#log").children):
-        if time.monotonic() > deadline:
-            raise AssertionError("日志区未在限时内清空")
-        await asyncio.sleep(0.02)
-
-
 def _create_file_script() -> list[dict]:
-    """apply_patch creates new.txt, then the model gives a final answer."""
+    """write creates new.txt, then the model gives a final answer."""
     return [
         {
             "tool_calls": [
                 {
-                    "name": "apply_patch",
-                    "arguments": {"path": "new.txt", "new_text": "hello"},
+                    "name": "write",
+                    "arguments": {"path": "new.txt", "content": "hello"},
                 }
             ]
         },
@@ -176,9 +168,10 @@ def test_plain_input_streams_reply(tmp_path):
             assert any("助手的流式回复" in t for t in texts)
             # Turn summary line written after the turn.
             assert any("退出原因: 已完成" in t for t in texts)
-            # Status bar refreshed after the turn.
+            # Status bar refreshed after the turn (model + tokens + session).
             right = str(app.query_one("#status-right").content)
-            assert right.startswith("轮数")
+            assert "输入 100" in right
+            assert "输出 20" in right
             assert "会话" in right
             # One session persisted in the store.
             assert app._runtime.session_id is not None
@@ -209,10 +202,14 @@ def test_slash_commands_on_empty_store(tmp_path):
             await pilot.pause()
             assert any("可用命令" in t for t in app._log_texts())
 
-            # /clear empties the display without touching the store.
+            # /clear empties the display and leaves only the semantics note;
+            # the store is untouched.
             await _submit(pilot, "/clear")
-            await _wait_log_empty(app)
-            assert len(app.query_one("#log").children) == 0
+            await pilot.pause()
+            await pilot.pause()
+            assert len(app.query_one("#log").children) == 1
+            assert "已清屏" in app._log_texts()[0]
+            assert len(app._store.list_sessions()) == 0
 
     _run(scenario())
 
@@ -244,7 +241,7 @@ def test_sessions_and_resume_after_turn(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Approval modal (yes=False + DefaultPolicy + apply_patch)
+# Approval modal (yes=False + DefaultPolicy + edit)
 # ---------------------------------------------------------------------------
 
 
@@ -258,7 +255,7 @@ def test_approval_modal_allow(tmp_path):
             await pilot.pause()
             # The modal names the tool and the pending change.
             body = str(modal.query_one("#approval-body").content)
-            assert "apply_patch" in body
+            assert "write" in body
             assert "new.txt" in body
 
             await pilot.click("#approve")
@@ -270,7 +267,7 @@ def test_approval_modal_allow(tmp_path):
             cards = list(app.query(ToolCard))
             assert cards, "缺少工具卡片"
             assert any(
-                "✓" in str(card.header_text) and "apply_patch" in str(card.header_text)
+                "✓" in str(card.header_text) and "write" in str(card.header_text)
                 for card in cards
             )
             assert any("退出原因: 已完成" in t for t in app._log_texts())
@@ -313,5 +310,171 @@ def test_auto_allow_skips_modal(tmp_path):
             assert all(
                 not isinstance(screen, ApprovalModal) for screen in app.screen_stack
             )
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Slash autocomplete menu (Tab / arrows / Esc / Enter)
+# ---------------------------------------------------------------------------
+
+
+def test_slash_menu_opens_filters_and_completes(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press("/")
+            await pilot.pause()
+            assert app.slash_visible
+            assert len(app._slash_items) == len(filter_commands("/"))
+
+            await pilot.press("h")
+            await pilot.pause()
+            assert [c.name for c in app._slash_items] == ["/help"]
+            assert app.query_one("#slash-menu").has_class("slash-visible")
+
+            # Tab completes the highlighted entry into the prompt.
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.query_one("#prompt").text == "/help "
+            assert not app.slash_visible
+
+            # Enter submits; the help block is rendered into the log.
+            await pilot.press("enter")
+            await pilot.pause()
+            texts = app._log_texts()
+            assert any("可用命令" in line for line in texts)
+
+    _run(scenario())
+
+
+def test_slash_menu_navigation_and_escape(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press("/")
+            await pilot.pause()
+            first = app._slash_index
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert app._slash_index == (first + 1) % len(app._slash_items)
+
+            await pilot.press("up")
+            await pilot.pause()
+            assert app._slash_index == first
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not app.slash_visible
+            assert not app.query_one("#slash-menu").has_class("slash-visible")
+
+            # Esc on a non-slash prompt is a no-op (no crash, menu stays shut).
+            await pilot.press("x")
+            await pilot.pause()
+            assert not app.slash_visible
+
+    _run(scenario())
+
+
+def test_slash_menu_enter_confirms_highlighted_command(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press("/")
+            await pilot.pause()
+            # Move the highlight onto /clear, then confirm with Enter.
+            index = [c.name for c in app._slash_items].index("/clear")
+            app._slash_index = index
+            app._menu().show_items(app._slash_items, index)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            texts = app._log_texts()
+            assert any("已清屏" in line for line in texts)
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# /model, /effort, /permissions, /new and the enhanced status bar
+# ---------------------------------------------------------------------------
+
+
+def test_permissions_command_switches_mode_and_status_bar(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _submit(pilot, "/permissions accept_edits")
+            await pilot.pause()
+            texts = app._log_texts()
+            assert any("权限模式已切换 default → accept_edits" in line for line in texts)
+            # The status bar mirrors the active mode in real time.
+            left = str(app.query_one("#status-left").content)
+            assert "权限:自动编辑" in left
+
+    _run(scenario())
+
+
+def test_new_command_resets_runtime_and_log(tmp_path):
+    turns = [{"text": "旧回复"}, {"text": "新回复"}]
+    app, _ws = _make_app(tmp_path, turns=turns)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _submit(pilot, "第一句")
+            await _wait_turn_done(app)
+            old_runtime = app._runtime
+            assert old_runtime.session_id is not None
+
+            await _submit(pilot, "/new")
+            await pilot.pause()
+            assert app._runtime is not old_runtime
+            assert app._runtime.session_id is None  # brand-new session
+            assert not list(app.query_one("#log").children) or any(
+                "已重置对话上下文" in t for t in app._log_texts()
+            )
+
+            await _submit(pilot, "第二句")
+            await _wait_turn_done(app)
+            # Two distinct sessions were persisted.
+            assert len(app._store.list_sessions()) == 2
+
+    _run(scenario())
+
+
+def test_effort_command_reports_unsupported_provider(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _submit(pilot, "/effort high")
+            await pilot.pause()
+            assert any("不支持推理预算调整" in t for t in app._log_texts())
+
+    _run(scenario())
+
+
+def test_banner_and_status_bar_content(tmp_path):
+    app, ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            texts = app._log_texts()
+            # The banner's info line carries version, platform and model.
+            assert any("minicode v" in line and "Python" in line for line in texts)
+            # Status bar: workspace, permission mode, model, context window.
+            left = str(app.query_one("#status-left").content)
+            assert ws.name in left
+            assert "权限:默认" in left
+            right = str(app.query_one("#status-right").content)
+            assert "fake" in right
+            assert "ctx" in right and "200k" in right
+            assert "缓存" in right
 
     _run(scenario())

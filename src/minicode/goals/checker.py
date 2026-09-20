@@ -2,7 +2,7 @@
 
 Command items reuse the shared platform-shell helpers from
 :mod:`minicode.tools.command` (shell wrapping, merged stdout/stderr,
-tree-safe kill on timeout) so the semantics match the ``run_command`` tool
+tree-safe kill on timeout) so the semantics match the ``bash`` tool
 exactly; the import direction goals -> tools keeps the dependency graph
 acyclic.
 """

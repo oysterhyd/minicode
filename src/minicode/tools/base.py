@@ -16,9 +16,9 @@ from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
 class ToolLimits(BaseModel):
     """Resource caps applied by every built-in tool."""
 
-    max_read_bytes: int = 256_000           # read_file cap
-    max_output_chars: int = 20_000          # list_files / search output cap
-    max_command_output_chars: int = 10_000  # run_command output cap
+    max_read_bytes: int = 256_000           # read cap
+    max_output_chars: int = 20_000          # ls / grep output cap
+    max_command_output_chars: int = 10_000  # bash output cap
     default_command_timeout_s: float = 60.0
     max_command_timeout_s: float = 300.0
     max_search_results: int = 100

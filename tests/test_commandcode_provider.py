@@ -629,3 +629,62 @@ def test_provider_without_credentials_raises_request_error(
         ProviderRequestError, match="COMMANDCODE_API_KEY 或本机 ZCode 配置"
     ):
         CommandCodeProvider()
+
+
+# ---------------------------------------------------------------------------
+# Reasoning effort and cache-token accounting
+# ---------------------------------------------------------------------------
+
+
+def usage_chunk(prompt: int, completion: int, cached: int | None = None) -> dict:
+    usage: dict = {"prompt_tokens": prompt, "completion_tokens": completion}
+    if cached is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached}
+    return {"choices": [], "usage": usage}
+
+
+def test_reasoning_effort_included_in_payload_when_set():
+    provider, captured = make_provider(
+        lambda request: sse_response([text_delta("hi")]), reasoning_effort="low"
+    )
+    events = run_stream(provider, messages=base_user_message())
+    assert events[-1].response.text == "hi"
+    payload = json.loads(captured[0].content.decode("utf-8"))
+    assert payload["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize("effort", [None, "off"])
+def test_reasoning_effort_omitted_for_none_and_off(effort):
+    provider, captured = make_provider(
+        lambda request: sse_response([text_delta("hi")]), reasoning_effort=effort
+    )
+    run_stream(provider, messages=base_user_message())
+    payload = json.loads(captured[0].content.decode("utf-8"))
+    assert "reasoning_effort" not in payload
+
+
+def test_default_effort_is_gateway_default():
+    provider, captured = make_provider(lambda request: sse_response([text_delta("hi")]))
+    run_stream(provider, messages=base_user_message())
+    payload = json.loads(captured[0].content.decode("utf-8"))
+    assert "reasoning_effort" not in payload
+
+
+def test_cached_tokens_parsed_into_usage():
+    provider, _ = make_provider(
+        lambda request: sse_response([text_delta("hi"), usage_chunk(500, 20, cached=320)])
+    )
+    events = run_stream(provider, messages=base_user_message())
+    usage = events[-1].response.usage
+    assert usage.input_tokens == 500
+    assert usage.output_tokens == 20
+    assert usage.cache_read_tokens == 320
+    assert usage.cache_hit_rate == 320 / 500
+
+
+def test_missing_cache_details_count_as_zero():
+    provider, _ = make_provider(
+        lambda request: sse_response([text_delta("hi"), usage_chunk(100, 5)])
+    )
+    events = run_stream(provider, messages=base_user_message())
+    assert events[-1].response.usage.cache_read_tokens == 0

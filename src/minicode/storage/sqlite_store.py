@@ -79,6 +79,7 @@ class SessionStore(Protocol):
         rounds: int | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        model: str | None = None,
     ) -> None: ...
 
     def append_message(self, session_id: str, message: Message) -> int: ...
@@ -222,6 +223,7 @@ class SqliteStore:
         rounds: int | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        model: str | None = None,
     ) -> None:
         assignments: list[str] = []
         params: list[Any] = []
@@ -240,6 +242,9 @@ class SqliteStore:
         if output_tokens is not None:
             assignments.append("output_tokens = ?")
             params.append(output_tokens)
+        if model is not None:
+            assignments.append("model = ?")
+            params.append(model)
 
         with self.transaction() as conn:
             self._require_session(conn, session_id)

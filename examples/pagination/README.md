@@ -27,8 +27,8 @@ minicode run "修复分页 bug" \
 ```
 
 `scripts/fix_pagination.json` 是一个确定性的 FakeProvider 脚本，按顺序重放四步：
-读取 `paginate.py` → `apply_patch` 精确替换 bug 行 → 运行 `pytest` → 输出中文总结。
-`--yes` 表示自动允许 `apply_patch` / `run_command` 这类需要审批的工具。
+读取 `paginate.py` → `edit` 精确替换 bug 行 → 运行 `pytest` → 输出中文总结。
+`--yes` 表示自动允许 `edit` / `bash` 这类需要审批的工具。
 
 注意：脚本中的测试命令假设 `python`（PATH 上的解释器）已安装 pytest。
 如果没有，可先把脚本里的命令改成你的 venv 解释器，例如
@@ -39,7 +39,7 @@ pytest 9 在双重 quiet 下会隐藏 "N passed" 摘要行。
 运行结束后：
 
 - 工作区摘要会打印退出原因、轮数、token 用量与耗时；
-- 「修改摘要」展示 `apply_patch` 产生的 diff；
+- 「修改摘要」展示 `edit` 产生的 diff；
 - `minicode report <session-id>` 可查看完整事件与工具输出。
 
 ## 接真实模型
@@ -53,7 +53,7 @@ minicode run "修复分页越界错误，并运行测试验证" \
   --provider anthropic
 ```
 
-不带 `--yes` 时，`apply_patch` 与 `run_command` 会在执行前逐个请求确认。
+不带 `--yes` 时，`edit` 与 `bash` 会在执行前逐个请求确认。
 
 ## 提示
 

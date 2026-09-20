@@ -89,30 +89,30 @@ SAMPLE_DATA: dict[EventType, dict[str, Any]] = {
     EventType.ROUND_START: {"round": 1},
     EventType.ASSISTANT_MESSAGE: {
         "text": "Let me run the tests.",
-        "tool_calls": ["run_command"],
+        "tool_calls": ["bash"],
         "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
         "stop_reason": "tool_use",
     },
     EventType.TOOL_CALL_START: {
         "call_id": "c1",
-        "name": "run_command",
+        "name": "bash",
         "arguments": {"command": "pytest -q"},
     },
     EventType.TOOL_CALL_RESULT: {
         "call_id": "c1",
-        "name": "run_command",
+        "name": "bash",
         "success": True,
         "exit_code": 0,
         "output_preview": "1 passed",
     },
     EventType.APPROVAL_REQUEST: {
         "call_id": "c1",
-        "tool_name": "run_command",
+        "tool_name": "bash",
         "summary": "pytest -q",
     },
     EventType.APPROVAL_DECISION: {
         "call_id": "c1",
-        "tool_name": "run_command",
+        "tool_name": "bash",
         "granted": True,
         "reason": None,
     },
@@ -127,7 +127,7 @@ SAMPLE_DATA: dict[EventType, dict[str, Any]] = {
         "items": [{"item": "tests pass", "kind": "command", "passed": True, "exit_code": 0}]
     },
     EventType.SIDE_EFFECT_UNKNOWN: {
-        "tool": "run_command",
+        "tool": "bash",
         "detail": "process crashed after writing the file",
     },
     EventType.BACKGROUND_JOB_STARTED: {"job_id": "j1", "command": "sleep 10"},
@@ -194,7 +194,7 @@ def test_tool_output_script_is_escaped():
         EventType.TOOL_CALL_RESULT,
         {
             "call_id": "c1",
-            "name": "run_command",
+            "name": "bash",
             "success": True,
             "exit_code": 0,
             "output_preview": "<script>alert(1)</script>",
@@ -212,7 +212,7 @@ def test_tool_arguments_with_markup_are_escaped():
         EventType.TOOL_CALL_START,
         {
             "call_id": "c2",
-            "name": "run_command",
+            "name": "bash",
             "arguments": {"command": 'echo "><img src=x onerror=alert(1)>'},
         },
     )
@@ -226,12 +226,12 @@ def test_tool_arguments_with_markup_are_escaped():
 
 def test_diff_and_full_output_are_escaped():
     ev_start = make_event(
-        0, EventType.TOOL_CALL_START, {"call_id": "c9", "name": "apply_patch", "arguments": {}}
+        0, EventType.TOOL_CALL_START, {"call_id": "c9", "name": "edit", "arguments": {}}
     )
     ev_result = make_event(
         1,
         EventType.TOOL_CALL_RESULT,
-        {"call_id": "c9", "name": "apply_patch", "success": True, "output_preview": "Done!"},
+        {"call_id": "c9", "name": "edit", "success": True, "output_preview": "Done!"},
     )
     full = APPLY_PATCH_DIFF + "\n+<script>alert(1)</script>"
     html_out = render_session_html(
@@ -243,23 +243,23 @@ def test_diff_and_full_output_are_escaped():
 
 
 # ---------------------------------------------------------------------------
-# apply_patch diff and full_outputs expansion
+# edit/write diff and full_outputs expansion
 # ---------------------------------------------------------------------------
 
 
-def _apply_patch_events() -> list[Event]:
+def _edit_events() -> list[Event]:
     return [
         make_event(
             0,
             EventType.TOOL_CALL_START,
-            {"call_id": "c9", "name": "apply_patch", "arguments": {"patch": "*** Begin Patch"}},
+            {"call_id": "c9", "name": "edit", "arguments": {"path": "a.py"}},
         ),
         make_event(
             1,
             EventType.TOOL_CALL_RESULT,
             {
                 "call_id": "c9",
-                "name": "apply_patch",
+                "name": "edit",
                 "success": True,
                 "exit_code": 0,
                 "output_preview": "Done!",
@@ -268,9 +268,9 @@ def _apply_patch_events() -> list[Event]:
     ]
 
 
-def test_apply_patch_diff_from_full_outputs_is_colored():
+def test_edit_diff_from_full_outputs_is_colored():
     html_out = render_session_html(
-        make_summary(), _apply_patch_events(), [], full_outputs={"c9": APPLY_PATCH_DIFF}
+        make_summary(), _edit_events(), [], full_outputs={"c9": APPLY_PATCH_DIFF}
     )
 
     assert "<details" in html_out and "<summary>" in html_out
@@ -281,7 +281,7 @@ def test_apply_patch_diff_from_full_outputs_is_colored():
     assert '<span class="d-meta">--- a/app.py</span>' in html_out
 
 
-def test_apply_patch_diff_falls_back_to_messages_tool_result():
+def test_edit_diff_falls_back_to_messages_tool_result():
     message = Message(
         role="user",
         content=[
@@ -289,25 +289,25 @@ def test_apply_patch_diff_falls_back_to_messages_tool_result():
             ToolResultBlock(tool_use_id="c9", content=APPLY_PATCH_DIFF, is_error=False),
         ],
     )
-    html_out = render_session_html(make_summary(), _apply_patch_events(), [message])
+    html_out = render_session_html(make_summary(), _edit_events(), [message])
 
     assert "<details" in html_out
     assert '<span class="d-add">+print(&#x27;added line&#x27;)</span>' in html_out
     assert '<span class="d-del">-print(&#x27;removed line&#x27;)</span>' in html_out
 
 
-def test_non_apply_patch_full_output_expands_without_diff_colors():
+def test_non_edit_full_output_expands_without_diff_colors():
     ev_start = make_event(
         0,
         EventType.TOOL_CALL_START,
-        {"call_id": "c3", "name": "read_file", "arguments": {"path": "a.txt"}},
+        {"call_id": "c3", "name": "read", "arguments": {"path": "a.txt"}},
     )
     ev_result = make_event(
         1,
         EventType.TOOL_CALL_RESULT,
         {
             "call_id": "c3",
-            "name": "read_file",
+            "name": "read",
             "success": True,
             "output_preview": "hello",
         },
@@ -327,7 +327,7 @@ def test_failed_tool_result_styled_differently():
         EventType.TOOL_CALL_RESULT,
         {
             "call_id": "c4",
-            "name": "run_command",
+            "name": "bash",
             "success": False,
             "exit_code": 2,
             "error": "command not found",
@@ -453,14 +453,14 @@ def test_render_from_sqlite_store(tmp_path):
         store.append_event(
             session_id,
             EventType.TOOL_CALL_START,
-            {"call_id": "c1", "name": "run_command", "arguments": {"command": "pytest -q"}},
+            {"call_id": "c1", "name": "bash", "arguments": {"command": "pytest -q"}},
         )
         store.append_event(
             session_id,
             EventType.TOOL_CALL_RESULT,
             {
                 "call_id": "c1",
-                "name": "run_command",
+                "name": "bash",
                 "success": True,
                 "exit_code": 0,
                 "output_preview": "3 passed",

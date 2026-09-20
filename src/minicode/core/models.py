@@ -61,15 +61,25 @@ class Message(BaseModel):
 class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
+    # Prompt tokens served from the provider cache; a subset of input_tokens.
+    cache_read_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
+    @property
+    def cache_hit_rate(self) -> float:
+        """Cached share of the prompt tokens (0.0 when nothing was cached)."""
+        if self.input_tokens <= 0:
+            return 0.0
+        return self.cache_read_tokens / self.input_tokens
+
     def __add__(self, other: "Usage") -> "Usage":
         return Usage(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
         )
 
 

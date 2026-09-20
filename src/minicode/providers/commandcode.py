@@ -45,7 +45,6 @@ from .zcode_config import DEFAULT_MODEL, discover_commandcode
 #: Per-request completion budget sent to the gateway.
 DEFAULT_MAX_TOKENS = 8192
 
-#: Missing-credentials message raised from the constructor.
 _MISSING_CREDENTIALS_MSG = "CommandCode provider 需要 COMMANDCODE_API_KEY 或本机 ZCode 配置"
 
 _DATA_PREFIX = "data:"
@@ -74,6 +73,7 @@ def _build_payload(
     messages: list[Message],
     tools: list[ToolSpec],
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Serialize the normalized conversation into an OpenAI-compatible
     request body.
@@ -89,6 +89,10 @@ def _build_payload(
       (``content=None`` when there are tool calls but no text);
     - user ``ToolResultBlock`` -> one ``{"role": "tool"}`` message each, and
       any ``TextBlock`` is emitted as a trailing ``user`` message after them.
+
+    ``reasoning_effort`` (when set) is passed through as the OpenAI-style
+    top-level field for effort-capable models; ``None`` / ``"off"`` omit it
+    so the gateway applies its own default.
     """
     chat_messages: list[dict[str, Any]] = []
     if system:
@@ -135,6 +139,8 @@ def _build_payload(
         "stream_options": {"include_usage": True},
         "max_tokens": max_tokens,
     }
+    if reasoning_effort is not None and reasoning_effort != "off":
+        payload["reasoning_effort"] = reasoning_effort
     if tools:
         payload["tools"] = [
             {
@@ -216,6 +222,7 @@ class CommandCodeProvider:
         api_key: str | None = None,
         timeout_s: float = 180.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         """Create the provider.
 
@@ -226,12 +233,16 @@ class CommandCodeProvider:
         either credential is still missing, :class:`ProviderRequestError`
         is raised.
 
-        ``transport`` is **test-only**: an optional ``httpx`` async transport
-        (e.g. ``httpx.MockTransport``) injected so tests can run without any
-        network access.
+        ``reasoning_effort`` sets the reasoning budget for effort-capable
+        models ("low" / "medium" / "high"; ``None`` or ``"off"`` means the
+        gateway default) and can be changed live via the ``/effort``
+        command. ``transport`` is **test-only**: an optional ``httpx`` async
+        transport (e.g. ``httpx.MockTransport``) injected so tests can run
+        without any network access.
         """
         self.model = model
         self.timeout_s = timeout_s
+        self.reasoning_effort = reasoning_effort
         self._transport = transport
 
         resolved_base = base_url
@@ -290,7 +301,13 @@ class CommandCodeProvider:
         response is still yielded (``stop_reason`` defaults to
         ``END_TURN``) to tolerate gateway differences.
         """
-        payload = _build_payload(model=self.model, system=system, messages=messages, tools=tools)
+        payload = _build_payload(
+            model=self.model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            reasoning_effort=self.reasoning_effort,
+        )
 
         text_parts: list[str] = []
         tool_buffers: dict[int, dict[str, str]] = {}
@@ -356,9 +373,18 @@ class CommandCodeProvider:
                         raw_usage = chunk.get("usage")
                         if isinstance(raw_usage, dict) and raw_usage:
                             # The final chunk (with include_usage) carries token counts.
+                            # prompt_tokens_details.cached_tokens reports the cache-served
+                            # subset of the prompt; garbage counts as zero.
+                            details = raw_usage.get("prompt_tokens_details")
+                            cached = (
+                                details.get("cached_tokens")
+                                if isinstance(details, dict)
+                                else None
+                            )
                             usage = Usage(
                                 input_tokens=_to_int(raw_usage.get("prompt_tokens")),
                                 output_tokens=_to_int(raw_usage.get("completion_tokens")),
+                                cache_read_tokens=max(0, _to_int(cached)),
                             )
         except httpx.HTTPError as exc:
             # Transport failures (connect/read errors, mid-stream breaks).

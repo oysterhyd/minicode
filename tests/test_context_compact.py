@@ -314,7 +314,7 @@ def test_structured_summary_merges_remaining_early_units():
     messages = (
         make_unit(
             1,
-            tool="apply_patch",
+            tool="edit",
             tool_input={"path": "src/auth.py", "new_text": "fix"},
             assistant_text="先看认证代码",
             result_chars=2500,

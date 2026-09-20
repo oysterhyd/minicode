@@ -7,7 +7,7 @@ import os
 import sys
 
 from minicode.tools.base import ToolContext, ToolLimits
-from minicode.tools.command import RunCommandTool
+from minicode.tools.command import BashTool
 
 
 def _python_command(snippet: str) -> str:
@@ -31,7 +31,7 @@ def _print_cwd_command() -> str:
 def run(raw_args, tmp_path, **limit_overrides):
     limits = ToolLimits(**limit_overrides) if limit_overrides else ToolLimits()
     ctx = ToolContext(workspace=tmp_path, limits=limits)
-    return asyncio.run(RunCommandTool().run(raw_args, ctx))
+    return asyncio.run(BashTool().run(raw_args, ctx))
 
 
 def test_run_command_success(tmp_path):

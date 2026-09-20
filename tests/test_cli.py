@@ -33,15 +33,15 @@ def _write_script(path: Path, turns: list[dict], **options) -> Path:
 
 
 def _create_file_script(tmp_path: Path) -> Path:
-    """Script: apply_patch creates new.txt, then a Chinese final answer."""
+    """Script: write creates new.txt, then a Chinese final answer."""
     return _write_script(
         tmp_path / "create_file_script.json",
         turns=[
             {
                 "tool_calls": [
                     {
-                        "name": "apply_patch",
-                        "arguments": {"path": "new.txt", "new_text": "hello"},
+                        "name": "write",
+                        "arguments": {"path": "new.txt", "content": "hello"},
                     }
                 ]
             },
@@ -82,7 +82,7 @@ def _run_create_file(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 1. run: apply_patch + final text, --yes
+# 1. run: write + final text, --yes
 # ---------------------------------------------------------------------------
 
 
@@ -116,7 +116,7 @@ def test_run_fixes_pagination_fixture(tmp_path):
     rewritten = False
     for turn in data["turns"]:
         for call in turn.get("tool_calls", []):
-            if call["name"] == "run_command":
+            if call["name"] == "bash":
                 # PowerShell needs the & call operator for quoted paths;
                 # bash accepts the quoted path directly. No -q: pytest 9
                 # hides the "N passed" summary line under double quiet.
@@ -129,7 +129,7 @@ def test_run_fixes_pagination_fixture(tmp_path):
                         f'"{sys.executable}" -m pytest test_paginate.py'
                     )
                 rewritten = True
-    assert rewritten, "script must contain a run_command call"
+    assert rewritten, "script must contain a bash call"
     script_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     result = runner.invoke(
@@ -226,7 +226,7 @@ def test_report_prints_diff_for_session(tmp_path):
 
     result = runner.invoke(app, ["report", session_id, "--db", str(db)])
     assert result.exit_code == 0, result.output
-    assert "apply_patch" in result.output
+    assert "write" in result.output
     assert "+hello" in result.output  # the full diff for the created file
     assert "已完成" in result.output
     assert "退出原因" in result.output
@@ -300,6 +300,141 @@ def test_chat_exits_on_eof(tmp_path):
     assert "在的。" in result.output
 
 
+def _chat(ws: Path, script: Path, db: Path, stdin: str, env: dict | None = None):
+    """Invoke ``minicode chat`` with *stdin* and hermetic gateway env."""
+    return runner.invoke(
+        app,
+        [
+            "chat",
+            "--workspace",
+            str(ws),
+            "--provider",
+            "fake",
+            "--script",
+            str(script),
+            "--db",
+            str(db),
+        ],
+        input=stdin,
+        env=env,
+    )
+
+
+def test_chat_clear_only_resets_screen_keeps_context(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    script = _write_script(tmp_path / "clear_script.json", turns=[{"text": "第一条"}])
+    result = _chat(ws, script, tmp_path / "db.sqlite3", "/clear\n你好\nexit\n")
+
+    assert result.exit_code == 0, result.output
+    # /clear states its semantics: rendering only, context kept.
+    assert "已清屏" in result.output
+    assert "上下文" in result.output
+    assert "第一条" in result.output
+    store = SqliteStore(tmp_path / "db.sqlite3")
+    try:
+        assert len(store.list_sessions()) == 1
+    finally:
+        store.close()
+
+
+def test_chat_new_starts_fresh_session(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    script = _write_script(
+        tmp_path / "new_script.json",
+        turns=[{"text": "旧会话"}, {"text": "新会话"}],
+    )
+    db = tmp_path / "db.sqlite3"
+    result = _chat(ws, script, db, "你好\n/new\n再来\nexit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "已重置对话上下文" in result.output
+    assert "旧会话" in result.output and "新会话" in result.output
+    store = SqliteStore(db)
+    try:
+        sessions = store.list_sessions()
+    finally:
+        store.close()
+    assert len(sessions) == 2  # /new really opened a second session
+
+
+def test_chat_model_switch_routes_through_catalog(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    script = _write_script(tmp_path / "model_script.json", turns=[{"text": "好的"}])
+    env = {
+        "COMMANDCODE_API_KEY": "test-key",
+        "COMMANDCODE_BASE_URL": "https://gw.test/provider/v1",
+    }
+    result = _chat(
+        ws,
+        script,
+        tmp_path / "db.sqlite3",
+        "/model\n/model z.ai/glm-5.3-flash\nexit\n",
+        env=env,
+    )
+
+    assert result.exit_code == 0, result.output
+    # No-arg /model lists the catalog with context-window sizes...
+    assert "z.ai/glm-5.3-flash" in result.output
+    assert "1,000,000" in result.output
+    # ...and the explicit switch confirms old -> new.
+    assert "已切换模型" in result.output
+    assert "fake → z.ai/glm-5.3-flash" in result.output
+
+
+def test_chat_permissions_switch_updates_mode(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    script = _write_script(tmp_path / "perm_script.json", turns=[{"text": "好"}])
+    result = _chat(
+        ws, script, tmp_path / "db.sqlite3", "/permissions\n/permissions accept_edits\nexit\n"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "当前权限模式: default" in result.output
+    assert "权限模式已切换 default → accept_edits" in result.output
+
+
+def test_chat_effort_requires_capable_provider(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    script = _write_script(tmp_path / "effort_script.json", turns=[{"text": "好"}])
+    result = _chat(ws, script, tmp_path / "db.sqlite3", "/effort high\nexit\n")
+
+    assert result.exit_code == 0, result.output
+    # The fake provider cannot carry a reasoning budget; the command says so
+    # instead of silently dropping the setting.
+    assert "不支持推理预算调整" in result.output
+
+
+def test_run_prints_banner_with_version_and_env(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    script = _write_script(tmp_path / "banner_script.json", turns=[{"text": "完成"}])
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "任务",
+            "--workspace",
+            str(ws),
+            "--provider",
+            "fake",
+            "--script",
+            str(script),
+            "--yes",
+            "--db",
+            str(tmp_path / "db.sqlite3"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "minicode v" in result.output
+    assert "Python" in result.output
+    assert "fake/fake" in result.output
+
+
 # ---------------------------------------------------------------------------
 # 5. sessions list / report in isolation over a pre-seeded db
 # ---------------------------------------------------------------------------
@@ -320,14 +455,14 @@ def test_sessions_list_and_report_with_seeded_db(tmp_path):
     store.append_event(
         session_id,
         EventType.TOOL_CALL_START,
-        {"call_id": "t1", "name": "apply_patch", "arguments": {"path": "a.py"}},
+        {"call_id": "t1", "name": "edit", "arguments": {"path": "a.py"}},
     )
     store.append_event(
         session_id,
         EventType.TOOL_CALL_RESULT,
         {
             "call_id": "t1",
-            "name": "apply_patch",
+            "name": "edit",
             "success": True,
             "exit_code": None,
             "error": None,
@@ -368,7 +503,7 @@ def test_sessions_list_and_report_with_seeded_db(tmp_path):
 
     report_result = runner.invoke(app, ["report", session_id, "--db", str(db)])
     assert report_result.exit_code == 0, report_result.output
-    assert "apply_patch" in report_result.output
+    assert "edit" in report_result.output
     assert "+hello" in report_result.output  # diff from the event preview
     assert "事件统计" in report_result.output
     assert "总计" in report_result.output

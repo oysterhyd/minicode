@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from minicode.core.models import ToolSpec
 from minicode.tools.base import BaseTool
-from minicode.tools.command import RunCommandTool
-from minicode.tools.files import ApplyPatchTool, ListFilesTool, ReadFileTool
-from minicode.tools.search import SearchTextTool
+from minicode.tools.command import BashTool
+from minicode.tools.files import EditTool, LsTool, ReadTool, WriteTool
+from minicode.tools.search import GrepTool
 
 
 class ToolRegistry:
@@ -32,14 +32,19 @@ class ToolRegistry:
 
 
 def default_registry() -> ToolRegistry:
-    """Registry preloaded with the built-in tools."""
+    """Registry preloaded with the built-in tools.
+
+    The first four mirror the Pi agent's core tool set (read / bash /
+    edit / write); ``ls`` and ``grep`` are the read-only extras.
+    """
     registry = ToolRegistry()
     for tool in (
-        ReadFileTool(),
-        ListFilesTool(),
-        SearchTextTool(),
-        ApplyPatchTool(),
-        RunCommandTool(),
+        ReadTool(),
+        BashTool(),
+        EditTool(),
+        WriteTool(),
+        LsTool(),
+        GrepTool(),
     ):
         registry.register(tool)
     return registry
