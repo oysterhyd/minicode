@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ValidationError
 
@@ -23,6 +23,26 @@ class ToolLimits(BaseModel):
     max_command_timeout_s: float = 300.0
     max_search_results: int = 100
     search_max_file_bytes: int = 1_000_000
+    # Tool outputs longer than this are spilled to an artifact; the model
+    # sees a preview plus a reference it can read back with read_artifact.
+    spill_threshold_chars: int = 4_000
+    spill_preview_chars: int = 1_000
+
+
+@runtime_checkable
+class ArtifactStoreLike(Protocol):
+    """What tools need from the session artifact store (see storage.artifacts)."""
+
+    def spill(self, session_id: str, kind: str, content: str) -> Any: ...
+
+    def read(self, session_id: str, artifact_id: str) -> str | None: ...
+
+
+@runtime_checkable
+class BackgroundManagerLike(Protocol):
+    """What tools need from the background job manager (see tasks.background)."""
+
+    def start(self, command: str, cwd: Path, timeout_s: float) -> Any: ...
 
 
 @dataclass(slots=True)
@@ -31,6 +51,10 @@ class ToolContext:
 
     workspace: Path                          # absolute resolved workspace root
     limits: ToolLimits = field(default_factory=ToolLimits)
+    # Optional services; None keeps tools self-contained in tests.
+    artifact_store: ArtifactStoreLike | None = None
+    background_manager: BackgroundManagerLike | None = None
+    session_id: str | None = None
 
 
 def truncate_output(text: str, limit: int) -> str:

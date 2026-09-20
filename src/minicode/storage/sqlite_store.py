@@ -21,12 +21,12 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
 from pydantic import BaseModel
 
+from minicode.core.clock import utc_now
 from minicode.core.models import Event, EventType, Message
 
 __all__ = [
@@ -41,17 +41,12 @@ DEFAULT_DB_PATH = Path.home() / ".minicode" / "sessions.db"
 
 #: Layout version recorded in ``PRAGMA user_version``. Bump when the schema
 #: changes in a way older code cannot read.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SESSION_COLUMNS = (
     "session_id, created_at, workspace, provider, model, "
     "status, exit_reason, rounds, input_tokens, output_tokens"
 )
-
-
-def _utc_now() -> str:
-    """UTC ISO-8601 timestamp with timezone offset (our storage convention)."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 class SessionSummary(BaseModel):
@@ -163,6 +158,15 @@ class SqliteStore:
                 data       TEXT NOT NULL,
                 PRIMARY KEY (session_id, seq)
             );
+
+            CREATE TABLE IF NOT EXISTS artifacts (
+                session_id  TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                relpath     TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY (session_id, artifact_id)
+            );
             """
         )
         # PRAGMAs cannot bind parameters; SCHEMA_VERSION is a module constant.
@@ -173,9 +177,10 @@ class SqliteStore:
         self._conn.close()
 
     @contextmanager
-    def _write_txn(self) -> Iterator[sqlite3.Connection]:
-        """Explicit write transaction: BEGIN IMMEDIATE up front, commit on
-        success, full rollback on any error."""
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Write transaction: BEGIN IMMEDIATE up front, commit on success,
+        full rollback on any error. The store's own writes and P1 modules
+        (task store) share the single connection through this."""
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             yield self._conn
@@ -183,6 +188,11 @@ class SqliteStore:
             self._conn.rollback()
             raise
         self._conn.commit()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """The underlying connection (read queries and migrations only)."""
+        return self._conn
 
     def _require_session(self, conn: sqlite3.Connection, session_id: str) -> None:
         row = conn.execute(
@@ -195,11 +205,11 @@ class SqliteStore:
 
     def create_session(self, *, workspace: str, provider: str, model: str) -> str:
         session_id = uuid.uuid4().hex
-        with self._write_txn() as conn:
+        with self.transaction() as conn:
             conn.execute(
                 "INSERT INTO sessions (session_id, created_at, workspace, provider, model)"
                 " VALUES (?, ?, ?, ?, ?)",
-                (session_id, _utc_now(), workspace, provider, model),
+                (session_id, utc_now(), workspace, provider, model),
             )
         return session_id
 
@@ -231,7 +241,7 @@ class SqliteStore:
             assignments.append("output_tokens = ?")
             params.append(output_tokens)
 
-        with self._write_txn() as conn:
+        with self.transaction() as conn:
             self._require_session(conn, session_id)
             if assignments:
                 params.append(session_id)
@@ -275,7 +285,7 @@ class SqliteStore:
 
     def append_message(self, session_id: str, message: Message) -> int:
         content_json = json.dumps(message.model_dump()["content"], ensure_ascii=False)
-        with self._write_txn() as conn:
+        with self.transaction() as conn:
             self._require_session(conn, session_id)
             row = conn.execute(
                 "SELECT COALESCE(MAX(seq) + 1, 0) AS next_seq FROM messages"
@@ -299,6 +309,57 @@ class SqliteStore:
             Message(role=row["role"], content=json.loads(row["content"])) for row in rows
         ]
 
+    def replace_messages(self, session_id: str, messages: list[Message]) -> None:
+        """Atomically rewrite the whole conversation (context compaction).
+
+        Compaction archives the original content to artifacts first; this
+        method then stores the compacted view so a resumed session sees
+        exactly what the model last saw. Row order is renumbered 0..n-1.
+        """
+        with self.transaction() as conn:
+            self._require_session(conn, session_id)
+            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            for seq, message in enumerate(messages):
+                content_json = json.dumps(
+                    message.model_dump()["content"], ensure_ascii=False
+                )
+                conn.execute(
+                    "INSERT INTO messages (session_id, seq, role, content)"
+                    " VALUES (?, ?, ?, ?)",
+                    (session_id, seq, message.role, content_json),
+                )
+
+    # -- artifacts (manifest; file bytes live in storage.artifacts.ArtifactStore) --
+
+    def record_artifact(
+        self, session_id: str, artifact_id: str, kind: str, relpath: str
+    ) -> None:
+        created_at = utc_now()
+        with self.transaction() as conn:
+            self._require_session(conn, session_id)
+            conn.execute(
+                "INSERT OR REPLACE INTO artifacts"
+                " (session_id, artifact_id, kind, relpath, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (session_id, artifact_id, kind, relpath, created_at),
+            )
+
+    def list_artifacts(self, session_id: str) -> list[dict[str, str]]:
+        rows = self._conn.execute(
+            "SELECT artifact_id, kind, relpath, created_at FROM artifacts"
+            " WHERE session_id = ? ORDER BY created_at ASC, artifact_id ASC",
+            (session_id,),
+        ).fetchall()
+        return [
+            {
+                "artifact_id": row["artifact_id"],
+                "kind": row["kind"],
+                "relpath": row["relpath"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     # -- events ------------------------------------------------------------
 
     def append_event(
@@ -306,8 +367,8 @@ class SqliteStore:
     ) -> Event:
         payload = data if data is not None else {}
         data_json = json.dumps(payload, ensure_ascii=False)
-        timestamp = _utc_now()
-        with self._write_txn() as conn:
+        timestamp = utc_now()
+        with self.transaction() as conn:
             self._require_session(conn, session_id)
             row = conn.execute(
                 "SELECT COALESCE(MAX(seq) + 1, 0) AS next_seq FROM events"

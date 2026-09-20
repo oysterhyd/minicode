@@ -6,9 +6,11 @@
 执行协议、权限、预算、取消与持久化；不将调用模型包装成模型训练能力，也不宣称完整复刻商业
 Claude Code。
 
-**当前状态（P0）**：可独立使用的最小闭环——单轮任务、交互会话、基础工具、权限审批、预算与
-取消、SQLite 会话持久化与执行报告。上下文压缩、会话恢复、Goal 验收等属于 P1，尚未实现
-（见下方清单）。
+**当前状态（P0 + P1）**：P0 最小闭环——单轮任务、交互会话、基础工具、权限审批、预算与
+取消、SQLite 会话持久化与执行报告——之上，P1 可靠性能力已落地：分层上下文压缩与原始输出
+按需读取、会话恢复与未知副作用处理、Goal 验收器与证据绑定、后台命令与只读子代理、
+20 任务离线评测集（三基线对照）与可离线查看的 HTML 执行报告，外加一个类 Claude Code 的
+全屏 TUI。MCP 接入、Skills 加载、多 worker 协作属于 P2，尚未实现。
 
 ## 快速开始
 
@@ -20,6 +22,16 @@ python -m venv .venv
 source .venv/Scripts/activate        # Windows Git Bash；Linux 为 .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+### 模型 provider
+
+`--provider auto`（默认）按以下顺序选择，无需 Anthropic key：
+
+1. `commandcode`——OpenAI 兼容网关（默认模型 `deepseek/deepseek-v4.1-flash`）。凭证来源：
+   环境变量 `COMMANDCODE_API_KEY`（可选 `COMMANDCODE_BASE_URL`），或自动发现本机
+   ZCode 安装的 provider 配置（`~/.zcode/v2/provider_config.json` 中的 "Command Code"）。
+2. `anthropic`——设置了 `ANTHROPIC_API_KEY` 时可用。
+3. `fake`——确定性脚本回放，离线演示与测试用。
 
 ### 无密钥演示（FakeProvider 一键重放修复过程）
 
@@ -69,39 +81,61 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 
 | 命令 | 说明 |
 | --- | --- |
-| `minicode run "任务"` | 执行一个单轮任务：流式输出回复、`▸/✓/✗` 工具行、修改摘要与统计 |
+| `minicode run "任务"` | 执行一个单轮任务：流式输出回复、`▸/✓/✗` 工具行、修改摘要与统计；`--acceptance` 挂验收配置后，模型自述完成不等于通过 |
 | `minicode chat` | 交互式多轮会话（同一会话累积上下文）；`exit` / `quit` / Ctrl+D 退出，回合内 Ctrl+C 只取消当前轮 |
+| `minicode tui` | 全屏交互界面（Textual）：流式回复、工具卡片、审批弹窗、斜杠命令（/help /sessions /resume /compact /clear /exit） |
 | `minicode sessions list` | 会话列表：ID、创建时间、工作区、模型、状态、轮数、token |
-| `minicode report <会话ID>` | 执行报告：事件统计、每个工具调用的结果与错误、apply_patch 完整 diff、用量与退出原因；`--full` 打印完整工具输出 |
+| `minicode resume <会话ID>` | 恢复历史会话并继续交互：已落库结果不重复执行；只读调用重新执行留痕；未知副作用标记 `unknown` 并要求模型先核实 |
+| `minicode report <会话ID>` | 执行报告（text）；`--format html` 生成单文件离线 HTML（时间线、工具记录、diff、验收证据、用量） |
+| `minicode eval` | 运行 `evals/` 的 20 任务评测集（FakeProvider 离线），b0/b2 基线对照，输出 JSON + Markdown 汇总 |
 
-常用选项（`run` / `chat` 共享）：`--workspace`（默认当前目录）、`--provider auto|fake|anthropic`、
-`--model`（默认 `claude-sonnet-4-5`，仅 anthropic 使用）、`--script`（FakeProvider 脚本 JSON）、
-`--max-rounds`（默认 20）、`--max-tokens`（默认 200000）、`--max-seconds`（默认 600，**每轮**的
-时长上限）、`--yes/-y`（自动允许全部工具）、`--db`（默认 `~/.minicode/sessions.db`）。
+常用选项（`run` / `chat` / `tui` 共享）：`--workspace`（默认当前目录）、
+`--provider auto|commandcode|anthropic|fake`、`--model`（缺省按 provider 选择）、
+`--script`（FakeProvider 脚本 JSON）、`--max-rounds`（默认 20）、`--max-tokens`（默认 200000）、
+`--max-seconds`（默认 600，**每轮**的时长上限）、`--yes/-y`（自动允许全部工具）、
+`--acceptance <yaml>`（Goal 验收：command / artifact / protected 三类检查项）、
+`--db`（默认 `~/.minicode/sessions.db`）。
 
 会话（消息、事件、用量）实时持久化到 SQLite；Ctrl+C 取消时先落库 `cancelled` 状态再退出
-（退出码 130）。预算耗尽（如 `max_rounds`）会打印明确的退出原因，但进程退出码为 0；
-脚本化调用方如需区分，请解析退出原因或查询会话状态。
+（退出码 130）。预算耗尽（如 `max_rounds`）与验收不通过（`goal_not_met`）会打印明确的
+退出原因，但进程退出码为 0；脚本化调用方如需区分，请解析退出原因或查询会话状态。
 
 ## P0 能力清单
 
 - CLI 单轮执行、交互会话、流式文本展示、Ctrl+C 取消（取消前先持久化）。
-- 两个模型适配器：Anthropic（流式，真实模型）与 FakeProvider（确定性脚本，测试/演示用）。
+- 模型适配器：CommandCode（OpenAI 兼容，默认）、Anthropic（流式）、FakeProvider（确定性脚本）。
 - 基础工具：`read_file`、`list_files`、`search_text`、`apply_patch`、`run_command`。
 - 工具参数校验（pydantic schema）、工作区路径边界（含符号链接/junction）、修改与命令审批
   （ALLOW/ASK/DENY 权限门）、命令超时与输出截断。
 - 会话持久化（SQLite）、逐事件执行追踪、diff 与命令退出码报告。
 - 预算控制：最大轮数 / 总 token / 每轮时长，退出原因可区分（completed / max_rounds /
-  token_budget / time_budget / cancelled / provider_error / internal_error）。
+  token_budget / time_budget / cancelled / goal_not_met / provider_error / internal_error）。
 
-## 明确未实现（P1/P2）
+## P1 能力清单（可靠性）
 
-- 会话恢复与断点续跑（P0 只持久化，不自动重放 `unknown` 副作用）。
-- 分层上下文压缩与长日志按需读取。
-- Goal 验收器、证据绑定与失败续跑。
-- HTML 执行报告、评测集与基线对照。
-- 子 Agent、任务图、后台命令。
-- MCP 工具接入、Skills 按需加载、多 worker 协作。
+- **分层上下文压缩**：超大工具输出转存为 artifact（模型看到预览 + 引用，`read_artifact`
+  按需回读）→ 按完整交互单元归档早期历史（tool_use 与 tool_result 永不拆散）→ 压缩较旧
+  工具结果 → 仍超预算时生成确定性结构化摘要。压缩后的视图持久化，恢复后所见即所存。
+- **会话恢复**：`resume` 加载消息/用量/轮数；已落库结果不重复执行；只读调用重新执行并留痕
+  （新事件记录）；写/Shell 类副作用不自动重放，标记「状态未知」并要求模型先核实。
+- **Goal 验收**：验收 YAML 定义命令 / 产物 / 受保护路径三类检查；模型回答后由宿主执行检查，
+  通过才判定完成；失败回填结构化报告继续修复（`max_fix_attempts` 上限）；通过的证据绑定
+  工作区内容指纹，代码再变即失效重验；受保护路径在会话开始时快照比对。
+- **后台命令与只读子代理**：`run_command` 支持 `background` 参数返回 job id，完成后作为
+  用户消息投递（幂等，不产生第二个 tool result）；`delegate` 工具把只读调研委派给一层
+  子代理（仅 read/list/search 工具），返回 summary/findings/evidence_refs/unresolved，
+  token 计入同一会话预算。
+- **评测集**：`evals/` 20 个本地任务（分页边界、差一错误、除零保护等），FakeProvider 离线
+  运行；b0（基础循环）与 b2（验收失败续跑）对照，结果含成功率、轮数、token 与失败分析。
+  评测度量的是 harness 机制而非模型智力。
+- **HTML 报告**：单文件、零外链、可离线打开；时间线、工具记录与 diff、验收证据表、用量。
+- **TUI**：Textual 全屏界面，类 Claude Code 交互（流式回复、工具卡片、审批弹窗、斜杠命令）。
+
+## 明确未实现（P2）
+
+- MCP 工具接入、Skills 按需加载、项目记忆。
+- 多 worker worktree 协作、可续跑 workflow。
+- 定时任务、Web 操作界面。
 
 ## 架构
 

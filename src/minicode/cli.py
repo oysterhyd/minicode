@@ -4,8 +4,11 @@ Commands:
 
 - ``run``      one-shot task turn (streamed text, tool one-liners, diff summary)
 - ``chat``     interactive REPL on one persistent session
+- ``resume``   continue a persisted session (interrupted tool calls are settled)
 - ``sessions`` session bookkeeping (``list``)
-- ``report``   execution report for one session
+- ``report``   execution report for one session (text or offline HTML)
+- ``eval``     run the local eval task set (delegates to evals/run_eval.py)
+- ``tui``      full-screen Textual interface
 
 The CLI only wires the backend packages (runtime / providers / tools /
 security / storage) together and adds presentation; it never re-implements
@@ -17,11 +20,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Awaitable, Callable, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 from pydantic import ValidationError
@@ -73,6 +78,7 @@ _EXIT_LABELS: dict[str, str] = {
     "token_budget": "Token 预算耗尽",
     "time_budget": "时长预算耗尽",
     "cancelled": "已取消",
+    "goal_not_met": "验收未通过",
     "provider_error": "模型调用失败",
     "internal_error": "内部错误",
 }
@@ -179,28 +185,50 @@ def _load_script(path: Path) -> FakeProviderOptions:
         _fail(f"脚本字段不合法: {exc}")
 
 
-def _builtin_demo_script() -> FakeProviderOptions:
-    return FakeProviderOptions(turns=[FakeTurn(text=_DEMO_REPLY)])
-
-
 class ProviderChoice(str, Enum):
-    """``--provider`` choices; ``auto`` prefers anthropic when a key exists."""
+    """``--provider`` choices; ``auto`` prefers commandcode (ZCode 网关),
+    then anthropic (when a key exists), then the offline fake provider."""
 
     auto = "auto"
     fake = "fake"
     anthropic = "anthropic"
+    commandcode = "commandcode"
+
+
+def _commandcode_available() -> bool:
+    try:
+        from minicode.providers.zcode_config import discover_commandcode
+    except ImportError:  # pragma: no cover - providers package always present
+        return False
+    return discover_commandcode() is not None
 
 
 def _build_provider(
-    provider_choice: ProviderChoice, model: str, script: Path | None
+    provider_choice: ProviderChoice, model: str | None, script: Path | None
 ) -> tuple[Provider, str, str]:
     """Resolve ``--provider`` into ``(provider, provider_name, model_label)``."""
     if provider_choice is ProviderChoice.auto:
         provider_choice = (
-            ProviderChoice.anthropic
-            if os.environ.get("ANTHROPIC_API_KEY")
-            else ProviderChoice.fake
+            ProviderChoice.commandcode
+            if _commandcode_available()
+            else (
+                ProviderChoice.anthropic
+                if os.environ.get("ANTHROPIC_API_KEY")
+                else ProviderChoice.fake
+            )
         )
+
+    if provider_choice is ProviderChoice.commandcode:
+        try:
+            # Lazy import: keeps startup light and test environments hermetic.
+            from minicode.providers.commandcode import (
+                DEFAULT_MODEL as _CC_DEFAULT_MODEL,
+                CommandCodeProvider,
+            )
+        except ImportError as exc:
+            _fail(f"无法加载 commandcode provider：{exc}")
+        chosen = model or _CC_DEFAULT_MODEL
+        return CommandCodeProvider(model=chosen), "commandcode", chosen
 
     if provider_choice is ProviderChoice.anthropic:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -210,9 +238,14 @@ def _build_provider(
             from minicode.providers.anthropic_provider import AnthropicProvider
         except ImportError as exc:
             _fail(f"未安装 anthropic SDK，请先执行 pip install 'minicode[real]'。({exc})")
-        return AnthropicProvider(model=model), "anthropic", model
+        chosen = model or "claude-sonnet-4-5"
+        return AnthropicProvider(model=chosen), "anthropic", chosen
 
-    options = _load_script(script) if script is not None else _builtin_demo_script()
+    options = (
+        _load_script(script)
+        if script is not None
+        else FakeProviderOptions(turns=[FakeTurn(text=_DEMO_REPLY)])
+    )
     return FakeProvider(options), "fake", "fake"
 
 
@@ -222,7 +255,7 @@ def _build_provider(
 
 WorkspaceOpt = Annotated[Path, typer.Option("--workspace", help="工作区目录（默认当前目录）")]
 ProviderOpt = Annotated[ProviderChoice, typer.Option(case_sensitive=False, help="模型提供方")]
-ModelOpt = Annotated[str, typer.Option(help="模型名称（仅 anthropic 使用）")]
+ModelOpt = Annotated[str | None, typer.Option(help="模型名称（缺省按 provider 选择默认模型）")]
 ScriptOpt = Annotated[
     Path | None,
     typer.Option(help="FakeProvider 脚本 JSON；fake 且未提供时使用内置演示脚本"),
@@ -232,6 +265,13 @@ MaxTokensOpt = Annotated[int, typer.Option(help="token 总预算")]
 MaxSecondsOpt = Annotated[float, typer.Option(help="每轮时长预算（秒）")]
 YesOpt = Annotated[bool, typer.Option("--yes", "-y", help="自动允许全部工具调用，不再逐个审批")]
 DbOpt = Annotated[Path, typer.Option(help="会话数据库路径（默认 ~/.minicode/sessions.db）")]
+AcceptanceOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--acceptance",
+        help="验收配置 YAML（command/artifact/protected 项）；设置后模型自述完成不等于通过",
+    ),
+]
 
 
 @dataclass(slots=True)
@@ -243,16 +283,18 @@ class _Setup:
     provider_name: str
     model_label: str
     budget: Budget
+    acceptance: Path | None = None
 
 
 def _prepare(
     workspace: Path,
     provider_choice: ProviderChoice,
-    model: str,
+    model: str | None,
     script: Path | None,
     max_rounds: int,
     max_tokens: int,
     max_seconds: float,
+    acceptance: Path | None = None,
 ) -> _Setup:
     """Validate options and build provider + budget (shared by run/chat)."""
     resolved = Path(workspace).expanduser()
@@ -260,6 +302,8 @@ def _prepare(
         _fail(f"工作区不存在: {resolved}")
     if not resolved.is_dir():
         _fail(f"工作区不是目录: {resolved}")
+    if acceptance is not None and not acceptance.exists():
+        _fail(f"验收配置不存在: {acceptance}")
     provider, provider_name, model_label = _build_provider(provider_choice, model, script)
     return _Setup(
         workspace=resolved,
@@ -269,6 +313,7 @@ def _prepare(
         budget=Budget(
             max_rounds=max_rounds, max_total_tokens=max_tokens, max_seconds=max_seconds
         ),
+        acceptance=acceptance,
     )
 
 
@@ -420,10 +465,28 @@ def _print_diff_summary(console: Console, store: SessionStore, session_id: str) 
 # ---------------------------------------------------------------------------
 
 
-def _make_runtime(
-    setup: _Setup, store: SqliteStore, console: Console, yes: bool
-) -> AgentRuntime:
-    """Build an AgentRuntime with the CLI's presentation callbacks."""
+@dataclass(slots=True)
+class _Services:
+    """P1 services + presentation callbacks shared by fresh and resumed runtimes."""
+
+    registry: Any
+    policy: PermissionPolicy
+    approval_handler: ApprovalHandler | None
+    on_text_delta: Any
+    on_event: Any
+    background_manager: Any
+    artifact_store: Any
+    goal_checker: Any | None
+    evidence_ledger: Any | None
+
+
+def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bool) -> _Services:
+    """Assemble everything an AgentRuntime (fresh or resumed) needs."""
+    from minicode.goals import AcceptanceSpec, EvidenceLedger, GoalChecker, ProtectedSnapshot
+    from minicode.storage import ArtifactStore
+    from minicode.tasks.background import BackgroundManager
+    from minicode.tools.artifact import ReadArtifactTool
+
     printer = _StreamPrinter(console)
 
     async def on_text_delta(delta: str) -> None:
@@ -436,8 +499,27 @@ def _make_runtime(
         elif event.type is EventType.TOOL_CALL_RESULT:
             printer.end_line()
             _print_tool_result(console, event.data)
+        else:
+            _print_p1_event(console, event)
+
+    registry = default_registry()
+    registry.register(ReadArtifactTool())
+    try:
+        from minicode.tools.delegate import DelegateSubagentTool
+    except ImportError:  # pragma: no cover - ships with minicode.tasks
+        pass
+    else:
+        registry.register(
+            DelegateSubagentTool(
+                provider=setup.provider,
+                workspace=setup.workspace,
+                parent_budget=setup.budget,
+                store=store,  # child events persist into the parent session
+            )
+        )
 
     policy: PermissionPolicy
+    approval_handler: ApprovalHandler | None
     if yes:
         policy = AutoAllowPolicy()
         approval_handler = None
@@ -445,19 +527,121 @@ def _make_runtime(
         policy = DefaultPolicy()
         approval_handler = _make_interactive_approval(console)
 
-    return AgentRuntime(
-        provider=setup.provider,
-        registry=default_registry(),
-        store=store,
+    goal_checker = None
+    evidence_ledger = None
+    if setup.acceptance is not None:
+        spec = AcceptanceSpec.from_yaml(setup.acceptance)
+        protected_paths = [item.path for item in spec.items if item.type == "protected"]
+        snapshot = ProtectedSnapshot(setup.workspace, protected_paths)
+        goal_checker = GoalChecker(spec, setup.workspace, protected_snapshot=snapshot)
+        evidence_ledger = EvidenceLedger()
+
+    return _Services(
+        registry=registry,
         policy=policy,
+        approval_handler=approval_handler,
+        on_text_delta=on_text_delta,
+        on_event=on_event,
+        background_manager=BackgroundManager(),
+        artifact_store=ArtifactStore(store),
+        goal_checker=goal_checker,
+        evidence_ledger=evidence_ledger,
+    )
+
+
+def _attach_compactor(runtime: Any, artifact_store: Any, max_total_tokens: int) -> None:
+    """Attach the context compactor with artifact spill bound to the live
+    session. The session id only exists after the first ``run_turn``
+    (compaction runs strictly inside turns), so the closure reads it lazily
+    off the runtime."""
+    from minicode.context.compact import CompactConfig, ContextCompactor
+
+    def spill(kind: str, content: str) -> str:
+        session_id = runtime.session_id
+        assert session_id is not None
+        return artifact_store.spill(session_id, kind, content).artifact_id
+
+    runtime._compactor = ContextCompactor(
+        CompactConfig(max_context_tokens=max_total_tokens),
+        spill_fn=spill,
+    )
+
+
+def _make_runtime(setup: _Setup, store: SqliteStore, console: Console, yes: bool) -> Any:
+    """Build a fresh AgentRuntime with presentation callbacks and P1 services."""
+    from minicode.runtime import AgentRuntime
+
+    services = _build_services(setup, store, console, yes)
+    runtime = AgentRuntime(
+        provider=setup.provider,
+        registry=services.registry,
+        store=store,
+        policy=services.policy,
         workspace=setup.workspace,
         provider_name=setup.provider_name,
         model=setup.model_label,
         budget=setup.budget,
-        approval_handler=approval_handler,
-        on_text_delta=on_text_delta,
-        on_event=on_event,
+        approval_handler=services.approval_handler,
+        on_text_delta=services.on_text_delta,
+        on_event=services.on_event,
+        background_manager=services.background_manager,
+        artifact_store=services.artifact_store,
+        goal_checker=services.goal_checker,
+        evidence_ledger=services.evidence_ledger,
     )
+    _attach_compactor(runtime, services.artifact_store, setup.budget.max_total_tokens)
+    return runtime
+
+
+def _print_p1_event(console: Console, event: Event) -> None:
+    """One-line presentation for the P1 events worth surfacing live."""
+    if event.type is EventType.GOAL_CHECK:
+        passed = "通过" if event.data.get("passed") else "未通过"
+        style = "green" if event.data.get("passed") else "yellow"
+        console.print(Text(f"  ◆ 验收检查：{passed}", style=style))
+        for item in event.data.get("items", []):
+            mark = "✓" if item.get("passed") else "✗"
+            item_style = "green" if item.get("passed") else "red"
+            console.print(Text(f"    {mark} {item.get('item_id')}", style=item_style))
+        return
+    if event.type is EventType.CONTEXT_COMPACTED:
+        before, after = event.data.get("tokens_before"), event.data.get("tokens_after")
+        console.print(
+            Text(f"  ◆ 上下文已压缩：估算 {before} → {after} token", style="dim")
+        )
+        return
+    if event.type is EventType.BACKGROUND_JOB_COMPLETED:
+        ok = event.data.get("status") == "completed"
+        console.print(
+            Text(
+                f"  ◆ 后台任务 {event.data.get('job_id')} "
+                f"退出码 {event.data.get('exit_code')}",
+                style="green" if ok else "red",
+            )
+        )
+        return
+    if event.type is EventType.BACKGROUND_JOB_LOST:
+        console.print(
+            Text(f"  ◆ 后台任务 {event.data.get('job_id')} 失联（进程已不在）", style="yellow")
+        )
+        return
+    if event.type is EventType.SIDE_EFFECT_UNKNOWN:
+        console.print(
+            Text(
+                f"  ◆ {event.data.get('name')} 的副作用状态未知，需要先核实",
+                style="yellow",
+            )
+        )
+        return
+    if event.type is EventType.SUBAGENT_FINISHED:
+        usage = event.data.get("usage") or {}
+        console.print(
+            Text(
+                f"  ◆ 子代理完成（token {usage.get('input_tokens', 0)}+"
+                f"{usage.get('output_tokens', 0)}）",
+                style="dim",
+            )
+        )
 
 
 def _run_one_turn(runtime: AgentRuntime, user_message: str) -> RunResult:
@@ -489,16 +673,19 @@ def run(
     task: Annotated[str, typer.Argument(help="要交给模型完成的任务描述")],
     workspace: WorkspaceOpt = Path("."),
     provider: ProviderOpt = ProviderChoice.auto,
-    model: ModelOpt = "claude-sonnet-4-5",
+    model: ModelOpt = None,
     script: ScriptOpt = None,
     max_rounds: MaxRoundsOpt = 20,
     max_tokens: MaxTokensOpt = 200_000,
     max_seconds: MaxSecondsOpt = 600.0,
     yes: YesOpt = False,
+    acceptance: AcceptanceOpt = None,
     db: DbOpt = DEFAULT_DB_PATH,
 ) -> None:
     """执行一个单轮任务：流式展示回复、工具调用与修改摘要。"""
-    setup = _prepare(workspace, provider, model, script, max_rounds, max_tokens, max_seconds)
+    setup = _prepare(
+        workspace, provider, model, script, max_rounds, max_tokens, max_seconds, acceptance
+    )
     console = Console()
     store = SqliteStore(db)
     try:
@@ -519,49 +706,134 @@ def run(
 def chat(
     workspace: WorkspaceOpt = Path("."),
     provider: ProviderOpt = ProviderChoice.auto,
-    model: ModelOpt = "claude-sonnet-4-5",
+    model: ModelOpt = None,
     script: ScriptOpt = None,
     max_rounds: MaxRoundsOpt = 20,
     max_tokens: MaxTokensOpt = 200_000,
     max_seconds: MaxSecondsOpt = 600.0,
     yes: YesOpt = False,
+    acceptance: AcceptanceOpt = None,
     db: DbOpt = DEFAULT_DB_PATH,
 ) -> None:
     """交互式多轮会话：同一会话持续累积上下文，exit / quit / Ctrl+D 退出。"""
-    setup = _prepare(workspace, provider, model, script, max_rounds, max_tokens, max_seconds)
+    setup = _prepare(
+        workspace, provider, model, script, max_rounds, max_tokens, max_seconds, acceptance
+    )
     console = Console()
     store = SqliteStore(db)
     try:
         runtime = _make_runtime(setup, store, console, yes)
-        _print_header(console, "交互会话（exit / quit / Ctrl+D 退出）", setup)
-        while True:
-            try:
-                user_input = console.input("[bold cyan]你 >[/] ")
-            except EOFError:  # Ctrl+D
-                console.print()
-                break
-            except KeyboardInterrupt:  # Ctrl+C at the prompt exits cleanly
-                console.print()
-                console.print("再见。")
-                break
-            text = user_input.strip()
-            if not text:
-                continue
-            if text in {"exit", "quit"}:
-                break
-            try:
-                result = _run_one_turn(runtime, text)
-            except asyncio.CancelledError:  # pragma: no cover - defensive
-                continue
-            except KeyboardInterrupt:
-                # Ctrl+C during a turn cancels that turn only; the session
-                # was persisted and the REPL continues.
-                console.print()
-                continue
-            _print_turn_summary(console, result)
-            _print_diff_summary(console, store, result.session_id)
+        _chat_repl(runtime, store, console, setup)
     finally:
         store.close()
+
+
+def _chat_repl(runtime: Any, store: SqliteStore, console: Console, setup: _Setup) -> None:
+    """Shared interactive loop for fresh sessions and resumed ones."""
+    _print_header(console, "交互会话（exit / quit / Ctrl+D 退出）", setup)
+    while True:
+        try:
+            user_input = console.input("[bold cyan]你 >[/] ")
+        except EOFError:  # Ctrl+D
+            console.print()
+            break
+        except KeyboardInterrupt:  # Ctrl+C at the prompt exits cleanly
+            console.print()
+            console.print("再见。")
+            break
+        text = user_input.strip()
+        if not text:
+            continue
+        if text in {"exit", "quit"}:
+            break
+        try:
+            result = _run_one_turn(runtime, text)
+        except asyncio.CancelledError:  # pragma: no cover - defensive
+            continue
+        except KeyboardInterrupt:
+            # Ctrl+C during a turn cancels that turn only; the session
+            # was persisted and the REPL continues.
+            console.print()
+            continue
+        _print_turn_summary(console, result)
+        _print_diff_summary(console, store, result.session_id)
+
+
+@app.command()
+def resume(
+    session_id: Annotated[str, typer.Argument(help="要恢复的会话 ID（可先用 sessions list 查看）")],
+    workspace: WorkspaceOpt | None = None,
+    provider: ProviderOpt = ProviderChoice.auto,
+    model: ModelOpt = None,
+    script: ScriptOpt = None,
+    max_rounds: MaxRoundsOpt = 30,
+    max_tokens: MaxTokensOpt = 400_000,
+    max_seconds: MaxSecondsOpt = 600.0,
+    yes: YesOpt = False,
+    acceptance: AcceptanceOpt = None,
+    db: DbOpt = DEFAULT_DB_PATH,
+) -> None:
+    """恢复历史会话并继续交互：已完成的结果不重复执行，未知副作用先核实。"""
+    from minicode.runtime import AgentRuntime
+
+    console = Console()
+    store = SqliteStore(db)
+    try:
+        resolved = _resolve_session_id(store, session_id)
+        if resolved is None:
+            _fail(f"未找到会话: {session_id}（可用 minicode sessions list 查看会话 ID）")
+        assert resolved is not None
+        summary = store.get_session(resolved)
+        assert summary is not None
+        if workspace is not None:
+            ws = Path(workspace).expanduser()
+            if not ws.is_dir():
+                _fail(f"工作区不存在: {ws}")
+        else:
+            ws = Path(summary.workspace)
+
+        setup = _prepare(
+            ws, provider, model, script, max_rounds, max_tokens, max_seconds, acceptance
+        )
+        runtime = _make_resumed_runtime(setup, store, console, yes, summary)
+        console.print(f"[bold]恢复会话[/] {summary.session_id[:8]} ·"
+                      f" 轮数 {summary.rounds} ·"
+                      f" Token {summary.input_tokens + summary.output_tokens}")
+        _chat_repl(runtime, store, console, setup)
+    finally:
+        store.close()
+
+
+def _make_resumed_runtime(
+    setup: _Setup, store: SqliteStore, console: Console, yes: bool, summary: Any
+) -> Any:
+    """Build the runtime for ``resume`` from shared services and validate
+    the stored session against it."""
+    from minicode.runtime import AgentRuntime
+
+    services = _build_services(setup, store, console, yes)
+    try:
+        runtime = AgentRuntime.resume(
+            store=store,
+            session_id=summary.session_id,
+            provider=setup.provider,
+            registry=services.registry,
+            policy=services.policy,
+            workspace=setup.workspace,
+            budget=setup.budget,
+            approval_handler=services.approval_handler,
+            on_text_delta=services.on_text_delta,
+            on_event=services.on_event,
+            compactor=None,  # attached below, bound to this runtime
+            goal_checker=services.goal_checker,
+            evidence_ledger=services.evidence_ledger,
+            background_manager=services.background_manager,
+            artifact_store=services.artifact_store,
+        )
+    except ValueError as exc:
+        _fail(str(exc))
+    _attach_compactor(runtime, services.artifact_store, setup.budget.max_total_tokens)
+    return runtime
 
 
 # ---------------------------------------------------------------------------
@@ -626,9 +898,11 @@ def _full_tool_outputs(store: SqliteStore, session_id: str) -> dict[str, str]:
 def report(
     session_id: Annotated[str, typer.Argument(help="会话 ID（可先用 sessions list 查看）")],
     full: Annotated[bool, typer.Option(help="打印完整工具输出，而不是 500 字符预览")] = False,
+    format: Annotated[str, typer.Option(case_sensitive=False, help="输出格式：text 或 html")] = "text",
+    output: Annotated[Path | None, typer.Option("--output", "-o", help="HTML 输出路径（缺省 ./minicode-report-<id>.html）")] = None,
     db: DbOpt = DEFAULT_DB_PATH,
 ) -> None:
-    """打印一个会话的执行报告：事件统计、工具输出、diff 与用量。"""
+    """打印一个会话的执行报告（text），或生成可离线查看的 HTML 报告。"""
     console = Console()
     store = SqliteStore(db)
     try:
@@ -639,9 +913,21 @@ def report(
         summary = store.get_session(resolved)
         assert summary is not None
         events = store.get_events(resolved)
+        messages = store.get_messages(resolved)
         full_outputs = _full_tool_outputs(store, resolved)
     finally:
         store.close()
+
+    if format.lower() == "html":
+        from minicode.reports import render_session_html
+
+        target = output if output is not None else Path(f"minicode-report-{resolved[:8]}.html")
+        html = render_session_html(summary, events, messages, full_outputs)
+        target.write_text(html, encoding="utf-8")
+        console.print(f"HTML 报告已生成: {target.resolve()}")
+        return
+    if format.lower() != "text":
+        _fail(f"未知格式: {format}（可选 text / html）")
     _render_report(console, summary, events, full_outputs, full)
 
 
@@ -705,6 +991,63 @@ def _render_report(
     )
     final = summary.exit_reason or summary.status
     console.print(f"退出原因: {_exit_label(final)} ({final})")
+
+
+@app.command("eval")
+def eval_cmd(
+    tasks_dir: Annotated[Path, typer.Option("--tasks-dir", help="任务集目录（默认 evals/tasks）")] = Path("evals/tasks"),
+    task: Annotated[list[str] | None, typer.Option("--task", help="只跑指定任务 ID（可重复）")] = None,
+    baselines: Annotated[str, typer.Option(help="基线组合：b0,b1,b2")] = "b0,b2",
+    output: Annotated[Path, typer.Option("--output", "-o", help="结果输出目录")] = Path("reports/eval"),
+) -> None:
+    """运行本地评测集（FakeProvider 离线跑通三基线对照）。"""
+    runner = _find_eval_runner()
+    if runner is None:
+        _fail("找不到 evals/run_eval.py（请在仓库根目录运行，或先安装完整仓库）。")
+    cmd = [
+        sys.executable, str(runner),
+        "--tasks-dir", str(tasks_dir),
+        "--baselines", baselines,
+        "--output", str(output),
+    ]
+    for task_id in task or []:
+        cmd += ["--task", task_id]
+    completed = subprocess.run(cmd)
+    if completed.returncode != 0:
+        _fail("评测运行失败，详见上方输出。")
+
+
+def _find_eval_runner() -> Path | None:
+    """Locate evals/run_eval.py relative to cwd or the package root."""
+    for base in (Path.cwd(), Path(__file__).resolve().parent.parent.parent):
+        candidate = base / "evals" / "run_eval.py"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+@app.command()
+def tui(
+    workspace: WorkspaceOpt = Path("."),
+    provider: ProviderOpt = ProviderChoice.auto,
+    model: ModelOpt = None,
+    script: ScriptOpt = None,
+    max_rounds: MaxRoundsOpt = 20,
+    max_tokens: MaxTokensOpt = 200_000,
+    max_seconds: MaxSecondsOpt = 600.0,
+    yes: YesOpt = False,
+    acceptance: AcceptanceOpt = None,
+    db: DbOpt = DEFAULT_DB_PATH,
+) -> None:
+    """全屏交互界面（Textual）：流式回复、工具卡片、审批弹窗、斜杠命令。"""
+    try:
+        from minicode.ui.app import run_tui
+    except ImportError as exc:
+        _fail(f"TUI 依赖未安装：pip install 'minicode' 后重试。({exc})")
+    setup = _prepare(
+        workspace, provider, model, script, max_rounds, max_tokens, max_seconds, acceptance
+    )
+    run_tui(setup=setup, db_path=db, yes=yes)
 
 
 def main() -> None:

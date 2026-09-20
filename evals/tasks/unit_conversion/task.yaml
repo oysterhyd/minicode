@@ -1,0 +1,27 @@
+id: unit_conversion
+title: 单位换算错：celsius_to_fahrenheit 的偏移量写成了 30，正确公式是 +32
+prompt: '运行 `python -m pytest test_temperature.py -q` 有用例失败：celsius_to_fahrenheit 的偏移量写成了
+  30，正确公式是 +32。
+
+  请阅读 temperature.py，定位并修复其中的 bug，使该测试文件的全部用例通过。
+
+  只允许修改 temperature.py，不要改动测试文件；完成后重新运行测试确认退出码为 0。
+
+  '
+allowed_paths:
+- temperature.py
+protected_paths:
+- test_temperature.py
+items:
+- id: tests-pass
+  type: command
+  command: python -m pytest test_temperature.py -q
+- id: tests-unchanged
+  type: protected
+  path: test_temperature.py
+budget:
+  max_rounds: 10
+  max_tokens: 80000
+  max_seconds: 120
+max_fix_attempts: 3
+script: script.json

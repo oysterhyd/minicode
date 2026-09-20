@@ -117,6 +117,9 @@ class ToolOutcome(BaseModel):
     output: str = ""
     error: str | None = None
     exit_code: int | None = None
+    # Set by tools that consumed model tokens themselves (subagent): the
+    # runtime adds it to the session-cumulative usage.
+    usage: Usage | None = None
 
     @classmethod
     def failure(cls, error: str, output: str = "", exit_code: int | None = None) -> "ToolOutcome":
@@ -159,6 +162,18 @@ class EventType(str, enum.Enum):
     APPROVAL_DECISION = "approval_decision"
     ROUND_END = "round_end"
     SESSION_END = "session_end"
+    # P1: context management
+    CONTEXT_COMPACTED = "context_compacted"
+    # P1: goal acceptance
+    GOAL_CHECK = "goal_check"
+    # P1: recovery
+    SIDE_EFFECT_UNKNOWN = "side_effect_unknown"
+    # P1: background jobs / subagents
+    BACKGROUND_JOB_STARTED = "background_job_started"
+    BACKGROUND_JOB_COMPLETED = "background_job_completed"
+    BACKGROUND_JOB_LOST = "background_job_lost"
+    SUBAGENT_STARTED = "subagent_started"
+    SUBAGENT_FINISHED = "subagent_finished"
 
 
 class Event(BaseModel):
@@ -179,6 +194,7 @@ class ExitReason(str, enum.Enum):
     TOKEN_BUDGET = "token_budget"    # cumulative token budget exhausted
     TIME_BUDGET = "time_budget"      # wall-clock budget exhausted
     CANCELLED = "cancelled"          # user interrupted (Ctrl+C)
+    GOAL_NOT_MET = "goal_not_met"    # acceptance checks still failing when the budget ran out
     PROVIDER_ERROR = "provider_error"
     INTERNAL_ERROR = "internal_error"
 

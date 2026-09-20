@@ -14,7 +14,7 @@ from minicode.core.models import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from minicode.storage import DEFAULT_DB_PATH, SessionSummary, SqliteStore
+from minicode.storage import DEFAULT_DB_PATH, SCHEMA_VERSION, SessionSummary, SqliteStore
 
 
 @pytest.fixture()
@@ -254,13 +254,13 @@ def test_persistence_across_instances(tmp_path):
         store2.close()
 
 
-def test_fresh_db_has_schema_version_one(tmp_path):
+def test_fresh_db_has_current_schema_version(tmp_path):
     db_path = tmp_path / "sessions.db"
     store = SqliteStore(db_path)
     try:
         con = sqlite3.connect(db_path)
         try:
-            assert con.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         finally:
             con.close()
     finally:
@@ -274,7 +274,7 @@ def test_rejects_database_from_newer_version(tmp_path):
 
     con = sqlite3.connect(db_path)
     try:
-        con.execute("PRAGMA user_version = 2")
+        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
         con.commit()
     finally:
         con.close()

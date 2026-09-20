@@ -1,0 +1,26 @@
+id: queue_fifo
+title: 队列 FIFO 顺序错：drain 从队尾弹出，顺序变成了 LIFO，约定应先进先出
+prompt: '运行 `python -m pytest test_job_queue.py -q` 有用例失败：drain 从队尾弹出，顺序变成了 LIFO，约定应先进先出。
+
+  请阅读 job_queue.py，定位并修复其中的 bug，使该测试文件的全部用例通过。
+
+  只允许修改 job_queue.py，不要改动测试文件；完成后重新运行测试确认退出码为 0。
+
+  '
+allowed_paths:
+- job_queue.py
+protected_paths:
+- test_job_queue.py
+items:
+- id: tests-pass
+  type: command
+  command: python -m pytest test_job_queue.py -q
+- id: tests-unchanged
+  type: protected
+  path: test_job_queue.py
+budget:
+  max_rounds: 10
+  max_tokens: 80000
+  max_seconds: 120
+max_fix_attempts: 3
+script: script.json

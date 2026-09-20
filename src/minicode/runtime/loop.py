@@ -44,7 +44,7 @@ from minicode.runtime.events import EventCallback, EventRecorder
 from minicode.runtime.prompt import build_system_prompt
 from minicode.security.policy import PermissionPolicy, PolicyBehavior
 from minicode.storage import SessionStore
-from minicode.tools.base import ToolContext
+from minicode.tools.base import ToolContext, ToolLimits
 from minicode.tools.registry import ToolRegistry
 
 #: Called for every streamed piece of assistant text.
@@ -53,12 +53,49 @@ TextDeltaCallback = Callable[[str], Awaitable[None]]
 #: Tool output echoed in TOOL_CALL_RESULT events is capped at this length.
 _OUTPUT_PREVIEW_CHARS = 500
 
+#: Spill thresholds (same defaults as ToolLimits; kept here so the loop does
+#: not reach into per-tool limits configured elsewhere).
+_SPILL_LIMITS = ToolLimits()
+
+#: Tool names that are safe to re-execute while resuming an interrupted
+#: session: they only read, so re-running them cannot duplicate side effects.
+_READ_ONLY_TOOLS = frozenset({"read_file", "list_files", "search_text"})
+
+
+def _format_bg_result(job: Any) -> str:
+    """User-message text announcing one finished background job."""
+    exit_label = "-" if job.exit_code is None else str(job.exit_code)
+    status = "完成" if job.status == "completed" else f"失败（{job.status}）"
+    output = job.output if job.output else "（无输出）"
+    return (
+        f"[后台任务 {job.job_id} 已{status}] 退出码: {exit_label}\n"
+        f"命令: {job.command}\n输出:\n{output}"
+    )
+
 
 class AgentRuntime:
     """Stateful agent loop for one session.
 
     The session row is created lazily on the first :meth:`run_turn` call;
     afterwards messages, usage, rounds and events accumulate across turns.
+    An existing session can be continued with :meth:`resume`, which restores
+    the persisted conversation and settles tool calls whose outcome was
+    lost to an interruption before handing control back to the loop.
+
+    P1 hooks (all optional, duck-typed so the runtime stays decoupled):
+
+    - ``compactor`` — context compaction (``needs_compaction`` / ``compact``);
+      runs before each provider call and rewrites the persisted conversation.
+    - ``goal_checker`` — acceptance gate (``spec``, ``protected_snapshot``,
+      ``run() -> report``, ``format_failure_report``); a model answer without
+      tool calls only ends the session when acceptance passes.
+    - ``evidence_ledger`` — binds passing evidence to a workspace fingerprint
+      (``record(report)`` / ``valid_pass(fingerprint)``); code changes after
+      evidence was recorded invalidate it.
+    - ``background_manager`` — background command jobs (``poll_completed``,
+      ``cancel_all``); finished jobs are delivered as user messages.
+    - ``artifact_store`` — full tool outputs spilled to disk when they exceed
+      the tool limits, readable back on demand via ``read_artifact``.
 
     Cancellation contract: if the task running :meth:`run_turn` is
     cancelled, the runtime finalizes the session with
@@ -83,6 +120,11 @@ class AgentRuntime:
         on_text_delta: TextDeltaCallback | None = None,
         on_event: EventCallback | None = None,
         system_prompt: str | None = None,
+        compactor: Any | None = None,
+        goal_checker: Any | None = None,
+        evidence_ledger: Any | None = None,
+        background_manager: Any | None = None,
+        artifact_store: Any | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -100,11 +142,20 @@ class AgentRuntime:
             if system_prompt is not None
             else build_system_prompt(str(workspace.resolve()), registry.names())
         )
+        self._compactor = compactor
+        self._goal_checker = goal_checker
+        self._evidence_ledger = evidence_ledger
+        self._background_manager = background_manager
+        self._artifact_store = artifact_store
 
         self.session_id: str | None = None  # created on first run_turn
         self._messages: list[Message] = []  # mirrors the persisted conversation
         self._usage = Usage()
         self._rounds = 0
+        self._goal_attempts = 0
+        self._own_pass_fingerprint: str | None = None  # fallback without a ledger
+        self._protected_captured = False
+        self._pending_dangling: list[ToolUseBlock] = []  # set by resume()
 
     # -- read-only state ----------------------------------------------------
 
@@ -126,10 +177,14 @@ class AgentRuntime:
         """Run one user turn to completion and return the outcome.
 
         On the first call the session row is created and ``SESSION_START``
-        is emitted. Each round streams one assistant response, persists it,
-        executes its tool calls one at a time under the permission policy,
-        and feeds the results back until the model produces a final answer
-        or a budget is exhausted.
+        is emitted (a configured protected-path snapshot is captured here,
+        before the model can change anything). Each round injects finished
+        background-job results, compacts the context when it exceeds the
+        budget, streams one assistant response, persists it, executes its
+        tool calls one at a time under the permission policy, and feeds the
+        results back until the model produces a final answer — which, with
+        an acceptance gate configured, only ends the session once the goal
+        checks pass — or a budget is exhausted.
 
         Cancellation: see the class docstring — ``CANCELLED`` is persisted
         and :class:`asyncio.CancelledError` is re-raised to the caller.
@@ -155,6 +210,11 @@ class AgentRuntime:
                     "model": self._model,
                 },
             )
+        # Protected paths are snapshotted before the model can change anything
+        # (first turn of a fresh session, or the first turn after a resume).
+        self._capture_protected_paths()
+        # Settle tool calls interrupted before their result was persisted.
+        await self._settle_recovery(recorder)
 
         # Wall-clock budget is per turn; rounds/tokens are seeded cumulatively.
         checker = BudgetChecker(
@@ -174,6 +234,14 @@ class AgentRuntime:
                     return await self._finalize(
                         recorder, ExitReason.MAX_ROUNDS, turn_started
                     )
+
+                # Background jobs finished since the last round are delivered
+                # before the next model call so the model sees their output.
+                await self._deliver_finished_jobs(recorder, session_id)
+
+                # Layered compaction before the provider call keeps the
+                # context inside budget; the compacted view is persisted.
+                await self._compact_if_needed(recorder, session_id)
 
                 self._rounds += 1
                 await recorder.emit(EventType.ROUND_START, {"round": self._rounds})
@@ -211,13 +279,19 @@ class AgentRuntime:
                     )
 
                 if not response.tool_calls:
-                    return await self._finalize(
-                        recorder, ExitReason.COMPLETED, turn_started
-                    )
+                    gated = await self._goal_gate(recorder, turn_started)
+                    if gated is not None:
+                        return gated
+                    # Acceptance failed but fix attempts remain: the failure
+                    # report was appended as a user message; keep looping.
+                    await recorder.emit(EventType.ROUND_END, {"round": self._rounds})
+                    continue
 
                 tool_results: list[ToolResultBlock] = []
                 for call in response.tool_calls:  # executed one at a time, in order
-                    tool_results.append(await self._execute_tool_call(recorder, call))
+                    tool_results.append(
+                        await self._execute_tool_call(recorder, call, session_id)
+                    )
                 if tool_results:
                     self._append_message(
                         session_id, Message(role="user", content=tool_results)
@@ -226,6 +300,167 @@ class AgentRuntime:
         except asyncio.CancelledError:
             await self._finalize_cancelled(recorder)
             raise  # never swallow cancellation
+
+    # -- resuming ------------------------------------------------------------
+
+    @classmethod
+    def resume(
+        cls,
+        *,
+        store: SessionStore,
+        session_id: str,
+        provider: Provider,
+        registry: ToolRegistry,
+        policy: PermissionPolicy,
+        workspace: Path | None = None,
+        provider_name: str | None = None,
+        model: str | None = None,
+        budget: Budget | None = None,
+        approval_handler: ApprovalHandler | None = None,
+        on_text_delta: TextDeltaCallback | None = None,
+        on_event: EventCallback | None = None,
+        system_prompt: str | None = None,
+        compactor: Any | None = None,
+        goal_checker: Any | None = None,
+        evidence_ledger: Any | None = None,
+        background_manager: Any | None = None,
+        artifact_store: Any | None = None,
+    ) -> "AgentRuntime":
+        """Continue a persisted session in a fresh process.
+
+        Loads the stored conversation, usage and round count, restores the
+        workspace/model from the session row (overridable) and marks tool
+        calls whose outcome was lost to an interruption; they are settled at
+        the start of the next :meth:`run_turn` (see :meth:`_settle_recovery`).
+        Raises ``ValueError`` for an unknown session or a missing workspace.
+        """
+        summary = store.get_session(session_id)
+        if summary is None:
+            raise ValueError(f"unknown session: {session_id}")
+        resolved_workspace = Path(workspace) if workspace else Path(summary.workspace)
+        if not resolved_workspace.exists():
+            raise ValueError(
+                f"workspace no longer exists: {resolved_workspace} (session {session_id})"
+            )
+
+        runtime = cls(
+            provider=provider,
+            registry=registry,
+            store=store,
+            policy=policy,
+            workspace=resolved_workspace,
+            provider_name=provider_name or summary.provider,
+            model=model or summary.model,
+            budget=budget
+            if budget is not None
+            else Budget(
+                max_rounds=max(summary.rounds + 10, 10),
+                max_total_tokens=max(
+                    (summary.input_tokens + summary.output_tokens) * 2, 200_000
+                ),
+            ),
+            approval_handler=approval_handler,
+            on_text_delta=on_text_delta,
+            on_event=on_event,
+            system_prompt=system_prompt,
+            compactor=compactor,
+            goal_checker=goal_checker,
+            evidence_ledger=evidence_ledger,
+            background_manager=background_manager,
+            artifact_store=artifact_store,
+        )
+        runtime.session_id = session_id
+        runtime._messages = store.get_messages(session_id)
+        runtime._usage = Usage(
+            input_tokens=summary.input_tokens, output_tokens=summary.output_tokens
+        )
+        runtime._rounds = summary.rounds
+        runtime._pending_dangling = cls._find_dangling_calls(runtime._messages)
+        return runtime
+
+    @staticmethod
+    def _find_dangling_calls(messages: list[Message]) -> list[ToolUseBlock]:
+        """Tool calls from persisted messages that never received a result —
+        the interruption window between execution and persistence."""
+        requested: list[ToolUseBlock] = []
+        answered: set[str] = set()
+        for message in messages:
+            for block in message.content:
+                if isinstance(block, ToolUseBlock):
+                    requested.append(block)
+                elif isinstance(block, ToolResultBlock):
+                    answered.add(block.tool_use_id)
+        return [call for call in requested if call.id not in answered]
+
+    async def _settle_recovery(self, recorder: EventRecorder) -> None:
+        """Settle the dangling calls found at resume time (plan.md §6.3).
+
+        A persisted result is never re-run. Read-only calls are re-executed
+        under a fresh event record; calls with uncertain side effects
+        (writes, shell) are marked ``unknown`` and the model is told to
+        verify current state instead of assuming anything.
+        """
+        pending = self._pending_dangling
+        self._pending_dangling = []
+        if not pending:
+            return
+
+        results: list[ToolResultBlock] = []
+        for call in pending:
+            tool = (
+                self._registry.get(call.name) if call.name in _READ_ONLY_TOOLS else None
+            )
+            if tool is not None:
+                # Read-only calls are safe to re-execute, and the read-only
+                # set is fixed, so no policy re-check is needed.
+                await recorder.emit(
+                    EventType.TOOL_CALL_START,
+                    {
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": call.input,
+                        "recovered": True,
+                    },
+                )
+                outcome = await self._run_tool(call, tool)
+                await recorder.emit(
+                    EventType.TOOL_CALL_RESULT,
+                    {
+                        "call_id": call.id,
+                        "name": call.name,
+                        "success": outcome.success,
+                        "exit_code": outcome.exit_code,
+                        "error": outcome.error,
+                        "output_preview": outcome.output[:_OUTPUT_PREVIEW_CHARS],
+                        "recovered": True,
+                    },
+                )
+                results.append(
+                    ToolResultBlock(
+                        tool_use_id=call.id,
+                        content=outcome.output
+                        if outcome.success
+                        else (outcome.error or ""),
+                        is_error=not outcome.success,
+                    )
+                )
+            else:
+                await recorder.emit(
+                    EventType.SIDE_EFFECT_UNKNOWN,
+                    {"call_id": call.id, "name": call.name},
+                )
+                results.append(
+                    ToolResultBlock(
+                        tool_use_id=call.id,
+                        content=(
+                            f"副作用状态未知：进程在「{call.name}」执行后、结果落库前被中断。"
+                            "不要假设它已执行或未执行；请先用只读工具核实当前状态再继续。"
+                        ),
+                        is_error=False,
+                    )
+                )
+        assert self.session_id is not None
+        self._append_message(self.session_id, Message(role="user", content=results))
 
     # -- streaming -----------------------------------------------------------
 
@@ -265,19 +500,40 @@ class AgentRuntime:
     # -- tool execution -------------------------------------------------------
 
     async def _execute_tool_call(
-        self, recorder: EventRecorder, call: ToolUseBlock
+        self, recorder: EventRecorder, call: ToolUseBlock, session_id: str
     ) -> ToolResultBlock:
         """Run one tool call under policy/approval with start/result events.
 
         Unknown tools, denials, missing approvals and tool crashes all become
         error ``ToolResultBlock``s fed back to the model — the loop continues.
+        Oversized outputs are spilled to the artifact store (the model gets a
+        preview plus a reference it can read back with ``read_artifact``).
         """
         await recorder.emit(
             EventType.TOOL_CALL_START,
             {"call_id": call.id, "name": call.name, "arguments": call.input},
         )
+        if call.name == "delegate":
+            await recorder.emit(
+                EventType.SUBAGENT_STARTED, {"task": str(call.input.get("task", ""))}
+            )
         outcome = await self._resolve_outcome(recorder, call)
-        block = self._outcome_to_block(call, outcome)
+        if outcome.usage is not None:
+            # Tools that spend model tokens themselves (subagent) are billed
+            # to the same session-cumulative budget.
+            self._usage = self._usage + outcome.usage
+        if call.name == "delegate":
+            await recorder.emit(
+                EventType.SUBAGENT_FINISHED,
+                {
+                    "usage": {
+                        "input_tokens": outcome.usage.input_tokens if outcome.usage else 0,
+                        "output_tokens": outcome.usage.output_tokens if outcome.usage else 0,
+                    },
+                },
+            )
+
+        block = self._outcome_to_block(call, self._maybe_spill(session_id, outcome))
         await recorder.emit(
             EventType.TOOL_CALL_RESULT,
             {
@@ -290,6 +546,25 @@ class AgentRuntime:
             },
         )
         return block
+
+    def _maybe_spill(self, session_id: str, outcome: ToolOutcome) -> ToolOutcome:
+        """Spill oversized successful outputs to an artifact, keeping a
+        preview plus a read-back reference in the model-facing content."""
+        if (
+            self._artifact_store is None
+            or not outcome.success
+            or len(outcome.output) <= _SPILL_LIMITS.spill_threshold_chars
+        ):
+            return outcome
+        ref = self._artifact_store.spill(
+            session_id, "tool_output", outcome.output
+        )
+        preview = outcome.output[: _SPILL_LIMITS.spill_preview_chars]
+        note = (
+            f"\n...[输出共 {len(outcome.output)} 字符，已转存为 artifact "
+            f"{ref.artifact_id}；可用 read_artifact 工具按需读取完整内容]"
+        )
+        return outcome.model_copy(update={"output": preview + note})
 
     async def _resolve_outcome(
         self, recorder: EventRecorder, call: ToolUseBlock
@@ -331,8 +606,20 @@ class AgentRuntime:
                 reason = f": {approved.reason}" if approved.reason else ""
                 return ToolOutcome.failure(f"approval denied{reason}")
 
+        return await self._run_tool(call, tool)
+
+    async def _run_tool(self, call: ToolUseBlock, tool: Any) -> ToolOutcome:
+        """Execute one approved tool call with the shared services attached."""
         try:
-            return await tool.run(call.input, ToolContext(workspace=self._workspace))
+            return await tool.run(
+                call.input,
+                ToolContext(
+                    workspace=self._workspace,
+                    artifact_store=self._artifact_store,
+                    background_manager=self._background_manager,
+                    session_id=self.session_id,
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - a tool crash must never escape the loop
             return ToolOutcome.failure(f"internal tool error: {exc}")
 
@@ -356,6 +643,150 @@ class AgentRuntime:
             tool_use_id=call.id, content=content, is_error=not outcome.success
         )
 
+    # -- P1: goal gate, compaction, background delivery ----------------------
+
+    def _capture_protected_paths(self) -> None:
+        """Snapshot protected paths before the model can change anything, so
+        acceptance can later prove they stayed untouched."""
+        snapshot = getattr(self._goal_checker, "protected_snapshot", None)
+        if snapshot is None or self._protected_captured:
+            return
+        snapshot.capture()
+        self._protected_captured = True
+
+    async def _goal_gate(
+        self, recorder: EventRecorder, turn_started: float
+    ) -> RunResult | None:
+        """Acceptance gate for a model answer without tool calls.
+
+        Returns the finalized :class:`RunResult` when the session may end
+        (no gate configured, evidence still valid, or checks passed), or
+        ``None`` when the failure report was appended and the loop should
+        continue. Evidence is bound to the workspace fingerprint: code that
+        changed after a passing check invalidates it and forces a re-check.
+        """
+        if self._goal_checker is None:
+            return await self._finalize(recorder, ExitReason.COMPLETED, turn_started)
+
+        # Fast path: passing evidence bound to the *current* workspace state
+        # is still valid — no re-check needed. Any code change since the
+        # evidence was recorded changes the fingerprint and forces a re-run.
+        fingerprint = self._current_workspace_fingerprint()
+        if fingerprint is not None and self._evidence_valid(fingerprint):
+            return await self._finalize(recorder, ExitReason.COMPLETED, turn_started)
+
+        report = await self._goal_checker.run()
+        await recorder.emit(
+            EventType.GOAL_CHECK,
+            {
+                "passed": report.passed,
+                "fingerprint": report.fingerprint,
+                "attempt": self._goal_attempts + 1,
+                "items": [
+                    {
+                        "item_id": item.item_id,
+                        "kind": item.kind,
+                        "passed": item.passed,
+                        "exit_code": item.exit_code,
+                        "detail": item.detail,
+                    }
+                    for item in report.items
+                ],
+            },
+        )
+        if report.passed:
+            self._record_goal_evidence(report)
+            return await self._finalize(recorder, ExitReason.COMPLETED, turn_started)
+
+        max_attempts = getattr(self._goal_checker.spec, "max_fix_attempts", 3)
+        self._goal_attempts += 1
+        if self._goal_attempts > max_attempts:
+            return await self._finalize(recorder, ExitReason.GOAL_NOT_MET, turn_started)
+        failure_report = self._goal_checker.format_failure_report(report)
+        assert self.session_id is not None
+        self._append_message(
+            self.session_id,
+            Message(role="user", content=[TextBlock(text=failure_report)]),
+        )
+        return None
+
+    def _record_goal_evidence(self, report: Any) -> None:
+        """Bind the passing report to its workspace fingerprint (ledger when
+        provided, internal fallback otherwise)."""
+        if self._evidence_ledger is not None:
+            self._evidence_ledger.record(report)
+        self._own_pass_fingerprint = report.fingerprint
+
+    def _current_workspace_fingerprint(self) -> str | None:
+        """Fingerprint of the workspace right now (lazy import so the runtime
+        core stays decoupled from the goals package)."""
+        from minicode.goals.checker import workspace_fingerprint
+
+        try:
+            return workspace_fingerprint(self._workspace)
+        except OSError:
+            return None
+
+    def _evidence_valid(self, fingerprint: str) -> bool:
+        if self._evidence_ledger is not None:
+            return self._evidence_ledger.valid_pass(fingerprint)
+        return self._own_pass_fingerprint == fingerprint
+
+    async def _compact_if_needed(self, recorder: EventRecorder, session_id: str) -> None:
+        """Run layered compaction when the estimated context exceeds budget
+        and persist the compacted view (originals live in artifacts)."""
+        if self._compactor is None:
+            return
+        if not self._compactor.needs_compaction(
+            self._system_prompt, self._messages, self._registry.specs()
+        ):
+            return
+        result = self._compactor.compact(
+            self._system_prompt, self._messages, self._registry.specs()
+        )
+        if not result.changed:
+            return
+        self._messages = result.messages
+        self._store.replace_messages(session_id, self._messages)
+        stats = result.stats
+        await recorder.emit(
+            EventType.CONTEXT_COMPACTED,
+            {
+                "tokens_before": stats.tokens_before,
+                "tokens_after": stats.tokens_after,
+                "archived_units": stats.archived_units,
+                "shrunk_results": stats.shrunk_results,
+                "summarized_units": stats.summarized_units,
+            },
+        )
+
+    async def _deliver_finished_jobs(
+        self, recorder: EventRecorder, session_id: str
+    ) -> None:
+        """Hand finished background jobs to the model as user messages.
+
+        Completion is keyed by the job id and each job is delivered exactly
+        once (``poll_completed`` drains); the original tool call keeps its
+        single ``started`` result, so no tool id ever gets a second result.
+        """
+        if self._background_manager is None:
+            return
+        for job in self._background_manager.poll_completed():
+            await recorder.emit(
+                EventType.BACKGROUND_JOB_COMPLETED,
+                {
+                    "job_id": job.job_id,
+                    "command": job.command,
+                    "status": job.status,
+                    "exit_code": job.exit_code,
+                    "output_preview": job.output[:_OUTPUT_PREVIEW_CHARS],
+                },
+            )
+            self._append_message(
+                session_id,
+                Message(role="user", content=[TextBlock(text=_format_bg_result(job))]),
+            )
+
     # -- persistence helpers ---------------------------------------------------
 
     def _append_message(self, session_id: str, message: Message) -> None:
@@ -372,7 +803,8 @@ class AgentRuntime:
         error: str | None = None,
     ) -> RunResult:
         """Single exit path: persist session state, emit ``SESSION_END`` and
-        build the :class:`RunResult` for this turn."""
+        build the :class:`RunResult` for this turn. Any still-running
+        background jobs are cancelled so the session never leaks processes."""
         assert self.session_id is not None
         duration_s = time.monotonic() - turn_started
         self._persist_session(exit_reason)
@@ -380,6 +812,7 @@ class AgentRuntime:
         if error is not None:
             data["error"] = error
         await recorder.emit(EventType.SESSION_END, data)
+        await self._cancel_background_jobs()
         return RunResult(
             session_id=self.session_id,
             exit_reason=exit_reason,
@@ -387,6 +820,16 @@ class AgentRuntime:
             total_usage=self._usage,
             duration_s=duration_s,
         )
+
+    async def _cancel_background_jobs(self) -> None:
+        """Best-effort cancellation of leftover background jobs (guarded:
+        teardown must never mask the real exit path)."""
+        if self._background_manager is None:
+            return
+        try:
+            await self._background_manager.cancel_all()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _finalize_cancelled(self, recorder: EventRecorder) -> None:
         """Persist ``CANCELLED`` while task cancellation is being handled.

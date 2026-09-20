@@ -106,3 +106,101 @@ P0 **只持久化，不恢复**：重启后事件可完整回放（`report`）�
 P0 演示闭环：`examples/pagination/`（带 bug 的仓库 + 失败测试）与
 `examples/pagination/scripts/fix_pagination.json`（FakeProvider 脚本），
 端到端测试见 `tests/test_cli.py`。
+
+## 5. P1：可靠性能力（实际实现）
+
+P1 在不动 P0 主干的前提下叠加了六层能力。Runtime 对新模块只依赖鸭子类型协议
+（`loop.py` 不 import 新包），装配发生在 CLI 层（`cli.py` 的 `_build_services` /
+`_attach_compactor`）。
+
+### 5.1 模块增量
+
+```text
+runtime/loop.py      P1 钩子：压缩 / Goal 门 / 后台投递 / 恢复 / artifact 转存
+context/             estimate（保守 token 估算）、compact（归档→压缩→摘要）
+goals/               spec（验收 YAML）、checker（指纹/快照/检查）、evidence（证据账本）
+tasks/               background（后台命令）、subagent（只读委派）、taskstore（任务依赖）
+tools/artifact.py    read_artifact：按引用回读转存的完整输出
+tools/delegate.py    delegate：一层只读子代理工具
+tools/command.py     run_command 增加 background 参数
+storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（schema v2）
+reports/             render_session_html：单文件离线 HTML 报告
+ui/                  Textual 全屏 TUI（minicode tui）
+providers/           commandcode.py + zcode_config.py：OpenAI 兼容默认适配器
+evals/               20 任务离线评测集 + 三基线 runner
+```
+
+### 5.2 上下文压缩（plan.md §6.2 → s08）
+
+两段式：
+
+1. **工具结果转存**（loop 内，逐调用）：成功输出超过 `spill_threshold_chars`（4000）时，
+   完整内容写入 `ArtifactStore`（`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），
+   模型只看到预览 + `[artifact:<id>] 可用 read_artifact 按需读取完整内容`。
+2. **轮前压缩**（`ContextCompactor`）：估算 token（字符/3，标注为估算）超过预算的
+   `trigger_fraction`（0.8）时依次执行——按完整交互单元归档早期历史（单元 =
+   user + assistant + 其 tool_result；tool_use/tool_result 同进同退）→ 压缩保留区中较旧
+   的工具结果 → 仍超时把最老单元合并为确定性结构化摘要。归档原文落 artifact，压缩后的
+   消息列表通过 `store.replace_messages` 原子重写持久化，并发出 `CONTEXT_COMPACTED` 事件。
+
+### 5.3 Goal 验收与证据（plan.md §6.4 → s17）
+
+验收 YAML 三类检查项：`command`（退出码 0）、`artifact`（文件存在于工作区内，越界拒绝）、
+`protected`（路径内容与会话开始时的快照一致）。执行顺序：
+
+```text
+模型回答（无工具调用）
+  → 证据快路径：通过证据的指纹 == 当前工作区指纹 → 直接 COMPLETED
+  → GoalChecker.run()：逐项检查 → GOAL_CHECK 事件
+      通过 → 记录证据（EvidenceLedger，绑定指纹）→ COMPLETED
+      失败 → 结构化失败报告回填为 user 消息 → 继续循环
+             （超过 max_fix_attempts → GOAL_NOT_MET，独立退出原因）
+```
+
+受保护路径快照在会话首个回合开始时捕获（模型改动之前）。模型自述"完成"永远不会
+绕过检查；证据与代码状态绑定——任何文件变化都会使旧证据失效。
+
+### 5.4 会话恢复（plan.md §6.3）
+
+`AgentRuntime.resume(store, session_id, ...)`：校验会话存在与工作区存在 → 加载消息、
+用量、轮数 → 找出**有 tool_use 但无对应 tool_result** 的悬空调用（中断窗口）。悬空调用
+在下次 `run_turn` 开始时结算：
+
+| 悬空调用类型 | 结算方式 |
+| --- | --- |
+| 只读（read_file / list_files / search_text） | 重新执行，发出带 `recovered: true` 的新 START/RESULT 事件，结果回填原始 call id |
+| 写 / Shell（apply_patch / run_command / 未知工具） | **不重放**：`SIDE_EFFECT_UNKNOWN` 事件 + 提示性 tool_result（"副作用状态未知，先核实再继续"） |
+
+已落库的结果永不重复执行；后台任务无进程可继承（一律不凭旧 PID 管理）。
+
+### 5.5 后台命令与只读子代理（plan.md §6.5 → s06/s11）
+
+- `run_command(background=true)`：`BackgroundManager.start` 立即返回 job id；完成事件
+  `BACKGROUND_JOB_COMPLETED`；结果在下一轮开始时作为 **user 消息**投递（每个 job 恰好
+  投递一次，原 tool call 不产生第二个 tool result）；会话结束时 `cancel_all()` 清理进程树。
+- `delegate` 工具：子 AgentRuntime 只注册 read_file / list_files / search_text，独立上下文，
+  返回 `{summary, findings, evidence_refs, unresolved}`（无效引用移入 unresolved）；
+  `ToolOutcome.usage` 把子代理 token 归集到父会话预算；事件 `SUBAGENT_STARTED/FINISHED`。
+
+### 5.6 评测与报告
+
+- `evals/`：20 个本地任务（repo fixture + task.yaml + FakeProvider 修复脚本），runner
+  （`minicode eval`）在干净副本上运行，b0（基础循环，runner 自行验收）与 b2（验收失败
+  续跑）对照；结果 JSON + Markdown 汇总 + 失败分析。诚实口径：FakeProvider 评测度量
+  harness 机制（验收、预算、恢复路径），不度量模型智力，不冒充真实模型成绩。
+- `minicode report <id> --format html`：单文件 HTML（零外链、可离线打开），时间线、
+  工具记录与 diff、验收证据表、用量；所有动态文本经 HTML 转义。
+- `minicode tui`：Textual 全屏界面——流式回复、工具卡片、审批 ModalScreen、
+  斜杠命令（/help /sessions /resume /compact /clear /exit）、Ctrl+C 取消当前回合。
+
+### 5.7 P1 → 实现位置映射
+
+| plan.md §3 P1 能力 | 实现位置 |
+| --- | --- |
+| 分层上下文压缩 + 原始输出按需读取 | `context/`、`storage/artifacts.py`、`tools/artifact.py`、`loop._maybe_spill/_compact_if_needed` |
+| 会话恢复及未确认副作用处理 | `loop.resume/_settle_recovery`、`cli.py`（`resume` 命令） |
+| Goal 验收器 + 失败续跑 + 证据绑定 | `goals/`、`loop._goal_gate`、`--acceptance` 装配 |
+| 任务依赖、后台测试、只读子代理 | `tasks/`、`tools/delegate.py`、`tools/command.py`（background）、`loop._deliver_finished_jobs` |
+| 评测集、基线、失败分析 | `evals/`（20 任务 + run_eval.py 三基线 runner） |
+| 可离线查看的 HTML 执行报告 | `reports/html.py`、`cli.py`（`report --format html`） |
+| 类 Claude Code TUI | `ui/`（Textual App + Pilot 测试） |

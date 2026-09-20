@@ -1,0 +1,27 @@
+id: division_guard
+title: 除零缺保护：whole 为 0 时抛 ZeroDivisionError，约定应返回 0.0
+prompt: '运行 `python -m pytest test_ratio.py -q` 有用例失败：whole 为 0 时抛 ZeroDivisionError，约定应返回
+  0.0。
+
+  请阅读 ratio.py，定位并修复其中的 bug，使该测试文件的全部用例通过。
+
+  只允许修改 ratio.py，不要改动测试文件；完成后重新运行测试确认退出码为 0。
+
+  '
+allowed_paths:
+- ratio.py
+protected_paths:
+- test_ratio.py
+items:
+- id: tests-pass
+  type: command
+  command: python -m pytest test_ratio.py -q
+- id: tests-unchanged
+  type: protected
+  path: test_ratio.py
+budget:
+  max_rounds: 10
+  max_tokens: 80000
+  max_seconds: 120
+max_fix_attempts: 3
+script: script.json

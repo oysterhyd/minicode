@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field
 from minicode.core.models import ToolOutcome
 from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, truncate_output
 
-# Directory names never descended into by listing / searching tools.
+# Directory names never descended into when walking the workspace
+# (listing / searching tools and the goals workspace fingerprint).
 SKIP_DIRS = {
     ".git",
     "__pycache__",

@@ -1,0 +1,26 @@
+id: dict_key_typo
+title: dict 键名笔误：to_card 读取的键名 nmae 是笔误，抛出 KeyError
+prompt: '运行 `python -m pytest test_user_profile.py -q` 有用例失败：to_card 读取的键名 nmae 是笔误，抛出 KeyError。
+
+  请阅读 user_profile.py，定位并修复其中的 bug，使该测试文件的全部用例通过。
+
+  只允许修改 user_profile.py，不要改动测试文件；完成后重新运行测试确认退出码为 0。
+
+  '
+allowed_paths:
+- user_profile.py
+protected_paths:
+- test_user_profile.py
+items:
+- id: tests-pass
+  type: command
+  command: python -m pytest test_user_profile.py -q
+- id: tests-unchanged
+  type: protected
+  path: test_user_profile.py
+budget:
+  max_rounds: 10
+  max_tokens: 80000
+  max_seconds: 120
+max_fix_attempts: 3
+script: script.json

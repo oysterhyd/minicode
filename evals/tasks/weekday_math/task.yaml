@@ -1,0 +1,26 @@
+id: weekday_math
+title: 日期星期计算错：weekday_name 返回的星期后移了一天，周日还会数组越界
+prompt: '运行 `python -m pytest test_weekday.py -q` 有用例失败：weekday_name 返回的星期后移了一天，周日还会数组越界。
+
+  请阅读 weekday.py，定位并修复其中的 bug，使该测试文件的全部用例通过。
+
+  只允许修改 weekday.py，不要改动测试文件；完成后重新运行测试确认退出码为 0。
+
+  '
+allowed_paths:
+- weekday.py
+protected_paths:
+- test_weekday.py
+items:
+- id: tests-pass
+  type: command
+  command: python -m pytest test_weekday.py -q
+- id: tests-unchanged
+  type: protected
+  path: test_weekday.py
+budget:
+  max_rounds: 10
+  max_tokens: 80000
+  max_seconds: 120
+max_fix_attempts: 3
+script: script.json
