@@ -49,6 +49,7 @@ _EXIT_REASON_LABELS: dict[str, str] = {
     "max_rounds": "达到最大轮数",
     "token_budget": "Token 预算耗尽",
     "time_budget": "时长预算耗尽",
+    "context_limit": "上下文超过模型窗口",
     "cancelled": "已取消",
     "goal_not_met": "验收未通过",
     "provider_error": "模型调用失败",
@@ -318,12 +319,17 @@ def _assistant_body(data: dict) -> str:
         rows.append(_kv("工具调用", chips))
     usage = data.get("usage")
     if isinstance(usage, dict):
-        rows.append(
-            _kv(
-                "Token",
+        if usage.get("available") is False:
+            usage_text = "未知（provider 未返回 usage）"
+        else:
+            usage_text = (
                 f"输入 {_esc(usage.get('input_tokens', 0))}"
-                f" · 输出 {_esc(usage.get('output_tokens', 0))}",
+                f" · 输出 {_esc(usage.get('output_tokens', 0))}"
+                f" · 缓存读 {_esc(usage.get('cache_read_tokens', 0))}"
+                f" · 缓存写 {_esc(usage.get('cache_write_tokens', 0))}"
             )
+        rows.append(
+            _kv("Token", usage_text)
         )
     stop = data.get("stop_reason")
     if stop:
@@ -454,7 +460,10 @@ def _session_end_body(data: dict) -> str:
             _kv(
                 "Token",
                 f"输入 {_esc(usage.get('input_tokens', 0))}"
-                f" · 输出 {_esc(usage.get('output_tokens', 0))}",
+                f" · 输出 {_esc(usage.get('output_tokens', 0))}"
+                f" · 缓存读 {_esc(usage.get('cache_read_tokens', 0))}"
+                f" · 缓存写 {_esc(usage.get('cache_write_tokens', 0))}"
+                f"{' · 用量不完整' if usage.get('available') is False else ''}",
             )
         )
     error = data.get("error")
@@ -654,6 +663,9 @@ def _header_html(summary: SessionSummary) -> str:
         f"<tr><th>轮数</th><td>{_esc(summary.rounds)}</td></tr>"
         f"<tr><th>Token</th><td>输入 {_esc(summary.input_tokens)}"
         f" · 输出 {_esc(summary.output_tokens)} · 总计 {_esc(total)}</td></tr>"
+        f"<tr><th>缓存 Token</th><td>读取 {_esc(summary.cache_read_tokens)}"
+        f" · 写入 {_esc(summary.cache_write_tokens)}"
+        f"{' · 用量不完整' if not summary.usage_available else ''}</td></tr>"
         "</table></header>"
     )
 
@@ -713,6 +725,8 @@ def _footer_html(summary: SessionSummary) -> str:
         f"<p>输入 Token <strong>{_esc(summary.input_tokens)}</strong>"
         f" · 输出 Token <strong>{_esc(summary.output_tokens)}</strong>"
         f" · 总计 <strong>{_esc(total)}</strong>"
+        f" · 缓存读取 <strong>{_esc(summary.cache_read_tokens)}</strong>"
+        f" · 缓存写入 <strong>{_esc(summary.cache_write_tokens)}</strong>"
         f" · 轮数 <strong>{_esc(summary.rounds)}</strong></p>"
         '<p class="muted">单文件离线报告：无外部 CSS / JS / 字体依赖，'
         "无需 JavaScript 即可查看全部内容（折叠区使用原生 details 元素）。</p>"

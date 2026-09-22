@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from minicode.core.models import ToolSpec
+from minicode.tools.artifacts import ReadArtifactTool
 from minicode.tools.base import BaseTool
 from minicode.tools.command import BashTool
 from minicode.tools.files import EditTool, LsTool, ReadTool, WriteTool
@@ -45,6 +46,7 @@ def default_registry() -> ToolRegistry:
         WriteTool(),
         LsTool(),
         GrepTool(),
+        ReadArtifactTool(),
     ):
         registry.register(tool)
     return registry

@@ -85,6 +85,8 @@ def test_run_command_output_truncated(tmp_path):
     assert outcome.success is True
     assert len(outcome.output) <= 2200
     assert "truncated" in outcome.output
+    assert outcome.full_output is not None
+    assert len(outcome.full_output) > 50_000
 
 
 def test_run_command_cwd(tmp_path):

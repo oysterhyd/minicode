@@ -12,7 +12,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, truncate_output
+from minicode.tools.base import BaseTool, ToolContext, bounded_output, resolve_or_fail
 from minicode.tools.files import SKIP_DIRS
 
 _RG_TIMEOUT_S = 30.0
@@ -66,9 +66,7 @@ class GrepTool(BaseTool):
             matches = self._python_search(regex, base, args.glob, effective_max, ctx)
         if not matches:
             return ToolOutcome(output="(no matches)")
-        return ToolOutcome(
-            output=truncate_output("\n".join(matches), ctx.limits.max_output_chars)
-        )
+        return bounded_output("\n".join(matches), ctx.limits.max_output_chars)
 
     # ------------------------------------------------------------------
     # ripgrep strategy: returns match lines, [] for no matches, or None

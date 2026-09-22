@@ -197,12 +197,12 @@ def test_stream_without_system_or_tools_omits_them() -> None:
     assert "tools" not in body
 
 
-def test_usage_defaults_to_zero_when_gateway_omits_it() -> None:
+def test_usage_is_unknown_when_gateway_omits_it() -> None:
     provider, _ = make_provider(lambda request: sse_response([text_delta("hi")]))
     collected = run_stream(provider, messages=base_user_message())
 
     done = [e for e in collected if isinstance(e, ResponseDone)][0]
-    assert done.response.usage == Usage()
+    assert done.response.usage == Usage(available=False)
 
 
 def test_stream_without_finish_reason_still_yields_done() -> None:

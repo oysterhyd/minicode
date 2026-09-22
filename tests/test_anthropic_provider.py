@@ -296,7 +296,7 @@ def test_unexpected_non_sdk_exception_propagates() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_end_turn_and_missing_usage_default_to_zero() -> None:
+def test_end_turn_and_missing_usage_is_unknown() -> None:
     # Final message has no `usage` attribute at all -> getattr defaults kick in.
     final_message = SimpleNamespace(
         content=[SimpleNamespace(type="text", text="all done")],
@@ -308,7 +308,7 @@ def test_end_turn_and_missing_usage_default_to_zero() -> None:
 
     response = [e for e in collected if isinstance(e, ResponseDone)][0].response
     assert response.stop_reason == StopReason.END_TURN
-    assert response.usage == Usage(input_tokens=0, output_tokens=0)
+    assert response.usage == Usage(input_tokens=0, output_tokens=0, available=False)
 
 
 def test_max_tokens_stop_reason_maps() -> None:

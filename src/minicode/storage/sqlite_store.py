@@ -41,11 +41,12 @@ DEFAULT_DB_PATH = Path.home() / ".minicode" / "sessions.db"
 
 #: Layout version recorded in ``PRAGMA user_version``. Bump when the schema
 #: changes in a way older code cannot read.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SESSION_COLUMNS = (
     "session_id, created_at, workspace, provider, model, "
-    "status, exit_reason, rounds, input_tokens, output_tokens"
+    "status, exit_reason, rounds, input_tokens, output_tokens, "
+    "cache_read_tokens, cache_write_tokens, usage_available"
 )
 
 
@@ -62,6 +63,9 @@ class SessionSummary(BaseModel):
     rounds: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    usage_available: bool = True
 
 
 class SessionStore(Protocol):
@@ -79,6 +83,9 @@ class SessionStore(Protocol):
         rounds: int | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
+        usage_available: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
         workspace: str | None = None,
@@ -146,7 +153,10 @@ class SqliteStore:
                 exit_reason   TEXT,
                 rounds        INTEGER NOT NULL DEFAULT 0,
                 input_tokens  INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL DEFAULT 0
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                usage_available    INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -181,8 +191,28 @@ class SqliteStore:
             );
             """
         )
+        # v3 -> v4: keep cumulative cache usage and whether the provider
+        # actually reported usage.  Column checks also repair databases that
+        # were created by an interrupted migration before user_version moved.
+        session_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "cache_read_tokens" not in session_columns:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+        if "cache_write_tokens" not in session_columns:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+        if "usage_available" not in session_columns:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN usage_available INTEGER NOT NULL DEFAULT 0"
+            )
         # PRAGMAs cannot bind parameters; SCHEMA_VERSION is a module constant.
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._conn.commit()
 
     def close(self) -> None:
         """Close the underlying connection (tidy teardown in tests / CLI)."""
@@ -219,8 +249,9 @@ class SqliteStore:
         session_id = uuid.uuid4().hex
         with self.transaction() as conn:
             conn.execute(
-                "INSERT INTO sessions (session_id, created_at, workspace, provider, model)"
-                " VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO sessions "
+                "(session_id, created_at, workspace, provider, model, usage_available)"
+                " VALUES (?, ?, ?, ?, ?, 1)",
                 (session_id, utc_now(), workspace, provider, model),
             )
         return session_id
@@ -234,6 +265,9 @@ class SqliteStore:
         rounds: int | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
+        usage_available: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
         workspace: str | None = None,
@@ -255,6 +289,15 @@ class SqliteStore:
         if output_tokens is not None:
             assignments.append("output_tokens = ?")
             params.append(output_tokens)
+        if cache_read_tokens is not None:
+            assignments.append("cache_read_tokens = ?")
+            params.append(cache_read_tokens)
+        if cache_write_tokens is not None:
+            assignments.append("cache_write_tokens = ?")
+            params.append(cache_write_tokens)
+        if usage_available is not None:
+            assignments.append("usage_available = ?")
+            params.append(int(usage_available))
         if model is not None:
             assignments.append("model = ?")
             params.append(model)
@@ -318,6 +361,9 @@ class SqliteStore:
             rounds=row["rounds"],
             input_tokens=row["input_tokens"],
             output_tokens=row["output_tokens"],
+            cache_read_tokens=row["cache_read_tokens"],
+            cache_write_tokens=row["cache_write_tokens"],
+            usage_available=bool(row["usage_available"]),
         )
 
     # -- messages ----------------------------------------------------------

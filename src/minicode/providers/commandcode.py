@@ -320,7 +320,7 @@ class CommandCodeProvider:
         tool_buffers: dict[int, dict[str, str]] = {}
         tool_order: list[int] = []
         finish_reason: str | None = None
-        usage = Usage()
+        usage = Usage(available=False)
 
         try:
             # NOTE: base_url gets a trailing "/" so httpx merges the relative
@@ -388,10 +388,17 @@ class CommandCodeProvider:
                                 if isinstance(details, dict)
                                 else None
                             )
+                            cache_write = (
+                                details.get("cache_creation_tokens")
+                                if isinstance(details, dict)
+                                else raw_usage.get("cache_creation_input_tokens")
+                            )
                             usage = Usage(
                                 input_tokens=_to_int(raw_usage.get("prompt_tokens")),
                                 output_tokens=_to_int(raw_usage.get("completion_tokens")),
                                 cache_read_tokens=max(0, _to_int(cached)),
+                                cache_write_tokens=max(0, _to_int(cache_write)),
+                                available=True,
                             )
         except httpx.HTTPError as exc:
             # Transport failures (connect/read errors, mid-stream breaks).

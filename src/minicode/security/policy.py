@@ -69,7 +69,7 @@ class PermissionPolicy(Protocol):
 
 
 #: Tools that only read workspace state: always safe to auto-allow.
-_READ_TOOLS = frozenset({"read", "ls", "grep"})
+_READ_TOOLS = frozenset({"read", "ls", "grep", "read_artifact"})
 #: Tools that mutate files; ``bash`` is the escape hatch and never auto-allowed.
 _EDIT_TOOLS = frozenset({"edit", "write"})
 

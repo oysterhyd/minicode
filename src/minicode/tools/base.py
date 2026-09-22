@@ -64,6 +64,18 @@ def truncate_output(text: str, limit: int) -> str:
     return text[:limit] + f"\n...[output truncated: {len(text)} chars total]"
 
 
+def bounded_output(text: str, limit: int, **updates: Any) -> ToolOutcome:
+    """Build an outcome with a bounded preview and recoverable original.
+
+    Tool implementations use this instead of throwing the tail away.  The
+    runtime archives ``full_output`` before returning a smaller preview and
+    artifact reference to the model.
+    """
+    preview = truncate_output(text, limit)
+    full_output = text if preview != text else None
+    return ToolOutcome(output=preview, full_output=full_output, **updates)
+
+
 def resolve_or_fail(ctx: ToolContext, user_path: str) -> tuple[Path | None, ToolOutcome | None]:
     """Resolve *user_path* inside the workspace.
 

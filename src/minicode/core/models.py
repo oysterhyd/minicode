@@ -63,6 +63,11 @@ class Usage(BaseModel):
     output_tokens: int = 0
     # Prompt tokens served from the provider cache; a subset of input_tokens.
     cache_read_tokens: int = 0
+    # Prompt tokens written into the provider cache for future requests.
+    cache_write_tokens: int = 0
+    # False means the provider did not return usage for this request.  This
+    # keeps "unknown" distinct from a real, reported zero.
+    available: bool = True
 
     @property
     def total_tokens(self) -> int:
@@ -80,6 +85,8 @@ class Usage(BaseModel):
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            available=self.available and other.available,
         )
 
 
@@ -125,6 +132,10 @@ class ToolOutcome(BaseModel):
 
     success: bool = True
     output: str = ""
+    # Built-in tools may expose a bounded preview in ``output`` while keeping
+    # the unabridged text here for the runtime to archive before model-facing
+    # truncation.  It is an execution-only field and is never serialized.
+    full_output: str | None = Field(default=None, exclude=True, repr=False)
     error: str | None = None
     exit_code: int | None = None
     job_id: str | None = None  # background command started by this call
@@ -200,6 +211,7 @@ class ExitReason(str, enum.Enum):
     MAX_ROUNDS = "max_rounds"        # round budget exhausted
     TOKEN_BUDGET = "token_budget"    # cumulative token budget exhausted
     TIME_BUDGET = "time_budget"      # wall-clock budget exhausted
+    CONTEXT_LIMIT = "context_limit"  # next request cannot fit the model window
     CANCELLED = "cancelled"          # user interrupted (Ctrl+C)
     GOAL_NOT_MET = "goal_not_met"    # acceptance checks still failing when the budget ran out
     PROVIDER_ERROR = "provider_error"

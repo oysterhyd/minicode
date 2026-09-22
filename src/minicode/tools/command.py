@@ -22,7 +22,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, truncate_output
+from minicode.tools.base import BaseTool, ToolContext, bounded_output, resolve_or_fail
 
 #: Force the Windows shells to speak UTF-8 on the pipe. Without this,
 #: PowerShell writes its output in the console code page (cp936 on a Chinese
@@ -231,12 +231,17 @@ class BashTool(BaseTool):
             raise
 
         output = decode_shell_output(stdout)
-        output = truncate_output(output, ctx.limits.max_command_output_chars)
         if proc.returncode == 0:
-            return ToolOutcome(success=True, output=output, exit_code=0)
-        return ToolOutcome(
+            return bounded_output(
+                output,
+                ctx.limits.max_command_output_chars,
+                success=True,
+                exit_code=0,
+            )
+        return bounded_output(
+            output,
+            ctx.limits.max_command_output_chars,
             success=False,
-            output=output,
             error=f"command exited with code {proc.returncode}",
             exit_code=proc.returncode,
         )

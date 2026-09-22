@@ -44,6 +44,9 @@ def test_create_and_get_session_roundtrip(store):
     assert summary.rounds == 0
     assert summary.input_tokens == 0
     assert summary.output_tokens == 0
+    assert summary.cache_read_tokens == 0
+    assert summary.cache_write_tokens == 0
+    assert summary.usage_available is True
     # created_at is a UTC ISO-8601 string with an explicit offset
     assert summary.created_at.endswith("+00:00")
 
@@ -180,6 +183,9 @@ def test_update_session_partial_and_clear(store):
         rounds=3,
         input_tokens=120,
         output_tokens=45,
+        cache_read_tokens=30,
+        cache_write_tokens=10,
+        usage_available=False,
     )
     s = store.get_session(session_id)
     assert (s.status, s.exit_reason, s.rounds, s.input_tokens, s.output_tokens) == (
@@ -190,6 +196,11 @@ def test_update_session_partial_and_clear(store):
         45,
     )
     assert (s.workspace, s.provider, s.model) == ("w", "p", "m")
+    assert (s.cache_read_tokens, s.cache_write_tokens, s.usage_available) == (
+        30,
+        10,
+        False,
+    )
 
     # partial update keeps the other fields
     store.update_session(session_id, rounds=5)
@@ -281,3 +292,30 @@ def test_rejects_database_from_newer_version(tmp_path):
 
     with pytest.raises(RuntimeError, match="newer version"):
         SqliteStore(db_path)
+
+
+def test_migrates_v3_session_usage_columns(tmp_path):
+    db_path = tmp_path / "sessions.db"
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute(
+            "CREATE TABLE sessions ("
+            "session_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, workspace TEXT NOT NULL, "
+            "provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', "
+            "exit_reason TEXT, rounds INTEGER NOT NULL DEFAULT 0, "
+            "input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0)"
+        )
+        con.execute("PRAGMA user_version = 3")
+        con.commit()
+    finally:
+        con.close()
+
+    store = SqliteStore(db_path)
+    try:
+        columns = {
+            row[1] for row in store.conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        assert {"cache_read_tokens", "cache_write_tokens", "usage_available"} <= columns
+        assert store.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        store.close()

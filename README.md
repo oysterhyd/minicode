@@ -114,24 +114,25 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 
 - CLI 单轮执行、交互会话、流式文本展示、Ctrl+C 取消（取消前先持久化）。
 - 模型适配器：CommandCode（OpenAI 兼容，默认）、Anthropic（流式）、FakeProvider（确定性脚本）。
-- 基础工具（对齐 Pi Agent 的 4 核心工具）：`read`、`bash`、`edit`、`write`，外加只读辅助 `ls`、`grep`。
+- 基础工具（对齐 Pi Agent 的 4 核心工具）：`read`、`bash`、`edit`、`write`，外加只读辅助
+  `ls`、`grep`、`read_artifact`（按 offset/limit 回读当前会话归档）。
 - 工具参数校验（pydantic schema）、工作区路径边界（含符号链接/junction）、修改与命令审批
   （ALLOW/ASK/DENY 权限门）、命令超时与输出截断。
 - 会话持久化（SQLite）、逐事件执行追踪、diff 与命令退出码报告。
 - 预算控制：默认限制**会话累计模型轮数**（20）与**每个用户回合时长**（600s），token 不限制；`--max-tokens N`
   可显式加一道累计输入及输出 token 上限（退出原因 token_budget）。它不等于上下文大小，
-  也不是按缓存折扣计算的费用。压缩层按「模型目录窗口 − 目录最大输出」触发。退出原因可区分
+  也不是按缓存折扣计算的费用。压缩层以模型硬窗口和 provider 实际输出上限统一计算。退出原因可区分
   （completed / max_tokens / max_rounds / token_budget / time_budget / cancelled / goal_not_met /
-  provider_error / internal_error）。
+  context_limit / provider_error / internal_error）。
 
 ## P1 能力清单（可靠性）
 
 - **分层上下文压缩**：超大工具输出转存为 artifact（模型看到预览 + 归档引用）→ 按完整交互单元归档早期历史
   （tool_use 与 tool_result 永不拆散）→ 压缩较旧工具结果 → 仍超阈值时生成确定性结构化摘要。
-  触发阈值是模型目录中「上下文窗口 − 最大输出」的 80%，切换模型后立即生效；目录值是本地
-  配置，不是向服务端实时发现的能力。压缩后的视图持久化，恢复后所见即所存。
-  当前归档工具输出之前可能已发生截断，且没有模型可调用的归档回读工具；压缩不保证一定
-  降到阈值内或完整保留用户约束。详细边界见 [架构说明](docs/architecture.md#52-上下文压缩与归档)。
+  工具截断前的完整成功/失败输出先进入归档；模型可通过 `read_artifact` 分页取回。压缩会处理
+  单次用户请求内的多轮已闭合工具交互，逐字保留用户要求与 artifact 引用；压缩后仍超过硬窗口时
+  以 `context_limit` 明确结束，不发送注定失败的请求。详细边界见
+  [架构说明](docs/architecture.md#52-上下文压缩与归档)。
 - **会话恢复**：`resume` 加载消息/用量/轮数和保存的 provider/model/workspace；已落库结果不重复执行；只读调用重新执行并留痕
   （新事件记录）；写/Shell 类副作用不自动重放，标记「状态未知」并要求模型先核实。
 - **回合限制**：wall-clock deadline 覆盖模型流、工具执行和验收命令；超时停止启动新工具，
@@ -153,9 +154,9 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 - 同一模型响应中的工具按顺序串行执行；后台命令只存活于当前用户回合，结束时清理。
 - `TaskStore` 的依赖与认领能力尚未接入 Runtime，不能视为已有多代理调度。
 - token 估算采用字符数 / 3，可能低估部分中文或混合内容，不是精确计数或严格上界。
-- 已解析缓存读取用量，但 Anthropic 请求尚未主动配置 `cache_control`；缓存统计没有完整
-  持久化，恢复会话后不能连续反映历史命中率。OpenAI 兼容协议也不保证网关支持相同缓存行为。
-- 启动与 `/model` 切换采用不同的输出上限构造路径；目录最大输出与实际请求上限目前不总是一致。
+- 缓存读/写用量与“provider 未返回 usage”状态会逐请求记入事件、累计写入 SQLite，并在 resume 后恢复；
+  Anthropic 请求尚未主动配置 `cache_control`，OpenAI 兼容协议也不保证网关支持相同缓存行为。
+- token 估算仍采用字符数 / 3；硬超限门避免发送已知越界请求，但估算值不是服务端 tokenizer 的严格上界。
 
 ## 明确未实现（P2）
 
@@ -169,7 +170,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 → 结果回填」循环，`core` 提供共享 pydantic 契约，事件与消息实时写入 SQLite。
 模块图、事件流与关键语义见 [docs/architecture.md](docs/architecture.md)，
 原始设计记录见 [plan.md](plan.md)；本轮功能扩展、TUI 与效率优化建议见
-[探索与优化方案](docs/optimization-design.md)（提案，尚未实现）。
+[探索与优化方案](docs/optimization-design.md)（A 阶段已实现，B–D 阶段待迭代）。
 
 ## 运行测试
 

@@ -48,6 +48,7 @@ class FakeTurn(BaseModel):
     output_tokens: int | None = None
     # Cache-served subset of input_tokens (status-bar cache-hit demos).
     cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
     # Default: TOOL_USE if tool_calls else END_TURN.
     stop_reason: StopReason | None = None
 
@@ -139,6 +140,8 @@ class FakeProvider:
                 else options.default_output_tokens
             ),
             cache_read_tokens=turn.cache_read_tokens or 0,
+            cache_write_tokens=turn.cache_write_tokens or 0,
+            available=True,
         )
 
         yield ResponseDone(

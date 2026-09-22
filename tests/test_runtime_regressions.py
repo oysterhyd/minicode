@@ -58,13 +58,15 @@ def protected_checker(ws):
     return GoalChecker(spec, ws, ProtectedSnapshot(ws, ["guard.txt"]))
 
 
-def test_builtin_services_only_expose_supported_tools_and_keep_artifacts(env):
+def test_builtin_services_expose_session_artifact_readback(env):
     ws, store = env
     setup = _Setup(ws, scripted(), "fake", "fake", Budget())
     services = _build_services(setup, store, Console(), True)
-    assert set(services.registry.names()) == {"read", "write", "edit", "bash", "ls", "grep"}
-    runtime = runtime_for(env)
-    assert "read_artifact" not in runtime._system_prompt
+    assert set(services.registry.names()) == {
+        "read", "write", "edit", "bash", "ls", "grep", "read_artifact"
+    }
+    runtime = runtime_for(env, artifact_store=services.artifact_store)
+    assert "read_artifact" in runtime._system_prompt
     assert "delegate" not in runtime._system_prompt
     sid = store.create_session(workspace=str(ws), provider="fake", model="fake")
     ref = services.artifact_store.spill(sid, "tool_output", "full output")

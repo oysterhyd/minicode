@@ -124,6 +124,8 @@ class AnthropicProvider:
     @staticmethod
     def _map_usage(response: Any) -> Usage:
         raw_usage = getattr(response, "usage", None)
+        if raw_usage is None:
+            return Usage(available=False)
         # Anthropic reports cache reads/creations separately from input
         # tokens; normalize so input_tokens is the total prompt size and
         # cache_read_tokens the cache-served subset (same convention as the
@@ -135,6 +137,8 @@ class AnthropicProvider:
             input_tokens=input_tokens + cache_read + cache_creation,
             output_tokens=int(getattr(raw_usage, "output_tokens", 0) or 0),
             cache_read_tokens=cache_read,
+            cache_write_tokens=cache_creation,
+            available=True,
         )
 
     # ------------------------------------------------------------------

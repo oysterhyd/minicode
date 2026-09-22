@@ -234,6 +234,19 @@ def _archive_summary(groups: list[list[Message]], artifact_id: str | None) -> st
     """Replacement text for the archived prefix of units."""
     count = len(groups)
     lines = [f"[context compacted] 最早的 {count} 个交互单元（单元 1-{count}）已归档："]
+    requirements: list[str] = []
+    for group in groups:
+        for message in group:
+            if message.role != "user":
+                continue
+            for block in message.content:
+                if isinstance(block, TextBlock) and block.text.strip():
+                    text = block.text.strip()
+                    if text not in requirements:
+                        requirements.append(text)
+    if requirements:
+        lines.append("用户要求（逐字保留）：")
+        lines.extend(f"- {text}" for text in requirements)
     for ordinal, group in enumerate(groups, start=1):
         lines.append(_unit_line(group, ordinal))
     if artifact_id is not None:
@@ -250,6 +263,7 @@ def _structured_summary(groups: list[list[Message]]) -> str:
     failures: list[str] = []
     todos: list[str] = []
     refs: list[str] = []
+    requirements: list[str] = []
     message_count = 0
     for group in groups:
         for message in group:
@@ -258,6 +272,10 @@ def _structured_summary(groups: list[list[Message]]) -> str:
                 if isinstance(block, TextBlock):
                     if not goal and message.role == "user" and block.text.strip():
                         goal = _shorten(block.text, 120)
+                    if message.role == "user" and block.text.strip():
+                        requirement = block.text.strip()
+                        if requirement not in requirements:
+                            requirements.append(requirement)
                     for line in block.text.splitlines():
                         stripped = line.strip()
                         if stripped and _TODO_LINE.search(stripped) and stripped not in todos:
@@ -276,6 +294,7 @@ def _structured_summary(groups: list[list[Message]]) -> str:
     lines = [
         f"[context summary] {message_count} 条消息 / {len(groups)} 个早期交互单元已合并为结构化摘要：",
         f"- 目标: {goal or '（未记录）'}",
+        f"- 用户要求: {' | '.join(requirements) if requirements else '（未记录）'}",
         f"- 关键文件: {', '.join(files) if files else '无'}",
         f"- 失败原因: {'; '.join(failures[:3]) if failures else '无'}",
         f"- 剩余 todo: {'; '.join(todos[:3]) if todos else '无'}",
@@ -296,11 +315,11 @@ class ContextCompactor:
     by passing ``spill_fn = lambda kind, content: store.spill(session_id,
     kind, content).artifact_id``.
 
-    ``context_tokens_fn`` supplies the prompt budget to trigger on — normally
-    the active model's ``context_window - max_output_tokens`` (see
-    :meth:`~minicode.runtime.AgentRuntime.prompt_budget_tokens`), read on every
-    check so a mid-session ``/model`` switch is honoured. Without it the static
-    ``config.max_context_tokens`` is used.
+    ``context_tokens_fn`` supplies the model's hard context window and
+    ``output_tokens_fn`` the response reserve actually sent by the provider.
+    Both are read on every check so a mid-session ``/model`` switch is
+    honoured. Without callbacks the static window and legacy 2000-token
+    response reserve are used.
     """
 
     def __init__(
@@ -308,14 +327,36 @@ class ContextCompactor:
         config: CompactConfig,
         spill_fn: Callable[[str, str], str] | None = None,
         context_tokens_fn: Callable[[], int] | None = None,
+        output_tokens_fn: Callable[[], int] | None = None,
     ) -> None:
         self.config = config
         self._spill_fn = spill_fn
         self._context_tokens_fn = context_tokens_fn
+        self._output_tokens_fn = output_tokens_fn
+
+    @property
+    def output_tokens(self) -> int:
+        """Response reserve included in estimates (legacy default: 2000)."""
+        if self._output_tokens_fn is None:
+            return 2000
+        return max(0, self._output_tokens_fn())
+
+    def _estimate(
+        self,
+        system: str | None,
+        messages: list[Message],
+        tool_specs: list[ToolSpec] | None,
+    ) -> int:
+        return estimate_messages_tokens(
+            system,
+            messages,
+            tool_specs,
+            reserve_output_tokens=self.output_tokens,
+        )
 
     @property
     def context_tokens(self) -> int:
-        """Prompt budget currently in force (tokens)."""
+        """Hard model context window currently in force (tokens)."""
         if self._context_tokens_fn is None:
             return self.config.max_context_tokens
         return self._context_tokens_fn()
@@ -331,7 +372,16 @@ class ContextCompactor:
         tool_specs: list[ToolSpec] | None = None,
     ) -> bool:
         """True when the estimated next prompt exceeds the trigger threshold."""
-        return estimate_messages_tokens(system, messages, tool_specs) > self._threshold
+        return self._estimate(system, messages, tool_specs) > self._threshold
+
+    def fits_hard_limit(
+        self,
+        system: str | None,
+        messages: list[Message],
+        tool_specs: list[ToolSpec] | None = None,
+    ) -> bool:
+        """Whether the next prompt plus configured response fits the window."""
+        return self._estimate(system, messages, tool_specs) <= self.context_tokens
 
     def compact(
         self,
@@ -344,10 +394,12 @@ class ContextCompactor:
         Empty, tiny or all-tail inputs come back unchanged (``changed=False``)
         with the original message list object.
         """
-        stats = CompactStats(tokens_before=estimate_messages_tokens(system, messages, tool_specs))
+        stats = CompactStats(tokens_before=self._estimate(system, messages, tool_specs))
         current = list(messages)
 
         current, archived = self._archive_early_units(current)
+        if archived == 0:
+            current, archived = self._archive_closed_exchanges(current)
         stats.archived_units = archived
 
         current, shrunk = self._shrink_old_results(current)
@@ -357,7 +409,7 @@ class ContextCompactor:
         stats.summarized_units = summarized
 
         changed = bool(archived or shrunk or summarized)
-        stats.tokens_after = estimate_messages_tokens(system, current, tool_specs)
+        stats.tokens_after = self._estimate(system, current, tool_specs)
         if not changed:
             return CompactResult(messages=messages, stats=stats, changed=False)
         return CompactResult(messages=current, stats=stats, changed=True)
@@ -395,6 +447,65 @@ class ContextCompactor:
         )
         return messages[:span_start] + [replacement] + messages[span_end:], k
 
+    def _archive_closed_exchanges(
+        self, messages: list[Message]
+    ) -> tuple[list[Message], int]:
+        """Archive early tool exchanges inside one long user request.
+
+        The original user message is retained byte-for-byte and receives an
+        additional archive note.  This fixes the common long-task shape where
+        ten tool rounds all belong to one user request, so fresh-input based
+        segmentation otherwise has no early unit to remove.
+        """
+        _head_end, units = _segment(messages)
+        if len(units) != 1:
+            return messages, 0
+        unit_start, unit_end = units[0]
+        anchor = messages[unit_start]
+        spans: list[tuple[int, int]] = []
+        index = unit_start + 1
+        while index + 1 < unit_end:
+            assistant = messages[index]
+            results = messages[index + 1]
+            calls = {
+                block.id
+                for block in assistant.content
+                if isinstance(block, ToolUseBlock)
+            }
+            answered = {
+                block.tool_use_id
+                for block in results.content
+                if isinstance(block, ToolResultBlock)
+            }
+            if assistant.role != "assistant" or results.role != "user" or not calls:
+                break
+            if calls != answered or not _pairing_ok(messages, index, index + 2):
+                break
+            spans.append((index, index + 2))
+            index += 2
+
+        early = _early_units(spans, self.config.tail_keep_rounds)
+        if len(early) < self.config.min_archive_units:
+            return messages, 0
+        span_start = early[0][0]
+        span_end = early[-1][1]
+        groups = [messages[start:end] for start, end in early]
+        artifact_id: str | None = None
+        if self._spill_fn is not None:
+            payload = json.dumps(
+                [message.model_dump() for message in messages[span_start:span_end]],
+                ensure_ascii=False,
+            )
+            artifact_id = self._spill_fn("archive", payload)
+        note = TextBlock(text=_archive_summary(groups, artifact_id))
+        preserved_anchor = Message(role="user", content=[*anchor.content, note])
+        return (
+            messages[:unit_start]
+            + [preserved_anchor]
+            + messages[span_end:],
+            len(early),
+        )
+
     # -- step B: shrink old tool results in the retained region --------------
 
     def _shrink_old_results(self, messages: list[Message]) -> tuple[list[Message], int]:
@@ -420,10 +531,14 @@ class ContextCompactor:
                     and (message_index, block_index) not in protected
                     and len(block.content) > preview
                 ):
+                    refs = list(dict.fromkeys(_ARTIFACT_REF.findall(block.content)))
+                    suffix = SHRINK_MARKER
+                    if refs:
+                        suffix += "\n归档引用: " + " ".join(refs)
                     blocks.append(
                         ToolResultBlock(
                             tool_use_id=block.tool_use_id,
-                            content=block.content[:preview] + SHRINK_MARKER,
+                            content=block.content[:preview] + suffix,
                             is_error=block.is_error,
                         )
                     )
@@ -444,7 +559,7 @@ class ContextCompactor:
         messages: list[Message],
         tool_specs: list[ToolSpec] | None,
     ) -> tuple[list[Message], int]:
-        if estimate_messages_tokens(system, messages, tool_specs) <= self._threshold:
+        if self._estimate(system, messages, tool_specs) <= self._threshold:
             return messages, 0
         _head_end, units = _segment(messages)
         early = _early_units(units, self.config.tail_keep_rounds)

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -96,6 +97,7 @@ _EXIT_LABELS: dict[str, str] = {
     "max_rounds": "达到最大轮数",
     "token_budget": "Token 预算耗尽",
     "time_budget": "时长预算耗尽",
+    "context_limit": "上下文超过模型窗口",
     "cancelled": "已取消",
     "goal_not_met": "验收未通过",
     "provider_error": "模型调用失败",
@@ -107,7 +109,15 @@ _SCRIPT_OPTION_FIELDS = frozenset(
     {"turns", "exhausted_text", "default_input_tokens", "default_output_tokens"}
 )
 _SCRIPT_TURN_FIELDS = frozenset(
-    {"text", "tool_calls", "input_tokens", "output_tokens", "stop_reason"}
+    {
+        "text",
+        "tool_calls",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "stop_reason",
+    }
 )
 _SCRIPT_CALL_FIELDS = frozenset({"name", "arguments", "id"})
 
@@ -300,7 +310,12 @@ def _build_provider(
         except ImportError as exc:
             _fail(f"无法加载 commandcode provider：{exc}")
         chosen = model or DEFAULT_MODEL
-        return CommandCodeProvider(model=chosen), "commandcode", chosen
+        info = lookup_model(chosen)
+        return (
+            CommandCodeProvider(model=chosen, max_tokens=info.max_output_tokens),
+            "commandcode",
+            chosen,
+        )
 
     if provider_choice is ProviderChoice.anthropic:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -311,7 +326,12 @@ def _build_provider(
         except ImportError as exc:
             _fail(f"未安装 anthropic SDK，请先执行 pip install 'minicode[real]'。({exc})")
         chosen = model or "claude-sonnet-4-5"
-        return AnthropicProvider(model=chosen), "anthropic", chosen
+        info = lookup_model(chosen)
+        return (
+            AnthropicProvider(model=chosen, max_tokens=info.max_output_tokens or 4096),
+            "anthropic",
+            chosen,
+        )
 
     options = (
         _load_script(script)
@@ -542,6 +562,8 @@ def _print_turn_summary(console: Console, result: RunResult) -> None:
         f" 轮数: {result.rounds} ·"
         f" Token: {format_tokens(usage.total_tokens)}"
         f"（输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}） ·"
+        f" 缓存 读 {format_tokens(usage.cache_read_tokens)} / 写 {format_tokens(usage.cache_write_tokens)}"
+        f"{' / 用量不完整' if not usage.available else ''} ·"
         f" 耗时: {result.duration_s:.1f}s ·"
         f" 会话: {result.session_id[:8]}"
     )
@@ -645,11 +667,9 @@ def _attach_compactor(runtime: Any, artifact_store: Any) -> None:
     (compaction runs strictly inside turns), so the closure reads it lazily
     off the runtime.
 
-    The trigger is the active model's prompt budget
-    (``context_window - max_output_tokens``), re-read on every check so a
-    mid-session ``/model`` switch is honoured. The session's *token budget* is
-    deliberately not used here: it counts cumulative spend across rounds, not
-    how full the context currently is.
+    The hard window and the provider's actual response budget are re-read on
+    every check so a mid-session ``/model`` switch is honoured. The session's
+    cumulative token budget is deliberately unrelated to this calculation.
     """
     from minicode.context.compact import CompactConfig, ContextCompactor
 
@@ -659,10 +679,11 @@ def _attach_compactor(runtime: Any, artifact_store: Any) -> None:
         return artifact_store.spill(session_id, kind, content).artifact_id
 
     runtime._compactor = ContextCompactor(
-        # Static fallback only; context_tokens_fn is what actually decides.
-        CompactConfig(max_context_tokens=max(runtime.prompt_budget_tokens(), 1)),
+        # Static fallback only; the callbacks are what actually decide.
+        CompactConfig(max_context_tokens=max(runtime.context_window, 1)),
         spill_fn=spill,
-        context_tokens_fn=runtime.prompt_budget_tokens,
+        context_tokens_fn=lambda: runtime.context_window,
+        output_tokens_fn=runtime.effective_max_output_tokens,
     )
 
 
@@ -1201,11 +1222,20 @@ def _resolve_session_id(store: SqliteStore, session_id: str) -> str | None:
 
 def _full_tool_outputs(store: SqliteStore, session_id: str) -> dict[str, str]:
     """Map tool_use_id -> full ToolResultBlock content from persisted messages."""
+    from minicode.storage import ArtifactStore
+
+    artifacts = ArtifactStore(store)
     outputs: dict[str, str] = {}
     for message in store.get_messages(session_id):
         for block in message.content:
             if isinstance(block, ToolResultBlock):
-                outputs.setdefault(block.tool_use_id, block.content)
+                full = block.content
+                match = re.search(r"\[artifact:([A-Za-z0-9_-]+)\]", block.content)
+                if match is not None:
+                    archived = artifacts.read(session_id, match.group(1))
+                    if archived is not None:
+                        full = archived
+                outputs.setdefault(block.tool_use_id, full)
     return outputs
 
 
@@ -1264,6 +1294,9 @@ def _render_report(
         f" · 轮数: {summary.rounds}"
         f" · Token: {format_tokens(summary.input_tokens + summary.output_tokens)}"
         f"（输入 {format_tokens(summary.input_tokens)} / 输出 {format_tokens(summary.output_tokens)}）"
+        f" · 缓存读/写: {format_tokens(summary.cache_read_tokens)} / "
+        f"{format_tokens(summary.cache_write_tokens)}"
+        f"{'（用量不完整）' if not summary.usage_available else ''}"
     )
 
     counts: Counter[EventType] = Counter(event.type for event in events)
@@ -1303,6 +1336,7 @@ def _render_report(
     console.print()
     console.print(
         f"总计: 输入 {format_tokens(summary.input_tokens)} token · 输出 {format_tokens(summary.output_tokens)} token"
+        f" · 缓存读 {format_tokens(summary.cache_read_tokens)} · 缓存写 {format_tokens(summary.cache_write_tokens)}"
     )
     final = summary.exit_reason or summary.status
     console.print(f"退出原因: {_exit_label(final)} ({final})")

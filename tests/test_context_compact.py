@@ -442,3 +442,77 @@ def test_context_tokens_fn_overrides_the_static_config():
 def test_without_context_tokens_fn_the_config_value_is_used():
     compactor = ContextCompactor(CompactConfig(max_context_tokens=4_000))
     assert compactor.context_tokens == 4_000
+
+
+def test_single_long_user_task_archives_closed_tool_exchanges():
+    messages = [
+        Message(role="user", content=[TextBlock(text="绝对不要修改测试文件；修复实现")])
+    ]
+    for index in range(10):
+        call_id = f"long_{index}"
+        messages.extend(
+            [
+                Message(
+                    role="assistant",
+                    content=[ToolUseBlock(id=call_id, name="read", input={"path": "x.py"})],
+                ),
+                Message(
+                    role="user",
+                    content=[ToolResultBlock(tool_use_id=call_id, content="x" * 3000)],
+                ),
+            ]
+        )
+    spill = FakeSpill()
+    compactor = ContextCompactor(
+        CompactConfig(max_context_tokens=4000, tail_keep_rounds=4), spill
+    )
+
+    result = compactor.compact("system", messages)
+
+    assert result.changed is True
+    assert result.stats.archived_units == 6
+    assert result.stats.tokens_after < result.stats.tokens_before
+    anchor_text = "\n".join(
+        block.text for block in result.messages[0].content if isinstance(block, TextBlock)
+    )
+    assert "绝对不要修改测试文件；修复实现" in anchor_text
+    assert "[artifact:archive_0000]" in anchor_text
+    assert_pairing(result.messages)
+    assert len(json.loads(spill.calls[0][1])) == 12
+
+
+def test_archive_summary_keeps_user_constraint_verbatim():
+    messages = build_history(6, result_chars=1000)
+    messages[0] = Message(
+        role="user", content=[TextBlock(text="绝对不要修改测试文件")]
+    )
+    result = ContextCompactor(
+        CompactConfig(max_context_tokens=10_000, tail_keep_rounds=2), FakeSpill()
+    ).compact("system", messages)
+
+    assert "绝对不要修改测试文件" in result.messages[0].content[0].text
+
+
+def test_shrinking_preserves_artifact_reference_from_result_tail():
+    referenced = "x" * 1000 + "\n[artifact:tool_output_abc123]"
+    messages = build_history(3, result_text=referenced)
+    result = ContextCompactor(
+        CompactConfig(max_context_tokens=10_000, tail_keep_rounds=4)
+    ).compact("system", messages)
+
+    oldest = result.messages[2].content[0].content
+    assert "[artifact:tool_output_abc123]" in oldest
+
+
+def test_hard_limit_accounts_for_dynamic_output_reserve():
+    reserve = {"tokens": 1000}
+    compactor = ContextCompactor(
+        CompactConfig(max_context_tokens=10_000),
+        context_tokens_fn=lambda: 10_000,
+        output_tokens_fn=lambda: reserve["tokens"],
+    )
+    messages = [Message(role="user", content=[TextBlock(text="x" * 25_000)])]
+
+    assert compactor.fits_hard_limit(None, messages) is True
+    reserve["tokens"] = 3000
+    assert compactor.fits_hard_limit(None, messages) is False

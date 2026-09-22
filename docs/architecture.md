@@ -132,7 +132,7 @@ context/             estimate（保守 token 估算）、compact（归档→压�
 goals/               spec（验收 YAML）、checker（指纹/快照/检查）、evidence（证据账本）
 tasks/               background（已接入）、taskstore（独立模块，尚未接入主循环）
 tools/command.py     bash 增加 background 参数
-storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（schema v2）
+storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（当前数据库 schema v4）
 reports/             render_session_html：单文件离线 HTML 报告
 ui/                  Textual 全屏 TUI（minicode tui）
 providers/           commandcode.py + zcode_config.py：OpenAI 兼容默认适配器
@@ -143,25 +143,23 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
 
 两段式：
 
-1. **工具结果转存**（loop 内，逐调用）：成功输出超过 `spill_threshold_chars`（4000）时，
-   将工具返回的字符串写入 `ArtifactStore`（`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），
-   模型只看到前 1000 字符预览 + `[artifact:<id>]`。工具内部可能已经截断，此处不是原始完整输出。
-2. **轮前压缩**（`ContextCompactor`）：估算 token（字符/3，另加固定输出预留）超过「当前模型
-   prompt 预算 × `trigger_fraction`（0.8）」时依次执行——prompt 预算 =
-   `context_window - max_output_tokens`（`AgentRuntime.prompt_budget_tokens()`，每次检查
-   现读，`/model` 切换立即生效）。交互单元以不含 tool_result 的 user 消息为边界，一个
-   用户回合的多轮工具循环通常仍属于同一单元。按单元归档早期历史 → 缩短较旧工具结果
+1. **工具结果转存**（loop 内，逐调用）：工具在裁剪模型预览时同时保留原文；成功或失败输出超过
+   `spill_threshold_chars`（4000）时，原文写入 `ArtifactStore`
+   （`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），模型看到前 1000 字符预览与
+   `[artifact:<id>]`。`read_artifact` 只在当前 session manifest 中查找，并按字符 offset/limit 分页回读。
+2. **轮前压缩**（`ContextCompactor`）：估算 prompt 与 provider 实际 `max_tokens` 的合计超过当前模型
+   窗口的 `trigger_fraction`（0.8）时依次执行；模型切换后两个值都立即重读。按 user 请求归档早期
+   历史；若整个长任务只有一条初始 user 消息，则改按已闭合的 assistant/tool-result 交互组归档。
+   归档摘要逐字带回 user 文本，原始初始请求保持独立；随后缩短较旧工具结果
    → 满足条件时合并早期单元为确定性摘要；归档/合并前检查调用结果配对。归档原文落 artifact，压缩后的
-   消息列表通过 `store.replace_messages` 原子重写持久化，并发出 `CONTEXT_COMPACTED` 事件。
+   消息列表通过 `store.replace_messages` 原子重写持久化，并发出 `CONTEXT_COMPACTED` 事件。缩短结果时
+   会从全文提取并保留 artifact 引用；压缩后再做硬窗口检查，超限以 `context_limit` 结束。
 
 现有限制：
 
-- 注册表没有归档回读工具；`ArtifactStore.read` 是宿主内部接口，模型不能按 ID 取回内容。
-- read/grep/diff/bash 先截断，再进入转存；失败工具输出不经过成功输出的转存分支。
-- 归档摘要主要保留助手摘录、调用和修改文件，没有独立保留用户约束；缩短工具结果可能丢掉末尾归档 ID。
-- 默认保留最近四个交互单元；单次长任务没有可归档的早期单元，只有结果缩短可能生效。
-- 默认步骤 A 合并早期单元后，步骤 C 可能没有足够单元继续摘要。Runtime 没有压缩后硬性超限门，不能保证请求一定进入预算。
-- 字符数 / 3 不是严格上界；目录最大输出与 provider 实际请求的 `max_tokens` 也不总一致，见 §6。
+- `read_artifact` 当前按字符分页，仍会先由宿主读取整个 UTF-8 artifact；超大输出尚未改为流式落盘。
+- 默认步骤 A 合并早期单元后，步骤 C 可能没有足够单元继续摘要；硬超限会明确停止而不是继续丢信息。
+- 字符数 / 3 不是严格上界，服务端 tokenizer 仍可能与本地估算有偏差。
 
 ### 5.3 Goal 验收与证据（plan.md §6.4 → s17）
 
@@ -219,7 +217,7 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
 
 | plan.md §3 P1 能力 | 实现位置 |
 | --- | --- |
-| 分层上下文压缩 + 输出归档（模型回读尚未实现） | `context/`、`storage/artifacts.py`、`loop._maybe_spill/_compact_if_needed` |
+| 分层上下文压缩 + 输出归档与分页回读 | `context/`、`storage/artifacts.py`、`tools/artifacts.py`、`loop._maybe_spill/_compact_if_needed` |
 | 会话恢复及未确认副作用处理 | `loop.resume/_settle_recovery`、`cli.py`（`resume` 命令） |
 | Goal 验收器 + 失败续跑 + 证据绑定 | `goals/`、`loop._goal_gate`、`--acceptance` 装配 |
 | 后台命令；独立的任务依赖存储 | `tasks/background.py` 已接入；`tasks/taskstore.py` 尚未接入 Runtime；`tools/command.py`、`loop._deliver_finished_jobs` |
@@ -233,12 +231,12 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
   阶段反馈或细粒度 usage 事件。CommandCode 忽略 reasoning-only 文本增量。
 - CommandCode 每次 `stream` 创建一个 `httpx.AsyncClient`；Anthropic 持有 SDK client。
 - 缓存统计：CommandCode 解析 `prompt_tokens_details.cached_tokens`；Anthropic 将普通输入、
-  缓存创建和缓存读取合并到输入总数。`Usage` 没有单独的 cache-write 字段，SQLite 和轮次
-  事件没有完整保存缓存计数，resume 只恢复输入/输出总量。
+  缓存创建和缓存读取合并到输入总数。`Usage` 单独记录 cache-read/cache-write 和 available；轮次事件、
+  SQLite schema v4 与 resume 保存并恢复这些累计值，缺失 usage 不再冒充真实的零。
 - Anthropic 请求没有设置 `cache_control`；兼容网关是否支持缓存、返回哪些 usage 字段，
   必须实际核验，不能由 API 格式兼容推断。
-- `_build_provider` 启动路径采用适配器默认输出上限（CommandCode 8192、Anthropic 4096），
-  `_provider_for_model` 切换路径传入目录最大输出；压缩预算始终使用目录值。
+- `_build_provider` 与 `_provider_for_model` 都把目录最大输出传给 provider；Runtime 从 provider 的
+  实际 `max_tokens` 计算 prompt 预算，压缩器使用同一值作为响应预留。
   `/effort off` 省略字段，表示采用网关默认行为，不等于明确关闭推理。
-- 工具表固定为六个内置工具；权限策略和恢复只读集合都使用内置工具名。
+- 工具表固定为七个内置工具（含 `read_artifact`）；权限策略和恢复只读集合仍使用内置工具名。
   Subagents、Skills、MCP、Plugins、项目指令自动加载及长期记忆尚未提供。

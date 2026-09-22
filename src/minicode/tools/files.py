@@ -14,7 +14,13 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, truncate_output
+from minicode.tools.base import (
+    BaseTool,
+    ToolContext,
+    bounded_output,
+    resolve_or_fail,
+    truncate_output,
+)
 
 # Directory names never descended into when walking the workspace
 # (listing / searching tools and the goals workspace fingerprint).
@@ -102,7 +108,7 @@ class ReadTool(BaseTool):
         numbered = "\n".join(
             f"{lineno:>6}\t{line}" for lineno, line in enumerate(selected, start=args.offset)
         )
-        return ToolOutcome(output=truncate_output(numbered, ctx.limits.max_output_chars))
+        return bounded_output(numbered, ctx.limits.max_output_chars)
 
 
 # ---------------------------------------------------------------------------
@@ -143,11 +149,17 @@ class LsTool(BaseTool):
                 entries.append(f"{prefix}{filename}")
 
         entries.sort()
+        full_text = "\n".join(entries)
+        visible_entries = entries
         if len(entries) > self._MAX_ENTRIES:
             omitted = len(entries) - self._MAX_ENTRIES
-            entries = entries[: self._MAX_ENTRIES]
-            entries.append(f"...[{omitted} more entries]")
-        return ToolOutcome(output=truncate_output("\n".join(entries), ctx.limits.max_output_chars))
+            visible_entries = entries[: self._MAX_ENTRIES]
+            visible_entries.append(f"...[{omitted} more entries]")
+        preview = truncate_output("\n".join(visible_entries), ctx.limits.max_output_chars)
+        return ToolOutcome(
+            output=preview,
+            full_output=full_text if preview != full_text else None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +220,7 @@ class EditTool(BaseTool):
             target.write_text(updated, encoding="utf-8")
         except OSError as exc:
             return ToolOutcome.failure(f"failed to write file: {exc}")
-        return ToolOutcome(output=_diff_output(relpath, text, updated, ctx))
+        return _diff_output(relpath, text, updated, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +263,10 @@ class WriteTool(BaseTool):
             target.write_text(args.content, encoding="utf-8")
         except OSError as exc:
             return ToolOutcome.failure(f"failed to write file: {exc}")
-        return ToolOutcome(output=_diff_output(relpath, previous, args.content, ctx))
+        return _diff_output(relpath, previous, args.content, ctx)
 
 
-def _diff_output(relpath: str, before: str, after: str, ctx: ToolContext) -> str:
+def _diff_output(relpath: str, before: str, after: str, ctx: ToolContext) -> ToolOutcome:
     """Unified diff header line ('Applied ... (+n -m)') plus the diff body."""
     diff_lines = list(
         difflib.unified_diff(
@@ -272,4 +284,5 @@ def _diff_output(relpath: str, before: str, after: str, ctx: ToolContext) -> str
         1 for line in diff_lines if line.startswith("-") and not line.startswith("---")
     )
     header = f"Applied change to {relpath} (+{adds} -{dels})"
-    return truncate_output(header + "\n" + "\n".join(diff_lines), ctx.limits.max_output_chars)
+    text = header + "\n" + "\n".join(diff_lines)
+    return bounded_output(text, ctx.limits.max_output_chars)

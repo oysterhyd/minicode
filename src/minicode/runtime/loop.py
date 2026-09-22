@@ -61,11 +61,15 @@ _SPILL_LIMITS = ToolLimits()
 
 #: Tool names that are safe to re-execute while resuming an interrupted
 #: session: they only read, so re-running them cannot duplicate side effects.
-_READ_ONLY_TOOLS = frozenset({"read", "ls", "grep"})
+_READ_ONLY_TOOLS = frozenset({"read", "ls", "grep", "read_artifact"})
 
 
 class _DeadlineExceeded(TimeoutError):
     """The turn's deadline expired, including during synchronous work."""
+
+
+class _ContextLimitExceeded(RuntimeError):
+    """The compacted next request still exceeds the model's hard window."""
 
 
 def _format_bg_result(job: Any) -> str:
@@ -212,11 +216,21 @@ class AgentRuntime:
         compaction should trigger on — not the session's token budget, which
         counts cumulative spend rather than context size.
         """
+        return max(0, self.context_window - self.effective_max_output_tokens())
+
+    def effective_max_output_tokens(self) -> int:
+        """Response budget actually sent by the active provider.
+
+        Provider construction, compaction and UI context reporting all read
+        this same value, avoiding a catalog/request mismatch after startup or
+        a live model switch.
+        """
+        configured = getattr(self._provider, "max_tokens", None)
+        if isinstance(configured, int) and configured > 0:
+            return configured
         from minicode.core.catalog import lookup_model
 
-        info = lookup_model(self._model)
-        reserve = info.max_output_tokens or 0
-        return max(0, info.context_window - reserve)
+        return lookup_model(self._model).max_output_tokens or 2000
 
     def context_tokens_used(self) -> int:
         """Estimated prompt size of the current context (no output reserve).
@@ -335,7 +349,15 @@ class AgentRuntime:
 
                     # Layered compaction before the provider call keeps the
                     # context inside budget; the compacted view is persisted.
-                    await self._compact_if_needed(recorder, session_id)
+                    try:
+                        await self._compact_if_needed(recorder, session_id)
+                    except _ContextLimitExceeded as exc:
+                        return await self._finalize(
+                            recorder,
+                            ExitReason.CONTEXT_LIMIT,
+                            turn_started,
+                            error=str(exc),
+                        )
 
                     self._rounds += 1
                     await recorder.emit(EventType.ROUND_START, {"round": self._rounds})
@@ -361,6 +383,9 @@ class AgentRuntime:
                             "usage": {
                                 "input_tokens": response.usage.input_tokens,
                                 "output_tokens": response.usage.output_tokens,
+                                "cache_read_tokens": response.usage.cache_read_tokens,
+                                "cache_write_tokens": response.usage.cache_write_tokens,
+                                "available": response.usage.available,
                                 "total_tokens": response.usage.total_tokens,
                             },
                             "stop_reason": response.stop_reason.value,
@@ -491,7 +516,11 @@ class AgentRuntime:
         runtime.session_id = session_id
         runtime._messages = store.get_messages(session_id)
         runtime._usage = Usage(
-            input_tokens=summary.input_tokens, output_tokens=summary.output_tokens
+            input_tokens=summary.input_tokens,
+            output_tokens=summary.output_tokens,
+            cache_read_tokens=summary.cache_read_tokens,
+            cache_write_tokens=summary.cache_write_tokens,
+            available=summary.usage_available,
         )
         runtime._rounds = summary.rounds
         runtime._pending_dangling = cls._find_dangling_calls(runtime._messages)
@@ -559,7 +588,9 @@ class AgentRuntime:
                         "recovered": True,
                     },
                 )
-                outcome = await self._run_tool(call, tool)
+                outcome = self._maybe_spill(
+                    self.session_id, await self._run_tool(call, tool)
+                )
                 await recorder.emit(
                     EventType.TOOL_CALL_RESULT,
                     {
@@ -572,15 +603,7 @@ class AgentRuntime:
                         "recovered": True,
                     },
                 )
-                results.append(
-                    ToolResultBlock(
-                        tool_use_id=call.id,
-                        content=outcome.output
-                        if outcome.success
-                        else (outcome.error or ""),
-                        is_error=not outcome.success,
-                    )
-                )
+                results.append(self._outcome_to_block(call, outcome))
             else:
                 await recorder.emit(
                     EventType.SIDE_EFFECT_UNKNOWN,
@@ -659,7 +682,8 @@ class AgentRuntime:
                 {"job_id": outcome.job_id, "command": call.input.get("command", "")},
             )
 
-        block = self._outcome_to_block(call, self._maybe_spill(session_id, outcome))
+        presented = self._maybe_spill(session_id, outcome)
+        block = self._outcome_to_block(call, presented)
         await recorder.emit(
             EventType.TOOL_CALL_RESULT,
             {
@@ -668,7 +692,7 @@ class AgentRuntime:
                 "success": outcome.success,
                 "exit_code": outcome.exit_code,
                 "error": outcome.error,
-                "output_preview": outcome.output[:_OUTPUT_PREVIEW_CHARS],
+                "output_preview": presented.output[:_OUTPUT_PREVIEW_CHARS],
             },
         )
         return block
@@ -676,23 +700,24 @@ class AgentRuntime:
     def _maybe_spill(
         self, session_id: str, outcome: ToolOutcome
     ) -> ToolOutcome:
-        """Spill oversized successful outputs to an artifact, keeping a
-        preview plus an archive reference in the model-facing content."""
-        if (
-            self._artifact_store is None
-            or not outcome.success
-            or len(outcome.output) <= _SPILL_LIMITS.spill_threshold_chars
-        ):
-            return outcome
+        """Archive the unabridged output before producing a model preview.
+
+        Failure logs follow the same path as successful output.  A tool may
+        have already placed a bounded preview in ``output``; ``full_output``
+        is the authoritative source in that case.
+        """
+        original = outcome.full_output if outcome.full_output is not None else outcome.output
+        if self._artifact_store is None or len(original) <= _SPILL_LIMITS.spill_threshold_chars:
+            return outcome.model_copy(update={"full_output": None})
         ref = self._artifact_store.spill(
-            session_id, "tool_output", outcome.output
+            session_id, "tool_output", original
         )
-        preview = outcome.output[: _SPILL_LIMITS.spill_preview_chars]
+        preview = original[: _SPILL_LIMITS.spill_preview_chars]
         note = (
-            f"\n...[输出共 {len(outcome.output)} 字符，已转存为 artifact "
+            f"\n...[输出共 {len(original)} 字符，已转存为 artifact "
             f"[artifact:{ref.artifact_id}]；完整内容保存在会话归档中]"
         )
-        return outcome.model_copy(update={"output": preview + note})
+        return outcome.model_copy(update={"output": preview + note, "full_output": None})
 
     async def _resolve_outcome(
         self, recorder: EventRecorder, call: ToolUseBlock
@@ -908,28 +933,33 @@ class AgentRuntime:
         and persist the compacted view (originals live in artifacts)."""
         if self._compactor is None:
             return
-        if not self._compactor.needs_compaction(
-            self._system_prompt, self._messages, self._registry.specs()
+        specs = self._registry.specs()
+        if self._compactor.needs_compaction(self._system_prompt, self._messages, specs):
+            result = self._compactor.compact(
+                self._system_prompt, self._messages, specs
+            )
+            if result.changed:
+                self._messages = result.messages
+                self._store.replace_messages(session_id, self._messages)
+                stats = result.stats
+                await recorder.emit(
+                    EventType.CONTEXT_COMPACTED,
+                    {
+                        "tokens_before": stats.tokens_before,
+                        "tokens_after": stats.tokens_after,
+                        "archived_units": stats.archived_units,
+                        "shrunk_results": stats.shrunk_results,
+                        "summarized_units": stats.summarized_units,
+                    },
+                )
+        fits_hard_limit = getattr(self._compactor, "fits_hard_limit", None)
+        if callable(fits_hard_limit) and not fits_hard_limit(
+            self._system_prompt, self._messages, specs
         ):
-            return
-        result = self._compactor.compact(
-            self._system_prompt, self._messages, self._registry.specs()
-        )
-        if not result.changed:
-            return
-        self._messages = result.messages
-        self._store.replace_messages(session_id, self._messages)
-        stats = result.stats
-        await recorder.emit(
-            EventType.CONTEXT_COMPACTED,
-            {
-                "tokens_before": stats.tokens_before,
-                "tokens_after": stats.tokens_after,
-                "archived_units": stats.archived_units,
-                "shrunk_results": stats.shrunk_results,
-                "summarized_units": stats.summarized_units,
-            },
-        )
+            raise _ContextLimitExceeded(
+                "压缩后上下文仍超过模型窗口；请缩小输入、切换更大上下文模型，"
+                "或通过 read_artifact 按需取回已归档内容。"
+            )
 
     async def _deliver_finished_jobs(
         self, recorder: EventRecorder, session_id: str
@@ -1054,6 +1084,9 @@ class AgentRuntime:
             rounds=self._rounds,
             input_tokens=self._usage.input_tokens,
             output_tokens=self._usage.output_tokens,
+            cache_read_tokens=self._usage.cache_read_tokens,
+            cache_write_tokens=self._usage.cache_write_tokens,
+            usage_available=self._usage.available,
         )
 
     def _session_end_data(self, exit_reason: ExitReason) -> dict[str, Any]:
@@ -1063,6 +1096,9 @@ class AgentRuntime:
             "total_usage": {
                 "input_tokens": self._usage.input_tokens,
                 "output_tokens": self._usage.output_tokens,
+                "cache_read_tokens": self._usage.cache_read_tokens,
+                "cache_write_tokens": self._usage.cache_write_tokens,
+                "available": self._usage.available,
                 "total_tokens": self._usage.total_tokens,
             },
         }

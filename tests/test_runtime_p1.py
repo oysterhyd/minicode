@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from minicode.context import CompactConfig, ContextCompactor
 from minicode.core.models import (
     Budget,
     Event,
@@ -21,6 +22,7 @@ from minicode.core.models import (
     ExitReason,
     Message,
     TextBlock,
+    ToolOutcome,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -359,6 +361,22 @@ def test_compaction_not_triggered_when_needs_false(harness_factory):
     assert sink.of_type(EventType.CONTEXT_COMPACTED) == []
 
 
+def test_context_hard_limit_stops_before_provider_request(harness_factory):
+    provider = FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="should not run")]))
+    compactor = ContextCompactor(
+        CompactConfig(max_context_tokens=100),
+        context_tokens_fn=lambda: 100,
+        output_tokens_fn=lambda: 0,
+    )
+    runtime, store, _sink = harness_factory(provider, compactor=compactor)
+
+    result = asyncio.run(runtime.run_turn("x" * 1000))
+
+    assert result.exit_reason is ExitReason.CONTEXT_LIMIT
+    assert provider.turns_consumed == 0
+    assert store.get_session(result.session_id).status == "context_limit"
+
+
 # ---------------------------------------------------------------------------
 # Background delivery
 # ---------------------------------------------------------------------------
@@ -434,6 +452,29 @@ def test_large_output_spilled_with_readback_reference(harness_factory):
     assert "tool_output_deadbeef" in result_blocks[0].content
     assert "[artifact:" in result_blocks[0].content
     assert len(result_blocks[0].content) < len(big) // 2
+
+
+def test_failed_output_spills_the_unabridged_log(harness_factory):
+    artifacts = FakeArtifactStore()
+    runtime, _db, _sink = harness_factory(
+        FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="done")])),
+        artifact_store=artifacts,
+    )
+    original = "failure-log\n" + "x" * 6000
+    outcome = ToolOutcome(
+        success=False,
+        output=original[:500] + "\n...[output truncated]",
+        full_output=original,
+        error="command failed",
+        exit_code=2,
+    )
+
+    presented = runtime._maybe_spill("session", outcome)
+
+    assert artifacts.spilled == [("tool_output", original)]
+    assert "[artifact:tool_output_deadbeef]" in presented.output
+    assert presented.error == "command failed"
+    assert presented.full_output is None
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +589,16 @@ def test_resume_unknown_session_raises(tmp_path):
 
 def test_resume_restores_usage_rounds_and_history(harness_factory, tmp_path):
     provider = FakeProvider(
-        FakeProviderOptions(turns=[FakeTurn(text="第一轮", input_tokens=50)])
+        FakeProviderOptions(
+            turns=[
+                FakeTurn(
+                    text="第一轮",
+                    input_tokens=50,
+                    cache_read_tokens=20,
+                    cache_write_tokens=5,
+                )
+            ]
+        )
     )
     runtime, store, _ = harness_factory(provider)
     first = asyncio.run(runtime.run_turn("一"))
@@ -558,7 +608,16 @@ def test_resume_restores_usage_rounds_and_history(harness_factory, tmp_path):
         store=store,
         session_id=old_session,
         provider=FakeProvider(
-            FakeProviderOptions(turns=[FakeTurn(text="第二轮", input_tokens=70)])
+            FakeProviderOptions(
+                turns=[
+                    FakeTurn(
+                        text="第二轮",
+                        input_tokens=70,
+                        cache_read_tokens=30,
+                        cache_write_tokens=7,
+                    )
+                ]
+            )
         ),
         registry=default_registry(),
         policy=AutoAllowPolicy(),
@@ -567,6 +626,11 @@ def test_resume_restores_usage_rounds_and_history(harness_factory, tmp_path):
 
     assert second.rounds == 2  # cumulative across the resume boundary
     assert second.total_usage.input_tokens == 120
+    assert second.total_usage.cache_read_tokens == 50
+    assert second.total_usage.cache_write_tokens == 12
+    summary = store.get_session(old_session)
+    assert summary.cache_read_tokens == 50
+    assert summary.cache_write_tokens == 12
     roles = [m.role for m in store.get_messages(old_session)]
     assert roles == ["user", "assistant", "user", "assistant"]
     assert len(resumed._pending_dangling) == 0
