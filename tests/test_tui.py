@@ -16,12 +16,14 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
+from rich.markdown import Markdown
+from rich.text import Text
 
 from minicode.cli import _Setup, _build_services
 from minicode.core.catalog import MODEL_CATALOG
 from minicode.slash import filter_commands
-from minicode.core.models import Budget
-from minicode.providers import FakeProvider, FakeProviderOptions, FakeTurn
+from minicode.core.models import Budget, ModelResponse, TextBlock, Usage
+from minicode.providers import FakeProvider, FakeProviderOptions, FakeTurn, ResponseDone, TextDelta
 from minicode.security import PermissionMode
 from minicode.storage import SqliteStore
 from minicode.ui.app import ApprovalModal, MiniCodeApp, ToolCard, run_tui
@@ -170,13 +172,13 @@ def test_plain_input_streams_reply(tmp_path):
             texts = app._log_texts()
             assert any("❯ hi" in t for t in texts)
             assert any("助手的流式回复" in t for t in texts)
+            assert isinstance(app.query_one(".msg-assistant").content, Markdown)
             # Turn summary line written after the turn.
             assert any("退出原因: 已完成" in t for t in texts)
             # Status bar refreshed after the turn (model + tokens + session).
             right = str(app.query_one("#status-right").content)
-            assert "输入 100" in right
-            assert "输出 20" in right
-            assert "会话" in right
+            assert "token 120" in right
+            assert "缓存" in right
             # One session persisted in the store.
             assert app._runtime.session_id is not None
             assert len(app._store.list_sessions()) == 1
@@ -314,6 +316,119 @@ def test_auto_allow_skips_modal(tmp_path):
             assert all(
                 not isinstance(screen, ApprovalModal) for screen in app.screen_stack
             )
+
+    _run(scenario())
+
+
+def test_tool_details_expand_on_click(tmp_path):
+    app, ws = _make_app(tmp_path, turns=[
+        {"tool_calls": [{"name": "read", "arguments": {"path": "sample.txt"}}]},
+        {"text": "已读取。"},
+    ], yes=True)
+    (ws / "sample.txt").write_text("detail visible on demand", encoding="utf-8")
+
+    async def scenario():
+        async with app.run_test(size=(120, 32)) as pilot:
+            await _submit(pilot, "读取")
+            await _wait_turn_done(app)
+            card = list(app.query(ToolCard))[0]
+            assert not card._body.display
+            assert "展开" in str(card.header_text)
+            await pilot.click(card)
+            await pilot.pause()
+            assert card._body.display
+            assert "detail visible on demand" in str(card._body.content)
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("width", [80, 120, 160])
+def test_timeline_remains_usable_at_common_terminal_widths(tmp_path, width):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "回应"}])
+
+    async def scenario():
+        async with app.run_test(size=(width, 30)) as pilot:
+            await _submit(pilot, "请求")
+            await _wait_turn_done(app)
+            assert any("回应" in line for line in app._log_texts())
+            assert app.query_one("#prompt").size.width > 40
+            assert app.query_one("#activity").size.width > 40
+            assert app.has_class("narrow") is (width < 100)
+
+    _run(scenario())
+
+
+def test_scrolling_up_is_preserved_when_new_content_arrives(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[])
+
+    async def scenario():
+        async with app.run_test(size=(80, 24)) as pilot:
+            for i in range(40):
+                app._add_line(Text(f"line {i}"), "msg-system")
+            await pilot.pause()
+            log = app.query_one("#log")
+            log.scroll_home(animate=False, immediate=True)
+            await pilot.pause()
+            assert not log.is_vertical_scroll_end
+            before = log.scroll_y
+            app._add_line(Text("new line"), "msg-system")
+            await pilot.pause()
+            assert log.scroll_y == before
+            assert app.query_one("#new-content").display
+            app.action_follow_log()
+            await pilot.pause()
+            assert log.is_vertical_scroll_end
+            assert not app.query_one("#new-content").display
+
+    _run(scenario())
+
+
+def test_input_is_queued_while_a_turn_is_running(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[])
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausingProvider:
+        name = "fake"
+
+        def __init__(self):
+            self.turns_consumed = 0
+
+        async def stream(self, *, system, messages, tools):
+            self.turns_consumed += 1
+            if self.turns_consumed == 1:
+                started.set()
+                yield TextDelta("first ")
+                await release.wait()
+                yield TextDelta("reply")
+                text = "first reply"
+            else:
+                text = "second"
+                yield TextDelta(text)
+            yield ResponseDone(response=ModelResponse(
+                blocks=[TextBlock(text=text)], usage=Usage(available=True)
+            ))
+
+    provider = PausingProvider()
+    app._setup.provider = provider
+    app._runtime._provider = provider
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _submit(pilot, "one")
+            await asyncio.wait_for(started.wait(), 2)
+            assert app._busy
+            assert "接收回复" in str(app.query_one("#activity").content)
+            await _submit(pilot, "two")
+            assert list(app._queued_turns) == ["two"]
+            assert "排队 1" in str(app.query_one("#activity").content)
+            release.set()
+            deadline = time.monotonic() + _WAIT_TIMEOUT_S
+            while app._busy or app._queued_turns or provider.turns_consumed < 2:
+                if time.monotonic() > deadline:
+                    raise AssertionError("排队回合未完成")
+                await asyncio.sleep(0.02)
+            assert any("second" in line for line in app._log_texts())
 
     _run(scenario())
 

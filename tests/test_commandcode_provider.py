@@ -720,3 +720,24 @@ def test_provider_threads_its_max_tokens_into_the_request(monkeypatch):
 
     asyncio.run(drain())
     assert seen["max_tokens"] == 384_000
+
+
+def test_connection_pool_is_reused_within_one_event_loop_and_closed():
+    provider, requests = make_provider(
+        lambda request: sse_response([text_delta("ok")])
+    )
+
+    async def scenario() -> None:
+        clients = []
+        for _ in range(2):
+            async for _event in provider.stream(system=None, messages=[], tools=[]):
+                pass
+            clients.append(provider._client)
+        assert clients[0] is clients[1]
+        assert clients[0] is not None and not clients[0].is_closed
+        await provider.aclose()
+        assert clients[0].is_closed
+        assert provider._client is None
+
+    asyncio.run(scenario())
+    assert len(requests) == 2

@@ -92,7 +92,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 | --- | --- |
 | `minicode run "任务"` | 执行一个单轮任务：流式输出回复、`▸/✓/✗` 工具行、修改摘要与统计；`--acceptance` 挂验收配置后，模型自述完成不等于通过 |
 | `minicode chat` | 交互式多轮会话（同一会话累积上下文）；`exit` / `quit` / Ctrl+D 退出，回合内 Ctrl+C 只取消当前轮 |
-| `minicode tui` | 全屏交互界面（Textual）：流式回复、工具卡片、审批弹窗、斜杠命令自动补全（/help /model /effort /permissions /clear /new /sessions /resume /compact /exit） |
+| `minicode tui` | 全屏交互界面（Textual）：流式回复、可展开工具详情、审批弹窗、运行中输入排队及斜杠命令自动补全（/help /model /effort /permissions /clear /new /sessions /resume /compact /exit） |
 | `minicode sessions list` | 会话列表：ID、创建时间、工作区、模型、状态、轮数、token |
 | `minicode resume <会话ID>` | 恢复历史会话并继续交互：已落库结果不重复执行；只读调用重新执行留痕；未知副作用标记 `unknown` 并要求模型先核实 |
 | `minicode report <会话ID>` | 执行报告（text）；`--format html` 生成单文件离线 HTML（时间线、工具记录、diff、验收证据、用量） |
@@ -146,12 +146,13 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
   运行；b1 尚未接入压缩，与 b0 相同；b2 在 runner 外层验收失败后续跑，并非直接评测运行时
   Goal 门。结果含成功率、轮数、脚本用量与失败分析，不代表真实模型能力或 token 节省。
 - **HTML 报告**：单文件、零外链、可离线打开；时间线、工具记录与 diff、验收证据表、用量。
-- **TUI**：Textual 全屏界面，流式纯文本回复、工具预览卡片、审批弹窗、斜杠命令与全局
-  LoadingIndicator。尚无 Markdown 回复渲染、可展开工具详情或分阶段动效；执行时输入框禁用。
+- **TUI**：Textual 全屏时间线；回复流式期间合并刷新，完成后渲染 Markdown；工具结果按需展开，
+  运行状态与耗时独立显示。浏览旧记录时保留滚动位置；运行中可编辑并排队下一条输入。
 
 ## 当前实现边界
 
-- 同一模型响应中的工具按顺序串行执行；后台命令只存活于当前用户回合，结束时清理。
+- 同一模型响应中连续的内置只读工具最多 4 个并发；写入、命令与未知工具是顺序屏障。
+  后台命令只存活于当前用户回合，结束时清理。
 - `TaskStore` 的依赖与认领能力尚未接入 Runtime，不能视为已有多代理调度。
 - token 估算采用字符数 / 3，可能低估部分中文或混合内容，不是精确计数或严格上界。
 - 缓存读/写用量与“provider 未返回 usage”状态会逐请求记入事件、累计写入 SQLite，并在 resume 后恢复；
@@ -170,7 +171,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 → 结果回填」循环，`core` 提供共享 pydantic 契约，事件与消息实时写入 SQLite。
 模块图、事件流与关键语义见 [docs/architecture.md](docs/architecture.md)，
 原始设计记录见 [plan.md](plan.md)；本轮功能扩展、TUI 与效率优化建议见
-[探索与优化方案](docs/optimization-design.md)（A 阶段已实现，B–D 阶段待迭代）。
+[探索与优化方案](docs/optimization-design.md)（A、B 阶段已实现，C–D 阶段待迭代）。
 
 ## 运行测试
 

@@ -56,7 +56,7 @@ SESSION_START                          # 首个 run_turn 时创建会话行
 │  每轮循环，直到模型不再调用工具或预算耗尽：
 ├─ ROUND_START {round}
 ├─ ASSISTANT_MESSAGE {text, tool_calls, usage, stop_reason}
-├─ TOOL_CALL_START {call_id, name, arguments}     # 每个调用一条，逐个串行
+├─ TOOL_CALL_START {call_id, name, arguments}     # 连续只读调用可并发
 │    ├─（若权限门判定 ASK 且配置了审批处理器）
 │    ├─ APPROVAL_REQUEST {call_id, tool_name, summary}
 │    ├─ APPROVAL_DECISION {call_id, granted, reason}
@@ -207,11 +207,12 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
   FakeProvider 的 usage 来自脚本/默认值，不度量真实模型能力、缓存或 token 节省；恢复等边界另由 tests 覆盖。
 - `minicode report <id> --format html`：单文件 HTML（零外链、可离线打开），时间线、
   工具记录与 diff、验收证据表、用量；所有动态文本经 HTML 转义。
-- `minicode tui`：Textual 全屏界面——流式回复、工具卡片、审批 ModalScreen、
+- `minicode tui`：Textual 全屏界面——流式回复、可展开工具卡片、审批 ModalScreen、
   斜杠命令与自动补全（/help /model /effort /permissions /clear /new /sessions /resume
-  /compact /exit）、启动 Banner、状态栏（CWD · 权限模式 · 模型 · 上下文负载 · Token ·
-  缓存命中率）、全局 LoadingIndicator、Ctrl+C 取消当前回合。回复为纯文本；执行时禁用
-  输入框；卡片展示预览，尚无展开交互、命令实时输出或任务/子代理面板。
+  /compact /exit）、简短环境信息、状态栏（CWD · 权限模式 · 模型 · 上下文负载 · Token ·
+  缓存命中率）、Ctrl+C 取消当前回合。文本增量合并刷新，回复结束后渲染 Markdown；
+  工具结果按需展开，运行中可排队下一条输入，用户上滚后新消息不强制拉到底部。
+  尚无命令实时输出或任务/子代理面板。
 
 ### 5.7 P1 → 实现位置映射
 
@@ -229,7 +230,8 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
 
 - `Provider.stream` 目前只提供 `TextDelta` 与终结 `ResponseDone`，没有工具参数增量、
   阶段反馈或细粒度 usage 事件。CommandCode 忽略 reasoning-only 文本增量。
-- CommandCode 每次 `stream` 创建一个 `httpx.AsyncClient`；Anthropic 持有 SDK client。
+- CommandCode 在同一事件循环内复用 `httpx.AsyncClient`；CLI 每个 `asyncio.run` 回合结束前
+  显式关闭，TUI 退出或切换模型时关闭旧 client。Anthropic 持有 SDK client。
 - 缓存统计：CommandCode 解析 `prompt_tokens_details.cached_tokens`；Anthropic 将普通输入、
   缓存创建和缓存读取合并到输入总数。`Usage` 单独记录 cache-read/cache-write 和 available；轮次事件、
   SQLite schema v4 与 resume 保存并恢复这些累计值，缺失 usage 不再冒充真实的零。

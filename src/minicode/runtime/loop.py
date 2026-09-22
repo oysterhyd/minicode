@@ -62,6 +62,7 @@ _SPILL_LIMITS = ToolLimits()
 #: Tool names that are safe to re-execute while resuming an interrupted
 #: session: they only read, so re-running them cannot duplicate side effects.
 _READ_ONLY_TOOLS = frozenset({"read", "ls", "grep", "read_artifact"})
+_MAX_PARALLEL_READS = 4
 
 
 class _DeadlineExceeded(TimeoutError):
@@ -169,6 +170,7 @@ class AgentRuntime:
         self._deadline: float | None = None
         self._announced_jobs: set[str] = set()
         self._lost_jobs: list[dict[str, Any]] = []
+        self._approval_lock = asyncio.Lock()
 
     # -- read-only state ----------------------------------------------------
 
@@ -292,12 +294,16 @@ class AgentRuntime:
         tool calls one at a time under the permission policy, and feeds the
         results back until the model produces a final answer — which, with
         an acceptance gate configured, only ends the session once the goal
-        checks pass — or a budget is exhausted.
+        checks pass — or a budget is exhausted. Adjacent built-in reads may
+        run in bounded parallel batches; writes and unknown tools remain
+        ordering barriers.
 
         Cancellation: see the class docstring — ``CANCELLED`` is persisted
         and :class:`asyncio.CancelledError` is re-raised to the caller.
         """
         turn_started = time.monotonic()
+        # CLI chat creates a fresh event loop for each user turn.
+        self._approval_lock = asyncio.Lock()
 
         first_turn = self.session_id is None
         if first_turn:
@@ -419,12 +425,42 @@ class AgentRuntime:
 
                     tool_results: list[ToolResultBlock] = []
                     try:
-                        for call in response.tool_calls:  # executed one at a time, in order
+                        calls = response.tool_calls
+                        index = 0
+                        while index < len(calls):
                             self._check_deadline()
-                            tool_results.append(
-                                await self._execute_tool_call(recorder, call, session_id)
-                            )
-                            self._check_deadline()
+                            if calls[index].name not in _READ_ONLY_TOOLS:
+                                tool_results.append(
+                                    await self._execute_tool_call(recorder, calls[index], session_id)
+                                )
+                                index += 1
+                                continue
+                            end = index
+                            while end < len(calls) and calls[end].name in _READ_ONLY_TOOLS:
+                                end += 1
+                            # A write/unknown call is a barrier. Only adjacent
+                            # built-in reads may overlap, and the provider sees
+                            # their results in its original call order.
+                            for start in range(index, end, _MAX_PARALLEL_READS):
+                                batch = calls[start:min(start + _MAX_PARALLEL_READS, end)]
+                                tasks = [
+                                    asyncio.create_task(self._execute_tool_call(recorder, call, session_id))
+                                    for call in batch
+                                ]
+                                try:
+                                    tool_results.extend(await asyncio.gather(*tasks))
+                                except BaseException:
+                                    for task in tasks:
+                                        task.cancel()
+                                    await asyncio.gather(*tasks, return_exceptions=True)
+                                    # Completed results must be durable even when
+                                    # cancellation interrupts the batch.
+                                    tool_results.extend(task.result() for task in tasks if
+                                                        task.done() and not task.cancelled() and
+                                                        task.exception() is None)
+                                    raise
+                                self._check_deadline()
+                            index = end
                     finally:
                         if tool_results:
                             self._append_message(
@@ -670,6 +706,7 @@ class AgentRuntime:
         Oversized outputs are spilled to the artifact store (the model gets a
         preview plus an archive reference).
         """
+        started = time.monotonic()
         await recorder.emit(
             EventType.TOOL_CALL_START,
             {"call_id": call.id, "name": call.name, "arguments": call.input},
@@ -693,6 +730,8 @@ class AgentRuntime:
                 "exit_code": outcome.exit_code,
                 "error": outcome.error,
                 "output_preview": presented.output[:_OUTPUT_PREVIEW_CHARS],
+                "output_detail": presented.output[:4000],
+                "duration_s": round(time.monotonic() - started, 3),
             },
         )
         return block
@@ -738,23 +777,27 @@ class AgentRuntime:
                 return ToolOutcome.failure(
                     "approval required but no approval handler is configured"
                 )
-            summary = self._approval_summary(call.name, call.input)
-            await recorder.emit(
-                EventType.APPROVAL_REQUEST,
-                {"call_id": call.id, "tool_name": call.name, "summary": summary},
-            )
-            approved = await self._approval_handler(
-                ApprovalRequest(tool_name=call.name, arguments=call.input, summary=summary)
-            )
-            await recorder.emit(
-                EventType.APPROVAL_DECISION,
-                {
-                    "call_id": call.id,
-                    "tool_name": call.name,
-                    "granted": approved.granted,
-                    "reason": approved.reason,
-                },
-            )
+            # An overridden policy may ask even for a nominally read-only
+            # tool. Keep its dialogs sequential while the approved reads may
+            # still overlap afterwards.
+            async with self._approval_lock:
+                summary = self._approval_summary(call.name, call.input)
+                await recorder.emit(
+                    EventType.APPROVAL_REQUEST,
+                    {"call_id": call.id, "tool_name": call.name, "summary": summary},
+                )
+                approved = await self._approval_handler(
+                    ApprovalRequest(tool_name=call.name, arguments=call.input, summary=summary)
+                )
+                await recorder.emit(
+                    EventType.APPROVAL_DECISION,
+                    {
+                        "call_id": call.id,
+                        "tool_name": call.name,
+                        "granted": approved.granted,
+                        "reason": approved.reason,
+                    },
+                )
             if not approved.granted:
                 reason = f": {approved.reason}" if approved.reason else ""
                 return ToolOutcome.failure(f"approval denied{reason}")

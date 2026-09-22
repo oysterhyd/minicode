@@ -14,12 +14,14 @@ User-facing strings are Chinese, code is English (project convention).
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import time
 from typer import Exit
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
@@ -30,7 +32,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Header, LoadingIndicator, Static, TextArea
 
-from minicode.banner import banner_text
+from minicode.banner import info_line
 from minicode.cli import (
     _Setup,
     _attach_compactor,
@@ -77,10 +79,6 @@ from minicode.slash import (
 
 #: Seconds between two idle Ctrl+C presses that quits the app.
 _DOUBLE_CTRL_C_WINDOW_S = 2.0
-
-#: How many lines/chars of a tool output preview are shown in a tool card.
-_PREVIEW_MAX_LINES = 6
-_PREVIEW_MAX_CHARS_PER_LINE = 160
 
 #: Maximum slash-command candidates rendered in the floating menu at once.
 _SLASH_MENU_MAX_ITEMS = 8
@@ -250,25 +248,36 @@ class StreamedReply(Static):
 
     def __init__(self) -> None:
         super().__init__(Text(""), classes="msg-assistant")
-        self._buffer = ""
+        self._rendered = Text("")
+        self._pending: list[str] = []
+        self._chunks: list[str] = []
+        self._flush_scheduled = False
+
+    @property
+    def plain_text(self) -> str:
+        return "".join(self._chunks)
 
     def append(self, delta: str) -> None:
-        self._buffer += delta
-        # Text (not str) so model output is never parsed as rich markup.
-        self.update(Text(self._buffer))
+        self._pending.append(delta)
+        if not self._flush_scheduled:
+            self._flush_scheduled = True
+            self.set_timer(0.05, self.flush)
 
+    def flush(self) -> None:
+        self._flush_scheduled = False
+        if self._pending:
+            # Rich Text preserves literal model content. One update per batch
+            # avoids a full widget redraw for every tiny SSE fragment.
+            chunk = "".join(self._pending)
+            self._chunks.append(chunk)
+            self._rendered.append(chunk)
+            self._pending.clear()
+            self.update(self._rendered)
 
-def _preview_text(preview: str) -> Text:
-    """Trim a tool output preview to a few dim lines for the card body."""
-    lines = preview.splitlines()
-    shown = lines[:_PREVIEW_MAX_LINES]
-    if len(lines) > _PREVIEW_MAX_LINES:
-        shown.append(f"…（共 {len(lines)} 行）")
-    trimmed = [
-        line[:_PREVIEW_MAX_CHARS_PER_LINE] + ("…" if len(line) > _PREVIEW_MAX_CHARS_PER_LINE else "")
-        for line in shown
-    ]
-    return Text("\n".join(trimmed), style="dim")
+    def finish(self) -> None:
+        self.flush()
+        if self.plain_text:
+            self.update(Markdown(self.plain_text))
 
 
 class ToolCard(Vertical):
@@ -277,6 +286,7 @@ class ToolCard(Vertical):
 
     def __init__(self, call_id: str, name: str, summary: str) -> None:
         super().__init__(classes="tool-card")
+        self.can_focus = True
         self.call_id = call_id
         line = Text("  ▸ ", style="dim")
         line.append(name, style="bold cyan")
@@ -286,6 +296,9 @@ class ToolCard(Vertical):
         self._header = Static(line)
         self._body = Static(Text(""), classes="tool-body")
         self._body.display = False
+        self._has_detail = False
+        self._expanded = False
+        self._header_base = line
 
     def compose(self) -> ComposeResult:
         yield self._header
@@ -304,12 +317,36 @@ class ToolCard(Vertical):
             line.append("✗ ", style="red")
             line.append(name, style="red")
             line.append(f" {error}", style="red")
+        duration = data.get("duration_s")
+        if isinstance(duration, (int, float)):
+            line.append(f"  {duration:.1f}s", style="dim")
+        detail = str(data.get("output_detail") or data.get("output_preview") or "")
+        self._has_detail = bool(detail.strip())
+        if self._has_detail:
+            self._body.update(Text(detail, style="dim"))
+        self._header_base = line
+        self._update_header()
+
+    def _update_header(self) -> None:
+        line = self._header_base.copy()
+        if self._has_detail:
+            line.append("  [收起]" if self._expanded else "  [展开]", style="dim")
         self.header_text = line
         self._header.update(line)
-        preview = str(data.get("output_preview") or "")
-        if preview.strip():
-            self._body.update(_preview_text(preview))
-            self._body.display = True
+
+    def toggle_detail(self) -> None:
+        if self._has_detail:
+            self._expanded = not self._expanded
+            self._body.display = self._expanded
+            self._update_header()
+
+    def on_click(self) -> None:
+        self.toggle_detail()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in ("enter", "space"):
+            self.toggle_detail()
+            event.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -456,29 +493,33 @@ def _turn_summary_text(result: RunResult) -> Text:
 class MiniCodeApp(App[None]):
     """minicode 全屏交互界面：流式回复、工具卡片、审批弹窗、斜杠命令。"""
 
-    TITLE = "minicode"
+    TITLE = "Oyster · minicode"
 
     BINDINGS = [
         # priority: win over the focused TextArea's own ctrl+c (copy) binding.
         Binding("ctrl+c", "cancel_or_exit", "取消/退出", priority=True),
         Binding("ctrl+q", "quit", "退出", priority=True),
         Binding("ctrl+l", "clear_log", "清屏"),
+        Binding("ctrl+end", "follow_log", "回到底部"),
     ]
 
     CSS = """
-    Screen { layout: vertical; }
+    Screen { layout: vertical; background: #151A1E; color: #E6E2D8; }
     #log { height: 1fr; padding: 1 1 0 1; }
     .msg-user { margin-top: 1; }
     .msg-assistant { margin-top: 1; }
-    .msg-banner { margin-bottom: 1; }
-    .tool-card { height: auto; margin-top: 1; }
+    .msg-banner { margin-bottom: 1; color: #A0ADB5; }
+    .tool-card { height: auto; margin-top: 1; padding: 0 1; background: #1D252B; }
+    .tool-card:focus { border-left: solid #74C5B5; }
     .tool-card > Static { height: auto; }
-    .tool-body { color: $text-muted; height: auto; }
-    .msg-event { color: $text-muted; margin-top: 1; }
+    .tool-body { color: #A0ADB5; height: auto; padding: 0 1 1 1; }
+    .msg-event { color: #A0ADB5; margin-top: 1; }
     .msg-system { margin-top: 1; }
     .msg-warn { color: $warning; margin-top: 1; }
-    .msg-summary { color: $text-muted; margin-top: 1; }
-    #input-dock { height: auto; padding: 0 1 1 1; }
+    .msg-summary { color: #A0ADB5; margin-top: 1; }
+    #new-content { display: none; height: 1; color: #74C5B5; }
+    #input-dock { height: auto; padding: 0 1 0 1; background: #1D252B; }
+    #activity { height: 1; color: #E8BD78; }
     #spinner { display: none; height: 1; }
     #slash-menu {
         display: none; height: auto; max-height: 12;
@@ -486,8 +527,8 @@ class MiniCodeApp(App[None]):
         margin-bottom: 1;
     }
     #slash-menu.slash-visible { display: block; }
-    #prompt { height: 4; border: round $primary; margin-bottom: 1; }
-    #prompt:focus { border: round $accent; }
+    #prompt { height: 3; border: round #74C5B5; margin-bottom: 0; }
+    #prompt:focus { border: round #E8BD78; }
     #statusbar { height: 1; }
     #status-left { width: 1fr; color: $text-muted; }
     #status-right { width: auto; color: $text-muted; }
@@ -536,6 +577,11 @@ class MiniCodeApp(App[None]):
         self._last_idle_ctrl_c = 0.0
         self._current_reply: StreamedReply | None = None
         self._cards: dict[str, ToolCard] = {}
+        self._queued_turns: deque[str] = deque()
+        self._activity_started = 0.0
+        self._activity_label = "就绪"
+        self._activity_widget: Static | None = None
+        self._activity_timer: Any = None
         # Slash-menu state machine: ``root`` command list or a cascading
         # ``submenu`` (命令 › /model). The view is re-derived from the prompt
         # text on every change; ``_backed_out`` keeps Esc'd submenus closed
@@ -580,7 +626,9 @@ class MiniCodeApp(App[None]):
         yield Header()
         with VerticalScroll(id="log"):
             pass
+        yield Static("↓ 有新内容 · 点击回到底部", id="new-content")
         with Vertical(id="input-dock"):
+            yield Static("就绪", id="activity")
             yield LoadingIndicator(id="spinner")
             yield SlashMenu("", id="slash-menu")
             yield PromptArea(
@@ -599,7 +647,7 @@ class MiniCodeApp(App[None]):
         log = self.query_one("#log", VerticalScroll)
         log.mount(
             Static(
-                banner_text(
+                info_line(
                     provider_label=self._setup.provider_name,
                     model_label=self._setup.model_label,
                     workspace=str(self._setup.workspace.resolve()),
@@ -608,6 +656,8 @@ class MiniCodeApp(App[None]):
             )
         )
         log.anchor()
+        self._activity_widget = self.query_one("#activity", Static)
+        self._activity_timer = self.set_interval(0.2, self._refresh_activity)
         self._refresh_status("就绪")
         self.query_one("#prompt", PromptArea).focus()
 
@@ -615,8 +665,14 @@ class MiniCodeApp(App[None]):
 
     def _mount(self, widget: Widget) -> None:
         log = self.query_one("#log", VerticalScroll)
+        follow = log.is_vertical_scroll_end
+        if not follow:
+            log.release_anchor()
         log.mount(widget)
-        log.scroll_end(force=True, animate=False)
+        if follow:
+            log.anchor()
+        else:
+            self.query_one("#new-content", Static).display = True
 
     def _add_line(self, content: Text, cls: str) -> Static:
         widget = Static(content, classes=cls)
@@ -626,9 +682,11 @@ class MiniCodeApp(App[None]):
     def _clear_log(self) -> None:
         self._end_streaming()
         self._cards.clear()
+        self.query_one("#new-content", Static).display = False
         log = self.query_one("#log", VerticalScroll)
         for child in list(log.children):
             child.remove()
+        log.anchor()
 
     def _log_texts(self) -> list[str]:
         """Plain-text snapshot of the log (used by tests and debugging)."""
@@ -636,6 +694,8 @@ class MiniCodeApp(App[None]):
         for child in self.query_one("#log", VerticalScroll).children:
             if isinstance(child, ToolCard):
                 texts.append(str(child.header_text))
+            elif isinstance(child, StreamedReply):
+                texts.append(child.plain_text)
             elif isinstance(child, Static):
                 texts.append(str(child.content))
         return texts
@@ -678,22 +738,36 @@ class MiniCodeApp(App[None]):
         line = Text(style="dim")
         line.append(runtime.model)
         line.append(" · ")
-        line.append(
-            self._context_bar(runtime.context_tokens_used(), runtime.context_window)
-        )
-        line.append(f" · 输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}")
-        line.append(f" · 缓存 {usage.cache_hit_rate:.0%}")
-        line.append(f" · 会话 {session_id[:8] if session_id else '未开始'}")
+        if self.size.width < 140:
+            line.append(
+                f"ctx {self._fmt_tokens(runtime.context_tokens_used())}/"
+                f"{self._fmt_tokens(runtime.context_window)}"
+            )
+            line.append(f" · token {format_tokens(usage.total_tokens)}")
+            line.append(f" · 缓存 {usage.cache_hit_rate:.0%}")
+        else:
+            line.append(
+                self._context_bar(runtime.context_tokens_used(), runtime.context_window)
+            )
+            line.append(f" · 输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}")
+            line.append(f" · 缓存 {usage.cache_hit_rate:.0%}")
+            line.append(f" · 会话 {session_id[:8] if session_id else '未开始'}")
         return line
 
     def _refresh_stats(self) -> None:
         self.query_one("#status-right", Static).update(self._stats_text())
 
     def _refresh_status(self, status: str) -> None:
+        self._activity_label = status
+        self._refresh_activity()
         mode = self._permission_mode()
         mode_label = f" · 权限:{_MODE_SHORT[mode]}" if mode is not None else ""
+        workspace_label = (
+            self._setup.workspace.name if self.size.width < 120
+            else self._short_path(self._setup.workspace)
+        )
         left = Text(
-            f"{self._short_path(self._setup.workspace)} · {status}{mode_label}",
+            f"{workspace_label} · {status}{mode_label}",
             style="dim",
         )
         self.query_one("#status-left", Static).update(left)
@@ -701,12 +775,22 @@ class MiniCodeApp(App[None]):
 
     def _set_busy(self, busy: bool, status: str) -> None:
         self._busy = busy
-        self.query_one("#spinner", LoadingIndicator).display = busy
+        if busy:
+            self._activity_started = time.monotonic()
         prompt = self.query_one("#prompt", PromptArea)
-        prompt.disabled = busy
-        if not busy:
-            prompt.focus()
+        prompt.focus()
         self._refresh_status(status)
+
+    def _refresh_activity(self) -> None:
+        if self._activity_widget is None:
+            return
+        elapsed = max(0.0, time.monotonic() - self._activity_started)
+        prefix = "*" if self._busy else "·"
+        suffix = f" · {elapsed:.1f}s" if self._busy else ""
+        queued = f" · 排队 {len(self._queued_turns)}" if self._queued_turns else ""
+        self._activity_widget.update(
+            f"{prefix} {self._activity_label}{suffix}{queued}"
+        )
 
     # -- streaming callbacks (run inside the turn worker) ---------------------
 
@@ -714,10 +798,13 @@ class MiniCodeApp(App[None]):
         if self._current_reply is None:
             self._current_reply = StreamedReply()
             self._mount(self._current_reply)
+            self._refresh_status("接收回复")
         self._current_reply.append(delta)
 
     def _end_streaming(self) -> None:
         """Freeze the current streaming bubble (next deltas open a new one)."""
+        if self._current_reply is not None:
+            self._current_reply.finish()
         self._current_reply = None
 
     async def _on_event(self, event: Event) -> None:
@@ -744,7 +831,7 @@ class MiniCodeApp(App[None]):
             card.set_result(event.data)
             return
         if etype is EventType.ROUND_START:
-            self._refresh_status("思考中…")
+            self._refresh_status("等待模型响应")
             return
         if etype is EventType.APPROVAL_REQUEST:
             self._refresh_status("等待审批")
@@ -775,9 +862,9 @@ class MiniCodeApp(App[None]):
         self._add_line(line, "msg-user")
 
     async def _run_turn(self, text: str) -> None:
-        """One model turn inside a Textual worker (input is disabled meanwhile)."""
+        """One model turn inside a Textual worker; input can queue the next turn."""
         self._end_streaming()
-        self._set_busy(True, "思考中…")
+        self._set_busy(True, "等待模型响应")
         try:
             result = await self._runtime.run_turn(text)
         except asyncio.CancelledError:
@@ -786,15 +873,27 @@ class MiniCodeApp(App[None]):
             self._abort_pending_approval()
             self._add_line(Text("回合已取消，会话状态已保存。", style="yellow"), "msg-warn")
             self._set_busy(False, "已取消")
+            self.call_later(self._start_next_queued_turn)
             raise
         except Exception as exc:  # noqa: BLE001 - presentation must survive runtime bugs
             self._end_streaming()
             self._add_line(Text(f"回合执行失败: {exc}", style="red"), "msg-warn")
             self._set_busy(False, "就绪")
+            self.call_later(self._start_next_queued_turn)
             return
         self._end_streaming()
         self._add_line(_turn_summary_text(result), "msg-summary")
         self._set_busy(False, "就绪")
+        self.call_later(self._start_next_queued_turn)
+
+    def _start_next_queued_turn(self) -> None:
+        if self._busy or not self._queued_turns:
+            return
+        text = self._queued_turns.popleft()
+        self._refresh_activity()
+        self._turn_worker = self.run_worker(
+            self._run_turn(text), group="turn", exclusive=False, description="queued agent turn"
+        )
 
     # -- approval adapter -----------------------------------------------------
 
@@ -834,7 +933,16 @@ class MiniCodeApp(App[None]):
         self.slash_close()
         text = event.text.strip()
         event.prompt_area.clear()
-        if not text or self._busy:
+        if not text:
+            return
+        if self._busy:
+            if text.startswith("/"):
+                self._add_line(Text("命令请在当前回合结束后提交。", style="yellow"), "msg-warn")
+                return
+            self._queued_turns.append(text)
+            self._append_user_message(text)
+            self._add_line(Text("  已排队，将在当前回合结束后发送。", style="dim"), "msg-event")
+            self._refresh_activity()
             return
         if text.startswith("/"):
             self._handle_slash(text)
@@ -859,6 +967,25 @@ class MiniCodeApp(App[None]):
 
     def action_clear_log(self) -> None:
         self._clear_log()
+
+    def action_follow_log(self) -> None:
+        self.query_one("#log", VerticalScroll).anchor()
+        self.query_one("#new-content", Static).display = False
+
+    @on(events.Click, "#new-content")
+    def _on_new_content_click(self) -> None:
+        self.action_follow_log()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.set_class(event.size.width < 100, "narrow")
+
+    async def on_unmount(self) -> None:
+        if self._activity_timer is not None:
+            self._activity_timer.stop()
+        self._activity_widget = None
+        close = getattr(self._setup.provider, "aclose", None)
+        if close is not None:
+            await close()
 
     # -- slash autocomplete: cascading two-level menu -------------------------
 
@@ -1190,6 +1317,7 @@ class MiniCodeApp(App[None]):
             return
         info = MODEL_CATALOG[name]
         old = self._runtime.model
+        previous_provider = self._setup.provider
         # Keep /new consistent with the switched model.
         self._setup.provider = provider
         self._setup.provider_name = info.provider
@@ -1197,6 +1325,9 @@ class MiniCodeApp(App[None]):
         self._runtime.set_model(
             provider=provider, provider_name=info.provider, model=info.name
         )
+        close = getattr(previous_provider, "aclose", None)
+        if close is not None:
+            asyncio.create_task(close())
         self.sub_title = f"{self._setup.workspace} · {info.provider}/{info.name}"
         self._add_line(
             Text(
@@ -1337,9 +1468,14 @@ class MiniCodeApp(App[None]):
         services.goal_checker = runtime._goal_checker
         services.evidence_ledger = runtime._evidence_ledger
         setup.workspace = runtime.workspace
+        previous_provider = self._setup.provider
         self._setup = setup
         self._services = services
         self._runtime = runtime
+        if previous_provider is not setup.provider:
+            close = getattr(previous_provider, "aclose", None)
+            if close is not None:
+                asyncio.create_task(close())
         self.sub_title = f"{setup.workspace} · {setup.provider_name}/{setup.model_label}"
         self._cards.clear()
         self._add_line(

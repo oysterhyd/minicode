@@ -63,7 +63,9 @@ class GrepTool(BaseTool):
 
         matches = await self._search_with_ripgrep(args, base, ctx, effective_max)
         if matches is None:
-            matches = self._python_search(regex, base, args.glob, effective_max, ctx)
+            matches = await asyncio.to_thread(
+                self._python_search, regex, base, args.glob, effective_max, ctx
+            )
         if not matches:
             return ToolOutcome(output="(no matches)")
         return bounded_output("\n".join(matches), ctx.limits.max_output_chars)

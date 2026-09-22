@@ -767,6 +767,10 @@ def _run_one_turn(runtime: AgentRuntime, user_message: str) -> RunResult:
         except asyncio.CancelledError:
             typer.secho("已被用户取消，会话状态已保存。", fg=typer.colors.YELLOW)
             raise
+        finally:
+            close = getattr(runtime.provider, "aclose", None)
+            if close is not None:
+                await close()
 
     return asyncio.run(_guarded())
 

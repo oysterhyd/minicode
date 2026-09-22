@@ -7,6 +7,7 @@ workspace.
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import os
 from pathlib import Path
@@ -87,6 +88,10 @@ class ReadTool(BaseTool):
     args_model = ReadArgs
 
     async def execute(self, args: ReadArgs, ctx: ToolContext) -> ToolOutcome:
+        return await asyncio.to_thread(self._read, args, ctx)
+
+    @staticmethod
+    def _read(args: ReadArgs, ctx: ToolContext) -> ToolOutcome:
         target, failure = resolve_or_fail(ctx, args.path)
         if failure is not None:
             return failure
@@ -132,6 +137,9 @@ class LsTool(BaseTool):
     _MAX_ENTRIES = 500
 
     async def execute(self, args: LsArgs, ctx: ToolContext) -> ToolOutcome:
+        return await asyncio.to_thread(self._list, args, ctx)
+
+    def _list(self, args: LsArgs, ctx: ToolContext) -> ToolOutcome:
         base, failure = resolve_or_fail(ctx, args.path)
         if failure is not None:
             return failure

@@ -21,6 +21,7 @@ printed or logged.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, AsyncIterator
 
@@ -250,6 +251,8 @@ class CommandCodeProvider:
         self.reasoning_effort = reasoning_effort
         self.max_tokens = DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
 
         resolved_base = base_url
         resolved_key = api_key
@@ -265,6 +268,26 @@ class CommandCodeProvider:
 
         self.base_url = resolved_base.rstrip("/")
         self.api_key = resolved_key
+
+    def _http_client(self) -> httpx.AsyncClient:
+        """Reuse connections for requests made on the same event loop."""
+        loop = asyncio.get_running_loop()
+        if self._client is None or self._client.is_closed or self._client_loop is not loop:
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url + "/",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=self.timeout_s,
+                transport=self._transport,
+            )
+            self._client_loop = loop
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the connection pool before its owning event loop exits."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
+        self._client_loop = None
 
     # ------------------------------------------------------------------
     # Error mapping
@@ -323,16 +346,11 @@ class CommandCodeProvider:
         usage = Usage(available=False)
 
         try:
-            # NOTE: base_url gets a trailing "/" so httpx merges the relative
-            # request path into "<base>/chat/completions" instead of
-            # concatenating raw paths (".../v1" + "chat/completions").
-            async with httpx.AsyncClient(
-                base_url=self.base_url + "/",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=self.timeout_s,
-                transport=self._transport,
-            ) as client:
-                async with client.stream(
+            # The host closes the provider at the end of its event-loop life.
+            # Keeping this client alive lets successive model rounds reuse HTTP
+            # connections (the CLI closes it after each asyncio.run turn).
+            client = self._http_client()
+            async with client.stream(
                     "POST", "/chat/completions", json=payload
                 ) as response:
                     if response.status_code >= 400:
