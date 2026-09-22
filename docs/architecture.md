@@ -1,8 +1,9 @@
-# minicode 架构（P0）
+# minicode 当前架构（P0 与已接入的 P1）
 
-本文描述 P0 的实际实现：模块划分、一次 run 的事件流、关键执行语义，以及与
-[plan.md](../plan.md) 的映射。所有用户可见字符串为中文，后端包相互独立，仅通过
-`core/models.py` 的 pydantic 契约耦合。
+本文按 2026-09-22 的代码核对，描述模块划分、一次 run 的事件流与关键执行语义。
+[plan.md](../plan.md) 是原始设计目标；后续优化见 [探索与优化方案](optimization-design.md)。
+交互界面以中文为主，部分工具错误为英文。共享模型位于 `core/models.py`，运行时也直接依赖
+工具、存储与 Goal 实现；目前没有插件加载器或独立的多代理调度层。
 
 ## 1. 模块图
 
@@ -25,7 +26,8 @@
         ┌──────────────────┐ ┌────────────────┐ ┌──────────────────────┐
         │ providers/       │ │ tools/         │ │ security/            │
         │ base.py    契约   │ │ registry.py    │ │ policy.py            │
-        │ anthropic.py     │ │ files.py       │ │ ModePolicy           │
+        │ anthropic adapter│ │ files.py       │ │ ModePolicy           │
+        │ commandcode.py   │ │                │ │                      │
         │ fake.py          │ │ search.py      │ │ DefaultPolicy        │
         └──────────────────┘ │ command.py     │ └──────────────────────┘
                              └────────────────┘
@@ -39,13 +41,14 @@
                —— 所有模块的共享契约，无业务逻辑
 ```
 
-依赖方向：`cli → runtime → {providers, tools, security, storage}`，全部指向 `core`。
-`cli.py` 不实现任何运行时逻辑，只做选项解析、装配（provider/registry/policy/store）、
-展示（流式文本、工具单行、diff 摘要）与 Ctrl+C 接线。
+主调用方向：`CLI/TUI → runtime → {providers, tools, security, storage, goals}`，共享 `core` 契约。
+`cli.py` 同时承担服务装配、provider 选择、REPL 命令和展示；`ui/app.py` 复用其中多个私有函数。
+这部分耦合是当前状态，不能将两个前端视为已经完全独立。P1 模块见 §5。
 
 ## 2. 一次 run 的事件流
 
-`minicode run "任务"` 对应如下 `EventType` 序列（`storage.get_events` 可完整回放）：
+`minicode run "任务"` 的正常工具循环对应以下 `EventType` 序列（可从 `storage.get_events`
+读取事件；事件中的工具输出仅为预览，不等于完整原始输出）：
 
 ```text
 SESSION_START                          # 首个 run_turn 时创建会话行
@@ -53,11 +56,11 @@ SESSION_START                          # 首个 run_turn 时创建会话行
 │  每轮循环，直到模型不再调用工具或预算耗尽：
 ├─ ROUND_START {round}
 ├─ ASSISTANT_MESSAGE {text, tool_calls, usage, stop_reason}
+├─ TOOL_CALL_START {call_id, name, arguments}     # 每个调用一条，逐个串行
 │    ├─（若权限门判定 ASK 且配置了审批处理器）
 │    ├─ APPROVAL_REQUEST {call_id, tool_name, summary}
 │    ├─ APPROVAL_DECISION {call_id, granted, reason}
 │    └─
-├─ TOOL_CALL_START {call_id, name, arguments}     # 每个工具调用一条，逐个串行
 ├─ TOOL_CALL_RESULT {call_id, name, success, exit_code, error, output_preview}
 ├─ ROUND_END {round}
 │
@@ -70,44 +73,46 @@ SESSION_START                          # 首个 run_turn 时创建会话行
 
 ## 3. 关键语义
 
-**权限门**。每个工具调用按「参数校验 → ALLOW/ASK/DENY 判定 → 执行」处理。
+**权限门**。当前顺序为「记录 TOOL_CALL_START → 查找工具 → 对原始参数执行权限判定/审批
+→ `BaseTool.run` 用 Pydantic 校验参数 → 执行」。因此参数错误可能先触发审批；原方案中的
+“校验最终参数后审批”尚未实现。
 `ModePolicy` 按三态权限模式判定：default 下只读工具（read / ls / grep）ALLOW、
 edit / write / bash ASK、未配置工具默认 DENY；accept_edits 额外自动允许文件编辑；
 bypass 全部 ALLOW。`/permissions` 命令可在运行时切换模式并同步到状态栏
-（`--yes`）。ASK 时审批处理器拿到的是**最终参数**（`ApprovalRequest.arguments`），
+（`--yes` 初始采用 bypass）。ASK 时审批处理器拿到的是调用的**原始参数**（`ApprovalRequest.arguments`），
 CLI 用 Rich `Confirm` 展示工具名与摘要；拒绝则以错误 tool_result 回填模型，工具不执行。
 参数变化即视为新调用，重新过权限门。
 
-**预算顺序**。每轮开始依次检查：时长（每轮重置的墙钟 deadline）→ 轮数（会话累计）；
+**预算顺序**。一个用户回合对应一次 `run_turn`，内部可包含多个模型轮次。墙钟 deadline
+在每个用户回合开始时重置，循环中依次检查时长和会话累计轮数；
 token 预算在**助手响应已计入、但其工具尚未执行之前**检查——预算已耗尽时不再产生任何
 副作用（测试 `test_token_budget_stops_before_tool_execution` 固定了这一顺序）。
-所有退出路径都经由唯一的 `_finalize`，退出原因可区分地持久化。
+正常退出经由 `_finalize`，取消经由专门的清理与持久化路径。
 
 **token 默认不限制**。`Budget.max_total_tokens` 为 0（或负）时 token 检查恒不触发，
-默认只靠轮数与每轮时长兜底。原因：它统计的是**各轮 prompt 之和**（每轮重发全部上下文，
-所以 20 轮 × 20k 上下文 ≈ 400k「token」），度量的是花费而不是上下文占用——把上下文
-交给压缩层（§5.2）按模型窗口控制才是对的。需要硬性成本上限时用 `--max-tokens N`。
+默认只靠轮数与回合时长兜底。它统计**各轮输入与输出 token 的累计值**（每轮重发上下文，
+所以 20 轮 × 20k 输入 ≈ 400k 输入 token，另加输出），不是当前上下文占用。
+`--max-tokens N` 是 token 量上限，不区分缓存折扣，不能直接等同于货币成本上限。
 
 **取消**。Ctrl+C 时 asyncio.run 取消主任务；AgentRuntime 在 `CancelledError` 处理中
 **先**把会话落库为 `cancelled`（含 SESSION_END 事件，且该收尾自身不可再抛异常），
 **再**向上传播取消。CLI 捕获 KeyboardInterrupt 映射为退出码 130。chat 模式下每轮独立
 `asyncio.run`，回合内 Ctrl+C 只取消当前轮并回到提示符。
 
-**持久化与恢复边界**。消息、事件、会话状态随发生随写入（写事务内分配序号）。
-P0 **只持久化，不恢复**：重启后事件可完整回放（`report`），但不会自动重放任何调用——
-尤其是「已开始但结果未落库」的 `unknown` 副作用（如被中断的命令），按 plan.md §6.3
-必须在恢复时显式核对。恢复、上下文压缩、Goal 验收均属 P1。
+**持久化与恢复边界**。消息与事件随流程写入，写事务内分配序号；会话累计用量与结束状态
+在收尾时更新。当前已支持 `resume`，规则见 §5.4；`report` 只展示已有记录，不执行工具。
+不能将压缩后的消息表或事件预览当作完整原始历史。
 
 ## 4. 与 plan.md 的映射（P0 六条能力 → 实现位置）
 
 | plan.md §3 P0 能力 | 实现位置 |
 | --- | --- |
 | CLI 单轮执行、交互会话、流式展示、Ctrl+C 取消 | `src/minicode/cli.py`（run / chat / `_run_one_turn` / `_StreamPrinter`） |
-| 真实模型适配器 + Fake Provider | `src/minicode/providers/anthropic_provider.py`、`providers/fake.py`（契约 `providers/base.py`） |
-| 五个基础工具 | `src/minicode/tools/files.py`、`tools/search.py`、`tools/command.py`、`tools/registry.py` |
+| 真实模型适配器 + Fake Provider | `src/minicode/providers/commandcode.py`、`providers/anthropic_provider.py`、`providers/fake.py`（契约 `providers/base.py`） |
+| 六个内置工具：read / bash / edit / write / ls / grep | `src/minicode/tools/files.py`、`tools/search.py`、`tools/command.py`、`tools/registry.py` |
 | 参数校验、工作区边界、审批、超时与输出限制 | `tools/base.py`（args 校验 + ToolLimits）、`core/paths.py`（越界解析）、`security/policy.py`、`tools/command.py`（超时/进程树终止）、`cli.py`（交互审批） |
 | 会话持久化、事件追踪、diff 与退出码报告 | `storage/sqlite_store.py`、`runtime/events.py`、`cli.py`（`report` / `_print_diff_summary`） |
-| 轮数 / token / 时长预算，退出原因可区分 | `core/models.py`（Budget / ExitReason / RunResult）、`runtime/budget.py`、`runtime/loop.py`（唯一 `_finalize` 路径） |
+| 轮数 / token / 时长预算，退出原因可区分 | `core/models.py`（Budget / ExitReason / RunResult）、`runtime/budget.py`、`runtime/loop.py`（结束与取消路径） |
 
 P0 演示闭环：`examples/pagination/`（带 bug 的仓库 + 失败测试）与
 `examples/pagination/scripts/fix_pagination.json`（FakeProvider 脚本），
@@ -115,9 +120,9 @@ P0 演示闭环：`examples/pagination/`（带 bug 的仓库 + 失败测试）�
 
 ## 5. P1：可靠性能力（实际实现）
 
-P1 在不动 P0 主干的前提下叠加了六层能力。Runtime 对新模块只依赖鸭子类型协议
-（`loop.py` 不 import 新包），装配发生在 CLI 层（`cli.py` 的 `_build_services` /
-`_attach_compactor`）。
+P1 服务主要由 `cli.py` 的 `_build_services` / `_attach_compactor` 装配，Runtime 驱动
+压缩、验收、恢复及后台结果投递。部分接口采用鸭子类型，Goal 恢复与验收路径则直接导入
+`goals` 中的类型并作类型判断。
 
 ### 5.1 模块增量
 
@@ -125,29 +130,38 @@ P1 在不动 P0 主干的前提下叠加了六层能力。Runtime 对新模块�
 runtime/loop.py      P1 钩子：压缩 / Goal 门 / 后台投递 / 恢复 / artifact 转存
 context/             estimate（保守 token 估算）、compact（归档→压缩→摘要）
 goals/               spec（验收 YAML）、checker（指纹/快照/检查）、evidence（证据账本）
-tasks/               background（后台命令）、taskstore（任务依赖）
+tasks/               background（已接入）、taskstore（独立模块，尚未接入主循环）
 tools/command.py     bash 增加 background 参数
 storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（schema v2）
 reports/             render_session_html：单文件离线 HTML 报告
 ui/                  Textual 全屏 TUI（minicode tui）
 providers/           commandcode.py + zcode_config.py：OpenAI 兼容默认适配器
-evals/               20 任务离线评测集 + 三基线 runner
+evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
 ```
 
-### 5.2 上下文压缩（plan.md §6.2 → s08）
+### 5.2 上下文压缩与归档
 
 两段式：
 
 1. **工具结果转存**（loop 内，逐调用）：成功输出超过 `spill_threshold_chars`（4000）时，
-   完整内容写入 `ArtifactStore`（`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），
-   模型只看到预览 + `[artifact:<id>]` 归档引用，完整内容留存在会话归档中。
-2. **轮前压缩**（`ContextCompactor`）：估算 token（字符/3，标注为估算）超过「当前模型
+   将工具返回的字符串写入 `ArtifactStore`（`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），
+   模型只看到前 1000 字符预览 + `[artifact:<id>]`。工具内部可能已经截断，此处不是原始完整输出。
+2. **轮前压缩**（`ContextCompactor`）：估算 token（字符/3，另加固定输出预留）超过「当前模型
    prompt 预算 × `trigger_fraction`（0.8）」时依次执行——prompt 预算 =
    `context_window - max_output_tokens`（`AgentRuntime.prompt_budget_tokens()`，每次检查
-   现读，`/model` 切换立即生效）。压缩层次：按完整交互单元归档早期历史（单元 =
-   user + assistant + 其 tool_result；tool_use/tool_result 同进同退）→ 压缩保留区中较旧
-   的工具结果 → 仍超时把最老单元合并为确定性结构化摘要。归档原文落 artifact，压缩后的
+   现读，`/model` 切换立即生效）。交互单元以不含 tool_result 的 user 消息为边界，一个
+   用户回合的多轮工具循环通常仍属于同一单元。按单元归档早期历史 → 缩短较旧工具结果
+   → 满足条件时合并早期单元为确定性摘要；归档/合并前检查调用结果配对。归档原文落 artifact，压缩后的
    消息列表通过 `store.replace_messages` 原子重写持久化，并发出 `CONTEXT_COMPACTED` 事件。
+
+现有限制：
+
+- 注册表没有归档回读工具；`ArtifactStore.read` 是宿主内部接口，模型不能按 ID 取回内容。
+- read/grep/diff/bash 先截断，再进入转存；失败工具输出不经过成功输出的转存分支。
+- 归档摘要主要保留助手摘录、调用和修改文件，没有独立保留用户约束；缩短工具结果可能丢掉末尾归档 ID。
+- 默认保留最近四个交互单元；单次长任务没有可归档的早期单元，只有结果缩短可能生效。
+- 默认步骤 A 合并早期单元后，步骤 C 可能没有足够单元继续摘要。Runtime 没有压缩后硬性超限门，不能保证请求一定进入预算。
+- 字符数 / 3 不是严格上界；目录最大输出与 provider 实际请求的 `max_tokens` 也不总一致，见 §6。
 
 ### 5.3 Goal 验收与证据（plan.md §6.4 → s17）
 
@@ -165,8 +179,8 @@ evals/               20 任务离线评测集 + 三基线 runner
 
 受保护路径快照在会话首个回合开始时捕获（模型改动之前），随验收配置保存到 SQLite
 `session_goals`（schema v3）；resume 恢复原基线，旧会话缺失基线时检查失败而非重新采样。
-保护检查放在全部验收命令之后，最终指纹也在检查完成后计算。模型自述"完成"永远不会
-绕过检查；证据与代码状态绑定——任何文件变化都会使旧证据失效。
+保护检查放在全部验收命令之后，最终指纹也在检查完成后计算。配置了验收门时，模型自述
+“完成”不会跳过验收逻辑；参与指纹计算的工作区内容变化会使旧证据失效。
 
 ### 5.4 会话恢复（plan.md §6.3）
 
@@ -190,24 +204,41 @@ evals/               20 任务离线评测集 + 三基线 runner
 ### 5.6 评测与报告
 
 - `evals/`：20 个本地任务（repo fixture + task.yaml + FakeProvider 修复脚本），runner
-  （`minicode eval`）在干净副本上运行，b0（基础循环，runner 自行验收）与 b2（验收失败
-  续跑）对照；结果 JSON + Markdown 汇总 + 失败分析。诚实口径：FakeProvider 评测度量
-  harness 机制（验收、预算、恢复路径），不度量模型智力，不冒充真实模型成绩。
+  （`minicode eval`）在干净副本上运行，b0 是基础循环；b1 与 b0 相同，尚未接入压缩；
+  b2 在 runner 外层验收失败后续跑，没有装配运行时 Goal 门。结果为 JSON + Markdown。
+  FakeProvider 的 usage 来自脚本/默认值，不度量真实模型能力、缓存或 token 节省；恢复等边界另由 tests 覆盖。
 - `minicode report <id> --format html`：单文件 HTML（零外链、可离线打开），时间线、
   工具记录与 diff、验收证据表、用量；所有动态文本经 HTML 转义。
 - `minicode tui`：Textual 全屏界面——流式回复、工具卡片、审批 ModalScreen、
   斜杠命令与自动补全（/help /model /effort /permissions /clear /new /sessions /resume
   /compact /exit）、启动 Banner、状态栏（CWD · 权限模式 · 模型 · 上下文负载 · Token ·
-  缓存命中率）、Ctrl+C 取消当前回合。
+  缓存命中率）、全局 LoadingIndicator、Ctrl+C 取消当前回合。回复为纯文本；执行时禁用
+  输入框；卡片展示预览，尚无展开交互、命令实时输出或任务/子代理面板。
 
 ### 5.7 P1 → 实现位置映射
 
 | plan.md §3 P1 能力 | 实现位置 |
 | --- | --- |
-| 分层上下文压缩 + 原始输出按需读取 | `context/`、`storage/artifacts.py`、`loop._maybe_spill/_compact_if_needed` |
+| 分层上下文压缩 + 输出归档（模型回读尚未实现） | `context/`、`storage/artifacts.py`、`loop._maybe_spill/_compact_if_needed` |
 | 会话恢复及未确认副作用处理 | `loop.resume/_settle_recovery`、`cli.py`（`resume` 命令） |
 | Goal 验收器 + 失败续跑 + 证据绑定 | `goals/`、`loop._goal_gate`、`--acceptance` 装配 |
-| 任务依赖、后台测试 | `tasks/`、`tools/command.py`（background）、`loop._deliver_finished_jobs` |
-| 评测集、基线、失败分析 | `evals/`（20 任务 + run_eval.py 三基线 runner） |
+| 后台命令；独立的任务依赖存储 | `tasks/background.py` 已接入；`tasks/taskstore.py` 尚未接入 Runtime；`tools/command.py`、`loop._deliver_finished_jobs` |
+| 评测集、基线、失败分析 | `evals/`（20 任务；run_eval.py 的 b1 目前等同 b0） |
 | 可离线查看的 HTML 执行报告 | `reports/html.py`、`cli.py`（`report --format html`） |
 | 类 Claude Code TUI | `ui/`（Textual App + Pilot 测试） |
+
+## 6. Provider、缓存及扩展边界
+
+- `Provider.stream` 目前只提供 `TextDelta` 与终结 `ResponseDone`，没有工具参数增量、
+  阶段反馈或细粒度 usage 事件。CommandCode 忽略 reasoning-only 文本增量。
+- CommandCode 每次 `stream` 创建一个 `httpx.AsyncClient`；Anthropic 持有 SDK client。
+- 缓存统计：CommandCode 解析 `prompt_tokens_details.cached_tokens`；Anthropic 将普通输入、
+  缓存创建和缓存读取合并到输入总数。`Usage` 没有单独的 cache-write 字段，SQLite 和轮次
+  事件没有完整保存缓存计数，resume 只恢复输入/输出总量。
+- Anthropic 请求没有设置 `cache_control`；兼容网关是否支持缓存、返回哪些 usage 字段，
+  必须实际核验，不能由 API 格式兼容推断。
+- `_build_provider` 启动路径采用适配器默认输出上限（CommandCode 8192、Anthropic 4096），
+  `_provider_for_model` 切换路径传入目录最大输出；压缩预算始终使用目录值。
+  `/effort off` 省略字段，表示采用网关默认行为，不等于明确关闭推理。
+- 工具表固定为六个内置工具；权限策略和恢复只读集合都使用内置工具名。
+  Subagents、Skills、MCP、Plugins、项目指令自动加载及长期记忆尚未提供。

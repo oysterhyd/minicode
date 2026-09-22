@@ -1,4 +1,7 @@
-# evals —— P1 本地任务评测集（20 任务 × 三基线，可离线运行）
+# evals —— 本地任务评测集（20 任务，可离线运行）
+
+> 2026-09-22 核对：runner 提供 b0/b1/b2 三个标签，但 b1 与 b0 的执行路径相同。
+> 当前没有三种独立机制的消融结果，也不能用 FakeProvider 的脚本 token 数衡量真实压缩收益。
 
 这是一套完全离线的评测：20 个带 bug 的微型 Python 仓库，由 FakeProvider 重放
 确定性修复脚本驱动 `AgentRuntime`，runner 自己做验收（子进程跑验收命令 +
@@ -14,18 +17,18 @@ evals/
 └── tasks/<task_id>/         # 提交在仓库里的生成产物（可再生）
     ├── repo/                # 带 bug 的微型仓库：<module>.py + test_<module>.py
     ├── task.yaml            # 任务定义（schema 见下，goals 模块兼容此格式）
-    └── script.json          # FakeProvider 修复脚本（读文件 → apply_patch → 跑测试 → 总结）
+    └── script.json          # FakeProvider 修复脚本（read → edit → bash → 总结）
 ```
 
 每个任务的仓库刻意保持极小（每文件 < 40 行）：测试**先失败**（红），
 修复后全部通过（绿）。`generate_tasks.py` 从同一份模板字典同时生成源码与
-脚本的 `old_text`，保证 `apply_patch` 精确命中；`python evals/generate_tasks.py
+脚本的 `old_text`，保证 `edit` 精确命中；`python evals/generate_tasks.py
 --verify` 会在临时目录里对每个任务做红→绿自检。
 
 ## 运行方式
 
 ```bash
-# 全量三基线（约 60 次运行，每次 2s 左右）
+# 全量三个标签（60 次运行，耗时取决于本机环境）
 PYTHONPATH=src .venv/Scripts/python.exe -m evals.run_eval
 
 # 只跑部分基线 / 指定任务（两种调用方式等价）
@@ -40,7 +43,7 @@ PYTHONPATH=src .venv/Scripts/python.exe -m evals.run_eval --task queue_fifo --ke
 `--baselines b0,b1,b2`、`--output`（默认 `reports/eval`）、`--keep-workspaces`。
 
 runner 会把启动解释器所在目录（venv 的 `Scripts/`）前置到子进程 PATH，
-保证 `run_command` 与验收子进程里的 `python` / `pytest` 解析到同一套环境。
+保证 `bash` 与验收子进程里的 `python` / `pytest` 解析到同一套环境。
 
 ## task.yaml schema
 
@@ -96,12 +99,13 @@ script: script.json
 - **b0 —— 基础循环**：一次 `run_turn(prompt)`，无上下文压缩、无验收门。
   结束后 runner 验收：验收命令退出码 0 且受保护文件哈希与运行前一致。
 - **b1 —— 同 b0（预留压缩钩子）**：行为与 b0 完全一致。`run_combo` 预留了
-  `compactor=None` 参数位置（TODO 注释标明接线点），主 agent 的上下文压缩
-  集成后在此接入；当前用于记录未压缩时的 token 基线。
+  `compactor=None` 参数位置，但 `run_combo` 直接丢弃该参数；CLI/TUI 已接入压缩，评测
+  runner 尚未接入。当前记录的是相同脚本用量，不构成压缩效果对照。
 - **b2 —— b1 + 验收失败续跑**：`run_turn` 结束后 runner 验收；若失败且未超
   `max_fix_attempts` 与预算（rounds/tokens），把失败详情（每个失败项 + 退出码 +
   “必须修复，不得改受保护文件”）作为新一轮 `run_turn` 输入继续跑，每次续跑后
-  重新验收，最多 `max_fix_attempts` 次。
+  重新验收，最多 `max_fix_attempts` 次。这是 runner 的外层逻辑，没有装配运行时的
+  `GoalChecker`、`EvidenceLedger` 或 `ContextCompactor`，因此不能当作这些组件的集成评测。
 
 ### 成功定义
 
@@ -121,11 +125,13 @@ script: script.json
 
 ## 诚实说明：FakeProvider 评测度量的是 harness 机制，不是模型智力
 
-FakeProvider 按脚本重放固定的 `read_file → apply_patch → run_command → 总结`
+FakeProvider 按脚本重放固定的 `read → edit → bash → 总结`
 序列，模型"决定"的环节是被排除的。因此这套评测能回答的问题仅限于 harness
 层：脚本重放是否稳定、工作区是否干净隔离、预算是否生效、验收命令与受保护
 文件哈希是否被如实执行、b2 的续跑分支是否按预期触发、退出原因是否可区分。
 它**不能**回答"模型能不能独立修好 bug"——那需要接真实模型的在线评测。
+FakeProvider 的 usage 来自脚本或固定默认值，不随实际请求长度计算，因此这里的 token
+结果也不能证明上下文压缩、工具输出裁剪或缓存带来了费用下降。
 在当前脚本保证一次修复成功的设定下，b0/b1/b2 的成功率和轮数必然一致，b2 的
 续跑分支只在验收失败时才会产生差异（runner 的失败分析模板也照此措辞）。
 
