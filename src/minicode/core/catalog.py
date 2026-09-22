@@ -1,10 +1,11 @@
 """Model catalog: the models minicode knows how to drive.
 
-Each entry records the provider that serves the model, its context window
-and whether it accepts a reasoning-effort parameter. The catalog is the
-single source of truth for ``/model`` completion, context-window load
-reporting and provider construction; unknown models fall back to a
-conservative default window so the status bar never crashes on them.
+Each entry records the provider that serves the model, its context window, the
+longest response it may produce and whether it accepts a reasoning-effort
+parameter. The catalog is the single source of truth for ``/model``
+completion, context-window load reporting, the compaction trigger and provider
+construction; unknown models fall back to a conservative default window so the
+status bar never crashes on them.
 """
 
 from __future__ import annotations
@@ -19,27 +20,36 @@ class ModelInfo:
     name: str  # provider-facing model id, e.g. "z.ai/glm-5.3-flash"
     provider: str  # provider key: commandcode / anthropic / fake
     context_window: int  # prompt tokens the model accepts
+    #: Longest response the model produces, in tokens. The prompt budget is
+    #: ``context_window - max_output_tokens``: compaction must leave this much
+    #: room, or a long answer would push the request past the window.
+    #: ``None`` = unknown, keep the provider's own default.
+    max_output_tokens: int | None = None
     supports_effort: bool = False  # accepts a reasoning_effort parameter
 
 
 #: Z.ai gateway models share the CommandCode (OpenAI-compatible) endpoint;
-#: DeepSeek V4.1 Flash and GLM-5.3 Flash both expose a 1M-token window.
+#: DeepSeek V4.1 Flash and GLM-5.3 Flash both expose a ~1M-token window with
+#: different maximum response lengths.
 _GLM_5_3_FLASH = ModelInfo(
     name="z.ai/glm-5.3-flash",
     provider="commandcode",
-    context_window=1_000_000,
+    context_window=1_048_576,  # 1 Mi tokens
+    max_output_tokens=128_000,
     supports_effort=True,
 )
 _DEEPSEEK_V41_FLASH = ModelInfo(
     name="deepseek/deepseek-v4.1-flash",
     provider="commandcode",
     context_window=1_000_000,
+    max_output_tokens=384_000,
     supports_effort=True,
 )
 _CLAUDE_SONNET_4_5 = ModelInfo(
     name="claude-sonnet-4-5",
     provider="anthropic",
     context_window=200_000,
+    max_output_tokens=64_000,
 )
 
 #: Registry keyed by model id; ``default_model`` names the CommandCode default.

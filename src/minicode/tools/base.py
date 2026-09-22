@@ -24,7 +24,7 @@ class ToolLimits(BaseModel):
     max_search_results: int = 100
     search_max_file_bytes: int = 1_000_000
     # Tool outputs longer than this are spilled to an artifact; the model
-    # sees a preview plus a reference it can read back with read_artifact.
+    # sees a preview plus an archive reference.
     spill_threshold_chars: int = 4_000
     spill_preview_chars: int = 1_000
 

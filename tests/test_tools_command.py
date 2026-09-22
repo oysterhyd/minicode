@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import locale
 import os
 import sys
 
+import pytest
+
 from minicode.tools.base import ToolContext, ToolLimits
-from minicode.tools.command import BashTool
+from minicode.tools.command import (
+    BashTool,
+    _translate_posix_redirects,
+    decode_shell_output,
+    shell_command,
+)
 
 
 def _python_command(snippet: str) -> str:
@@ -102,3 +110,73 @@ def test_run_command_timeout_clamped_to_limit(tmp_path):
     assert fast.success is True
     tiny = run({"command": "echo ok", "timeout_s": 0.001}, tmp_path)
     assert tiny.success is True  # clamped up to 1s minimum, echo finishes fast
+
+
+# ---------------------------------------------------------------------------
+# Output decoding: encoding, POSIX idioms and ANSI noise
+#
+# Regression tests for session 39e5f16a, where PowerShell's code-page output
+# was decoded as UTF-8: every Chinese character of `Get-Content README.md`
+# reached the model as mojibake, and `2>/dev/null` was taken as a redirect to
+# a file named D:\dev\null.
+# ---------------------------------------------------------------------------
+
+
+def test_decode_shell_output_uses_the_system_code_page():
+    """Bytes in the shell's own code page survive decoding on any platform."""
+    text = "演示会**实际修改**工作区内的文件"
+    raw = text.encode(locale.getpreferredencoding(False))
+    assert decode_shell_output(raw) == text
+
+
+def test_decode_shell_output_prefers_utf8_then_falls_back():
+    assert decode_shell_output("中文 ok".encode("utf-8")) == "中文 ok"
+    # Undecodable bytes degrade to replacement characters, never to an error.
+    assert "\ufffd" in decode_shell_output(b"\xff\xfe\x00bad")
+
+
+def test_decode_shell_output_strips_sgr_colour():
+    raw = b"\x1b[32;1mLines\x1b[0m \x1b[31mFile\x1b[0m\n"
+    assert decode_shell_output(raw) == "Lines File\n"
+
+
+def test_decode_shell_output_normalises_crlf():
+    assert decode_shell_output(b"a\r\nb\r\n") == "a\nb\n"
+
+
+def test_posix_null_redirect_is_translated_for_powershell():
+    assert _translate_posix_redirects("git status 2>/dev/null") == "git status 2>$null"
+    assert _translate_posix_redirects("ls >/dev/null") == "ls >$null"
+    # Only the redirect target is rewritten; other text is left alone.
+    assert _translate_posix_redirects("echo /dev/nullx") == "echo /dev/nullx"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell-specific command wrapping")
+def test_windows_shell_command_requests_utf8_and_translates_dev_null():
+    argv = shell_command("Get-ChildItem 2>/dev/null")
+    assert "$null" in argv[-1]
+    # Both output encodings are pinned before the user's command runs.
+    assert "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8" in argv[-1]
+    assert "$OutputEncoding=[System.Text.Encoding]::UTF8" in argv[-1]
+    assert argv[-1].endswith("Get-ChildItem 2>$null")
+
+
+def test_posix_shell_command_keeps_command_verbatim():
+    if os.name == "nt":  # the POSIX branch is only reachable on POSIX
+        return
+    assert shell_command("git status 2>/dev/null")[-1] == "git status 2>/dev/null"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell console code page")
+def test_run_command_non_ascii_output_is_readable(tmp_path):
+    (tmp_path / "cn.md").write_text("演示会：中文内容\n", encoding="utf-8")
+    outcome = run({"command": "Get-Content cn.md"}, tmp_path)
+    assert outcome.success is True
+    assert "演示会" in outcome.output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="POSIX redirect under PowerShell")
+def test_run_command_posix_null_redirect_succeeds(tmp_path):
+    outcome = run({"command": "Get-ChildItem . 2>/dev/null"}, tmp_path)
+    assert outcome.success is True
+    assert outcome.exit_code == 0

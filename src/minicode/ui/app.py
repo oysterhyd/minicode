@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typer import Exit
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from minicode.cli import (
     _exit_label,
     _format_timestamp,
     _provider_for_model,
+    _prepare_resume,
     _resolve_session_id,
     _status_label,
     _success_brief,
@@ -48,6 +50,7 @@ from minicode.core.catalog import (
     MODEL_CATALOG,
     parse_effort,
 )
+from minicode.core.format import format_tokens
 from minicode.core.models import (
     ApprovalDecision,
     ApprovalRequest,
@@ -367,7 +370,7 @@ class ModelPickerModal(ModalScreen[str | None]):
             info = MODEL_CATALOG[name]
             mark = " ← 当前" if name == self._current else ""
             body.append(
-                f"{name}（上下文 {info.context_window:,} token）{mark}\n",
+                f"{name}（上下文 {format_tokens(info.context_window)} token）{mark}\n",
                 style="bold" if name == self._current else "",
             )
         with Vertical(id="model-dialog"):
@@ -408,8 +411,8 @@ def _p1_line(event: Event) -> Text:
         return line
     if event.type is EventType.CONTEXT_COMPACTED:
         return Text(
-            f"  ◆ 上下文已压缩：估算 {data.get('tokens_before')} → "
-            f"{data.get('tokens_after')} token",
+            f"  ◆ 上下文已压缩：估算 {format_tokens(int(data.get('tokens_before') or 0))} → "
+            f"{format_tokens(int(data.get('tokens_after') or 0))} token",
             style="dim",
         )
     if event.type is EventType.BACKGROUND_JOB_COMPLETED:
@@ -420,18 +423,11 @@ def _p1_line(event: Event) -> Text:
         )
     if event.type is EventType.BACKGROUND_JOB_LOST:
         return Text(
-            f"  ◆ 后台任务 {data.get('job_id')} 失联（进程已不在）", style="yellow"
+            f"  ◆ 后台任务 {data.get('job_id')} 已终止或失联，结果不完整", style="yellow"
         )
     if event.type is EventType.SIDE_EFFECT_UNKNOWN:
         return Text(
             f"  ◆ {data.get('name')} 的副作用状态未知，需要先核实", style="yellow"
-        )
-    if event.type is EventType.SUBAGENT_FINISHED:
-        usage = data.get("usage") or {}
-        return Text(
-            f"  ◆ 子代理完成（token {usage.get('input_tokens', 0)}+"
-            f"{usage.get('output_tokens', 0)}）",
-            style="dim",
         )
     raise AssertionError(f"unhandled P1 event: {event.type}")
 
@@ -444,8 +440,8 @@ def _turn_summary_text(result: RunResult) -> Text:
     line.append(
         f"退出原因: {_exit_label(result.exit_reason.value)}"
         f" · 轮数: {result.rounds}"
-        f" · Token: {usage.total_tokens}"
-        f"（输入 {usage.input_tokens} / 输出 {usage.output_tokens}）"
+        f" · Token: {format_tokens(usage.total_tokens)}"
+        f"（输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}）"
         f" · 耗时: {result.duration_s:.1f}s"
         f" · 会话: {result.session_id[:8]}"
     )
@@ -567,7 +563,7 @@ class MiniCodeApp(App[None]):
             provider_name=self._setup.provider_name,
             model=self._setup.model_label,
             budget=self._setup.budget,
-            approval_handler=None if self._yes else self._approval_handler,
+            approval_handler=self._approval_handler,
             on_text_delta=self._on_text_delta,
             on_event=self._on_event,
             background_manager=services.background_manager,
@@ -575,9 +571,7 @@ class MiniCodeApp(App[None]):
             goal_checker=services.goal_checker,
             evidence_ledger=services.evidence_ledger,
         )
-        _attach_compactor(
-            runtime, services.artifact_store, self._setup.budget.max_total_tokens
-        )
+        _attach_compactor(runtime, services.artifact_store)
         self._runtime = runtime
 
     # -- layout ---------------------------------------------------------------
@@ -666,11 +660,7 @@ class MiniCodeApp(App[None]):
     @staticmethod
     def _fmt_tokens(value: int) -> str:
         """Compact token count: 1M / 200k / 950 (no trailing ``.0``)."""
-        if value >= 1_000_000:
-            return f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
-        if value >= 1_000:
-            return f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
-        return str(value)
+        return format_tokens(value)
 
     @classmethod
     def _context_bar(cls, used: int, window: int) -> str:
@@ -691,7 +681,7 @@ class MiniCodeApp(App[None]):
         line.append(
             self._context_bar(runtime.context_tokens_used(), runtime.context_window)
         )
-        line.append(f" · 输入 {usage.input_tokens} / 输出 {usage.output_tokens}")
+        line.append(f" · 输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}")
         line.append(f" · 缓存 {usage.cache_hit_rate:.0%}")
         line.append(f" · 会话 {session_id[:8] if session_id else '未开始'}")
         return line
@@ -772,7 +762,6 @@ class MiniCodeApp(App[None]):
             EventType.BACKGROUND_JOB_COMPLETED,
             EventType.BACKGROUND_JOB_LOST,
             EventType.SIDE_EFFECT_UNKNOWN,
-            EventType.SUBAGENT_FINISHED,
         ):
             self._end_streaming()
             self._add_line(_p1_line(event), "msg-event")
@@ -933,6 +922,13 @@ class MiniCodeApp(App[None]):
     def _open_submenu(self, cmd: str) -> None:
         """Enter (or re-render) the submenu for *cmd* (``/model`` / ``/effort``)."""
         entries = self._build_submenu_entries(cmd)
+        if not entries:
+            # Nothing to offer (e.g. /resume with no stored session): fall back
+            # to direct execution so Enter still runs the command and explains.
+            self._submenu_cmd = None
+            self._submenu_entries = []
+            self.slash_close()
+            return
         if self._submenu_cmd != cmd:
             # Entering: highlight the currently active value.
             self._submenu_cmd = cmd
@@ -942,11 +938,20 @@ class MiniCodeApp(App[None]):
         self._menu_open = True
         self._submenu_entries = entries
         self._root_items = []
-        crumb = f"命令 › {cmd} · {SUBMENU_COMMANDS[cmd]}"
-        self._menu().show_submenu(crumb, entries, self._slash_index)
+        self._menu().show_submenu(
+            self._submenu_crumb(cmd), entries, self._slash_index
+        )
+
+    def _submenu_crumb(self, cmd: str) -> str:
+        """Breadcrumb header of a submenu (``命令 › /model · 选择模型``)."""
+        return f"命令 › {cmd} · {SUBMENU_COMMANDS[cmd]}"
 
     def _build_submenu_entries(self, cmd: str) -> list[SubmenuItem]:
-        """Submenu options for *cmd*, annotated with live runtime state."""
+        """Submenu options for *cmd*, annotated with live runtime state.
+
+        Every command in :data:`SUBMENU_COMMANDS` gets its option list here;
+        an empty list means "no options available" and closes the menu.
+        """
         if cmd == "/model":
             current = self._runtime.model
             entries = []
@@ -982,7 +987,38 @@ class MiniCodeApp(App[None]):
                 )
                 for level in EFFORT_LEVELS
             ]
+        if cmd == "/permissions":
+            policy = self._services.policy
+            current = policy.mode.value if isinstance(policy, ModePolicy) else None
+            return [
+                SubmenuItem(
+                    value=mode.value,
+                    detail=PERMISSION_MODE_LABELS[mode],
+                    badges=("当前",) if mode.value == current else (),
+                )
+                for mode in PermissionMode
+            ]
+        if cmd == "/resume":
+            return self._resume_entries()
         return []
+
+    def _resume_entries(self) -> list[SubmenuItem]:
+        """Stored sessions as pickable options (value = 8-char session id)."""
+        current = self._runtime.session_id
+        return [
+            SubmenuItem(
+                value=session.session_id[:8],
+                detail=(
+                    f"{_status_label(session.status, session.exit_reason)}"
+                    f" · {session.rounds} 轮"
+                    f" · {format_tokens(session.input_tokens + session.output_tokens)} token"
+                    f" · {session.provider}/{session.model}"
+                    f" · {_format_timestamp(session.created_at)}"
+                ),
+                badges=("当前",) if session.session_id == current else (),
+            )
+            for session in self._store.list_sessions()[:20]
+        ]
 
     def slash_move(self, delta: int) -> None:
         """Move the highlight by *delta* (wrapping both ways)."""
@@ -991,8 +1027,9 @@ class MiniCodeApp(App[None]):
             return
         self._slash_index = (self._slash_index + delta) % len(items)
         if self._submenu_cmd is not None:
-            crumb = f"命令 › {self._submenu_cmd} · {SUBMENU_COMMANDS[self._submenu_cmd]}"
-            self._menu().show_submenu(crumb, self._submenu_entries, self._slash_index)
+            self._menu().show_submenu(
+                self._submenu_crumb(self._submenu_cmd), self._submenu_entries, self._slash_index
+            )
         else:
             self._menu().show_root(self._root_items, self._slash_index)
 
@@ -1025,14 +1062,13 @@ class MiniCodeApp(App[None]):
             return
         prompt = self._prompt()
         if self._submenu_cmd is not None:
+            if not self._submenu_entries:
+                return
             entry = self._submenu_entries[self._slash_index]
             cmd = self._submenu_cmd
             self.slash_close()
             _set_text_caret_end(prompt, "")
-            if cmd == "/model":
-                self._switch_model(entry.value)
-            elif cmd == "/effort":
-                self._apply_effort(entry.value)
+            self._apply_submenu_choice(cmd, entry.value)
             return
         cmd = self._root_items[self._slash_index]
         if cmd.name in SUBMENU_COMMANDS:
@@ -1044,6 +1080,17 @@ class MiniCodeApp(App[None]):
         _set_text_caret_end(prompt, cmd.name)
         self.slash_close()
         self.post_message(PromptArea.Submitted(cmd.name, prompt))
+
+    def _apply_submenu_choice(self, cmd: str, value: str) -> None:
+        """Apply the option picked in *cmd*'s submenu (one entry per command)."""
+        if cmd == "/model":
+            self._switch_model(value)
+        elif cmd == "/effort":
+            self._apply_effort(value)
+        elif cmd == "/permissions":
+            self._cmd_permissions(value)
+        elif cmd == "/resume":
+            self._cmd_resume(value)
 
     def slash_back(self) -> None:
         """Esc / Backspace: submenu -> root list -> closed."""
@@ -1154,7 +1201,7 @@ class MiniCodeApp(App[None]):
         self._add_line(
             Text(
                 f"✔ 已切换模型 {old} → {info.name}"
-                f"（上下文 {info.context_window:,} token）",
+                f"（上下文 {format_tokens(info.context_window)} token）",
                 style="green",
             ),
             "msg-system",
@@ -1241,7 +1288,7 @@ class MiniCodeApp(App[None]):
                 f"  {session.session_id[:8]}"
                 f"  {_status_label(session.status, session.exit_reason)}"
                 f"  · 轮数 {session.rounds}"
-                f"  · Token {session.input_tokens + session.output_tokens}"
+                f"  · Token {format_tokens(session.input_tokens + session.output_tokens)}"
                 f"  · {session.provider}/{session.model}"
                 f"  · {session.workspace}"
                 f"  · {_format_timestamp(session.created_at)}"
@@ -1259,19 +1306,22 @@ class MiniCodeApp(App[None]):
                 "msg-warn",
             )
             return
-        services = self._services
         try:
+            summary = self._store.get_session(resolved)
+            setup = _prepare_resume(summary, budget=self._setup.budget)
+            services = _build_services(setup, self._store, Console(), self._yes)
+            services.policy = self._services.policy
             runtime = AgentRuntime.resume(
                 store=self._store,
                 session_id=resolved,
-                provider=self._setup.provider,
+                provider=setup.provider,
                 registry=services.registry,
                 policy=services.policy,
                 workspace=None,  # keep the stored session's workspace
-                provider_name=self._setup.provider_name,
-                model=self._setup.model_label,
-                budget=self._setup.budget,
-                approval_handler=None if self._yes else self._approval_handler,
+                provider_name=setup.provider_name,
+                model=setup.model_label,
+                budget=setup.budget,
+                approval_handler=self._approval_handler,
                 on_text_delta=self._on_text_delta,
                 on_event=self._on_event,
                 compactor=None,  # re-attached below, bound to this runtime
@@ -1280,19 +1330,23 @@ class MiniCodeApp(App[None]):
                 background_manager=services.background_manager,
                 artifact_store=services.artifact_store,
             )
-        except ValueError as exc:
+        except (ValueError, RuntimeError, ProviderRequestError, Exit) as exc:
             self._add_line(Text(f"恢复会话失败: {exc}", style="red"), "msg-warn")
             return
-        _attach_compactor(
-            runtime, services.artifact_store, self._setup.budget.max_total_tokens
-        )
+        _attach_compactor(runtime, services.artifact_store)
+        services.goal_checker = runtime._goal_checker
+        services.evidence_ledger = runtime._evidence_ledger
+        setup.workspace = runtime.workspace
+        self._setup = setup
+        self._services = services
         self._runtime = runtime
+        self.sub_title = f"{setup.workspace} · {setup.provider_name}/{setup.model_label}"
         self._cards.clear()
         self._add_line(
             Text(
                 f"已恢复会话 {resolved[:8]}"
                 f" · 轮数 {runtime.rounds}"
-                f" · Token {runtime.usage.total_tokens}",
+                f" · Token {format_tokens(runtime.usage.total_tokens)}",
                 style="green",
             ),
             "msg-system",
@@ -1324,7 +1378,7 @@ class MiniCodeApp(App[None]):
         self._store.replace_messages(session_id, result.messages)
         self._add_line(
             Text(
-                f"上下文已压缩：估算 {stats.tokens_before} → {stats.tokens_after} token"
+                f"上下文已压缩：估算 {format_tokens(stats.tokens_before)} → {format_tokens(stats.tokens_after)} token"
                 f"（归档 {stats.archived_units} · 收缩 {stats.shrunk_results}"
                 f" · 摘要 {stats.summarized_units}）"
             ),

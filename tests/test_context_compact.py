@@ -212,7 +212,7 @@ def test_compact_archives_early_units_with_spill_reference():
     assert summary.role == "user"
     text = summary.content[0].text
     assert f"[artifact:{artifact_id}]" in text
-    assert "可用 read_artifact 工具读取完整内容" in text
+    assert "完整内容保存在会话归档中" in text
     assert "read_file" in text and "file_1.py" in text  # tool + arg digest
 
     # Pairing invariant and complete removal of archived units.
@@ -415,3 +415,30 @@ def test_pairing_safety_allows_archive_when_span_is_complete():
     assert len(spill.calls) == 1
     assert "call_a" in spill.calls[0][1]
     assert "result text" in spill.calls[0][1]
+
+
+# ---------------------------------------------------------------------------
+# 7. Dynamic prompt budget: the trigger follows the active model
+# ---------------------------------------------------------------------------
+
+
+def test_context_tokens_fn_overrides_the_static_config():
+    """The trigger is the active model's prompt budget, read per check."""
+    config = CompactConfig(max_context_tokens=1_000, trigger_fraction=0.8)
+    budget = {"tokens": 100_000}
+    compactor = ContextCompactor(config, context_tokens_fn=lambda: budget["tokens"])
+    messages = [Message(role="user", content=[TextBlock(text="x" * 30_000)])]
+
+    assert compactor.context_tokens == 100_000
+    # 10k estimated tokens < 0.8 * 100k: no compaction on the big budget...
+    assert compactor.needs_compaction(None, messages) is False
+
+    # ...but it does fire once the model switches to a smaller window.
+    budget["tokens"] = 10_000
+    assert compactor.context_tokens == 10_000
+    assert compactor.needs_compaction(None, messages) is True
+
+
+def test_without_context_tokens_fn_the_config_value_is_used():
+    compactor = ContextCompactor(CompactConfig(max_context_tokens=4_000))
+    assert compactor.context_tokens == 4_000

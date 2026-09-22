@@ -197,7 +197,7 @@ miniclaudecode/
 │   ├── context/               # assembly、compact、skills、memory
 │   ├── storage/               # SQLite、迁移、产物与恢复
 │   ├── goals/                 # 验收、证据与停止决策
-│   ├── tasks/                 # 依赖、后台任务、subagent
+│   ├── tasks/                 # 依赖、后台任务
 │   ├── integrations/          # 可选 MCP
 │   └── reports/               # JSON 与 HTML
 ├── tests/                     # 单元、集成、恢复与边界测试
@@ -228,7 +228,7 @@ minicode eval --suite core --output ./reports
 | M1：最小编码闭环 | 第 1 周后半–第 2 周；CLI、真实 Provider、基础工具、权限、预算、取消 | 完成至少一个真实修复任务并留下 trace；越界拒绝、命令超时、错误回填有测试 |
 | M2：状态与恢复 | 第 3 周；SQLite、产物、恢复、结构化报告 | 注入三类崩溃后恢复符合规则；未知副作用不自动重放；旧结果可追溯 |
 | M3：长任务与验收 | 第 4 周；上下文压缩、Goal、证据失效 | 长日志任务可继续；工具配对不破坏；模型自述“通过”不能绕过真实验收 |
-| M4：受控任务执行 | 第 5 周；任务图、后台命令、只读 subagent | 依赖与认领测试通过；取消传递有效；子任务费用计入总预算 |
+| M4：受控任务执行 | 第 5 周；任务图、后台命令 | 依赖与认领测试通过；取消传递有效 |
 | M5：面试展示版 | 第 6 周；20 个任务、对照评测、HTML 报告、README、录屏 | 新环境按文档可复现；发布真实结果及失败样例；演示有离线回放备份 |
 | M6：差异化扩展 | 第 7–8 周；选择真实 MCP，加 Skills，或深化 worktree/workflow | 所选功能有真实端到端案例与失败测试，明确未实现范围 |
 
@@ -322,7 +322,7 @@ README 首屏说明解决的问题，提供一条启动命令、一张架构图�
 - [教程总览与版本说明](learn-claude-code/README-zh.md)
 - [权限边界](learn-claude-code/s03_permission/README.zh.md)
 - [上下文压缩](learn-claude-code/s08_context_compact/README.zh.md)
-- [子 Agent](learn-claude-code/s06_subagent/README.zh.md) 与 [团队及 worktree](learn-claude-code/s13_agent_teams/README.zh.md)
+- [团队及 worktree](learn-claude-code/s13_agent_teams/README.zh.md)
 - [MCP 教学范围](learn-claude-code/s14_mcp_plugin/README.zh.md)
 - [集成运行时](learn-claude-code/s15_integrated_harness/README.zh.md)
 - [Workflow 续跑](learn-claude-code/s16_workflow_runtime/README.zh.md)

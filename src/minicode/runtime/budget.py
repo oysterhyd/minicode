@@ -31,5 +31,11 @@ class BudgetChecker:
         return rounds >= self.budget.max_rounds
 
     def tokens_exceeded(self, usage: Usage) -> bool:
-        """True when *usage* (session-cumulative) exceeds the token cap."""
+        """True when *usage* (session-cumulative) exceeds the token cap.
+
+        A cap of ``0`` or less disables token accounting entirely; rounds and
+        wall-clock still bound the turn.
+        """
+        if self.budget.max_total_tokens <= 0:
+            return False
         return usage.total_tokens > self.budget.max_total_tokens

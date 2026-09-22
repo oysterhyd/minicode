@@ -17,6 +17,7 @@ structural, so call sites simply await it.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
 from typing import Awaitable, Callable, Literal
 
@@ -24,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from minicode.core.clock import utc_now
 from minicode.tools.base import truncate_output
-from minicode.tools.command import kill_process_tree, spawn_shell
+from minicode.tools.command import decode_shell_output, kill_process_tree, spawn_shell
 
 #: Called when a job reaches a terminal state (completed / failed).
 CompleteCallback = Callable[["BackgroundJob"], Awaitable[None]]
@@ -89,7 +90,6 @@ class BackgroundManager:
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         # Job ids that reached a terminal state but were not collected yet.
         self._pending: set[str] = set()
-        self._counter = 0
 
     # -- starting -----------------------------------------------------------
 
@@ -100,14 +100,16 @@ class BackgroundManager:
         foreground ``bash`` tool; the process is spawned detached and
         watched by a background task that enforces *timeout_s*.
         """
-        self._counter += 1
         job = BackgroundJob(
-            job_id=f"bg_{self._counter}", command=command, cwd=str(cwd)
+            job_id=f"bg_{uuid.uuid4().hex}", command=command, cwd=str(cwd)
         )
         self._jobs[job.job_id] = job
 
         try:
             proc = await spawn_shell(command, cwd)
+        except asyncio.CancelledError:
+            await self._mark_lost(job)
+            raise
         except (OSError, ValueError) as exc:
             job.status = "failed"
             job.output = f"failed to start command: {exc}"
@@ -134,9 +136,8 @@ class BackgroundManager:
     ) -> None:
         """Wait for the process, then record the terminal state and notify.
 
-        Cancellation propagates untouched (see :meth:`cancel_all`): a
-        cancelled watcher must not mark the job finished nor fire the
-        callback.
+        Cancellation kills the process tree and records a collectable lost
+        result before propagating to the caller.
         """
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
@@ -145,8 +146,12 @@ class BackgroundManager:
             job.status = "failed"
             job.exit_code = None  # killed, no natural exit code
             job.output = f"command timed out after {timeout_s}s and was killed"
+        except asyncio.CancelledError:
+            await kill_process_tree(proc)
+            await self._mark_lost(job)
+            raise
         else:
-            output = stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+            output = decode_shell_output(stdout)
             job.exit_code = proc.returncode
             job.status = "completed" if proc.returncode == 0 else "failed"
             job.output = truncate_output(output, self._max_output_chars)
@@ -154,6 +159,15 @@ class BackgroundManager:
             self._procs.pop(job.job_id, None)
 
         job.finished_at = utc_now()
+        self._pending.add(job.job_id)
+        await self._notify(job)
+
+    async def _mark_lost(self, job: BackgroundJob) -> None:
+        if job.status != "running":
+            return
+        job.status = "lost"
+        job.finished_at = utc_now()
+        job.output = "后台任务随回合结束或取消而终止，未取得完整结果。"
         self._pending.add(job.job_id)
         await self._notify(job)
 
@@ -193,25 +207,23 @@ class BackgroundManager:
 
     async def cancel_all(self) -> None:
         """Cancel every watcher task, kill every live process tree and mark
-        still-running jobs as ``lost`` (they will never report a result).
+        still-running jobs as ``lost`` with a collectable terminal result.
 
         Jobs that managed to finish before the cancellation keep their
         terminal state and stay collectable through :meth:`poll_completed`.
         """
         tasks = list(self._tasks.values())
+        procs = list(self._procs.values())
         for task in tasks:
             task.cancel()
         self._tasks.clear()
 
-        procs = list(self._procs.values())
-        self._procs.clear()
-        for proc in procs:
-            await kill_process_tree(proc)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-
-        now = utc_now()
+        # Also covers watchers cancelled before their coroutine first ran.
+        for proc in procs:
+            if proc.returncode is None:
+                await kill_process_tree(proc)
+        self._procs.clear()
         for job in self._jobs.values():
-            if job.status == "running":
-                job.status = "lost"
-                job.finished_at = now
+            await self._mark_lost(job)

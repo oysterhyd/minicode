@@ -1,4 +1,4 @@
-"""Tests for run_command's ``background`` parameter — the tool must delegate
+"""Tests for run_command's ``background`` parameter — the tool must hand work
 to the configured background manager instead of running the command itself."""
 
 from __future__ import annotations

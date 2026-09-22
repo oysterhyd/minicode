@@ -15,6 +15,7 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from minicode.cli import app
@@ -300,6 +301,34 @@ def test_chat_exits_on_eof(tmp_path):
     assert "在的。" in result.output
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_resume_restores_or_explicitly_overrides_provider_and_model(tmp_path, override, monkeypatch):
+    ws = tmp_path / "resumed"
+    ws.mkdir()
+    db = tmp_path / "resume.db"
+    store = SqliteStore(db)
+    saved_provider = "anthropic" if override else "fake"
+    sid = store.create_session(workspace=str(ws), provider=saved_provider, model="saved-model")
+    store.close()
+    script = _write_script(tmp_path / "resume-script.json", turns=[{"text": "resumed reply"}])
+    # Ambient gateway credentials must not override saved provider selection.
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "ambient-key")
+    args = ["resume", sid, "--db", str(db), "--script", str(script), "--yes"]
+    if override:
+        args += ["--provider", "fake", "--model", "explicit-model"]
+    result = runner.invoke(app, args, input="continue\nexit\n")
+    assert result.exit_code == 0, result.output
+    assert "resumed reply" in result.output
+    store = SqliteStore(db)
+    try:
+        summary = store.get_session(sid)
+        assert summary.provider == "fake"
+        assert summary.model == ("explicit-model" if override else "saved-model")
+        assert summary.workspace == str(ws)
+    finally:
+        store.close()
+
+
 def _chat(ws: Path, script: Path, db: Path, stdin: str, env: dict | None = None):
     """Invoke ``minicode chat`` with *stdin* and hermetic gateway env."""
     return runner.invoke(
@@ -508,3 +537,81 @@ def test_sessions_list_and_report_with_seeded_db(tmp_path):
     assert "事件统计" in report_result.output
     assert "总计" in report_result.output
     assert "已完成 (completed)" in report_result.output
+
+
+def test_run_header_shows_uncapped_tokens_and_compact_counts(tmp_path):
+    """Token display is compact (300k / 1M) and the default budget is 不限."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db = tmp_path / "db.sqlite3"
+    script = tmp_path / "big.json"
+    script.write_text(
+        json.dumps(
+            {
+                "turns": [
+                    {
+                        "text": "看完了。",
+                        "input_tokens": 300_000,
+                        "output_tokens": 84_009,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "调研仓库",
+            "--workspace",
+            str(ws),
+            "--provider",
+            "fake",
+            "--script",
+            str(script),
+            "--yes",
+            "--db",
+            str(db),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "token 不限" in result.output  # default: no token cap
+    # Counts are compact, never raw six-digit numbers.
+    assert "Token: 384k" in result.output
+    assert "输入 300k" in result.output
+    assert "输出 84k" in result.output
+    assert "300000" not in result.output
+    # Uncapped does not mean unbounded: rounds and time still apply.
+    assert "≤ 20 轮" in result.output
+
+
+def test_run_max_tokens_flag_restores_a_hard_cap(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    db = tmp_path / "db.sqlite3"
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "创建 new.txt",
+            "--workspace",
+            str(ws),
+            "--provider",
+            "fake",
+            "--script",
+            str(_create_file_script(tmp_path)),
+            "--yes",
+            "--max-tokens",
+            "1",
+            "--db",
+            str(db),
+        ],
+    )
+
+    # An explicit cap still works: the session stops on the budget and says so.
+    assert "token ≤ 1" in result.output
+    assert "Token 预算耗尽" in result.output
+    assert "token_budget" in result.output

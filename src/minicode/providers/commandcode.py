@@ -223,6 +223,7 @@ class CommandCodeProvider:
         timeout_s: float = 180.0,
         transport: httpx.AsyncBaseTransport | None = None,
         reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         """Create the provider.
 
@@ -236,13 +237,18 @@ class CommandCodeProvider:
         ``reasoning_effort`` sets the reasoning budget for effort-capable
         models ("low" / "medium" / "high"; ``None`` or ``"off"`` means the
         gateway default) and can be changed live via the ``/effort``
-        command. ``transport`` is **test-only**: an optional ``httpx`` async
-        transport (e.g. ``httpx.MockTransport``) injected so tests can run
-        without any network access.
+        command. ``max_tokens`` is the response budget sent as the request's
+        ``max_tokens``; ``None`` keeps :data:`DEFAULT_MAX_TOKENS`. Hosts pass
+        the model's real output length from the catalog
+        (:attr:`~minicode.core.catalog.ModelInfo.max_output_tokens`) so a long
+        answer is not cut off by the harness. ``transport`` is **test-only**:
+        an optional ``httpx`` async transport (e.g. ``httpx.MockTransport``)
+        injected so tests can run without any network access.
         """
         self.model = model
         self.timeout_s = timeout_s
         self.reasoning_effort = reasoning_effort
+        self.max_tokens = DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
         self._transport = transport
 
         resolved_base = base_url
@@ -306,6 +312,7 @@ class CommandCodeProvider:
             system=system,
             messages=messages,
             tools=tools,
+            max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
         )
 

@@ -127,9 +127,7 @@ class ToolOutcome(BaseModel):
     output: str = ""
     error: str | None = None
     exit_code: int | None = None
-    # Set by tools that consumed model tokens themselves (subagent): the
-    # runtime adds it to the session-cumulative usage.
-    usage: Usage | None = None
+    job_id: str | None = None  # background command started by this call
 
     @classmethod
     def failure(cls, error: str, output: str = "", exit_code: int | None = None) -> "ToolOutcome":
@@ -178,12 +176,10 @@ class EventType(str, enum.Enum):
     GOAL_CHECK = "goal_check"
     # P1: recovery
     SIDE_EFFECT_UNKNOWN = "side_effect_unknown"
-    # P1: background jobs / subagents
+    # P1: background jobs
     BACKGROUND_JOB_STARTED = "background_job_started"
     BACKGROUND_JOB_COMPLETED = "background_job_completed"
     BACKGROUND_JOB_LOST = "background_job_lost"
-    SUBAGENT_STARTED = "subagent_started"
-    SUBAGENT_FINISHED = "subagent_finished"
 
 
 class Event(BaseModel):
@@ -200,6 +196,7 @@ class Event(BaseModel):
 
 class ExitReason(str, enum.Enum):
     COMPLETED = "completed"          # model finished with a final answer
+    MAX_TOKENS = "max_tokens"        # provider response was truncated
     MAX_ROUNDS = "max_rounds"        # round budget exhausted
     TOKEN_BUDGET = "token_budget"    # cumulative token budget exhausted
     TIME_BUDGET = "time_budget"      # wall-clock budget exhausted
@@ -210,8 +207,19 @@ class ExitReason(str, enum.Enum):
 
 
 class Budget(BaseModel):
+    """Caps for one session.
+
+    ``max_total_tokens`` counts the *sum of every round's prompt tokens*, not
+    the size of the context: each round re-sends the conversation, so a
+    twenty-round session over a 30k context pays ~300k here even though the
+    context never grew. That makes it a cost guard, not a context guard —
+    keeping the context inside the model's window is the compactor's job
+    (``context/``). ``0`` or a negative value means *no token cap at all*, which
+    is the default: rounds and wall-clock still bound the session.
+    """
+
     max_rounds: int = 20
-    max_total_tokens: int = 200_000
+    max_total_tokens: int = 0
     max_seconds: float = 600.0
 
 

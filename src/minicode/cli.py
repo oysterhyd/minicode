@@ -44,6 +44,7 @@ from minicode.core.catalog import (
     lookup_model,
     parse_effort,
 )
+from minicode.core.format import format_tokens
 from minicode.core.models import (
     ApprovalDecision,
     ApprovalHandler,
@@ -91,6 +92,7 @@ app.add_typer(sessions_app, name="sessions")
 #: ExitReason value -> Chinese label (unknown values fall back to the raw one).
 _EXIT_LABELS: dict[str, str] = {
     "completed": "已完成",
+    "max_tokens": "模型输出被截断",
     "max_rounds": "达到最大轮数",
     "token_budget": "Token 预算耗尽",
     "time_budget": "时长预算耗尽",
@@ -140,7 +142,7 @@ def _session_list_lines(sessions: list[SessionSummary]) -> list[str]:
         f"  {session.session_id[:8]}"
         f"  {_status_label(session.status, session.exit_reason)}"
         f"  · 轮数 {session.rounds}"
-        f"  · Token {session.input_tokens + session.output_tokens}"
+        f"  · Token {format_tokens(session.input_tokens + session.output_tokens)}"
         f"  · {session.provider}/{session.model}"
         f"  · {session.workspace}"
         f"  · {_format_timestamp(session.created_at)}"
@@ -250,13 +252,21 @@ def _provider_for_model(
     if info.provider == "commandcode":
         from minicode.providers.commandcode import CommandCodeProvider
 
-        return CommandCodeProvider(model=info.name, reasoning_effort=effort)
+        return CommandCodeProvider(
+            model=info.name,
+            reasoning_effort=effort,
+            # The model's real output length, so a long answer is not cut off
+            # by the harness's own request budget.
+            max_tokens=info.max_output_tokens,
+        )
     if info.provider == "anthropic":
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError("切换到 anthropic 模型需要设置 ANTHROPIC_API_KEY 环境变量。")
         from minicode.providers.anthropic_provider import AnthropicProvider
 
-        return AnthropicProvider(model=info.name)
+        return AnthropicProvider(
+            model=info.name, max_tokens=info.max_output_tokens or 4096
+        )
     return FakeProvider()
 
 
@@ -308,7 +318,7 @@ def _build_provider(
         if script is not None
         else FakeProviderOptions(turns=[FakeTurn(text=_DEMO_REPLY)])
     )
-    return FakeProvider(options), "fake", "fake"
+    return FakeProvider(options), "fake", model or "fake"
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +333,9 @@ ScriptOpt = Annotated[
     typer.Option(help="FakeProvider 脚本 JSON；fake 且未提供时使用内置演示脚本"),
 ]
 MaxRoundsOpt = Annotated[int, typer.Option(help="会话最大轮数")]
-MaxTokensOpt = Annotated[int, typer.Option(help="token 总预算")]
+MaxTokensOpt = Annotated[
+    int, typer.Option(help="会话累计 token 上限（0 = 不限制，默认）")
+]
 MaxSecondsOpt = Annotated[float, typer.Option(help="每轮时长预算（秒）")]
 YesOpt = Annotated[bool, typer.Option("--yes", "-y", help="自动允许全部工具调用，不再逐个审批")]
 DbOpt = Annotated[Path, typer.Option(help="会话数据库路径（默认 ~/.minicode/sessions.db）")]
@@ -376,6 +388,29 @@ def _prepare(
             max_rounds=max_rounds, max_total_tokens=max_tokens, max_seconds=max_seconds
         ),
         acceptance=acceptance,
+    )
+
+
+def _prepare_resume(
+    summary: SessionSummary,
+    *,
+    workspace: Path | None = None,
+    provider_choice: ProviderChoice = ProviderChoice.auto,
+    model: str | None = None,
+    script: Path | None = None,
+    budget: Budget,
+    acceptance: Path | None = None,
+) -> _Setup:
+    """Both frontends restore the saved adapter/model unless explicitly overridden."""
+    if provider_choice is ProviderChoice.auto:
+        provider_choice = ProviderChoice(
+            lookup_model(model).provider if model is not None else summary.provider
+        )
+    if model is None and provider_choice.value == summary.provider:
+        model = summary.model
+    return _prepare(
+        workspace or Path(summary.workspace), provider_choice, model, script,
+        budget.max_rounds, budget.max_total_tokens, budget.max_seconds, acceptance,
     )
 
 
@@ -481,12 +516,19 @@ def _make_interactive_approval(console: Console) -> ApprovalHandler:
     return handler
 
 
+def _token_budget_label(max_total_tokens: int) -> str:
+    """Human label for the token cap; ``0`` means no cap at all."""
+    if max_total_tokens <= 0:
+        return "不限"
+    return f"≤ {format_tokens(max_total_tokens)}"
+
+
 def _print_header(console: Console, goal: str, setup: _Setup) -> None:
     """Task header below the banner: goal plus the budget envelope."""
     console.print(f"[bold]目标[/]   {goal}")
     console.print(
         f"[bold]预算[/]   ≤ {setup.budget.max_rounds} 轮"
-        f" · ≤ {setup.budget.max_total_tokens} token"
+        f" · token {_token_budget_label(setup.budget.max_total_tokens)}"
         f" · ≤ {setup.budget.max_seconds:g} 秒"
     )
     console.print()
@@ -498,7 +540,8 @@ def _print_turn_summary(console: Console, result: RunResult) -> None:
     console.print(
         f"退出原因: {_exit_label(result.exit_reason.value)} ({result.exit_reason.value}) ·"
         f" 轮数: {result.rounds} ·"
-        f" Token: {usage.total_tokens}（输入 {usage.input_tokens} / 输出 {usage.output_tokens}） ·"
+        f" Token: {format_tokens(usage.total_tokens)}"
+        f"（输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}） ·"
         f" 耗时: {result.duration_s:.1f}s ·"
         f" 会话: {result.session_id[:8]}"
     )
@@ -547,7 +590,6 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
     from minicode.goals import AcceptanceSpec, EvidenceLedger, GoalChecker, ProtectedSnapshot
     from minicode.storage import ArtifactStore
     from minicode.tasks.background import BackgroundManager
-    from minicode.tools.artifact import ReadArtifactTool
 
     printer = _StreamPrinter(console)
 
@@ -565,21 +607,6 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
             _print_p1_event(console, event)
 
     registry = default_registry()
-    registry.register(ReadArtifactTool())
-    try:
-        from minicode.tools.delegate import DelegateSubagentTool
-    except ImportError:  # pragma: no cover - ships with minicode.tasks
-        pass
-    else:
-        registry.register(
-            DelegateSubagentTool(
-                provider=setup.provider,
-                workspace=setup.workspace,
-                parent_budget=setup.budget,
-                store=store,  # child events persist into the parent session
-            )
-        )
-
     policy: PermissionPolicy
     approval_handler: ApprovalHandler | None
     if yes:
@@ -612,11 +639,18 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
     )
 
 
-def _attach_compactor(runtime: Any, artifact_store: Any, max_total_tokens: int) -> None:
+def _attach_compactor(runtime: Any, artifact_store: Any) -> None:
     """Attach the context compactor with artifact spill bound to the live
     session. The session id only exists after the first ``run_turn``
     (compaction runs strictly inside turns), so the closure reads it lazily
-    off the runtime."""
+    off the runtime.
+
+    The trigger is the active model's prompt budget
+    (``context_window - max_output_tokens``), re-read on every check so a
+    mid-session ``/model`` switch is honoured. The session's *token budget* is
+    deliberately not used here: it counts cumulative spend across rounds, not
+    how full the context currently is.
+    """
     from minicode.context.compact import CompactConfig, ContextCompactor
 
     def spill(kind: str, content: str) -> str:
@@ -625,8 +659,10 @@ def _attach_compactor(runtime: Any, artifact_store: Any, max_total_tokens: int) 
         return artifact_store.spill(session_id, kind, content).artifact_id
 
     runtime._compactor = ContextCompactor(
-        CompactConfig(max_context_tokens=max_total_tokens),
+        # Static fallback only; context_tokens_fn is what actually decides.
+        CompactConfig(max_context_tokens=max(runtime.prompt_budget_tokens(), 1)),
         spill_fn=spill,
+        context_tokens_fn=runtime.prompt_budget_tokens,
     )
 
 
@@ -649,7 +685,7 @@ def _new_runtime(setup: _Setup, store: SqliteStore, services: Any) -> Any:
         goal_checker=services.goal_checker,
         evidence_ledger=services.evidence_ledger,
     )
-    _attach_compactor(runtime, services.artifact_store, setup.budget.max_total_tokens)
+    _attach_compactor(runtime, services.artifact_store)
     return runtime
 
 
@@ -667,7 +703,7 @@ def _print_p1_event(console: Console, event: Event) -> None:
     if event.type is EventType.CONTEXT_COMPACTED:
         before, after = event.data.get("tokens_before"), event.data.get("tokens_after")
         console.print(
-            Text(f"  ◆ 上下文已压缩：估算 {before} → {after} token", style="dim")
+            Text(f"  ◆ 上下文已压缩：估算 {format_tokens(int(before or 0))} → {format_tokens(int(after or 0))}", style="dim")
         )
         return
     if event.type is EventType.BACKGROUND_JOB_COMPLETED:
@@ -682,7 +718,7 @@ def _print_p1_event(console: Console, event: Event) -> None:
         return
     if event.type is EventType.BACKGROUND_JOB_LOST:
         console.print(
-            Text(f"  ◆ 后台任务 {event.data.get('job_id')} 失联（进程已不在）", style="yellow")
+            Text(f"  ◆ 后台任务 {event.data.get('job_id')} 已终止或失联，结果不完整", style="yellow")
         )
         return
     if event.type is EventType.SIDE_EFFECT_UNKNOWN:
@@ -693,15 +729,6 @@ def _print_p1_event(console: Console, event: Event) -> None:
             )
         )
         return
-    if event.type is EventType.SUBAGENT_FINISHED:
-        usage = event.data.get("usage") or {}
-        console.print(
-            Text(
-                f"  ◆ 子代理完成（token {usage.get('input_tokens', 0)}+"
-                f"{usage.get('output_tokens', 0)}）",
-                style="dim",
-            )
-        )
 
 
 def _run_one_turn(runtime: AgentRuntime, user_message: str) -> RunResult:
@@ -736,7 +763,7 @@ def run(
     model: ModelOpt = None,
     script: ScriptOpt = None,
     max_rounds: MaxRoundsOpt = 20,
-    max_tokens: MaxTokensOpt = 200_000,
+    max_tokens: MaxTokensOpt = 0,
     max_seconds: MaxSecondsOpt = 600.0,
     yes: YesOpt = False,
     acceptance: AcceptanceOpt = None,
@@ -775,7 +802,7 @@ def chat(
     model: ModelOpt = None,
     script: ScriptOpt = None,
     max_rounds: MaxRoundsOpt = 20,
-    max_tokens: MaxTokensOpt = 200_000,
+    max_tokens: MaxTokensOpt = 0,
     max_seconds: MaxSecondsOpt = 600.0,
     yes: YesOpt = False,
     acceptance: AcceptanceOpt = None,
@@ -915,7 +942,7 @@ class _ChatRepl:
         self.console.print(
             Text(
                 "已清屏（会话上下文与 Token 用量保留："
-                f"输入 {usage.input_tokens} / 输出 {usage.output_tokens}）。",
+                f"输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}）。",
                 style="dim",
             )
         )
@@ -958,7 +985,7 @@ class _ChatRepl:
         )
         self.console.print(
             f"[green]已切换模型[/] {old} → {info.name}"
-            f"（上下文 {info.context_window:,} token）"
+            f"（上下文 {format_tokens(info.context_window)} token）"
         )
 
     def _provider_for(self, info: Any) -> Provider | None:
@@ -1031,7 +1058,7 @@ class _ChatRepl:
                 f"  {session.session_id[:8]}"
                 f"  {_status_label(session.status, session.exit_reason)}"
                 f"  · 轮数 {session.rounds}"
-                f"  · Token {session.input_tokens + session.output_tokens}"
+                f"  · Token {format_tokens(session.input_tokens + session.output_tokens)}"
                 f"  · {session.provider}/{session.model}"
                 f"  · {session.workspace}"
                 f"  · {_format_timestamp(session.created_at)}"
@@ -1047,7 +1074,7 @@ def resume(
     model: ModelOpt = None,
     script: ScriptOpt = None,
     max_rounds: MaxRoundsOpt = 30,
-    max_tokens: MaxTokensOpt = 400_000,
+    max_tokens: MaxTokensOpt = 0,
     max_seconds: MaxSecondsOpt = 600.0,
     yes: YesOpt = False,
     acceptance: AcceptanceOpt = None,
@@ -1072,14 +1099,16 @@ def resume(
         else:
             ws = Path(summary.workspace)
 
-        setup = _prepare(
-            ws, provider, model, script, max_rounds, max_tokens, max_seconds, acceptance
+        setup = _prepare_resume(
+            summary, workspace=ws, provider_choice=provider, model=model, script=script,
+            budget=Budget(max_rounds=max_rounds, max_total_tokens=max_tokens, max_seconds=max_seconds),
+            acceptance=acceptance,
         )
         services = _build_services(setup, store, console, yes)
         runtime = _make_resumed_runtime(setup, store, summary, services)
         console.print(f"[bold]恢复会话[/] {summary.session_id[:8]} ·"
                       f" 轮数 {summary.rounds} ·"
-                      f" Token {summary.input_tokens + summary.output_tokens}")
+                      f" Token {format_tokens(summary.input_tokens + summary.output_tokens)}")
         _ChatRepl(
             setup=setup,
             store=store,
@@ -1104,6 +1133,8 @@ def _make_resumed_runtime(
             registry=services.registry,
             policy=services.policy,
             workspace=setup.workspace,
+            provider_name=setup.provider_name,
+            model=setup.model_label,
             budget=setup.budget,
             approval_handler=services.approval_handler,
             on_text_delta=services.on_text_delta,
@@ -1116,7 +1147,7 @@ def _make_resumed_runtime(
         )
     except ValueError as exc:
         _fail(str(exc))
-    _attach_compactor(runtime, services.artifact_store, setup.budget.max_total_tokens)
+    _attach_compactor(runtime, services.artifact_store)
     return runtime
 
 
@@ -1231,8 +1262,8 @@ def _render_report(
     console.print(
         f"状态: {_status_label(summary.status, summary.exit_reason)}"
         f" · 轮数: {summary.rounds}"
-        f" · Token: {summary.input_tokens + summary.output_tokens}"
-        f"（输入 {summary.input_tokens} / 输出 {summary.output_tokens}）"
+        f" · Token: {format_tokens(summary.input_tokens + summary.output_tokens)}"
+        f"（输入 {format_tokens(summary.input_tokens)} / 输出 {format_tokens(summary.output_tokens)}）"
     )
 
     counts: Counter[EventType] = Counter(event.type for event in events)
@@ -1271,7 +1302,7 @@ def _render_report(
 
     console.print()
     console.print(
-        f"总计: 输入 {summary.input_tokens} token · 输出 {summary.output_tokens} token"
+        f"总计: 输入 {format_tokens(summary.input_tokens)} token · 输出 {format_tokens(summary.output_tokens)} token"
     )
     final = summary.exit_reason or summary.status
     console.print(f"退出原因: {_exit_label(final)} ({final})")
@@ -1317,7 +1348,7 @@ def tui(
     model: ModelOpt = None,
     script: ScriptOpt = None,
     max_rounds: MaxRoundsOpt = 20,
-    max_tokens: MaxTokensOpt = 200_000,
+    max_tokens: MaxTokensOpt = 0,
     max_seconds: MaxSecondsOpt = 600.0,
     yes: YesOpt = False,
     acceptance: AcceptanceOpt = None,

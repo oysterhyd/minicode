@@ -688,3 +688,35 @@ def test_missing_cache_details_count_as_zero():
     )
     events = run_stream(provider, messages=base_user_message())
     assert events[-1].response.usage.cache_read_tokens == 0
+
+
+def test_payload_max_tokens_overrides_the_default():
+    """The request budget is the model's real output length, not a constant."""
+    payload = _build_payload(model="m", system=None, messages=[], tools=[], max_tokens=384_000)
+    assert payload["max_tokens"] == 384_000
+
+
+def test_provider_threads_its_max_tokens_into_the_request(monkeypatch):
+    """A catalog output cap reaches the wire instead of DEFAULT_MAX_TOKENS."""
+    import httpx
+
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "k")
+    monkeypatch.setenv("COMMANDCODE_BASE_URL", "https://gw.test/v1")
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, content=b"data: [DONE]\n\n")
+
+    provider = CommandCodeProvider(
+        model="deepseek/deepseek-v4.1-flash",
+        max_tokens=384_000,
+        transport=httpx.MockTransport(handler),
+    )
+
+    async def drain() -> None:
+        async for _event in provider.stream(system=None, messages=[], tools=[]):
+            pass
+
+    asyncio.run(drain())
+    assert seen["max_tokens"] == 384_000

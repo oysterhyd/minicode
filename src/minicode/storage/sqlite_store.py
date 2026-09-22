@@ -41,7 +41,7 @@ DEFAULT_DB_PATH = Path.home() / ".minicode" / "sessions.db"
 
 #: Layout version recorded in ``PRAGMA user_version``. Bump when the schema
 #: changes in a way older code cannot read.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SESSION_COLUMNS = (
     "session_id, created_at, workspace, provider, model, "
@@ -80,7 +80,13 @@ class SessionStore(Protocol):
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         model: str | None = None,
+        provider: str | None = None,
+        workspace: str | None = None,
     ) -> None: ...
+
+    def get_goal_state(self, session_id: str) -> dict[str, Any] | None: ...
+
+    def save_goal_state(self, session_id: str, state: dict[str, Any]) -> None: ...
 
     def append_message(self, session_id: str, message: Message) -> int: ...
 
@@ -168,6 +174,11 @@ class SqliteStore:
                 created_at  TEXT NOT NULL,
                 PRIMARY KEY (session_id, artifact_id)
             );
+
+            CREATE TABLE IF NOT EXISTS session_goals (
+                session_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL
+            );
             """
         )
         # PRAGMAs cannot bind parameters; SCHEMA_VERSION is a module constant.
@@ -224,6 +235,8 @@ class SqliteStore:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         model: str | None = None,
+        provider: str | None = None,
+        workspace: str | None = None,
     ) -> None:
         assignments: list[str] = []
         params: list[Any] = []
@@ -245,6 +258,12 @@ class SqliteStore:
         if model is not None:
             assignments.append("model = ?")
             params.append(model)
+        if provider is not None:
+            assignments.append("provider = ?")
+            params.append(provider)
+        if workspace is not None:
+            assignments.append("workspace = ?")
+            params.append(workspace)
 
         with self.transaction() as conn:
             self._require_session(conn, session_id)
@@ -254,6 +273,21 @@ class SqliteStore:
                     f"UPDATE sessions SET {', '.join(assignments)} WHERE session_id = ?",
                     params,
                 )
+
+    def get_goal_state(self, session_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT state FROM session_goals WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return json.loads(row["state"]) if row is not None else None
+
+    def save_goal_state(self, session_id: str, state: dict[str, Any]) -> None:
+        with self.transaction() as conn:
+            self._require_session(conn, session_id)
+            conn.execute(
+                "INSERT INTO session_goals (session_id, state) VALUES (?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET state = excluded.state",
+                (session_id, json.dumps(state, ensure_ascii=False)),
+            )
 
     def get_session(self, session_id: str) -> SessionSummary | None:
         row = self._conn.execute(

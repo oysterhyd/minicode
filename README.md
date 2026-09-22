@@ -98,7 +98,8 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 
 常用选项（`run` / `chat` / `tui` 共享）：`--workspace`（默认当前目录）、
 `--provider auto|commandcode|anthropic|fake`、`--model`（缺省按 provider 选择）、
-`--script`（FakeProvider 脚本 JSON）、`--max-rounds`（默认 20）、`--max-tokens`（默认 200000）、
+`--script`（FakeProvider 脚本 JSON）、`--max-rounds`（默认 20）、`--max-tokens`（默认 0 =
+不限制 token）、
 `--max-seconds`（默认 600，**每轮**的时长上限）、`--yes/-y`（自动允许全部工具）、
 `--acceptance <yaml>`（Goal 验收：command / artifact / protected 三类检查项）、
 `--db`（默认 `~/.minicode/sessions.db`）。
@@ -115,23 +116,28 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 - 工具参数校验（pydantic schema）、工作区路径边界（含符号链接/junction）、修改与命令审批
   （ALLOW/ASK/DENY 权限门）、命令超时与输出截断。
 - 会话持久化（SQLite）、逐事件执行追踪、diff 与命令退出码报告。
-- 预算控制：最大轮数 / 总 token / 每轮时长，退出原因可区分（completed / max_rounds /
-  token_budget / time_budget / cancelled / goal_not_met / provider_error / internal_error）。
+- 预算控制：默认只限制**轮数**（20）与**每轮时长**（600s），token 不限制；`--max-tokens N`
+  可显式加一道累计 token 上限（退出原因 token_budget）。累计 token 是各轮 prompt 之和，
+  不是上下文大小——上下文由压缩层按「模型窗口 − 最大输出」控制。退出原因可区分
+  （completed / max_rounds / token_budget / time_budget / cancelled / goal_not_met /
+  provider_error / internal_error）。
 
 ## P1 能力清单（可靠性）
 
-- **分层上下文压缩**：超大工具输出转存为 artifact（模型看到预览 + 引用，`read_artifact`
-  按需回读）→ 按完整交互单元归档早期历史（tool_use 与 tool_result 永不拆散）→ 压缩较旧
-  工具结果 → 仍超预算时生成确定性结构化摘要。压缩后的视图持久化，恢复后所见即所存。
-- **会话恢复**：`resume` 加载消息/用量/轮数；已落库结果不重复执行；只读调用重新执行并留痕
+- **分层上下文压缩**：超大工具输出转存为 artifact（模型看到预览 + 归档引用）→ 按完整交互单元归档早期历史
+  （tool_use 与 tool_result 永不拆散）→ 压缩较旧工具结果 → 仍超阈值时生成确定性结构化摘要。
+  触发阈值是当前模型的「上下文窗口 − 最大输出」（DeepSeek V4.1 Flash 1M−384k、
+  GLM-5.3 Flash 1Mi−128k、Claude Sonnet 4.5 200k−64k）的 80%，切换模型后立即生效。
+  压缩后的视图持久化，恢复后所见即所存。
+- **会话恢复**：`resume` 加载消息/用量/轮数和保存的 provider/model/workspace；已落库结果不重复执行；只读调用重新执行并留痕
   （新事件记录）；写/Shell 类副作用不自动重放，标记「状态未知」并要求模型先核实。
+- **回合限制**：wall-clock deadline 覆盖模型流、工具执行和验收命令；超时停止启动新工具，
+  并等待进程树清理。模型因输出 token 上限截断时以 `max_tokens` 结束，不计为完成。
 - **Goal 验收**：验收 YAML 定义命令 / 产物 / 受保护路径三类检查；模型回答后由宿主执行检查，
   通过才判定完成；失败回填结构化报告继续修复（`max_fix_attempts` 上限）；通过的证据绑定
-  工作区内容指纹，代码再变即失效重验；受保护路径在会话开始时快照比对。
-- **后台命令与只读子代理**：`bash` 支持 `background` 参数返回 job id，完成后作为
-  用户消息投递（幂等，不产生第二个 tool result）；`delegate` 工具把只读调研委派给一层
-  子代理（仅 read/list/search 工具），返回 summary/findings/evidence_refs/unresolved，
-  token 计入同一会话预算。
+  工作区内容指纹，代码再变即失效重验；受保护路径基线与验收配置随会话持久化，resume 不重新采样；指纹在所有检查完成后计算。
+- **后台命令**：`bash` 支持 `background` 参数返回 job id，完成后作为用户消息投递。
+  任务属于当前回合；回合结束或取消时终止仍在运行的进程树，记录并展示 lost 结果。
 - **评测集**：`evals/` 20 个本地任务（分页边界、差一错误、除零保护等），FakeProvider 离线
   运行；b0（基础循环）与 b2（验收失败续跑）对照，结果含成功率、轮数、token 与失败分析。
   评测度量的是 harness 机制而非模型智力。

@@ -133,8 +133,6 @@ SAMPLE_DATA: dict[EventType, dict[str, Any]] = {
     EventType.BACKGROUND_JOB_STARTED: {"job_id": "j1", "command": "sleep 10"},
     EventType.BACKGROUND_JOB_COMPLETED: {"job_id": "j1", "exit_code": 0},
     EventType.BACKGROUND_JOB_LOST: {"job_id": "j1"},
-    EventType.SUBAGENT_STARTED: {"task_id": "s1", "prompt": "explore the repo"},
-    EventType.SUBAGENT_FINISHED: {"task_id": "s1", "success": True, "summary": "done"},
 }
 
 # ---------------------------------------------------------------------------

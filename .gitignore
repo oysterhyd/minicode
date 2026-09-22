@@ -16,7 +16,7 @@ htmlcov/
 *.db-journal
 
 # Generated eval / report outputs (reproducible; fixtures in evals/ are committed)
-reports/
+/reports/
 
 # Teaching reference (has its own git repo, kept local only)
 /learn-claude-code/

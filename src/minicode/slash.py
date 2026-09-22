@@ -30,10 +30,15 @@ class SubmenuItem:
 
 
 #: Commands that open a cascading submenu instead of executing directly on
-#: Enter. Maps command name -> submenu title (breadcrumb label).
+#: Enter. Maps command name -> submenu title (breadcrumb label). A command
+#: belongs here as soon as its usage takes a value from a known set (enumerated
+#: argument) or from a list the harness can enumerate (stored sessions);
+#: commands without arguments, or with a free-form one, execute directly.
 SUBMENU_COMMANDS: dict[str, str] = {
     "/model": "选择模型",
     "/effort": "选择推理预算",
+    "/permissions": "选择权限模式",
+    "/resume": "选择要恢复的会话",
 }
 
 

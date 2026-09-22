@@ -51,3 +51,25 @@ def test_below_threshold_all_checks_false():
     assert checker.time_exceeded() is False
     assert checker.rounds_exceeded(5) is False
     assert checker.tokens_exceeded(Usage(input_tokens=50, output_tokens=50)) is False
+
+
+# ---------------------------------------------------------------------------
+# Uncapped token budget (the default)
+#
+# Regression guard for session 39e5f16a: a 200_000-token *cumulative* cap killed
+# an ordinary 20-round session. Tokens are now uncapped unless asked for;
+# rounds and wall-clock remain the bounds.
+# ---------------------------------------------------------------------------
+
+
+def test_zero_token_cap_never_fires():
+    for cap in (0, -1):
+        checker = BudgetChecker(Budget(max_total_tokens=cap), start_usage=Usage(), start_rounds=0)
+        assert checker.tokens_exceeded(Usage(input_tokens=50_000_000)) is False
+
+
+def test_budget_defaults_to_no_token_cap():
+    budget = Budget()
+    assert budget.max_total_tokens == 0
+    checker = BudgetChecker(budget, start_usage=Usage(), start_rounds=0)
+    assert checker.tokens_exceeded(Usage(input_tokens=10_000_000, output_tokens=1)) is False

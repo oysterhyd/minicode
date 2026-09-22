@@ -550,15 +550,20 @@ def test_set_model_swaps_provider_and_updates_session(harness_factory, tmp_path)
     assert result.exit_reason.value == "completed"
 
     new_provider = FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="换了")]))
+    new_provider.name = "commandcode"
     glm = MODEL_CATALOG["z.ai/glm-5.3-flash"]
     runtime.set_model(provider=new_provider, provider_name="commandcode", model=glm.name)
 
     assert runtime.model == glm.name
     assert runtime.provider is new_provider
-    assert runtime.context_window == 1_000_000
+    assert runtime.context_window == glm.context_window == 1_048_576
+    # Compaction triggers on the prompt budget, not the window: the model has
+    # to be able to emit its full response on top of the prompt.
+    assert runtime.prompt_budget_tokens() == 1_048_576 - 128_000
     # The persisted session row reflects the switch.
     summary = harness.store.get_session(result.session_id)
     assert summary is not None and summary.model == glm.name
+    assert summary.provider == runtime.provider_name == new_provider.name
 
 
 def test_context_tokens_used_grows_with_messages(harness_factory):
@@ -581,3 +586,29 @@ def test_runtime_usage_includes_cache_read_tokens(harness_factory):
     usage = harness.runtime.usage
     assert usage.input_tokens == 100
     assert usage.cache_read_tokens == 60
+
+
+def test_uncapped_budget_runs_past_any_token_total(harness_factory):
+    """With the default (uncapped) token budget, heavy spend never ends the
+    session — only the round cap does. Regression guard for session 39e5f16a,
+    where a 200k cumulative cap killed an ordinary 20-round run."""
+    provider = FakeProvider(
+        FakeProviderOptions(
+            turns=[
+                FakeTurn(
+                    tool_calls=[FakeToolCall(name="ls", arguments={"path": "."})],
+                    input_tokens=500_000,
+                    output_tokens=100_000,
+                ),
+                FakeTurn(text="第一轮之后的总结", input_tokens=500_000, output_tokens=100_000),
+            ]
+        )
+    )
+    harness = harness_factory(provider, budget=Budget(max_rounds=3, max_total_tokens=0))
+
+    result = asyncio.run(harness.runtime.run_turn("go"))
+
+    # Completed on its own answer after 1.2M tokens of accumulated spend.
+    assert result.exit_reason is ExitReason.COMPLETED
+    assert result.total_usage.total_tokens == 1_200_000
+    assert result.rounds == 2

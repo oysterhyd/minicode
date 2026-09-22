@@ -17,6 +17,7 @@ session-level finalize paths end a turn.
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import json
 import time
 from pathlib import Path
@@ -31,6 +32,7 @@ from minicode.core.models import (
     Message,
     ModelResponse,
     RunResult,
+    StopReason,
     TextBlock,
     ToolOutcome,
     ToolResultBlock,
@@ -60,6 +62,10 @@ _SPILL_LIMITS = ToolLimits()
 #: Tool names that are safe to re-execute while resuming an interrupted
 #: session: they only read, so re-running them cannot duplicate side effects.
 _READ_ONLY_TOOLS = frozenset({"read", "ls", "grep"})
+
+
+class _DeadlineExceeded(TimeoutError):
+    """The turn's deadline expired, including during synchronous work."""
 
 
 def _format_bg_result(job: Any) -> str:
@@ -95,7 +101,7 @@ class AgentRuntime:
     - ``background_manager`` — background command jobs (``poll_completed``,
       ``cancel_all``); finished jobs are delivered as user messages.
     - ``artifact_store`` — full tool outputs spilled to disk when they exceed
-      the tool limits, readable back on demand via ``read_artifact``.
+      the tool limits, retained for session reports.
 
     Cancellation contract: if the task running :meth:`run_turn` is
     cancelled, the runtime finalizes the session with
@@ -156,6 +162,9 @@ class AgentRuntime:
         self._own_pass_fingerprint: str | None = None  # fallback without a ledger
         self._protected_captured = False
         self._pending_dangling: list[ToolUseBlock] = []  # set by resume()
+        self._deadline: float | None = None
+        self._announced_jobs: set[str] = set()
+        self._lost_jobs: list[dict[str, Any]] = []
 
     # -- read-only state ----------------------------------------------------
 
@@ -180,11 +189,34 @@ class AgentRuntime:
         return self._provider
 
     @property
+    def provider_name(self) -> str:
+        return self._provider_name
+
+    @property
+    def workspace(self) -> Path:
+        return self._workspace
+
+    @property
     def context_window(self) -> int:
         """Prompt-token capacity of the active model (catalog lookup)."""
         from minicode.core.catalog import lookup_model
 
         return lookup_model(self._model).context_window
+
+    def prompt_budget_tokens(self) -> int:
+        """How much prompt the active model can take *and still answer*.
+
+        ``context_window`` minus the model's maximum response length: the
+        window has to hold both, so compacting only against the window would
+        let a long answer push the request past it. This is the number
+        compaction should trigger on — not the session's token budget, which
+        counts cumulative spend rather than context size.
+        """
+        from minicode.core.catalog import lookup_model
+
+        info = lookup_model(self._model)
+        reserve = info.max_output_tokens or 0
+        return max(0, info.context_window - reserve)
 
     def context_tokens_used(self) -> int:
         """Estimated prompt size of the current context (no output reserve).
@@ -213,11 +245,23 @@ class AgentRuntime:
         by the new model. The persisted session row is updated so
         ``sessions list`` reflects reality.
         """
+        self._validate_provider(provider, provider_name, model)
+        if self.session_id is not None:
+            self._store.update_session(self.session_id, provider=provider_name, model=model)
         self._provider = provider
         self._provider_name = provider_name
         self._model = model
-        if self.session_id is not None:
-            self._store.update_session(self.session_id, model=model)
+
+    @staticmethod
+    def _validate_provider(provider: Provider, provider_name: str, model: str) -> None:
+        if provider.name != provider_name:
+            raise ValueError("provider instance does not match provider_name")
+        if getattr(provider, "model", model) != model:
+            raise ValueError("provider instance does not match model")
+
+    def _check_deadline(self) -> None:
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise _DeadlineExceeded("turn deadline exceeded")
 
     # -- turn loop -----------------------------------------------------------
     # The loop exits only through finalize paths; budget exhaustion is just
@@ -252,104 +296,125 @@ class AgentRuntime:
         assert session_id is not None  # set directly above on the first turn
         recorder = EventRecorder(self._store, session_id, self._on_event)
         if first_turn:
-            await recorder.emit(
-                EventType.SESSION_START,
-                {
-                    "workspace": str(self._workspace.resolve()),
-                    "provider": self._provider_name,
-                    "model": self._model,
-                },
-            )
-        # Protected paths are snapshotted before the model can change anything
-        # (first turn of a fresh session, or the first turn after a resume).
-        self._capture_protected_paths()
-        # Settle tool calls interrupted before their result was persisted.
-        await self._settle_recovery(recorder)
-
-        # Wall-clock budget is per turn; rounds/tokens are seeded cumulatively.
-        checker = BudgetChecker(
-            self._budget, start_usage=self._usage, start_rounds=self._rounds
-        )
-
-        user_msg = Message(role="user", content=[TextBlock(text=user_message)])
-        self._append_message(session_id, user_msg)
-
+            self._bind_goal_session()
+        user_recorded = False
+        self._deadline = turn_started + self._budget.max_seconds
         try:
-            while True:
-                if checker.time_exceeded():
-                    return await self._finalize(
-                        recorder, ExitReason.TIME_BUDGET, turn_started
-                    )
-                if checker.rounds_exceeded(self._rounds):
-                    return await self._finalize(
-                        recorder, ExitReason.MAX_ROUNDS, turn_started
-                    )
-
-                # Background jobs finished since the last round are delivered
-                # before the next model call so the model sees their output.
-                await self._deliver_finished_jobs(recorder, session_id)
-
-                # Layered compaction before the provider call keeps the
-                # context inside budget; the compacted view is persisted.
-                await self._compact_if_needed(recorder, session_id)
-
-                self._rounds += 1
-                await recorder.emit(EventType.ROUND_START, {"round": self._rounds})
-
-                response, failure, error = await self._stream_assistant_turn()
-                if response is None:
-                    assert failure is not None  # always set when response is None
-                    return await self._finalize(
-                        recorder, failure, turn_started, error=error
-                    )
-
-                self._append_message(
-                    session_id, Message(role="assistant", content=list(response.blocks))
-                )
-                self._usage = self._usage + response.usage
-                await recorder.emit(
-                    EventType.ASSISTANT_MESSAGE,
-                    {
-                        "text": response.text,
-                        "tool_calls": [call.name for call in response.tool_calls],
-                        "usage": {
-                            "input_tokens": response.usage.input_tokens,
-                            "output_tokens": response.usage.output_tokens,
-                            "total_tokens": response.usage.total_tokens,
+            async with asyncio.timeout(max(0, self._deadline - time.monotonic())):
+                if first_turn:
+                    await recorder.emit(
+                        EventType.SESSION_START,
+                        {
+                            "workspace": str(self._workspace.resolve()),
+                            "provider": self._provider_name,
+                            "model": self._model,
                         },
-                        "stop_reason": response.stop_reason.value,
-                    },
+                    )
+                # Settle tool calls interrupted before their result was persisted.
+                await self._settle_recovery(recorder)
+
+                # Wall-clock budget is per turn; rounds/tokens are seeded cumulatively.
+                checker = BudgetChecker(
+                    self._budget, start_usage=self._usage, start_rounds=self._rounds
                 )
 
-                # Token budget fires before any tool of this round runs: side
-                # effects must not start once the budget is already blown.
-                if checker.tokens_exceeded(self._usage):
-                    return await self._finalize(
-                        recorder, ExitReason.TOKEN_BUDGET, turn_started
-                    )
+                user_msg = Message(role="user", content=[TextBlock(text=user_message)])
+                self._append_message(session_id, user_msg)
+                user_recorded = True
 
-                if not response.tool_calls:
-                    gated = await self._goal_gate(recorder, turn_started)
-                    if gated is not None:
-                        return gated
-                    # Acceptance failed but fix attempts remain: the failure
-                    # report was appended as a user message; keep looping.
-                    await recorder.emit(EventType.ROUND_END, {"round": self._rounds})
-                    continue
+                while True:
+                    self._check_deadline()
+                    if checker.rounds_exceeded(self._rounds):
+                        return await self._finalize(
+                            recorder, ExitReason.MAX_ROUNDS, turn_started
+                        )
 
-                tool_results: list[ToolResultBlock] = []
-                for call in response.tool_calls:  # executed one at a time, in order
-                    tool_results.append(
-                        await self._execute_tool_call(recorder, call, session_id)
-                    )
-                if tool_results:
+                    # Background jobs finished since the last round are delivered
+                    # before the next model call so the model sees their output.
+                    await self._deliver_finished_jobs(recorder, session_id)
+
+                    # Layered compaction before the provider call keeps the
+                    # context inside budget; the compacted view is persisted.
+                    await self._compact_if_needed(recorder, session_id)
+
+                    self._rounds += 1
+                    await recorder.emit(EventType.ROUND_START, {"round": self._rounds})
+
+                    self._check_deadline()
+                    response, failure, error = await self._stream_assistant_turn()
+                    self._check_deadline()
+                    if response is None:
+                        assert failure is not None  # always set when response is None
+                        return await self._finalize(
+                            recorder, failure, turn_started, error=error
+                        )
+
                     self._append_message(
-                        session_id, Message(role="user", content=tool_results)
+                        session_id, Message(role="assistant", content=list(response.blocks))
                     )
-                await recorder.emit(EventType.ROUND_END, {"round": self._rounds})
+                    self._usage = self._usage + response.usage
+                    await recorder.emit(
+                        EventType.ASSISTANT_MESSAGE,
+                        {
+                            "text": response.text,
+                            "tool_calls": [call.name for call in response.tool_calls],
+                            "usage": {
+                                "input_tokens": response.usage.input_tokens,
+                                "output_tokens": response.usage.output_tokens,
+                                "total_tokens": response.usage.total_tokens,
+                            },
+                            "stop_reason": response.stop_reason.value,
+                        },
+                    )
+
+                    # Token budget fires before any tool of this round runs: side
+                    # effects must not start once the budget is already blown.
+                    if checker.tokens_exceeded(self._usage):
+                        return await self._finalize(
+                            recorder, ExitReason.TOKEN_BUDGET, turn_started
+                        )
+
+                    if response.stop_reason is StopReason.MAX_TOKENS:
+                        if response.tool_calls:
+                            self._append_message(session_id, Message(role="user", content=[
+                                ToolResultBlock(tool_use_id=call.id, is_error=True,
+                                                content="未执行：模型响应被截断，请重新生成完整调用。")
+                                for call in response.tool_calls
+                            ]))
+                        return await self._finalize(recorder, ExitReason.MAX_TOKENS, turn_started)
+
+                    if not response.tool_calls:
+                        gated = await self._goal_gate(recorder, turn_started)
+                        if gated is not None:
+                            return gated
+                        # Acceptance failed but fix attempts remain: the failure
+                        # report was appended as a user message; keep looping.
+                        await recorder.emit(EventType.ROUND_END, {"round": self._rounds})
+                        continue
+
+                    tool_results: list[ToolResultBlock] = []
+                    try:
+                        for call in response.tool_calls:  # executed one at a time, in order
+                            self._check_deadline()
+                            tool_results.append(
+                                await self._execute_tool_call(recorder, call, session_id)
+                            )
+                            self._check_deadline()
+                    finally:
+                        if tool_results:
+                            self._append_message(
+                                session_id, Message(role="user", content=tool_results)
+                            )
+                    await recorder.emit(EventType.ROUND_END, {"round": self._rounds})
+        except TimeoutError:
+            if not user_recorded:
+                self._append_message(session_id, Message(role="user", content=[TextBlock(text=user_message)]))
+            return await self._finalize(recorder, ExitReason.TIME_BUDGET, turn_started)
         except asyncio.CancelledError:
             await self._finalize_cancelled(recorder)
             raise  # never swallow cancellation
+        finally:
+            self._deadline = None
 
     # -- resuming ------------------------------------------------------------
 
@@ -387,27 +452,31 @@ class AgentRuntime:
         summary = store.get_session(session_id)
         if summary is None:
             raise ValueError(f"unknown session: {session_id}")
-        resolved_workspace = Path(workspace) if workspace else Path(summary.workspace)
-        if not resolved_workspace.exists():
+        resolved_workspace = (Path(workspace) if workspace else Path(summary.workspace)).resolve()
+        if not resolved_workspace.is_dir():
             raise ValueError(
                 f"workspace no longer exists: {resolved_workspace} (session {session_id})"
             )
 
+        resolved_provider = provider_name or provider.name
+        resolved_model = model or getattr(provider, "model", summary.model)
+        cls._validate_provider(provider, resolved_provider, resolved_model)
         runtime = cls(
             provider=provider,
             registry=registry,
             store=store,
             policy=policy,
             workspace=resolved_workspace,
-            provider_name=provider_name or summary.provider,
-            model=model or summary.model,
+            provider_name=resolved_provider,
+            model=resolved_model,
             budget=budget
             if budget is not None
             else Budget(
+                # A resumed session gets headroom in rounds and no token cap:
+                # its stored totals are already large by definition, and
+                # capping against them would kill the continuation on the
+                # first round.
                 max_rounds=max(summary.rounds + 10, 10),
-                max_total_tokens=max(
-                    (summary.input_tokens + summary.output_tokens) * 2, 200_000
-                ),
             ),
             approval_handler=approval_handler,
             on_text_delta=on_text_delta,
@@ -426,6 +495,18 @@ class AgentRuntime:
         )
         runtime._rounds = summary.rounds
         runtime._pending_dangling = cls._find_dangling_calls(runtime._messages)
+        jobs: dict[str, dict[str, Any]] = {}
+        for event in store.get_events(session_id):
+            if event.type is EventType.BACKGROUND_JOB_STARTED:
+                jobs[event.data["job_id"]] = event.data
+            elif event.type in (EventType.BACKGROUND_JOB_COMPLETED, EventType.BACKGROUND_JOB_LOST):
+                jobs.pop(event.data["job_id"], None)
+        runtime._lost_jobs = list(jobs.values())
+        runtime._bind_goal_session(resuming=True)
+        store.update_session(
+            session_id, workspace=str(resolved_workspace),
+            provider=resolved_provider, model=resolved_model,
+        )
         return runtime
 
     @staticmethod
@@ -450,6 +531,12 @@ class AgentRuntime:
         (writes, shell) are marked ``unknown`` and the model is told to
         verify current state instead of assuming anything.
         """
+        for data in self._lost_jobs:
+            await recorder.emit(EventType.BACKGROUND_JOB_LOST, {**data, "status": "lost"})
+            self._append_message(self.session_id, Message(role="user", content=[TextBlock(
+                text=f"后台任务 {data['job_id']} 在恢复会话时失联，结果未知，请核实。"
+            )]))
+        self._lost_jobs = []
         pending = self._pending_dangling
         self._pending_dangling = []
         if not pending:
@@ -527,16 +614,17 @@ class AgentRuntime:
         ``asyncio.CancelledError`` is deliberately not caught here.
         """
         try:
-            async for event in self._provider.stream(
+            async with aclosing(self._provider.stream(
                 system=self._system_prompt,
                 messages=self._messages,
                 tools=self._registry.specs(),
-            ):
-                if isinstance(event, TextDelta):
-                    if self._on_text_delta is not None:
-                        await self._on_text_delta(event.text)
-                else:  # ResponseDone: terminal, fully assembled response
-                    return event.response, None, None
+            )) as stream:
+                async for event in stream:
+                    if isinstance(event, TextDelta):
+                        if self._on_text_delta is not None:
+                            await self._on_text_delta(event.text)
+                    else:
+                        return event.response, None, None
         except ProviderError as exc:
             return None, ExitReason.PROVIDER_ERROR, str(exc)
         except Exception as exc:  # noqa: BLE001 - any provider bug must not kill the loop
@@ -557,30 +645,18 @@ class AgentRuntime:
         Unknown tools, denials, missing approvals and tool crashes all become
         error ``ToolResultBlock``s fed back to the model — the loop continues.
         Oversized outputs are spilled to the artifact store (the model gets a
-        preview plus a reference it can read back with ``read_artifact``).
+        preview plus an archive reference).
         """
         await recorder.emit(
             EventType.TOOL_CALL_START,
             {"call_id": call.id, "name": call.name, "arguments": call.input},
         )
-        if call.name == "delegate":
-            await recorder.emit(
-                EventType.SUBAGENT_STARTED, {"task": str(call.input.get("task", ""))}
-            )
         outcome = await self._resolve_outcome(recorder, call)
-        if outcome.usage is not None:
-            # Tools that spend model tokens themselves (subagent) are billed
-            # to the same session-cumulative budget.
-            self._usage = self._usage + outcome.usage
-        if call.name == "delegate":
+        if outcome.job_id is not None:
+            self._announced_jobs.add(outcome.job_id)
             await recorder.emit(
-                EventType.SUBAGENT_FINISHED,
-                {
-                    "usage": {
-                        "input_tokens": outcome.usage.input_tokens if outcome.usage else 0,
-                        "output_tokens": outcome.usage.output_tokens if outcome.usage else 0,
-                    },
-                },
+                EventType.BACKGROUND_JOB_STARTED,
+                {"job_id": outcome.job_id, "command": call.input.get("command", "")},
             )
 
         block = self._outcome_to_block(call, self._maybe_spill(session_id, outcome))
@@ -597,9 +673,11 @@ class AgentRuntime:
         )
         return block
 
-    def _maybe_spill(self, session_id: str, outcome: ToolOutcome) -> ToolOutcome:
+    def _maybe_spill(
+        self, session_id: str, outcome: ToolOutcome
+    ) -> ToolOutcome:
         """Spill oversized successful outputs to an artifact, keeping a
-        preview plus a read-back reference in the model-facing content."""
+        preview plus an archive reference in the model-facing content."""
         if (
             self._artifact_store is None
             or not outcome.success
@@ -612,7 +690,7 @@ class AgentRuntime:
         preview = outcome.output[: _SPILL_LIMITS.spill_preview_chars]
         note = (
             f"\n...[输出共 {len(outcome.output)} 字符，已转存为 artifact "
-            f"{ref.artifact_id}；可用 read_artifact 工具按需读取完整内容]"
+            f"[artifact:{ref.artifact_id}]；完整内容保存在会话归档中]"
         )
         return outcome.model_copy(update={"output": preview + note})
 
@@ -660,6 +738,7 @@ class AgentRuntime:
 
     async def _run_tool(self, call: ToolUseBlock, tool: Any) -> ToolOutcome:
         """Execute one approved tool call with the shared services attached."""
+        self._check_deadline()
         try:
             return await tool.run(
                 call.input,
@@ -704,6 +783,42 @@ class AgentRuntime:
         snapshot.capture()
         self._protected_captured = True
 
+    def _bind_goal_session(self, *, resuming: bool = False) -> None:
+        """Bind acceptance and its immutable protected baseline to this session."""
+        from minicode.goals import AcceptanceSpec, EvidenceLedger, GoalChecker, ProtectedSnapshot
+
+        assert self.session_id is not None
+        saved = self._store.get_goal_state(self.session_id)
+        checker = self._goal_checker
+        if saved is not None:
+            spec = AcceptanceSpec.model_validate(saved["spec"])
+            if isinstance(checker, GoalChecker):
+                protected = {item.path for item in spec.items if item.type == "protected"}
+                requested = {item.path for item in checker.spec.items if item.type == "protected"}
+                if not protected <= requested:
+                    raise ValueError("resume cannot remove the session's protected paths")
+                spec = checker.spec
+            checker = GoalChecker(spec, self._workspace)
+        if not isinstance(checker, GoalChecker):
+            self._capture_protected_paths()
+            return
+        snapshot = ProtectedSnapshot(
+            self._workspace, [item.path for item in checker.spec.items if item.type == "protected"]
+        )
+        if saved is not None:
+            snapshot.restore(saved["baseline"])
+        elif resuming:
+            # Legacy sessions have no trustworthy initial baseline.
+            snapshot.restore({"digests": {}, "unresolvable": {}})
+        else:
+            snapshot.capture()
+        self._goal_checker = GoalChecker(checker.spec, self._workspace, snapshot)
+        self._evidence_ledger = EvidenceLedger()
+        self._protected_captured = True
+        self._store.save_goal_state(
+            self.session_id, {"spec": checker.spec.model_dump(), "baseline": snapshot.export()}
+        )
+
     async def _goal_gate(
         self, recorder: EventRecorder, turn_started: float
     ) -> RunResult | None:
@@ -725,7 +840,13 @@ class AgentRuntime:
         if fingerprint is not None and self._evidence_valid(fingerprint):
             return await self._finalize(recorder, ExitReason.COMPLETED, turn_started)
 
-        report = await self._goal_checker.run()
+        from minicode.goals import GoalChecker
+
+        report = await (
+            self._goal_checker.run(deadline=self._deadline)
+            if isinstance(self._goal_checker, GoalChecker) else self._goal_checker.run()
+        )
+        self._check_deadline()
         await recorder.emit(
             EventType.GOAL_CHECK,
             {
@@ -821,9 +942,15 @@ class AgentRuntime:
         """
         if self._background_manager is None:
             return
+        for job in getattr(self._background_manager, "jobs", lambda: [])():
+            if job.job_id not in self._announced_jobs:
+                self._announced_jobs.add(job.job_id)
+                await recorder.emit(EventType.BACKGROUND_JOB_STARTED, {
+                    "job_id": job.job_id, "command": job.command,
+                })
         for job in self._background_manager.poll_completed():
             await recorder.emit(
-                EventType.BACKGROUND_JOB_COMPLETED,
+                EventType.BACKGROUND_JOB_LOST if job.status == "lost" else EventType.BACKGROUND_JOB_COMPLETED,
                 {
                     "job_id": job.job_id,
                     "command": job.command,
@@ -856,13 +983,16 @@ class AgentRuntime:
         build the :class:`RunResult` for this turn. Any still-running
         background jobs are cancelled so the session never leaks processes."""
         assert self.session_id is not None
+        if exit_reason is not ExitReason.TIME_BUDGET:
+            self._check_deadline()
+        await self._cancel_background_jobs()
+        await self._deliver_finished_jobs(recorder, self.session_id)
         duration_s = time.monotonic() - turn_started
         self._persist_session(exit_reason)
         data = self._session_end_data(exit_reason)
         if error is not None:
             data["error"] = error
         await recorder.emit(EventType.SESSION_END, data)
-        await self._cancel_background_jobs()
         return RunResult(
             session_id=self.session_id,
             exit_reason=exit_reason,
@@ -872,14 +1002,21 @@ class AgentRuntime:
         )
 
     async def _cancel_background_jobs(self) -> None:
-        """Best-effort cancellation of leftover background jobs (guarded:
-        teardown must never mask the real exit path)."""
+        """Finish background teardown before propagating another cancellation."""
         if self._background_manager is None:
             return
+        cleanup = asyncio.create_task(self._background_manager.cancel_all())
         try:
-            await self._background_manager.cancel_all()
-        except Exception:  # noqa: BLE001
-            pass
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            # Repeated Ctrl+C must not interrupt the actual process cleanup.
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
 
     async def _finalize_cancelled(self, recorder: EventRecorder) -> None:
         """Persist ``CANCELLED`` while task cancellation is being handled.
@@ -887,9 +1024,20 @@ class AgentRuntime:
         Guarded so finalization itself can never raise — the original
         :class:`asyncio.CancelledError` must always propagate to the caller.
         """
+        cleanup = asyncio.create_task(self._persist_cancelled(recorder))
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
+
+    async def _persist_cancelled(self, recorder: EventRecorder) -> None:
         if self.session_id is None:
             return
+        await self._cancel_background_jobs()
         try:
+            await self._deliver_finished_jobs(recorder, self.session_id)
             self._persist_session(ExitReason.CANCELLED)
             await recorder.emit(
                 EventType.SESSION_END, self._session_end_data(ExitReason.CANCELLED)

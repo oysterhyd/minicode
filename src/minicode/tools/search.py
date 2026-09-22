@@ -113,7 +113,15 @@ class GrepTool(BaseTool):
                 proc.kill()
             except ProcessLookupError:  # pragma: no cover - race on exit
                 pass
+            await proc.wait()
             return None
+        except asyncio.CancelledError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            raise
 
         if proc.returncode == 1:  # ripgrep: no matches
             return []

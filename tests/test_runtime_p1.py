@@ -432,7 +432,7 @@ def test_large_output_spilled_with_readback_reference(harness_factory):
     ]
     assert len(result_blocks) == 1
     assert "tool_output_deadbeef" in result_blocks[0].content
-    assert "read_artifact" in result_blocks[0].content
+    assert "[artifact:" in result_blocks[0].content
     assert len(result_blocks[0].content) < len(big) // 2
 
 

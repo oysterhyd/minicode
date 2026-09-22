@@ -7,7 +7,7 @@ A. **Archive** — whole early interaction units (a fresh user request, the
    assistant's reply and the tool results it produced) are JSON-serialized
    and persisted through ``spill_fn``; the messages are replaced by a single
    summary user message carrying an ``[artifact:<id>]`` reference that the
-   model can read back with the ``read_artifact`` tool. Without a
+   session report can retain as a full archive. Without a
    ``spill_fn`` the same units are replaced by a pure truncation-style
    summary (no reference, original text dropped).
 B. **Shrink** — old tool results in the retained region (every result except
@@ -58,7 +58,7 @@ __all__ = [
 SHRINK_MARKER = "\n...[已压缩；完整内容见执行报告]"
 
 # [artifact:<id>] references embedded in text; carried over into structured
-# summaries so the read_artifact path survives a merge.
+# summaries so archive references survive a merge.
 _ARTIFACT_REF = re.compile(r"\[artifact:[A-Za-z0-9_\-]+\]")
 
 # Deterministic "remaining todo" extraction: checklist items or todo keywords.
@@ -237,7 +237,7 @@ def _archive_summary(groups: list[list[Message]], artifact_id: str | None) -> st
     for ordinal, group in enumerate(groups, start=1):
         lines.append(_unit_line(group, ordinal))
     if artifact_id is not None:
-        lines.append(f"归档引用: [artifact:{artifact_id}] 可用 read_artifact 工具读取完整内容")
+        lines.append(f"归档引用: [artifact:{artifact_id}]（完整内容保存在会话归档中）")
     else:
         lines.append("（未配置 artifact 存储，原始内容未保留）")
     return "\n".join(lines)
@@ -282,7 +282,7 @@ def _structured_summary(groups: list[list[Message]]) -> str:
     ]
     unique_refs = list(dict.fromkeys(refs))
     if unique_refs:
-        lines.append(f"- 归档引用: {' '.join(unique_refs[:3])} 可用 read_artifact 工具读取完整内容")
+        lines.append(f"- 归档引用: {' '.join(unique_refs[:3])}（完整内容保存在会话归档中）")
     return "\n".join(lines)
 
 
@@ -294,17 +294,35 @@ def _structured_summary(groups: list[list[Message]]) -> str:
 class ContextCompactor:
     """Stateless per-call compactor; bind the artifact store on the loop side
     by passing ``spill_fn = lambda kind, content: store.spill(session_id,
-    kind, content).artifact_id``."""
+    kind, content).artifact_id``.
+
+    ``context_tokens_fn`` supplies the prompt budget to trigger on — normally
+    the active model's ``context_window - max_output_tokens`` (see
+    :meth:`~minicode.runtime.AgentRuntime.prompt_budget_tokens`), read on every
+    check so a mid-session ``/model`` switch is honoured. Without it the static
+    ``config.max_context_tokens`` is used.
+    """
 
     def __init__(
-        self, config: CompactConfig, spill_fn: Callable[[str, str], str] | None = None
+        self,
+        config: CompactConfig,
+        spill_fn: Callable[[str, str], str] | None = None,
+        context_tokens_fn: Callable[[], int] | None = None,
     ) -> None:
         self.config = config
         self._spill_fn = spill_fn
+        self._context_tokens_fn = context_tokens_fn
+
+    @property
+    def context_tokens(self) -> int:
+        """Prompt budget currently in force (tokens)."""
+        if self._context_tokens_fn is None:
+            return self.config.max_context_tokens
+        return self._context_tokens_fn()
 
     @property
     def _threshold(self) -> float:
-        return self.config.max_context_tokens * self.config.trigger_fraction
+        return self.context_tokens * self.config.trigger_fraction
 
     def needs_compaction(
         self,

@@ -22,6 +22,7 @@ from minicode.core.catalog import MODEL_CATALOG
 from minicode.slash import filter_commands
 from minicode.core.models import Budget
 from minicode.providers import FakeProvider, FakeProviderOptions, FakeTurn
+from minicode.security import PermissionMode
 from minicode.storage import SqliteStore
 from minicode.ui.app import ApprovalModal, MiniCodeApp, ToolCard, run_tui
 
@@ -301,7 +302,7 @@ def test_approval_modal_deny(tmp_path):
 
 
 def test_auto_allow_skips_modal(tmp_path):
-    """--yes wiring: AutoAllowPolicy + no approval handler -> no modal."""
+    """--yes bypasses policy approval while retaining the handler."""
     app, ws = _make_app(tmp_path, turns=_create_file_script(), yes=True)
 
     async def scenario():
@@ -315,6 +316,71 @@ def test_auto_allow_skips_modal(tmp_path):
             )
 
     _run(scenario())
+
+
+@pytest.mark.parametrize("restored", [False, True])
+def test_yes_then_tighten_permissions_still_shows_approval(tmp_path, restored, monkeypatch):
+    app, ws = _make_app(tmp_path, turns=_create_file_script(), yes=True)
+    if restored:
+        sid = app._store.create_session(workspace=str(ws), provider="fake", model="fake")
+        provider = app._setup.provider
+        monkeypatch.setattr("minicode.cli._build_provider", lambda *args: (provider, "fake", "fake"))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            if restored:
+                app._cmd_resume(sid)
+            app._cmd_permissions("default")
+            await _submit(pilot, "create")
+            await _wait_for_modal(app)
+            assert not (ws / "new.txt").exists()
+            await pilot.click("#approve")
+            await _wait_turn_done(app)
+            assert (ws / "new.txt").read_text() == "hello"
+
+    try:
+        _run(scenario())
+    finally:
+        app._store.close()
+
+
+def test_resume_other_workspace_restores_all_services_and_model(tmp_path, monkeypatch):
+    from minicode.goals import AcceptanceSpec, GoalChecker, ProtectedSnapshot
+    from minicode.runtime import AgentRuntime
+    from minicode.security import AutoAllowPolicy
+
+    app, old_ws = _make_app(tmp_path, turns=[{"text": "old"}], yes=True)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "guard.txt").write_text("original")
+    spec = AcceptanceSpec(items=[{"id": "protected", "type": "protected", "path": "guard.txt"}])
+    provider = FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="ok")]))
+    provider.name, provider.model = "anthropic", "saved-model"
+    previous = AgentRuntime(
+        provider=provider, provider_name="anthropic", model="saved-model",
+        workspace=target, store=app._store, registry=app._services.registry,
+        policy=AutoAllowPolicy(), goal_checker=GoalChecker(spec, target, ProtectedSnapshot(target, ["guard.txt"])),
+    )
+    sid = asyncio.run(previous.run_turn("start")).session_id
+    (target / "guard.txt").write_text("modified")
+    monkeypatch.setattr("minicode.cli._build_provider", lambda choice, model, script: (provider, choice.value, model))
+
+    async def scenario():
+        async with app.run_test():
+            app._cmd_resume(sid)
+            runtime = app._runtime
+            assert app._setup.workspace == runtime.workspace == target
+            assert app._services.goal_checker.workspace == target
+            assert runtime._goal_checker.protected_snapshot.workspace == target
+            assert runtime._goal_checker.protected_snapshot.violations()
+            assert runtime.model == app._setup.model_label == "saved-model"
+            assert runtime.provider.name == runtime.provider_name == app._setup.provider_name == "anthropic"
+            assert str(target) in app.sub_title and str(old_ws) not in runtime._system_prompt
+
+    try:
+        _run(scenario())
+    finally:
+        app._store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -680,5 +746,119 @@ def test_direct_argument_bypass_skips_menu(tmp_path):
             await pilot.press("enter")
             await pilot.pause()
             assert app._setup.provider.reasoning_effort == "high"
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Cascading submenu for every command that takes an enumerated value
+# ---------------------------------------------------------------------------
+
+
+def test_permissions_submenu_lists_modes_and_applies(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/permissions")
+            await pilot.pause()
+            assert app.slash_view == "submenu"
+            assert [e.value for e in app._submenu_entries] == [
+                mode.value for mode in PermissionMode
+            ]
+            assert app._submenu_entries[0].badges == ("当前",)
+
+            # Descend one option and confirm it with Enter.
+            await pilot.press("down")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._services.policy.mode is PermissionMode.ACCEPT_EDITS
+            assert app.slash_view is None
+            assert any("accept_edits" in line for line in app._log_texts())
+
+    _run(scenario())
+
+
+def test_permissions_submenu_esc_keeps_mode_unchanged(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/permissions")
+            await pilot.pause()
+            await pilot.press("escape")  # submenu -> root list
+            await pilot.pause()
+            assert app.slash_view == "root"
+            assert [c.name for c in app._root_items] == ["/permissions"]
+            await pilot.press("escape")  # root -> closed
+            await pilot.pause()
+            assert app.slash_view is None
+            assert app._services.policy.mode is PermissionMode.DEFAULT
+
+    _run(scenario())
+
+
+def test_resume_submenu_lists_sessions_and_applies(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            # Produce one stored session first.
+            app.query_one("#prompt").text = "写点什么"
+            await pilot.press("enter")
+            await _wait_turn_done(app)
+            session_id = app._runtime.session_id
+            assert session_id is not None
+
+            await pilot.press(*"/resume")
+            await pilot.pause()
+            assert app.slash_view == "submenu"
+            entries = app._submenu_entries
+            assert [e.value for e in entries] == [session_id[:8]]
+            # The live session is marked, and Enter resumes the picked one.
+            assert entries[0].badges == ("当前",)
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.slash_view is None
+            assert app._runtime.session_id == session_id
+            assert any(
+                line.startswith(f"已恢复会话 {session_id[:8]}")
+                for line in app._log_texts()
+            )
+
+    _run(scenario())
+
+
+def test_resume_submenu_closes_when_no_sessions(tmp_path):
+    """No candidates -> no submenu; Enter still runs the command directly."""
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/resume")
+            await pilot.pause()
+            assert app.slash_view is None  # nothing to pick from
+            await pilot.press("enter")
+            await pilot.pause()
+            assert any("用法: /resume" in line for line in app._log_texts())
+
+    _run(scenario())
+
+
+def test_tab_in_permissions_submenu_fills_direct_command(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "好"}])
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.press(*"/permissions")
+            await pilot.pause()
+            await pilot.press("down")  # accept_edits
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.query_one("#prompt").text == "/permissions accept_edits "
+            assert app.slash_view is None  # menu closed, Enter runs directly
 
     _run(scenario())

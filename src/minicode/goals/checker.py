@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import time
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -19,7 +20,7 @@ from pydantic import BaseModel
 from minicode.core.clock import utc_now
 from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
 from minicode.goals.spec import AcceptanceItem, AcceptanceSpec, ItemKind
-from minicode.tools.command import kill_process_tree, spawn_shell
+from minicode.tools.command import decode_shell_output, kill_process_tree, spawn_shell
 from minicode.tools.files import SKIP_DIRS
 
 _FINGERPRINT_READ_CAP = 2 * 1024 * 1024  # hash only the first 2 MiB per file
@@ -51,12 +52,15 @@ def workspace_fingerprint(workspace: Path) -> str:
             for name in sorted(filenames):
                 file_path = Path(dirpath) / name
                 rel = file_path.relative_to(root).as_posix()
+                size = -1
                 try:
                     size = file_path.stat().st_size
                     with file_path.open("rb") as handle:
                         head = handle.read(_FINGERPRINT_READ_CAP)
-                except OSError:
-                    head = b""  # unreadable file still contributes its path
+                except OSError as exc:
+                    # Distinguish unreadable/missing files from empty files;
+                    # never reuse the preceding file's size after a failed stat.
+                    head = f"unreadable:{exc.errno}".encode("ascii")
                 entry = hashlib.sha256()
                 entry.update(rel.encode("utf-8"))
                 entry.update(b"\0")
@@ -100,6 +104,18 @@ class ProtectedSnapshot:
                 self._unresolvable[raw] = f"受保护路径越界，无法追踪: {exc}"
                 continue
             self._digests[raw] = _sha256_file(resolved) if resolved.is_file() else None
+        self._captured = True
+
+    def export(self) -> dict:
+        return {"digests": dict(self._digests), "unresolvable": dict(self._unresolvable)}
+
+    def restore(self, state: dict) -> None:
+        self._digests = dict(state["digests"])
+        self._unresolvable = dict(state["unresolvable"])
+        # Missing baseline data must fail closed, never capture modified files.
+        for raw in self.paths:
+            if raw not in self._digests:
+                self._unresolvable[raw] = "缺少会话初始基线，无法验证受保护文件"
         self._captured = True
 
     def violations(self) -> list[tuple[str, str]]:
@@ -165,28 +181,32 @@ class GoalChecker:
         self.workspace = Path(workspace)
         self.protected_snapshot = protected_snapshot
 
-    async def run(self) -> GoalReport:
-        """Run every item and return a report. Async only for future-proofing."""
+    async def run(self, *, deadline: float | None = None) -> GoalReport:
+        """Run commands, then verify protected files and fingerprint the final state."""
         ran_at = utc_now()
-        fingerprint = workspace_fingerprint(self.workspace)
         results: list[GoalItemResult] = []
-        # Lazily computed at the first protected item, i.e. after all preceding
-        # command items ran, so tampering by acceptance commands is caught too.
-        violations: dict[str, str] | None = None
+        # Capture before commands, and check protection after all commands.
+        if self.protected_snapshot is not None and not self.protected_snapshot._captured:
+            self.protected_snapshot.capture()
         for item in self.spec.items:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("turn deadline exceeded")
             if item.type == "command":
                 results.append(await self._check_command(item))
             elif item.type == "artifact":
                 results.append(self._check_artifact(item))
-            else:  # protected
-                if violations is None:
-                    snapshot = self.protected_snapshot
-                    violations = dict(snapshot.violations()) if snapshot is not None else {}
-                results.append(self._check_protected(item, violations))
+        snapshot = self.protected_snapshot
+        violations = dict(snapshot.violations()) if snapshot is not None else {}
+        results.extend(
+            self._check_protected(item, violations)
+            for item in self.spec.items if item.type == "protected"
+        )
+        by_id = {result.item_id: result for result in results}
+        results = [by_id[item.id] for item in self.spec.items]
         return GoalReport(
             passed=all(r.passed for r in results),
             items=results,
-            fingerprint=fingerprint,
+            fingerprint=workspace_fingerprint(self.workspace),
             ran_at=ran_at,
         )
 
@@ -210,8 +230,11 @@ class GoalChecker:
                 passed=False,
                 detail=f"命令超时（>{self.command_timeout_s:g}s），已强制终止进程树",
             )
+        except asyncio.CancelledError:
+            await kill_process_tree(proc)
+            raise
 
-        output = stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+        output = decode_shell_output(stdout)
         output = _truncate_output(output)
         code = proc.returncode
         suffix = f"；输出: {output}" if output else "；无输出"

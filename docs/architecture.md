@@ -83,6 +83,11 @@ token 预算在**助手响应已计入、但其工具尚未执行之前**检查�
 副作用（测试 `test_token_budget_stops_before_tool_execution` 固定了这一顺序）。
 所有退出路径都经由唯一的 `_finalize`，退出原因可区分地持久化。
 
+**token 默认不限制**。`Budget.max_total_tokens` 为 0（或负）时 token 检查恒不触发，
+默认只靠轮数与每轮时长兜底。原因：它统计的是**各轮 prompt 之和**（每轮重发全部上下文，
+所以 20 轮 × 20k 上下文 ≈ 400k「token」），度量的是花费而不是上下文占用——把上下文
+交给压缩层（§5.2）按模型窗口控制才是对的。需要硬性成本上限时用 `--max-tokens N`。
+
 **取消**。Ctrl+C 时 asyncio.run 取消主任务；AgentRuntime 在 `CancelledError` 处理中
 **先**把会话落库为 `cancelled`（含 SESSION_END 事件，且该收尾自身不可再抛异常），
 **再**向上传播取消。CLI 捕获 KeyboardInterrupt 映射为退出码 130。chat 模式下每轮独立
@@ -120,9 +125,7 @@ P1 在不动 P0 主干的前提下叠加了六层能力。Runtime 对新模块�
 runtime/loop.py      P1 钩子：压缩 / Goal 门 / 后台投递 / 恢复 / artifact 转存
 context/             estimate（保守 token 估算）、compact（归档→压缩→摘要）
 goals/               spec（验收 YAML）、checker（指纹/快照/检查）、evidence（证据账本）
-tasks/               background（后台命令）、subagent（只读委派）、taskstore（任务依赖）
-tools/artifact.py    read_artifact：按引用回读转存的完整输出
-tools/delegate.py    delegate：一层只读子代理工具
+tasks/               background（后台命令）、taskstore（任务依赖）
 tools/command.py     bash 增加 background 参数
 storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（schema v2）
 reports/             render_session_html：单文件离线 HTML 报告
@@ -137,9 +140,11 @@ evals/               20 任务离线评测集 + 三基线 runner
 
 1. **工具结果转存**（loop 内，逐调用）：成功输出超过 `spill_threshold_chars`（4000）时，
    完整内容写入 `ArtifactStore`（`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），
-   模型只看到预览 + `[artifact:<id>] 可用 read_artifact 按需读取完整内容`。
-2. **轮前压缩**（`ContextCompactor`）：估算 token（字符/3，标注为估算）超过预算的
-   `trigger_fraction`（0.8）时依次执行——按完整交互单元归档早期历史（单元 =
+   模型只看到预览 + `[artifact:<id>]` 归档引用，完整内容留存在会话归档中。
+2. **轮前压缩**（`ContextCompactor`）：估算 token（字符/3，标注为估算）超过「当前模型
+   prompt 预算 × `trigger_fraction`（0.8）」时依次执行——prompt 预算 =
+   `context_window - max_output_tokens`（`AgentRuntime.prompt_budget_tokens()`，每次检查
+   现读，`/model` 切换立即生效）。压缩层次：按完整交互单元归档早期历史（单元 =
    user + assistant + 其 tool_result；tool_use/tool_result 同进同退）→ 压缩保留区中较旧
    的工具结果 → 仍超时把最老单元合并为确定性结构化摘要。归档原文落 artifact，压缩后的
    消息列表通过 `store.replace_messages` 原子重写持久化，并发出 `CONTEXT_COMPACTED` 事件。
@@ -158,13 +163,15 @@ evals/               20 任务离线评测集 + 三基线 runner
              （超过 max_fix_attempts → GOAL_NOT_MET，独立退出原因）
 ```
 
-受保护路径快照在会话首个回合开始时捕获（模型改动之前）。模型自述"完成"永远不会
+受保护路径快照在会话首个回合开始时捕获（模型改动之前），随验收配置保存到 SQLite
+`session_goals`（schema v3）；resume 恢复原基线，旧会话缺失基线时检查失败而非重新采样。
+保护检查放在全部验收命令之后，最终指纹也在检查完成后计算。模型自述"完成"永远不会
 绕过检查；证据与代码状态绑定——任何文件变化都会使旧证据失效。
 
 ### 5.4 会话恢复（plan.md §6.3）
 
 `AgentRuntime.resume(store, session_id, ...)`：校验会话存在与工作区存在 → 加载消息、
-用量、轮数 → 找出**有 tool_use 但无对应 tool_result** 的悬空调用（中断窗口）。悬空调用
+用量、轮数及保存的 provider/model/workspace（CLI/TUI 共用恢复配置）→ 找出**有 tool_use 但无对应 tool_result** 的悬空调用（中断窗口）。悬空调用
 在下次 `run_turn` 开始时结算：
 
 | 悬空调用类型 | 结算方式 |
@@ -174,15 +181,12 @@ evals/               20 任务离线评测集 + 三基线 runner
 
 已落库的结果永不重复执行；后台任务无进程可继承（一律不凭旧 PID 管理）。
 
-### 5.5 后台命令与只读子代理（plan.md §6.5 → s06/s11）
+### 5.5 后台命令（plan.md §6.5）
 
 - `bash(background=true)`：`BackgroundManager.start` 立即返回 job id；完成事件
   `BACKGROUND_JOB_COMPLETED`；结果在下一轮开始时作为 **user 消息**投递（每个 job 恰好
-  投递一次，原 tool call 不产生第二个 tool result）；会话结束时 `cancel_all()` 清理进程树。
-- `delegate` 工具：子 AgentRuntime 只注册 read / ls / grep，独立上下文，
-  返回 `{summary, findings, evidence_refs, unresolved}`（无效引用移入 unresolved）；
-  `ToolOutcome.usage` 把子代理 token 归集到父会话预算；事件 `SUBAGENT_STARTED/FINISHED`。
-
+  投递一次，原 tool call 不产生第二个 tool result）；回合结束时 `cancel_all()` 清理进程树；启动记录 `BACKGROUND_JOB_STARTED`，
+  被终止的任务记录 `BACKGROUND_JOB_LOST` 并向用户和模型投递，之后才发出 `SESSION_END`。
 ### 5.6 评测与报告
 
 - `evals/`：20 个本地任务（repo fixture + task.yaml + FakeProvider 修复脚本），runner
@@ -200,10 +204,10 @@ evals/               20 任务离线评测集 + 三基线 runner
 
 | plan.md §3 P1 能力 | 实现位置 |
 | --- | --- |
-| 分层上下文压缩 + 原始输出按需读取 | `context/`、`storage/artifacts.py`、`tools/artifact.py`、`loop._maybe_spill/_compact_if_needed` |
+| 分层上下文压缩 + 原始输出按需读取 | `context/`、`storage/artifacts.py`、`loop._maybe_spill/_compact_if_needed` |
 | 会话恢复及未确认副作用处理 | `loop.resume/_settle_recovery`、`cli.py`（`resume` 命令） |
 | Goal 验收器 + 失败续跑 + 证据绑定 | `goals/`、`loop._goal_gate`、`--acceptance` 装配 |
-| 任务依赖、后台测试、只读子代理 | `tasks/`、`tools/delegate.py`、`tools/command.py`（background）、`loop._deliver_finished_jobs` |
+| 任务依赖、后台测试 | `tasks/`、`tools/command.py`（background）、`loop._deliver_finished_jobs` |
 | 评测集、基线、失败分析 | `evals/`（20 任务 + run_eval.py 三基线 runner） |
 | 可离线查看的 HTML 执行报告 | `reports/html.py`、`cli.py`（`report --format html`） |
 | 类 Claude Code TUI | `ui/`（Textual App + Pilot 测试） |

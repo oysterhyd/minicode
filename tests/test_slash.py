@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from minicode.slash import SLASH_COMMANDS, SlashCommand, filter_commands
+import re
+
+from minicode.slash import (
+    SLASH_COMMANDS,
+    SUBMENU_COMMANDS,
+    SlashCommand,
+    filter_commands,
+)
 
 
 def test_registry_has_expected_core_commands():
@@ -41,3 +48,35 @@ def test_slash_command_is_frozen_dataclass():
         pass
     else:  # pragma: no cover
         raise AssertionError("SlashCommand must be frozen")
+
+
+# ---------------------------------------------------------------------------
+# Submenu enrolment invariant
+#
+# Regression test for the cascading-menu gap: /model and /effort drilled into a
+# second level while /permissions (same kind of enumerated argument) executed
+# blindly. Any command whose usage enumerates its values must be enrolled in
+# SUBMENU_COMMANDS, so the cascade cannot be forgotten again.
+# ---------------------------------------------------------------------------
+
+
+_ENUMERATED_USAGE = re.compile(r"\[[a-z_]+(?:\|[a-z_]+)+\]")
+
+
+def test_enumerated_argument_commands_have_a_submenu():
+    missing = [
+        cmd.name
+        for cmd in SLASH_COMMANDS
+        if _ENUMERATED_USAGE.search(cmd.usage) and cmd.name not in SUBMENU_COMMANDS
+    ]
+    assert missing == [], f"命令有枚举取值但未接入二级菜单: {missing}"
+
+
+def test_submenu_commands_are_registered_and_single_level():
+    names = {cmd.name for cmd in SLASH_COMMANDS}
+    assert set(SUBMENU_COMMANDS) <= names
+    for name, title in SUBMENU_COMMANDS.items():
+        assert title, name
+        # One level only: the cascade must not point at a command that is
+        # itself a submenu entry.
+        assert not name.endswith("/")
