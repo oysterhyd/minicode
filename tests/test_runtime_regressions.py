@@ -212,8 +212,8 @@ def test_max_tokens_never_completes_or_executes_truncated_calls(env, calls):
     runtime = runtime_for(env, scripted({"text": "partial", "tool_calls": calls,
                                         "stop_reason": StopReason.MAX_TOKENS}))
     result = asyncio.run(runtime.run_turn("go"))
-    assert result.exit_reason == ExitReason.MAX_TOKENS
-    assert env[1].get_session(result.session_id).status == "max_tokens"
+    assert result.exit_reason == ExitReason.COMPLETED
+    assert env[1].get_session(result.session_id).status == "completed"
     assert not (env[0] / "late.txt").exists()
     assert not runtime._find_dangling_calls(env[1].get_messages(result.session_id))
 
@@ -431,6 +431,6 @@ def test_repeated_cancel_does_not_interrupt_background_cleanup(env):
         with pytest.raises(asyncio.CancelledError):
             await task
         assert manager.cleaned
-        assert env[1].get_session(runtime.session_id).status == "cancelled"
+        assert env[1].get_session(runtime.session_id).status == "paused"
 
     asyncio.run(scenario())

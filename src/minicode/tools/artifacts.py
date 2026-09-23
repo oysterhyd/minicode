@@ -29,20 +29,31 @@ class ReadArtifactTool(BaseTool):
     async def execute(self, args: ReadArtifactArgs, ctx: ToolContext) -> ToolOutcome:
         if ctx.artifact_store is None or ctx.session_id is None:
             return ToolOutcome.failure("artifact storage is not available for this session")
-        content = ctx.artifact_store.read(ctx.session_id, args.artifact_id)
-        if content is None:
+        aread_page = getattr(ctx.artifact_store, "aread_page", None)
+        read_page = getattr(ctx.artifact_store, "read_page", None)
+        if callable(aread_page):
+            result = await aread_page(ctx.session_id, args.artifact_id, args.offset, args.limit)
+        elif callable(read_page):
+            result = read_page(ctx.session_id, args.artifact_id, args.offset, args.limit)
+        else:
+            content = ctx.artifact_store.read(ctx.session_id, args.artifact_id)
+            result = None if content is None else (
+                content[args.offset:args.offset + args.limit], len(content),
+                args.offset + args.limit < len(content),
+            )
+        if result is None:
             return ToolOutcome.failure(
                 f"unknown artifact for this session: {args.artifact_id}"
             )
-        total = len(content)
-        if args.offset > total:
+        page, total, has_more = result
+        if total is not None and args.offset > total:
             return ToolOutcome.failure(
                 f"offset {args.offset} beyond end of artifact ({total} characters)"
             )
-        end = min(total, args.offset + args.limit)
-        page = content[args.offset:end]
-        status = f"artifact {args.artifact_id} · characters {args.offset}-{end} of {total}"
-        if end < total:
+        end = args.offset + len(page)
+        total_label = str(total) if total is not None else "?"
+        status = f"artifact {args.artifact_id} · characters {args.offset}-{end} of {total_label}"
+        if has_more:
             status += f" · next_offset={end}"
         else:
             status += " · end"

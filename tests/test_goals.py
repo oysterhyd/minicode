@@ -254,15 +254,15 @@ def test_fingerprint_ignores_skip_dirs(tmp_path):
     assert workspace_fingerprint(tmp_path) == fp_before
 
 
-def test_fingerprint_first_2mb_cap(tmp_path):
-    # Same size and same first 2 MiB but a different tail → same fingerprint.
+def test_fingerprint_includes_content_after_first_2mb(tmp_path):
+    # A tail change must invalidate previously passing acceptance evidence.
     head = b"a" * (2 * 1024 * 1024)
     target = tmp_path / "big.bin"
     target.write_bytes(head + b"tail1")
     fp1 = workspace_fingerprint(tmp_path)
     target.write_bytes(head + b"tail2")
     fp2 = workspace_fingerprint(tmp_path)
-    assert fp1 == fp2
+    assert fp1 != fp2
     # But a change within the first 2 MiB does change the fingerprint.
     target.write_bytes(b"b" + head[1:] + b"tail2")
     assert workspace_fingerprint(tmp_path) != fp2

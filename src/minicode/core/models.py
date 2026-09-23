@@ -207,27 +207,29 @@ class Event(BaseModel):
 
 class ExitReason(str, enum.Enum):
     COMPLETED = "completed"          # model finished with a final answer
-    MAX_TOKENS = "max_tokens"        # provider response was truncated
-    MAX_ROUNDS = "max_rounds"        # round budget exhausted
-    TOKEN_BUDGET = "token_budget"    # cumulative token budget exhausted
-    TIME_BUDGET = "time_budget"      # wall-clock budget exhausted
-    CONTEXT_LIMIT = "context_limit"  # next request cannot fit the model window
+    MAX_TOKENS = "max_tokens"        # repeated truncated responses; resumable pause
+    MAX_ROUNDS = "max_rounds"        # round slice checkpoint
+    TOKEN_BUDGET = "token_budget"    # explicit cumulative spending guard
+    TIME_BUDGET = "time_budget"      # wall-clock slice checkpoint
+    CONTEXT_LIMIT = "context_limit"  # next request needs a larger workset window
     CANCELLED = "cancelled"          # user interrupted (Ctrl+C)
-    GOAL_NOT_MET = "goal_not_met"    # acceptance checks still failing when the budget ran out
+    GOAL_NOT_MET = "goal_not_met"    # acceptance attempts paused for review
     PROVIDER_ERROR = "provider_error"
     INTERNAL_ERROR = "internal_error"
+    STALLED = "stalled"              # repeated identical tool cycle needs review
 
 
 class Budget(BaseModel):
-    """Caps for one session.
+    """Resource policy for one task activation.
 
-    ``max_total_tokens`` counts the *sum of every round's prompt tokens*, not
+    ``max_total_tokens`` counts the *sum of every round's input and output tokens*, not
     the size of the context: each round re-sends the conversation, so a
     twenty-round session over a 30k context pays ~300k here even though the
     context never grew. That makes it a cost guard, not a context guard —
     keeping the context inside the model's window is the compactor's job
     (``context/``). ``0`` or a negative value means *no token cap at all*, which
-    is the default: rounds and wall-clock still bound the session.
+    is the default. ``max_rounds`` and ``max_seconds`` are checkpoint slices,
+    not lifetime caps. A non-positive round slice disables round checkpoints.
     """
 
     max_rounds: int = 20
@@ -241,3 +243,4 @@ class RunResult(BaseModel):
     rounds: int = 0
     total_usage: Usage = Field(default_factory=Usage)
     duration_s: float = 0.0
+    error: str | None = None

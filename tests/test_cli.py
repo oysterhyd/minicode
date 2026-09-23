@@ -585,7 +585,7 @@ def test_run_header_shows_uncapped_tokens_and_compact_counts(tmp_path):
     assert "输出 84k" in result.output
     assert "300000" not in result.output
     # Uncapped does not mean unbounded: rounds and time still apply.
-    assert "≤ 20 轮" in result.output
+    assert "单次轮次 ≤ 20" in result.output
 
 
 def test_run_max_tokens_flag_restores_a_hard_cap(tmp_path):
@@ -613,5 +613,35 @@ def test_run_max_tokens_flag_restores_a_hard_cap(tmp_path):
 
     # An explicit cap still works: the session stops on the budget and says so.
     assert "token ≤ 1" in result.output
-    assert "Token 预算耗尽" in result.output
+    assert "显式 Token 上限已暂停" in result.output
+    assert result.exit_code == 2
     assert "token_budget" in result.output
+
+
+def test_run_auto_continues_past_many_round_slices(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    turns = []
+    for index in range(21):
+        (ws / f"{index}.txt").write_text(str(index), encoding="utf-8")
+        turns.append({"tool_calls": [{"name": "read", "arguments": {
+            "path": f"{index}.txt",
+        }}]})
+    turns.append({"text": "finished"})
+    script = tmp_path / "long.json"
+    script.write_text(json.dumps({"turns": turns}), encoding="utf-8")
+    db = tmp_path / "sessions.sqlite3"
+    result = runner.invoke(app, [
+        "run", "inspect all files", "--workspace", str(ws),
+        "--provider", "fake", "--script", str(script),
+        "--max-rounds", "3", "--yes", "--db", str(db),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "finished" in result.output
+    store = SqliteStore(db)
+    try:
+        summary = store.list_sessions()[0]
+        assert summary.status == "completed"
+        assert summary.rounds == 22
+    finally:
+        store.close()

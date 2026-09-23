@@ -54,11 +54,13 @@ _EXIT_REASON_LABELS: dict[str, str] = {
     "goal_not_met": "验收未通过",
     "provider_error": "模型调用失败",
     "internal_error": "内部错误",
+    "stalled": "重复工具循环",
 }
 
 #: Non-terminal status labels (status is free-form in the store).
 _STATUS_LABELS: dict[str, str] = {
     "running": "运行中",
+    "paused": "已暂停，可继续",
 }
 
 #: EventType -> (badge label, badge color class suffix).

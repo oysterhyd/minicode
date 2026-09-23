@@ -83,24 +83,26 @@ bypass 全部 ALLOW。`/permissions` 命令可在运行时切换模式并同步�
 CLI 用 Rich `Confirm` 展示工具名与摘要；拒绝则以错误 tool_result 回填模型，工具不执行。
 参数变化即视为新调用，重新过权限门。
 
-**预算顺序**。一个用户回合对应一次 `run_turn`，内部可包含多个模型轮次。墙钟 deadline
-在每个用户回合开始时重置，循环中依次检查时长和会话累计轮数；
+**预算顺序**。`run_turn` 是可恢复的执行切片，内部可包含多个模型轮次。墙钟 deadline
+在每次执行开始时重置，轮数按本次执行计数；CLI/TUI 达到轮次切片时自动调用 `continue_turn`，
+时长切片在持久化消息有进展时也会自动续跑，无进展则暂停；
 token 预算在**助手响应已计入、但其工具尚未执行之前**检查——预算已耗尽时不再产生任何
-副作用（测试 `test_token_budget_stops_before_tool_execution` 固定了这一顺序）。
-正常退出经由 `_finalize`，取消经由专门的清理与持久化路径。
+副作用。未执行的 tool_use 会收到明确的错误 tool_result，避免恢复时误判为副作用未知。
+正常完成和暂停均经由 `_finalize`，取消经由专门的清理与持久化路径。
 
 **token 默认不限制**。`Budget.max_total_tokens` 为 0（或负）时 token 检查恒不触发，
-默认只靠轮数与回合时长兜底。它统计**各轮输入与输出 token 的累计值**（每轮重发上下文，
+默认以轮数与时长切片保存进度。它统计**各轮输入与输出 token 的累计值**（每轮重发上下文，
 所以 20 轮 × 20k 输入 ≈ 400k 输入 token，另加输出），不是当前上下文占用。
 `--max-tokens N` 是 token 量上限，不区分缓存折扣，不能直接等同于货币成本上限。
 
 **取消**。Ctrl+C 时 asyncio.run 取消主任务；AgentRuntime 在 `CancelledError` 处理中
-**先**把会话落库为 `cancelled`（含 SESSION_END 事件，且该收尾自身不可再抛异常），
+**先**把会话落库为 `paused`、原因记为 `cancelled`（含 SESSION_END 事件），
 **再**向上传播取消。CLI 捕获 KeyboardInterrupt 映射为退出码 130。chat 模式下每轮独立
 `asyncio.run`，回合内 Ctrl+C 只取消当前轮并回到提示符。
 
-**持久化与恢复边界**。消息与事件随流程写入，写事务内分配序号；会话累计用量与结束状态
-在收尾时更新。当前已支持 `resume`，规则见 §5.4；`report` 只展示已有记录，不执行工具。
+**持久化与恢复边界**。消息与事件随流程写入，写事务内分配序号；轮数与用量逐轮更新，
+恢复时从事件补齐可能滞后的计数。暂停任务通过 `continue_turn` 无需重复输入；`resume` 可跨进程续跑。
+`report` 只展示已有记录，不执行工具。
 不能将压缩后的消息表或事件预览当作完整原始历史。
 
 ## 4. 与 plan.md 的映射（P0 六条能力 → 实现位置）
@@ -153,12 +155,13 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
    归档摘要逐字带回 user 文本，原始初始请求保持独立；随后缩短较旧工具结果
    → 满足条件时合并早期单元为确定性摘要；归档/合并前检查调用结果配对。归档原文落 artifact，压缩后的
    消息列表通过 `store.replace_messages` 原子重写持久化，并发出 `CONTEXT_COMPACTED` 事件。缩短结果时
-   会从全文提取并保留 artifact 引用；压缩后再做硬窗口检查，超限以 `context_limit` 结束。
+   会从全文提取并保留 artifact 引用；仍超限时归档单个超长文本并提供分页引用。服务端实际
+   拒绝上下文时再进行有界缩减重试，无法容纳时以 `context_limit` 暂停并保留任务。
 
 现有限制：
 
-- `read_artifact` 当前按字符分页，仍会先由宿主读取整个 UTF-8 artifact；超大输出尚未改为流式落盘。
-- 默认步骤 A 合并早期单元后，步骤 C 可能没有足够单元继续摘要；硬超限会明确停止而不是继续丢信息。
+- `read_artifact` 按字符分页，读取页面时只保持有限缓冲；大型命令输出流式落盘归档。
+- 固定系统提示或工具 schema 本身超出模型窗口时无法无损缩减；任务会暂停，需换模型或调整配置。
 - 字符数 / 3 不是严格上界，服务端 tokenizer 仍可能与本地估算有偏差。
 
 ### 5.3 Goal 验收与证据（plan.md §6.4 → s17）
@@ -172,7 +175,7 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
   → GoalChecker.run()：逐项检查 → GOAL_CHECK 事件
       通过 → 记录证据（EvidenceLedger，绑定指纹）→ COMPLETED
       失败 → 结构化失败报告回填为 user 消息 → 继续循环
-             （超过 max_fix_attempts → GOAL_NOT_MET，独立退出原因）
+             （超过 max_fix_attempts → GOAL_NOT_MET 暂停，可继续）
 ```
 
 受保护路径快照在会话首个回合开始时捕获（模型改动之前），随验收配置保存到 SQLite
@@ -188,7 +191,7 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
 
 | 悬空调用类型 | 结算方式 |
 | --- | --- |
-| 只读（read / ls / grep） | 重新执行，发出带 `recovered: true` 的新 START/RESULT 事件，结果回填原始 call id |
+| 只读（read / ls / grep / read_artifact） | 重新检查当前权限后执行，发出带 `recovered: true` 的新 START/RESULT 事件，结果回填原始 call id |
 | 写 / Shell（edit / write / bash / 未知工具） | **不重放**：`SIDE_EFFECT_UNKNOWN` 事件 + 提示性 tool_result（"副作用状态未知，先核实再继续"） |
 
 已落库的结果永不重复执行；后台任务无进程可继承（一律不凭旧 PID 管理）。
@@ -197,7 +200,8 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
 
 - `bash(background=true)`：`BackgroundManager.start` 立即返回 job id；完成事件
   `BACKGROUND_JOB_COMPLETED`；结果在下一轮开始时作为 **user 消息**投递（每个 job 恰好
-  投递一次，原 tool call 不产生第二个 tool result）；回合结束时 `cancel_all()` 清理进程树；启动记录 `BACKGROUND_JOB_STARTED`，
+  投递一次，原 tool call 不产生第二个 tool result）；轮次或时长切片自动续跑期间保持进程，
+  其他暂停或取消时 `cancel_all()` 清理进程树；启动记录 `BACKGROUND_JOB_STARTED`，
   被终止的任务记录 `BACKGROUND_JOB_LOST` 并向用户和模型投递，之后才发出 `SESSION_END`。
 ### 5.6 评测与报告
 

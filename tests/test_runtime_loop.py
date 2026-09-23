@@ -369,7 +369,7 @@ def test_max_rounds_exit(harness_factory):
 
     summary = harness.store.get_session(result.session_id)
     assert summary is not None
-    assert summary.status == "max_rounds"
+    assert summary.status == "paused"
     assert summary.exit_reason == "max_rounds"
     assert summary.rounds == 2
 
@@ -466,7 +466,7 @@ def test_provider_error_finalizes_session(harness_factory):
 
     summary = harness.store.get_session(result.session_id)
     assert summary is not None
-    assert summary.status == "provider_error"
+    assert summary.status == "paused"
     assert summary.exit_reason == "provider_error"
 
 
@@ -500,7 +500,7 @@ def test_cancellation_finalizes_and_propagates(harness_factory):
     assert harness.runtime.session_id is not None
     summary = harness.store.get_session(harness.runtime.session_id)
     assert summary is not None
-    assert summary.status == "cancelled"
+    assert summary.status == "paused"
     assert summary.exit_reason == "cancelled"
     assert harness.events.of_type(EventType.SESSION_END)
 

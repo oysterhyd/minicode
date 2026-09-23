@@ -19,6 +19,7 @@ class ToolLimits(BaseModel):
     max_read_bytes: int = 256_000           # read cap
     max_output_chars: int = 20_000          # ls / grep output cap
     max_command_output_chars: int = 10_000  # bash output cap
+    max_command_capture_bytes: int = 100_000_000  # disk-backed log quota
     default_command_timeout_s: float = 60.0
     max_command_timeout_s: float = 300.0
     max_search_results: int = 100
@@ -36,6 +37,12 @@ class ArtifactStoreLike(Protocol):
     def spill(self, session_id: str, kind: str, content: str) -> Any: ...
 
     def read(self, session_id: str, artifact_id: str) -> str | None: ...
+
+    def read_page(
+        self, session_id: str, artifact_id: str, offset: int, limit: int
+    ) -> tuple[str, int | None, bool] | None: ...
+
+    async def spill_binary_stream(self, session_id: str, kind: str, source: Any) -> Any: ...
 
 
 @runtime_checkable

@@ -60,6 +60,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/compact", "/compact", "手动压缩当前会话上下文"),
     SlashCommand("/sessions", "/sessions", "列出历史会话"),
     SlashCommand("/resume", "/resume <会话ID8>", "恢复一个历史会话"),
+    SlashCommand("/continue", "/continue", "从上次暂停处继续未完成任务"),
     SlashCommand("/exit", "/exit", "退出（或 Ctrl+Q / Ctrl+C 两次）", aliases=("/quit",)),
 )
 

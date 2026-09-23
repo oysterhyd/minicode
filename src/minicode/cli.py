@@ -53,6 +53,7 @@ from minicode.core.models import (
     Budget,
     Event,
     EventType,
+    ExitReason,
     RunResult,
     ToolResultBlock,
 )
@@ -93,15 +94,16 @@ app.add_typer(sessions_app, name="sessions")
 #: ExitReason value -> Chinese label (unknown values fall back to the raw one).
 _EXIT_LABELS: dict[str, str] = {
     "completed": "已完成",
-    "max_tokens": "模型输出被截断",
-    "max_rounds": "达到最大轮数",
-    "token_budget": "Token 预算耗尽",
-    "time_budget": "时长预算耗尽",
-    "context_limit": "上下文超过模型窗口",
+    "max_tokens": "模型输出连续被截断",
+    "max_rounds": "轮次切片已保存",
+    "token_budget": "显式 Token 上限已暂停",
+    "time_budget": "时长切片已保存",
+    "context_limit": "上下文待调整",
     "cancelled": "已取消",
     "goal_not_met": "验收未通过",
-    "provider_error": "模型调用失败",
-    "internal_error": "内部错误",
+    "provider_error": "模型调用暂不可用",
+    "internal_error": "内部错误，已保存进度",
+    "stalled": "重复工具循环",
 }
 
 #: Field allowlists for the FakeProvider script JSON (unknown fields are errors).
@@ -137,7 +139,8 @@ def _exit_label(value: str) -> str:
 
 def _status_label(status: str, exit_reason: str | None) -> str:
     if exit_reason:
-        return _exit_label(exit_reason)
+        label = _exit_label(exit_reason)
+        return f"已暂停 · {label}" if status == "paused" else label
     return "进行中" if status == "running" else status
 
 
@@ -352,11 +355,11 @@ ScriptOpt = Annotated[
     Path | None,
     typer.Option(help="FakeProvider 脚本 JSON；fake 且未提供时使用内置演示脚本"),
 ]
-MaxRoundsOpt = Annotated[int, typer.Option(help="会话最大轮数")]
+MaxRoundsOpt = Annotated[int, typer.Option(help="每次执行的轮次切片（0 = 不设切片）")]
 MaxTokensOpt = Annotated[
     int, typer.Option(help="会话累计 token 上限（0 = 不限制，默认）")
 ]
-MaxSecondsOpt = Annotated[float, typer.Option(help="每轮时长预算（秒）")]
+MaxSecondsOpt = Annotated[float, typer.Option(help="每次执行的时长切片（秒）")]
 YesOpt = Annotated[bool, typer.Option("--yes", "-y", help="自动允许全部工具调用，不再逐个审批")]
 DbOpt = Annotated[Path, typer.Option(help="会话数据库路径（默认 ~/.minicode/sessions.db）")]
 AcceptanceOpt = Annotated[
@@ -547,7 +550,8 @@ def _print_header(console: Console, goal: str, setup: _Setup) -> None:
     """Task header below the banner: goal plus the budget envelope."""
     console.print(f"[bold]目标[/]   {goal}")
     console.print(
-        f"[bold]预算[/]   ≤ {setup.budget.max_rounds} 轮"
+        f"[bold]预算[/]   单次轮次 "
+        f"{('不限' if setup.budget.max_rounds <= 0 else '≤ ' + str(setup.budget.max_rounds))}"
         f" · token {_token_budget_label(setup.budget.max_total_tokens)}"
         f" · ≤ {setup.budget.max_seconds:g} 秒"
     )
@@ -567,6 +571,12 @@ def _print_turn_summary(console: Console, result: RunResult) -> None:
         f" 耗时: {result.duration_s:.1f}s ·"
         f" 会话: {result.session_id[:8]}"
     )
+    if result.exit_reason is not ExitReason.COMPLETED:
+        detail = f"（{result.error}）" if result.error else ""
+        console.print(
+            f"任务已保存并暂停{detail}。可用 minicode resume {result.session_id[:8]} "
+            "进入会话后执行 /continue。"
+        )
 
 
 def _print_diff_summary(console: Console, store: SessionStore, session_id: str) -> None:
@@ -685,8 +695,6 @@ def _attach_compactor(runtime: Any, artifact_store: Any) -> None:
         context_tokens_fn=lambda: runtime.context_window,
         output_tokens_fn=runtime.effective_max_output_tokens,
     )
-
-
 def _new_runtime(setup: _Setup, store: SqliteStore, services: Any) -> Any:
     """Build a fresh AgentRuntime from an already-assembled services bundle."""
     runtime = AgentRuntime(
@@ -752,7 +760,7 @@ def _print_p1_event(console: Console, event: Event) -> None:
         return
 
 
-def _run_one_turn(runtime: AgentRuntime, user_message: str) -> RunResult:
+def _run_one_turn(runtime: AgentRuntime, user_message: str | None) -> RunResult:
     """Run one turn under ``asyncio.run`` with Ctrl+C wired to cancellation.
 
     When the user hits Ctrl+C, asyncio.run cancels the main task; the runtime
@@ -763,7 +771,18 @@ def _run_one_turn(runtime: AgentRuntime, user_message: str) -> RunResult:
 
     async def _guarded() -> RunResult:
         try:
-            return await runtime.run_turn(user_message)
+            message_count = runtime.message_count
+            result = (
+                await runtime.run_turn(user_message)
+                if user_message is not None else await runtime.continue_turn()
+            )
+            while result.exit_reason in (ExitReason.MAX_ROUNDS, ExitReason.TIME_BUDGET):
+                if (result.exit_reason is ExitReason.TIME_BUDGET
+                        and runtime.message_count <= message_count):
+                    break
+                message_count = runtime.message_count
+                result = await runtime.continue_turn()
+            return result
         except asyncio.CancelledError:
             typer.secho("已被用户取消，会话状态已保存。", fg=typer.colors.YELLOW)
             raise
@@ -816,6 +835,8 @@ def run(
             raise typer.Exit(130) from None
         _print_turn_summary(console, result)
         _print_diff_summary(console, store, result.session_id)
+        if result.exit_reason is not ExitReason.COMPLETED:
+            raise typer.Exit(2)
     finally:
         store.close()
 
@@ -944,6 +965,13 @@ class _ChatRepl:
             self._cmd_permissions(arg)
         elif verb == "/sessions":
             self._cmd_sessions()
+        elif verb == "/continue":
+            if not self.runtime.task_pending:
+                self.console.print(Text("当前没有暂停的任务。", style="yellow"))
+            else:
+                result = _run_one_turn(self.runtime, None)
+                _print_turn_summary(self.console, result)
+                _print_diff_summary(self.console, self.store, result.session_id)
         elif verb == "/compact":
             self.console.print(Text("/compact 需要全屏界面，请使用 minicode tui。", style="yellow"))
         elif verb == "/resume":
@@ -1173,6 +1201,7 @@ def _make_resumed_runtime(
     except ValueError as exc:
         _fail(str(exc))
     _attach_compactor(runtime, services.artifact_store)
+    setup.budget = runtime._budget
     return runtime
 
 

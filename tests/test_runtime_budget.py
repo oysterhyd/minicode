@@ -35,6 +35,12 @@ def test_rounds_threshold_is_inclusive():
     assert checker.rounds_exceeded(4) is True
 
 
+def test_round_slice_is_relative_to_resume_point():
+    checker = BudgetChecker(Budget(max_rounds=2), start_usage=Usage(), start_rounds=20)
+    assert not checker.rounds_exceeded(21)
+    assert checker.rounds_exceeded(22)
+
+
 def test_tokens_threshold_strictly_greater():
     checker = BudgetChecker(Budget(max_total_tokens=1000), start_usage=Usage(), start_rounds=0)
     # exactly at the cap is still fine (strict > comparison)

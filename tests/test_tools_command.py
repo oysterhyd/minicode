@@ -16,6 +16,8 @@ from minicode.tools.command import (
     decode_shell_output,
     shell_command,
 )
+from minicode.storage import ArtifactStore, SqliteStore
+from minicode.tools.artifacts import ReadArtifactTool
 
 
 def _python_command(snippet: str) -> str:
@@ -87,6 +89,41 @@ def test_run_command_output_truncated(tmp_path):
     assert "truncated" in outcome.output
     assert outcome.full_output is not None
     assert len(outcome.full_output) > 50_000
+
+
+def test_large_command_output_spills_to_pageable_artifact(tmp_path):
+    store = SqliteStore(tmp_path / "logs.sqlite3")
+    session_id = store.create_session(workspace=str(tmp_path), provider="fake", model="fake")
+    artifacts = ArtifactStore(store)
+    ctx = ToolContext(
+        workspace=tmp_path, artifact_store=artifacts, session_id=session_id,
+        limits=ToolLimits(max_command_output_chars=1000),
+    )
+    try:
+        outcome = asyncio.run(BashTool().run(
+            {"command": _python_command("print('x' * 2100000)")}, ctx
+        ))
+        assert outcome.success
+        assert "[artifact:" in outcome.output
+        artifact_id = store.list_artifacts(session_id)[0]["artifact_id"]
+        page = asyncio.run(ReadArtifactTool().run({
+            "artifact_id": artifact_id, "offset": 2_000_000, "limit": 1000,
+        }, ctx))
+        assert page.success
+        assert "x" * 100 in page.output
+        assert "next_offset=" in page.output
+    finally:
+        store.close()
+
+
+def test_command_output_quota_returns_recoverable_failure(tmp_path):
+    outcome = run(
+        {"command": _python_command("print('x' * 50000)")},
+        tmp_path, max_command_capture_bytes=1000,
+    )
+    assert not outcome.success
+    assert "capture quota" in (outcome.error or "")
+    assert outcome.output
 
 
 def test_run_command_cwd(tmp_path):

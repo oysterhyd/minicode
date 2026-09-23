@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from minicode.core.clock import utc_now
 from minicode.tools.base import truncate_output
-from minicode.tools.command import decode_shell_output, kill_process_tree, spawn_shell
+from minicode.tools.command import capture_bounded, decode_shell_output, kill_process_tree, spawn_shell
 
 #: Called when a job reaches a terminal state (completed / failed).
 CompleteCallback = Callable[["BackgroundJob"], Awaitable[None]]
@@ -140,21 +140,24 @@ class BackgroundManager:
         result before propagating to the caller.
         """
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            await kill_process_tree(proc)
-            job.status = "failed"
-            job.exit_code = None  # killed, no natural exit code
-            job.output = f"command timed out after {timeout_s}s and was killed"
+            stdout, timed_out, over_limit = await capture_bounded(proc, timeout_s)
         except asyncio.CancelledError:
             await kill_process_tree(proc)
             await self._mark_lost(job)
             raise
+        except Exception as exc:  # noqa: BLE001 - watcher must reach a terminal state
+            job.status = "failed"
+            job.exit_code = None
+            job.output = f"background command capture failed: {exc}"
         else:
             output = decode_shell_output(stdout)
-            job.exit_code = proc.returncode
-            job.status = "completed" if proc.returncode == 0 else "failed"
+            job.exit_code = None if timed_out or over_limit else proc.returncode
+            job.status = "completed" if proc.returncode == 0 and not timed_out and not over_limit else "failed"
             job.output = truncate_output(output, self._max_output_chars)
+            if timed_out:
+                job.output += f"\ncommand timed out after {timeout_s}s and was killed"
+            if over_limit:
+                job.output += "\ncommand output exceeded capture quota and was killed"
         finally:
             self._procs.pop(job.job_id, None)
 

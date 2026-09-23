@@ -9,6 +9,7 @@ so a consumer looping against it always receives a well-formed
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, AsyncIterator
 
 from pydantic import BaseModel, Field
@@ -85,6 +86,15 @@ class FakeProvider:
     def reset(self) -> None:
         """Rewind the script index so the next ``stream`` replays turn 0."""
         self._index = 0
+
+    def restore_progress(self, turns_consumed: int, tool_call_counter: int) -> None:
+        """Resume a script at the next response after persisted assistant turns."""
+        self._index = max(0, turns_consumed)
+        self._tool_call_counter = max(0, tool_call_counter)
+
+    def resume_identity(self) -> str:
+        """Identify the script so a different one starts at its first turn."""
+        return hashlib.sha256(self.options.model_dump_json().encode("utf-8")).hexdigest()
 
     async def stream(
         self,

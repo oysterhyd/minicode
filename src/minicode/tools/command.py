@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,44 @@ def decode_shell_output(raw: bytes) -> str:
     if text is None:
         text = raw.decode("utf-8", errors="replace")
     return _ANSI_SGR_RE.sub("", text).replace("\r\n", "\n")
+
+
+async def capture_bounded(
+    proc: asyncio.subprocess.Process, timeout_s: float, max_bytes: int = 2_000_000
+) -> tuple[bytes, bool, bool]:
+    """Drain a child with bounded memory; kill on timeout or output overflow."""
+    output = bytearray()
+
+    async def collect() -> bool:
+        assert proc.stdout is not None
+        while chunk := await proc.stdout.read(64 * 1024):
+            remaining = max_bytes - len(output)
+            output.extend(chunk[:max(0, remaining)])
+            if len(chunk) > remaining:
+                await kill_process_tree(proc)
+                return True
+        return False
+
+    collector = asyncio.create_task(collect())
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(proc.wait(), collector), timeout=timeout_s
+        )
+        return bytes(output), False, results[1]
+    except asyncio.TimeoutError:
+        await kill_process_tree(proc)
+        await asyncio.gather(collector, return_exceptions=True)
+        return bytes(output), True, False
+    except asyncio.CancelledError:
+        await kill_process_tree(proc)
+        collector.cancel()
+        await asyncio.gather(collector, return_exceptions=True)
+        raise
+    except Exception:
+        await kill_process_tree(proc)
+        collector.cancel()
+        await asyncio.gather(collector, return_exceptions=True)
+        raise
 
 
 async def spawn_shell(command: str, cwd: str | Path) -> asyncio.subprocess.Process:
@@ -221,27 +260,74 @@ class BashTool(BaseTool):
         except (OSError, ValueError) as exc:
             return ToolOutcome.failure(f"failed to start command: {exc}")
 
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            await kill_process_tree(proc)
-            return ToolOutcome.failure(f"command timed out after {timeout_s}s and was killed")
-        except asyncio.CancelledError:
-            await kill_process_tree(proc)
-            raise
+        with tempfile.TemporaryFile(mode="w+b") as captured:
+            async def collect() -> tuple[int, bool]:
+                assert proc.stdout is not None
+                total = 0
+                while chunk := await proc.stdout.read(64 * 1024):
+                    captured.write(chunk)
+                    total += len(chunk)
+                    if total > ctx.limits.max_command_capture_bytes:
+                        await kill_process_tree(proc)
+                        return total, True
+                return total, False
 
-        output = decode_shell_output(stdout)
-        if proc.returncode == 0:
-            return bounded_output(
-                output,
-                ctx.limits.max_command_output_chars,
-                success=True,
-                exit_code=0,
-            )
-        return bounded_output(
-            output,
-            ctx.limits.max_command_output_chars,
-            success=False,
-            error=f"command exited with code {proc.returncode}",
-            exit_code=proc.returncode,
-        )
+            collector = asyncio.create_task(collect())
+            timed_out = False
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(proc.wait(), collector), timeout=timeout_s
+                )
+                total, quota_hit = results[1]
+            except asyncio.TimeoutError:
+                timed_out = True
+                await kill_process_tree(proc)
+                await asyncio.gather(collector, return_exceptions=True)
+                total, quota_hit = captured.tell(), False
+            except asyncio.CancelledError:
+                await kill_process_tree(proc)
+                collector.cancel()
+                await asyncio.gather(collector, return_exceptions=True)
+                raise
+            except Exception:
+                await kill_process_tree(proc)
+                collector.cancel()
+                await asyncio.gather(collector, return_exceptions=True)
+                raise
+
+            captured.seek(0)
+            if total <= 2_000_000:
+                output = decode_shell_output(captured.read())
+                outcome = bounded_output(
+                    output, ctx.limits.max_command_output_chars,
+                    success=not timed_out and not quota_hit and proc.returncode == 0,
+                    exit_code=proc.returncode,
+                )
+            else:
+                preview = decode_shell_output(captured.read(1200))[:1000]
+                spill = getattr(ctx.artifact_store, "spill_binary_stream", None)
+                if callable(spill) and ctx.session_id is not None:
+                    ref = await spill(ctx.session_id, "command_output", captured)
+                    output = f"{preview}\n...[完整输出见 [artifact:{ref.artifact_id}]]"
+                else:
+                    output = f"{preview}\n...[输出超过内存预览预算；请重定向到文件后分页读取]"
+                outcome = ToolOutcome(
+                    success=not timed_out and not quota_hit and proc.returncode == 0,
+                    output=output, exit_code=proc.returncode,
+                )
+            if timed_out:
+                return outcome.model_copy(update={
+                    "success": False,
+                    "error": f"command timed out after {timeout_s}s and was killed",
+                })
+            if quota_hit:
+                return outcome.model_copy(update={
+                    "success": False,
+                    "error": "command output exceeded capture quota and was killed; narrow or redirect output",
+                })
+            if proc.returncode != 0:
+                return outcome.model_copy(update={
+                    "success": False,
+                    "error": f"command exited with code {proc.returncode}",
+                })
+            return outcome

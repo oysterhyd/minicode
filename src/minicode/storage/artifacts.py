@@ -13,8 +13,12 @@ then :meth:`Path.replace`).
 
 from __future__ import annotations
 
+import asyncio
+import codecs
+import locale
 import uuid
 from pathlib import Path
+from typing import BinaryIO
 
 from pydantic import BaseModel
 
@@ -53,6 +57,60 @@ class ArtifactStore:
         self._store.record_artifact(session_id, artifact_id, kind, target.name)
         return ArtifactRef(artifact_id=artifact_id, kind=kind, size=len(content))
 
+    async def spill_binary_stream(
+        self, session_id: str, kind: str, source: BinaryIO
+    ) -> ArtifactRef:
+        """Store a captured process log without loading the full log in memory."""
+        artifact_id = f"{kind}_{uuid.uuid4().hex[:12]}"
+        session_dir = self._session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        target = session_dir / f"{artifact_id}.txt"
+        tmp = target.with_suffix(".tmp")
+
+        def copy() -> int:
+            source.seek(0)
+            sample = source.read(8192)
+            try:
+                sample.decode("utf-8")
+                encoding = "utf-8"
+            except UnicodeDecodeError:
+                encoding = locale.getpreferredencoding(False) or "utf-8"
+            source.seek(0)
+            decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+            size = 0
+            with tmp.open("w", encoding="utf-8") as output:
+                while chunk := source.read(64 * 1024):
+                    decoded = decoder.decode(chunk)
+                    output.write(decoded)
+                    size += len(decoded)
+                tail = decoder.decode(b"", final=True)
+                output.write(tail)
+                size += len(tail)
+            return size
+
+        copy_task = asyncio.create_task(asyncio.to_thread(copy))
+        try:
+            size = await asyncio.shield(copy_task)
+            tmp.replace(target)
+            self._store.record_artifact(session_id, artifact_id, kind, target.name)
+        except asyncio.CancelledError:
+            while not copy_task.done():
+                try:
+                    await asyncio.shield(copy_task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if copy_task.done() and not copy_task.cancelled():
+                copy_task.exception()
+            tmp.unlink(missing_ok=True)
+            raise
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
+            raise
+        return ArtifactRef(artifact_id=artifact_id, kind=kind, size=size)
+
     def read(self, session_id: str, artifact_id: str) -> str | None:
         """Return the full content of one artifact, or ``None`` if unknown."""
         relpath = self._relpath(session_id, artifact_id)
@@ -61,6 +119,44 @@ class ArtifactStore:
         target = self._session_dir(session_id) / relpath
         try:
             return target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def read_page(
+        self, session_id: str, artifact_id: str, offset: int, limit: int
+    ) -> tuple[str, int | None, bool] | None:
+        """Read only a character page; total is unknown until the last page."""
+        relpath = self._relpath(session_id, artifact_id)
+        if relpath is None:
+            return None
+        target = self._session_dir(session_id) / relpath
+        return self._read_page_path(target, offset, limit)
+
+    async def aread_page(
+        self, session_id: str, artifact_id: str, offset: int, limit: int
+    ) -> tuple[str, int | None, bool] | None:
+        """Resolve manifest on the owner thread, then read large pages off-loop."""
+        relpath = self._relpath(session_id, artifact_id)
+        if relpath is None:
+            return None
+        target = self._session_dir(session_id) / relpath
+        return await asyncio.to_thread(self._read_page_path, target, offset, limit)
+
+    @staticmethod
+    def _read_page_path(
+        target: Path, offset: int, limit: int
+    ) -> tuple[str, int | None, bool] | None:
+        try:
+            with target.open("r", encoding="utf-8") as handle:
+                skipped = 0
+                while skipped < offset:
+                    chunk = handle.read(min(64 * 1024, offset - skipped))
+                    if not chunk:
+                        return "", skipped, False
+                    skipped += len(chunk)
+                page = handle.read(limit)
+                has_more = bool(handle.read(1))
+                return page, None if has_more else offset + len(page), has_more
         except (OSError, UnicodeDecodeError):
             return None
 

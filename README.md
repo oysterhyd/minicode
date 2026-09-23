@@ -91,24 +91,24 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 | 命令 | 说明 |
 | --- | --- |
 | `minicode run "任务"` | 执行一个单轮任务：流式输出回复、`▸/✓/✗` 工具行、修改摘要与统计；`--acceptance` 挂验收配置后，模型自述完成不等于通过 |
-| `minicode chat` | 交互式多轮会话（同一会话累积上下文）；`exit` / `quit` / Ctrl+D 退出，回合内 Ctrl+C 只取消当前轮 |
-| `minicode tui` | 全屏交互界面（Textual）：流式回复、可展开工具详情、审批弹窗、运行中输入排队及斜杠命令自动补全（/help /model /effort /permissions /clear /new /sessions /resume /compact /exit） |
+| `minicode chat` | 交互式多轮会话；暂停的任务用 `/continue` 原地续跑，`exit` / `quit` / Ctrl+D 退出 |
+| `minicode tui` | 全屏交互界面（Textual）：流式回复、可展开工具详情、审批弹窗、运行中输入排队及 `/continue` 等斜杠命令 |
 | `minicode sessions list` | 会话列表：ID、创建时间、工作区、模型、状态、轮数、token |
-| `minicode resume <会话ID>` | 恢复历史会话并继续交互：已落库结果不重复执行；只读调用重新执行留痕；未知副作用标记 `unknown` 并要求模型先核实 |
+| `minicode resume <会话ID>` | 恢复历史会话；用 `/continue` 续跑暂停任务。已落库结果不重复执行；未确认写入标记状态未知并要求核实 |
 | `minicode report <会话ID>` | 执行报告（text）；`--format html` 生成单文件离线 HTML（时间线、工具记录、diff、验收证据、用量） |
 | `minicode eval` | 运行 `evals/` 的 20 任务评测集（FakeProvider 离线），提供 b0/b1/b2 标签；目前 b1 与 b0 相同、b2 增加外层验收失败续跑；输出 JSON + Markdown 汇总 |
 
 常用选项（`run` / `chat` / `tui` 共享）：`--workspace`（默认当前目录）、
 `--provider auto|commandcode|anthropic|fake`、`--model`（缺省按 provider 选择）、
-`--script`（FakeProvider 脚本 JSON）、`--max-rounds`（默认 20）、`--max-tokens`（默认 0 =
+`--script`（FakeProvider 脚本 JSON）、`--max-rounds`（默认每次执行 20 轮，自动续跑）、`--max-tokens`（默认 0 =
 不限制 token）、
-`--max-seconds`（默认 600，**每个用户回合**的时长上限，覆盖其中所有模型轮次）、`--yes/-y`（自动允许全部工具）、
+`--max-seconds`（默认 600，单次执行的时长切片；有进展时自动续跑）、`--yes/-y`（自动允许全部工具）、
 `--acceptance <yaml>`（Goal 验收：command / artifact / protected 三类检查项）、
 `--db`（默认 `~/.minicode/sessions.db`）。
 
-消息与事件随执行写入 SQLite，累计用量和结束状态在收尾时更新；Ctrl+C 取消时先落库 `cancelled` 状态再退出
-（退出码 130）。预算耗尽（如 `max_rounds`）与验收不通过（`goal_not_met`）会打印明确的
-退出原因，但进程退出码为 0；脚本化调用方如需区分，请解析退出原因或查询会话状态。
+消息与事件随执行写入 SQLite，用量和轮数逐轮更新。Ctrl+C 取消会保存 `paused` 状态及
+`cancelled` 原因（退出码 130）。单次 `run` 若仍暂停，退出码为 2；会话与任务进度可通过
+`minicode resume <ID>` 后执行 `/continue` 恢复。
 
 ## P0 能力清单
 
@@ -119,29 +119,31 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 - 工具参数校验（pydantic schema）、工作区路径边界（含符号链接/junction）、修改与命令审批
   （ALLOW/ASK/DENY 权限门）、命令超时与输出截断。
 - 会话持久化（SQLite）、逐事件执行追踪、diff 与命令退出码报告。
-- 预算控制：默认限制**会话累计模型轮数**（20）与**每个用户回合时长**（600s），token 不限制；`--max-tokens N`
-  可显式加一道累计输入及输出 token 上限（退出原因 token_budget）。它不等于上下文大小，
-  也不是按缓存折扣计算的费用。压缩层以模型硬窗口和 provider 实际输出上限统一计算。退出原因可区分
-  （completed / max_tokens / max_rounds / token_budget / time_budget / cancelled / goal_not_met /
-  context_limit / provider_error / internal_error）。
+- 预算控制：20 轮是单次执行切片，CLI/TUI 会自动从保存点接续，不限制任务累计轮数。
+  默认 600 秒时长切片超时后保存进度，有进展时自动续跑，无进展时暂停供调整；
+  `--max-tokens N` 是显式的会话累计 token 支出保护，
+  达到后暂停，恢复时默认保留原上限；可在 `resume` 传入更高的正数，或用 `--max-tokens -1`
+  明确取消该上限。重复且无新证据的工具循环会暂停供检查。
 
 ## P1 能力清单（可靠性）
 
 - **分层上下文压缩**：超大工具输出转存为 artifact（模型看到预览 + 归档引用）→ 按完整交互单元归档早期历史
   （tool_use 与 tool_result 永不拆散）→ 压缩较旧工具结果 → 仍超阈值时生成确定性结构化摘要。
   工具截断前的完整成功/失败输出先进入归档；模型可通过 `read_artifact` 分页取回。压缩会处理
-  单次用户请求内的多轮已闭合工具交互，逐字保留用户要求与 artifact 引用；压缩后仍超过硬窗口时
-  以 `context_limit` 明确结束，不发送注定失败的请求。详细边界见
+  单次用户请求内的多轮已闭合工具交互；超长文本会归档并给模型分页读取入口。压缩后仍无法容纳时
+  暂停以便切换模型或调整固定提示，不发送注定失败的请求。详细边界见
   [架构说明](docs/architecture.md#52-上下文压缩与归档)。
-- **会话恢复**：`resume` 加载消息/用量/轮数和保存的 provider/model/workspace；已落库结果不重复执行；只读调用重新执行并留痕
-  （新事件记录）；写/Shell 类副作用不自动重放，标记「状态未知」并要求模型先核实。
-- **回合限制**：wall-clock deadline 覆盖模型流、工具执行和验收命令；超时停止启动新工具，
-  并等待进程树清理。模型因输出 token 上限截断时以 `max_tokens` 结束，不计为完成。
+- **会话恢复**：`resume` 恢复消息、逐轮用量、轮数和模型配置；`/continue` 无需重复提交用户任务。
+  已落库结果不重放；未确认只读调用重新检查当前权限后执行，写/Shell 副作用标记状态未知。
+- **异常恢复**：无文本的临时 Provider 失败最多重试两次；上下文拒绝会尝试归档超长输入并重发；
+  模型输出截断会提示短续写，连续截断才暂停。工具异常作为结果交给模型，内置只读工具可重试一次。
+  文件读取、列表和搜索按页或结果预算返回；大文件编辑采用有界复制，文件写入采用原子替换。
+  命令输出有磁盘后备归档及采集配额，达到配额时终止该命令并将失败交回模型。
 - **Goal 验收**：验收 YAML 定义命令 / 产物 / 受保护路径三类检查；模型回答后由宿主执行检查，
   通过才判定完成；失败回填结构化报告继续修复（`max_fix_attempts` 上限）；通过的证据绑定
   工作区内容指纹，代码再变即失效重验；受保护路径基线与验收配置随会话持久化，resume 不重新采样；指纹在所有检查完成后计算。
 - **后台命令**：`bash` 支持 `background` 参数返回 job id，完成后作为用户消息投递。
-  任务属于当前回合；回合结束或取消时终止仍在运行的进程树，记录并展示 lost 结果。
+  轮次及时长切片续跑期间保持运行；暂停或取消时终止仍在运行的进程树，记录并展示 lost 结果。
 - **评测集**：`evals/` 20 个本地任务（分页边界、差一错误、除零保护等），FakeProvider 离线
   运行；b1 尚未接入压缩，与 b0 相同；b2 在 runner 外层验收失败后续跑，并非直接评测运行时
   Goal 门。结果含成功率、轮数、脚本用量与失败分析，不代表真实模型能力或 token 节省。
@@ -152,12 +154,11 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 ## 当前实现边界
 
 - 同一模型响应中连续的内置只读工具最多 4 个并发；写入、命令与未知工具是顺序屏障。
-  后台命令只存活于当前用户回合，结束时清理。
+  后台命令在同一进程的自动续跑期间保持运行；真正暂停、取消或进程退出时无法跨进程继承。
 - `TaskStore` 的依赖与认领能力尚未接入 Runtime，不能视为已有多代理调度。
-- token 估算采用字符数 / 3，可能低估部分中文或混合内容，不是精确计数或严格上界。
 - 缓存读/写用量与“provider 未返回 usage”状态会逐请求记入事件、累计写入 SQLite，并在 resume 后恢复；
   Anthropic 请求尚未主动配置 `cache_control`，OpenAI 兼容协议也不保证网关支持相同缓存行为。
-- token 估算仍采用字符数 / 3；硬超限门避免发送已知越界请求，但估算值不是服务端 tokenizer 的严格上界。
+- token 估算仍采用字符数 / 3，不是服务端 tokenizer 的严格上界；服务端拒绝时会尝试归档缩减后重试。
 
 ## 明确未实现（P2）
 

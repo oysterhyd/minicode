@@ -58,6 +58,7 @@ from minicode.core.models import (
     ApprovalRequest,
     Event,
     EventType,
+    ExitReason,
     RunResult,
 )
 from minicode.providers import ProviderRequestError
@@ -861,12 +862,23 @@ class MiniCodeApp(App[None]):
         line.append(text)
         self._add_line(line, "msg-user")
 
-    async def _run_turn(self, text: str) -> None:
+    async def _run_turn(self, text: str | None) -> None:
         """One model turn inside a Textual worker; input can queue the next turn."""
         self._end_streaming()
         self._set_busy(True, "等待模型响应")
         try:
-            result = await self._runtime.run_turn(text)
+            message_count = self._runtime.message_count
+            result = (
+                await self._runtime.run_turn(text)
+                if text is not None else await self._runtime.continue_turn()
+            )
+            while result.exit_reason in (ExitReason.MAX_ROUNDS, ExitReason.TIME_BUDGET):
+                if (result.exit_reason is ExitReason.TIME_BUDGET
+                        and self._runtime.message_count <= message_count):
+                    break
+                message_count = self._runtime.message_count
+                self._refresh_status("已保存进度 · 继续执行")
+                result = await self._runtime.continue_turn()
         except asyncio.CancelledError:
             # The runtime already persisted the session as cancelled.
             self._end_streaming()
@@ -883,7 +895,10 @@ class MiniCodeApp(App[None]):
             return
         self._end_streaming()
         self._add_line(_turn_summary_text(result), "msg-summary")
-        self._set_busy(False, "就绪")
+        if result.exit_reason is not ExitReason.COMPLETED:
+            detail = f" · {result.error}" if result.error else ""
+            self._add_line(Text(f"任务已暂停，可用 /continue 继续{detail}", style="yellow"), "msg-warn")
+        self._set_busy(False, "就绪" if result.exit_reason is ExitReason.COMPLETED else "已暂停")
         self.call_later(self._start_next_queued_turn)
 
     def _start_next_queued_turn(self) -> None:
@@ -1273,6 +1288,15 @@ class MiniCodeApp(App[None]):
             self._cmd_sessions()
         elif verb == "/resume":
             self._cmd_resume(arg)
+        elif verb == "/continue":
+            if not self._runtime.task_pending:
+                self._add_line(Text("当前没有暂停的任务。", style="yellow"), "msg-warn")
+            else:
+                self._add_line(Text("继续未完成任务…", style="dim"), "msg-event")
+                self._turn_worker = self.run_worker(
+                    self._run_turn(None), group="turn", exclusive=False,
+                    description="continued agent turn",
+                )
         elif verb == "/compact":
             self._cmd_compact()
         else:
@@ -1465,6 +1489,7 @@ class MiniCodeApp(App[None]):
             self._add_line(Text(f"恢复会话失败: {exc}", style="red"), "msg-warn")
             return
         _attach_compactor(runtime, services.artifact_store)
+        setup.budget = runtime._budget
         services.goal_checker = runtime._goal_checker
         services.evidence_ledger = runtime._evidence_ledger
         setup.workspace = runtime.workspace

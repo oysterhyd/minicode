@@ -40,7 +40,7 @@ from minicode.core.models import (
     Usage,
 )
 from minicode.providers.base import Provider, TextDelta
-from minicode.providers.errors import ProviderError
+from minicode.providers.errors import ProviderAuthError, ProviderError, ProviderRequestError
 from minicode.runtime.budget import BudgetChecker
 from minicode.runtime.events import EventCallback, EventRecorder
 from minicode.runtime.prompt import build_system_prompt
@@ -171,6 +171,10 @@ class AgentRuntime:
         self._announced_jobs: set[str] = set()
         self._lost_jobs: list[dict[str, Any]] = []
         self._approval_lock = asyncio.Lock()
+        self._task_pending = False
+        self._last_tool_signature: str | None = None
+        self._same_tool_rounds = 0
+        self._last_exit_reason: ExitReason | None = None
 
     # -- read-only state ----------------------------------------------------
 
@@ -178,6 +182,16 @@ class AgentRuntime:
     def usage(self) -> Usage:
         """Session-cumulative token usage."""
         return self._usage
+
+    @property
+    def task_pending(self) -> bool:
+        """Whether the latest task has a durable continuation point."""
+        return self._task_pending
+
+    @property
+    def message_count(self) -> int:
+        """Persisted conversation length, used to detect time-slice progress."""
+        return len(self._messages)
 
     @property
     def rounds(self) -> int:
@@ -280,21 +294,26 @@ class AgentRuntime:
             raise _DeadlineExceeded("turn deadline exceeded")
 
     # -- turn loop -----------------------------------------------------------
-    # The loop exits only through finalize paths; budget exhaustion is just
-    # another finalize (MAX_ROUNDS), never a break/exception.
+    # The loop exits through a completed result or a durable pause checkpoint.
 
-    async def run_turn(self, user_message: str) -> RunResult:
-        """Run one user turn to completion and return the outcome.
+    async def continue_turn(self) -> RunResult:
+        """Continue a paused task without adding a duplicate user message."""
+        if self._last_exit_reason is ExitReason.GOAL_NOT_MET:
+            self._goal_attempts = 0
+        return await self.run_turn(None)
+
+    async def run_turn(self, user_message: str | None) -> RunResult:
+        """Run one activation of a user task and return its durable outcome.
 
         On the first call the session row is created and ``SESSION_START``
         is emitted (a configured protected-path snapshot is captured here,
         before the model can change anything). Each round injects finished
         background-job results, compacts the context when it exceeds the
         budget, streams one assistant response, persists it, executes its
-        tool calls one at a time under the permission policy, and feeds the
+        tool calls under the permission policy, and feeds the
         results back until the model produces a final answer — which, with
         an acceptance gate configured, only ends the session once the goal
-        checks pass — or a budget is exhausted. Adjacent built-in reads may
+        checks pass — or a resource slice checkpoints the task. Adjacent built-in reads may
         run in bounded parallel batches; writes and unknown tools remain
         ordering barriers.
 
@@ -304,6 +323,9 @@ class AgentRuntime:
         turn_started = time.monotonic()
         # CLI chat creates a fresh event loop for each user turn.
         self._approval_lock = asyncio.Lock()
+
+        if user_message is None and (self.session_id is None or not self._task_pending):
+            raise ValueError("no paused task to continue")
 
         first_turn = self.session_id is None
         if first_turn:
@@ -315,35 +337,56 @@ class AgentRuntime:
         session_id = self.session_id
         assert session_id is not None  # set directly above on the first turn
         recorder = EventRecorder(self._store, session_id, self._on_event)
-        if first_turn:
-            self._bind_goal_session()
         user_recorded = False
         self._deadline = turn_started + self._budget.max_seconds
         try:
+            if first_turn:
+                self._bind_goal_session()
             async with asyncio.timeout(max(0, self._deadline - time.monotonic())):
                 if first_turn:
+                    start_data = {
+                        "workspace": str(self._workspace.resolve()),
+                        "provider": self._provider_name,
+                        "model": self._model,
+                        "budget": self._budget.model_dump(),
+                    }
+                    resume_identity = getattr(self._provider, "resume_identity", None)
+                    if callable(resume_identity):
+                        start_data["provider_resume_identity"] = resume_identity()
                     await recorder.emit(
                         EventType.SESSION_START,
-                        {
-                            "workspace": str(self._workspace.resolve()),
-                            "provider": self._provider_name,
-                            "model": self._model,
-                        },
+                        start_data,
                     )
+                # A timeout can leave a dangling call in this same process.
+                self._pending_dangling = self._find_dangling_calls(self._messages)
                 # Settle tool calls interrupted before their result was persisted.
                 await self._settle_recovery(recorder)
 
-                # Wall-clock budget is per turn; rounds/tokens are seeded cumulatively.
+                # Round/time slices checkpoint work; the optional token guard
+                # still accounts for the entire session.
                 checker = BudgetChecker(
                     self._budget, start_usage=self._usage, start_rounds=self._rounds
                 )
 
-                user_msg = Message(role="user", content=[TextBlock(text=user_message)])
-                self._append_message(session_id, user_msg)
-                user_recorded = True
+                if user_message is not None:
+                    user_msg = Message(role="user", content=[TextBlock(text=user_message)])
+                    self._append_message(session_id, user_msg)
+                    self._task_pending = True
+                    self._goal_attempts = 0
+                    self._last_tool_signature = None
+                    self._same_tool_rounds = 0
+                    user_recorded = True
+                self._store.update_session(session_id, status="running", exit_reason=None)
 
+                context_rejections = 0
+                truncations = 0
                 while True:
                     self._check_deadline()
+                    if checker.tokens_exceeded(self._usage):
+                        return await self._finalize(
+                            recorder, ExitReason.TOKEN_BUDGET, turn_started,
+                            error="已达到显式 Token 费用上限；提高预算后可继续当前任务。",
+                        )
                     if checker.rounds_exceeded(self._rounds):
                         return await self._finalize(
                             recorder, ExitReason.MAX_ROUNDS, turn_started
@@ -367,15 +410,23 @@ class AgentRuntime:
 
                     self._rounds += 1
                     await recorder.emit(EventType.ROUND_START, {"round": self._rounds})
+                    self._store.update_session(session_id, rounds=self._rounds)
 
                     self._check_deadline()
-                    response, failure, error = await self._stream_assistant_turn()
+                    response, failure, error, provider_exc = await self._stream_assistant_turn()
                     self._check_deadline()
                     if response is None:
                         assert failure is not None  # always set when response is None
+                        if (isinstance(provider_exc, ProviderRequestError)
+                                and self._is_context_error(str(provider_exc))
+                                and context_rejections < 3
+                                and self._offload_largest_text(session_id)):
+                            context_rejections += 1
+                            continue
                         return await self._finalize(
                             recorder, failure, turn_started, error=error
                         )
+                    context_rejections = 0
 
                     self._append_message(
                         session_id, Message(role="assistant", content=list(response.blocks))
@@ -397,22 +448,37 @@ class AgentRuntime:
                             "stop_reason": response.stop_reason.value,
                         },
                     )
+                    self._persist_counters()
 
                     # Token budget fires before any tool of this round runs: side
                     # effects must not start once the budget is already blown.
                     if checker.tokens_exceeded(self._usage):
+                        self._backfill_unexecuted_calls(
+                            session_id, response.tool_calls, "未执行：显式 Token 费用上限已达到。"
+                        )
                         return await self._finalize(
-                            recorder, ExitReason.TOKEN_BUDGET, turn_started
+                            recorder, ExitReason.TOKEN_BUDGET, turn_started,
+                            error="已达到显式 Token 费用上限；提高预算后可继续当前任务。",
                         )
 
                     if response.stop_reason is StopReason.MAX_TOKENS:
-                        if response.tool_calls:
-                            self._append_message(session_id, Message(role="user", content=[
-                                ToolResultBlock(tool_use_id=call.id, is_error=True,
-                                                content="未执行：模型响应被截断，请重新生成完整调用。")
-                                for call in response.tool_calls
-                            ]))
-                        return await self._finalize(recorder, ExitReason.MAX_TOKENS, turn_started)
+                        self._backfill_unexecuted_calls(
+                            session_id, response.tool_calls,
+                            "未执行：模型响应被截断，请重新生成完整调用。",
+                        )
+                        self._append_message(session_id, Message(role="user", content=[TextBlock(
+                            text="上一条模型回复被输出长度截断。请简短续写未完成部分；"
+                                 "不要假设被截断的工具调用已经执行。"
+                        )]))
+                        truncations += 1
+                        if truncations >= 3:
+                            return await self._finalize(
+                                recorder, ExitReason.MAX_TOKENS, turn_started,
+                                error="连续三次回复被截断；任务已暂停，可调整模型或输出预算后继续。",
+                            )
+                        await recorder.emit(EventType.ROUND_END, {"round": self._rounds})
+                        continue
+                    truncations = 0
 
                     if not response.tool_calls:
                         gated = await self._goal_gate(recorder, turn_started)
@@ -467,13 +533,30 @@ class AgentRuntime:
                                 session_id, Message(role="user", content=tool_results)
                             )
                     await recorder.emit(EventType.ROUND_END, {"round": self._rounds})
+                    if self._tool_cycle_stalled(response.tool_calls, tool_results):
+                        self._append_message(session_id, Message(role="user", content=[TextBlock(
+                            text="连续多轮工具调用与结果完全相同，任务已暂停以避免无效循环。"
+                                 "继续时请重新评估目标与可用证据。"
+                        )]))
+                        return await self._finalize(
+                            recorder, ExitReason.STALLED, turn_started,
+                            error="重复的工具调用没有产生新证据。",
+                        )
         except TimeoutError:
-            if not user_recorded:
+            if user_message is not None and not user_recorded:
                 self._append_message(session_id, Message(role="user", content=[TextBlock(text=user_message)]))
+                self._task_pending = True
             return await self._finalize(recorder, ExitReason.TIME_BUDGET, turn_started)
         except asyncio.CancelledError:
             await self._finalize_cancelled(recorder)
             raise  # never swallow cancellation
+        except Exception as exc:  # noqa: BLE001 - checkpoint unexpected failures
+            if user_message is not None and not user_recorded:
+                self._append_message(session_id, Message(role="user", content=[TextBlock(text=user_message)]))
+                self._task_pending = True
+            return await self._finalize(
+                recorder, ExitReason.INTERNAL_ERROR, turn_started, error=str(exc)
+            )
         finally:
             self._deadline = None
 
@@ -513,6 +596,22 @@ class AgentRuntime:
         summary = store.get_session(session_id)
         if summary is None:
             raise ValueError(f"unknown session: {session_id}")
+        events = store.get_events(session_id)
+        start_event = next((event for event in events
+                            if event.type is EventType.SESSION_START), None)
+        saved_budget = start_event.data.get("budget") if start_event else None
+        effective_budget = budget if budget is not None else Budget()
+        if isinstance(saved_budget, dict):
+            try:
+                saved_cap = int(saved_budget.get("max_total_tokens", 0))
+            except (TypeError, ValueError):
+                saved_cap = 0
+            # A default zero in a resumed frontend must not silently remove
+            # an explicit spending cap. A negative cap is an explicit opt-out.
+            if saved_cap > 0 and effective_budget.max_total_tokens == 0:
+                effective_budget = effective_budget.model_copy(
+                    update={"max_total_tokens": saved_cap}
+                )
         resolved_workspace = (Path(workspace) if workspace else Path(summary.workspace)).resolve()
         if not resolved_workspace.is_dir():
             raise ValueError(
@@ -530,15 +629,7 @@ class AgentRuntime:
             workspace=resolved_workspace,
             provider_name=resolved_provider,
             model=resolved_model,
-            budget=budget
-            if budget is not None
-            else Budget(
-                # A resumed session gets headroom in rounds and no token cap:
-                # its stored totals are already large by definition, and
-                # capping against them would kill the continuation on the
-                # first round.
-                max_rounds=max(summary.rounds + 10, 10),
-            ),
+            budget=effective_budget,
             approval_handler=approval_handler,
             on_text_delta=on_text_delta,
             on_event=on_event,
@@ -559,18 +650,71 @@ class AgentRuntime:
             available=summary.usage_available,
         )
         runtime._rounds = summary.rounds
+        runtime._task_pending = bool(runtime._messages) and summary.status != ExitReason.COMPLETED.value
+        try:
+            runtime._last_exit_reason = ExitReason(summary.exit_reason) if summary.exit_reason else None
+        except ValueError:
+            runtime._last_exit_reason = None
         runtime._pending_dangling = cls._find_dangling_calls(runtime._messages)
         jobs: dict[str, dict[str, Any]] = {}
-        for event in store.get_events(session_id):
+        event_usage = Usage()
+        event_rounds = summary.rounds
+        completed_responses = 0
+        for event in events:
             if event.type is EventType.BACKGROUND_JOB_STARTED:
                 jobs[event.data["job_id"]] = event.data
             elif event.type in (EventType.BACKGROUND_JOB_COMPLETED, EventType.BACKGROUND_JOB_LOST):
                 jobs.pop(event.data["job_id"], None)
+            elif event.type is EventType.ROUND_START:
+                event_rounds = max(event_rounds, int(event.data.get("round", 0)))
+            elif event.type is EventType.ASSISTANT_MESSAGE:
+                completed_responses += 1
+                data = event.data.get("usage")
+                if isinstance(data, dict):
+                    event_usage += Usage(
+                        input_tokens=int(data.get("input_tokens", 0)),
+                        output_tokens=int(data.get("output_tokens", 0)),
+                        cache_read_tokens=int(data.get("cache_read_tokens", 0)),
+                        cache_write_tokens=int(data.get("cache_write_tokens", 0)),
+                        available=bool(data.get("available", False)),
+                    )
+        runtime._rounds = event_rounds
+        restore_progress = getattr(provider, "restore_progress", None)
+        resume_identity = getattr(provider, "resume_identity", None)
+        saved_identity = (start_event.data.get("provider_resume_identity")
+                          if start_event else None)
+        if (callable(restore_progress) and callable(resume_identity)
+                and saved_identity is not None
+                and resume_identity() == saved_identity):
+            ids = [
+                block.id
+                for message in runtime._messages for block in message.content
+                if isinstance(block, ToolUseBlock)
+            ]
+            ids.extend(
+                str(event.data.get("call_id", ""))
+                for event in events if event.type is EventType.TOOL_CALL_START
+            )
+            fake_call_counter = max((
+                int(call_id.removeprefix("fake_tool_"))
+                for call_id in ids
+                if call_id.startswith("fake_tool_")
+                and call_id.removeprefix("fake_tool_").isdigit()
+            ), default=0)
+            restore_progress(completed_responses, fake_call_counter)
+        if event_usage.total_tokens > runtime._usage.total_tokens:
+            runtime._usage = event_usage
         runtime._lost_jobs = list(jobs.values())
         runtime._bind_goal_session(resuming=True)
         store.update_session(
             session_id, workspace=str(resolved_workspace),
             provider=resolved_provider, model=resolved_model,
+            rounds=runtime._rounds,
+            input_tokens=runtime._usage.input_tokens,
+            output_tokens=runtime._usage.output_tokens,
+            cache_read_tokens=runtime._usage.cache_read_tokens,
+            cache_write_tokens=runtime._usage.cache_write_tokens,
+            usage_available=runtime._usage.available,
         )
         return runtime
 
@@ -609,37 +753,12 @@ class AgentRuntime:
 
         results: list[ToolResultBlock] = []
         for call in pending:
-            tool = (
-                self._registry.get(call.name) if call.name in _READ_ONLY_TOOLS else None
-            )
-            if tool is not None:
-                # Read-only calls are safe to re-execute, and the read-only
-                # set is fixed, so no policy re-check is needed.
-                await recorder.emit(
-                    EventType.TOOL_CALL_START,
-                    {
-                        "call_id": call.id,
-                        "name": call.name,
-                        "arguments": call.input,
-                        "recovered": True,
-                    },
-                )
-                outcome = self._maybe_spill(
-                    self.session_id, await self._run_tool(call, tool)
-                )
-                await recorder.emit(
-                    EventType.TOOL_CALL_RESULT,
-                    {
-                        "call_id": call.id,
-                        "name": call.name,
-                        "success": outcome.success,
-                        "exit_code": outcome.exit_code,
-                        "error": outcome.error,
-                        "output_preview": outcome.output[:_OUTPUT_PREVIEW_CHARS],
-                        "recovered": True,
-                    },
-                )
-                results.append(self._outcome_to_block(call, outcome))
+            if call.name in _READ_ONLY_TOOLS:
+                # Re-check the *current* policy; permissions may have changed
+                # since the original call was interrupted.
+                results.append(await self._execute_tool_call(
+                    recorder, call, self.session_id, recovered=True
+                ))
             else:
                 await recorder.emit(
                     EventType.SIDE_EFFECT_UNKNOWN,
@@ -662,7 +781,7 @@ class AgentRuntime:
 
     async def _stream_assistant_turn(
         self,
-    ) -> tuple[ModelResponse | None, ExitReason | None, str | None]:
+    ) -> tuple[ModelResponse | None, ExitReason | None, str | None, Exception | None]:
         """Stream one assistant turn from the provider.
 
         Returns ``(response, None, None)`` on success, or
@@ -672,32 +791,40 @@ class AgentRuntime:
         assembled response, so the streamed text is taken from there.
         ``asyncio.CancelledError`` is deliberately not caught here.
         """
-        try:
-            async with aclosing(self._provider.stream(
-                system=self._system_prompt,
-                messages=self._messages,
-                tools=self._registry.specs(),
-            )) as stream:
-                async for event in stream:
-                    if isinstance(event, TextDelta):
-                        if self._on_text_delta is not None:
-                            await self._on_text_delta(event.text)
-                    else:
-                        return event.response, None, None
-        except ProviderError as exc:
-            return None, ExitReason.PROVIDER_ERROR, str(exc)
-        except Exception as exc:  # noqa: BLE001 - any provider bug must not kill the loop
-            return None, ExitReason.INTERNAL_ERROR, str(exc)
-        return (
-            None,
-            ExitReason.INTERNAL_ERROR,
-            "provider stream ended without a final response",
-        )
+        for attempt in range(3):
+            saw_text = False
+            try:
+                async with aclosing(self._provider.stream(
+                    system=self._system_prompt,
+                    messages=self._messages,
+                    tools=self._registry.specs(),
+                )) as stream:
+                    async for event in stream:
+                        if isinstance(event, TextDelta):
+                            saw_text = True
+                            if self._on_text_delta is not None:
+                                await self._on_text_delta(event.text)
+                        else:
+                            return event.response, None, None, None
+                raise ProviderError("provider stream ended without a final response")
+            except (ProviderAuthError, ProviderRequestError) as exc:
+                self._usage = self._usage.model_copy(update={"available": False})
+                return None, ExitReason.PROVIDER_ERROR, str(exc), exc
+            except ProviderError as exc:
+                self._usage = self._usage.model_copy(update={"available": False})
+                if saw_text or attempt == 2:
+                    return None, ExitReason.PROVIDER_ERROR, str(exc), exc
+                await asyncio.sleep(min(2.0, 0.25 * (2 ** attempt)))
+            except Exception as exc:  # noqa: BLE001 - provider bugs are resumable
+                self._usage = self._usage.model_copy(update={"available": False})
+                return None, ExitReason.INTERNAL_ERROR, str(exc), exc
+        raise AssertionError("retry loop must return")
 
     # -- tool execution -------------------------------------------------------
 
     async def _execute_tool_call(
-        self, recorder: EventRecorder, call: ToolUseBlock, session_id: str
+        self, recorder: EventRecorder, call: ToolUseBlock, session_id: str,
+        *, recovered: bool = False,
     ) -> ToolResultBlock:
         """Run one tool call under policy/approval with start/result events.
 
@@ -707,10 +834,10 @@ class AgentRuntime:
         preview plus an archive reference).
         """
         started = time.monotonic()
-        await recorder.emit(
-            EventType.TOOL_CALL_START,
-            {"call_id": call.id, "name": call.name, "arguments": call.input},
-        )
+        start_data = {"call_id": call.id, "name": call.name, "arguments": call.input}
+        if recovered:
+            start_data["recovered"] = True
+        await recorder.emit(EventType.TOOL_CALL_START, start_data)
         outcome = await self._resolve_outcome(recorder, call)
         if outcome.job_id is not None:
             self._announced_jobs.add(outcome.job_id)
@@ -721,9 +848,7 @@ class AgentRuntime:
 
         presented = self._maybe_spill(session_id, outcome)
         block = self._outcome_to_block(call, presented)
-        await recorder.emit(
-            EventType.TOOL_CALL_RESULT,
-            {
+        result_data = {
                 "call_id": call.id,
                 "name": call.name,
                 "success": outcome.success,
@@ -732,8 +857,10 @@ class AgentRuntime:
                 "output_preview": presented.output[:_OUTPUT_PREVIEW_CHARS],
                 "output_detail": presented.output[:4000],
                 "duration_s": round(time.monotonic() - started, 3),
-            },
-        )
+            }
+        if recovered:
+            result_data["recovered"] = True
+        await recorder.emit(EventType.TOOL_CALL_RESULT, result_data)
         return block
 
     def _maybe_spill(
@@ -807,18 +934,20 @@ class AgentRuntime:
     async def _run_tool(self, call: ToolUseBlock, tool: Any) -> ToolOutcome:
         """Execute one approved tool call with the shared services attached."""
         self._check_deadline()
-        try:
-            return await tool.run(
-                call.input,
-                ToolContext(
-                    workspace=self._workspace,
-                    artifact_store=self._artifact_store,
-                    background_manager=self._background_manager,
-                    session_id=self.session_id,
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 - a tool crash must never escape the loop
-            return ToolOutcome.failure(f"internal tool error: {exc}")
+        context = ToolContext(
+            workspace=self._workspace,
+            artifact_store=self._artifact_store,
+            background_manager=self._background_manager,
+            session_id=self.session_id,
+        )
+        for attempt in range(2):
+            try:
+                return await tool.run(call.input, context)
+            except Exception as exc:  # noqa: BLE001 - tool crash becomes a result
+                if call.name not in _READ_ONLY_TOOLS or attempt == 1:
+                    return ToolOutcome.failure(f"internal tool error: {exc}")
+                await asyncio.sleep(0.1)
+        raise AssertionError("tool retry loop must return")
 
     @staticmethod
     def _approval_summary(name: str, arguments: dict[str, Any]) -> str:
@@ -904,7 +1033,7 @@ class AgentRuntime:
         # Fast path: passing evidence bound to the *current* workspace state
         # is still valid — no re-check needed. Any code change since the
         # evidence was recorded changes the fingerprint and forces a re-run.
-        fingerprint = self._current_workspace_fingerprint()
+        fingerprint = await self._current_workspace_fingerprint()
         if fingerprint is not None and self._evidence_valid(fingerprint):
             return await self._finalize(recorder, ExitReason.COMPLETED, turn_started)
 
@@ -939,14 +1068,14 @@ class AgentRuntime:
 
         max_attempts = getattr(self._goal_checker.spec, "max_fix_attempts", 3)
         self._goal_attempts += 1
-        if self._goal_attempts > max_attempts:
-            return await self._finalize(recorder, ExitReason.GOAL_NOT_MET, turn_started)
         failure_report = self._goal_checker.format_failure_report(report)
         assert self.session_id is not None
         self._append_message(
             self.session_id,
             Message(role="user", content=[TextBlock(text=failure_report)]),
         )
+        if self._goal_attempts > max_attempts:
+            return await self._finalize(recorder, ExitReason.GOAL_NOT_MET, turn_started)
         return None
 
     def _record_goal_evidence(self, report: Any) -> None:
@@ -956,13 +1085,13 @@ class AgentRuntime:
             self._evidence_ledger.record(report)
         self._own_pass_fingerprint = report.fingerprint
 
-    def _current_workspace_fingerprint(self) -> str | None:
+    async def _current_workspace_fingerprint(self) -> str | None:
         """Fingerprint of the workspace right now (lazy import so the runtime
         core stays decoupled from the goals package)."""
         from minicode.goals.checker import workspace_fingerprint
 
         try:
-            return workspace_fingerprint(self._workspace)
+            return await asyncio.to_thread(workspace_fingerprint, self._workspace)
         except OSError:
             return None
 
@@ -974,10 +1103,16 @@ class AgentRuntime:
     async def _compact_if_needed(self, recorder: EventRecorder, session_id: str) -> None:
         """Run layered compaction when the estimated context exceeds budget
         and persist the compacted view (originals live in artifacts)."""
-        if self._compactor is None:
-            return
         specs = self._registry.specs()
-        if self._compactor.needs_compaction(self._system_prompt, self._messages, specs):
+        from minicode.context.compact import ContextCompactor
+
+        archive_ready = not (
+            isinstance(self._compactor, ContextCompactor)
+            and getattr(self._compactor, "_spill_fn", None) is None
+        )
+        if self._compactor is not None and archive_ready and self._compactor.needs_compaction(
+            self._system_prompt, self._messages, specs
+        ):
             result = self._compactor.compact(
                 self._system_prompt, self._messages, specs
             )
@@ -995,14 +1130,77 @@ class AgentRuntime:
                         "summarized_units": stats.summarized_units,
                     },
                 )
-        fits_hard_limit = getattr(self._compactor, "fits_hard_limit", None)
-        if callable(fits_hard_limit) and not fits_hard_limit(
-            self._system_prompt, self._messages, specs
-        ):
+        offloaded = 0
+        while not self._fits_context(specs) and offloaded < 32:
+            if not self._offload_largest_text(session_id):
+                break
+            offloaded += 1
+        if offloaded:
+            await recorder.emit(EventType.CONTEXT_COMPACTED, {"offloaded_blocks": offloaded})
+        if not self._fits_context(specs):
             raise _ContextLimitExceeded(
-                "压缩后上下文仍超过模型窗口；请缩小输入、切换更大上下文模型，"
-                "或通过 read_artifact 按需取回已归档内容。"
+                "上下文仍超过模型窗口；原始记录已保留。请切换更大上下文模型，"
+                "或减少固定工具/系统提示内容后继续。"
             )
+
+    def _fits_context(self, specs: list[Any]) -> bool:
+        from minicode.context.estimate import estimate_messages_tokens
+
+        estimate_fits = estimate_messages_tokens(
+            self._system_prompt, self._messages, specs,
+            reserve_output_tokens=self.effective_max_output_tokens(),
+        ) <= self.context_window
+        fits_hard_limit = getattr(self._compactor, "fits_hard_limit", None)
+        return estimate_fits and (
+            not callable(fits_hard_limit)
+            or fits_hard_limit(self._system_prompt, self._messages, specs)
+        )
+
+    @staticmethod
+    def _is_context_error(message: str) -> bool:
+        lowered = message.lower()
+        return any(marker in lowered for marker in (
+            "context length", "context window", "context_length",
+            "too many tokens", "prompt is too long", "token limit",
+        ))
+
+    def _offload_largest_text(self, session_id: str) -> bool:
+        """Replace one oversized text block with a pageable artifact pointer.
+
+        This is a last resort when deterministic compaction cannot fit a
+        request. It never discards the original input or alters tool calls.
+        """
+        if self._artifact_store is None:
+            return False
+        candidates = [
+            (len(block.text), message_index, block_index, block.text)
+            for message_index, message in enumerate(self._messages)
+            for block_index, block in enumerate(message.content)
+            if isinstance(block, TextBlock)
+            and len(block.text) > 1000
+            and not block.text.startswith("原始内容过长，完整文本见")
+        ]
+        if not candidates:
+            return False
+        _, message_index, block_index, original = max(candidates)
+        try:
+            ref = self._artifact_store.spill(session_id, "context_input", original)
+        except OSError:
+            return False
+        preview = original[:500]
+        tail = original[-150:] if len(original) > 650 else ""
+        replacement = (
+            f"原始内容过长，完整文本见 [artifact:{ref.artifact_id}]。"
+            "请先用 read_artifact 分页读取所需部分，再继续任务；不要仅凭以下预览作决定。\n"
+            f"开头预览：\n{preview}\n末尾预览：\n{tail}"
+        )
+        updated = list(self._messages)
+        blocks = list(updated[message_index].content)
+        blocks[block_index] = TextBlock(text=replacement)
+        updated[message_index] = Message(role=updated[message_index].role, content=blocks)
+        self._store.replace_messages(session_id, updated)
+        self._messages = updated
+        return True
 
     async def _deliver_finished_jobs(
         self, recorder: EventRecorder, session_id: str
@@ -1041,8 +1239,45 @@ class AgentRuntime:
 
     def _append_message(self, session_id: str, message: Message) -> None:
         """Mirror a message into memory and the store."""
-        self._messages.append(message)
         self._store.append_message(session_id, message)
+        self._messages.append(message)
+
+    def _persist_counters(self) -> None:
+        assert self.session_id is not None
+        self._store.update_session(
+            self.session_id,
+            rounds=self._rounds,
+            input_tokens=self._usage.input_tokens,
+            output_tokens=self._usage.output_tokens,
+            cache_read_tokens=self._usage.cache_read_tokens,
+            cache_write_tokens=self._usage.cache_write_tokens,
+            usage_available=self._usage.available,
+        )
+
+    def _backfill_unexecuted_calls(
+        self, session_id: str, calls: list[ToolUseBlock], reason: str
+    ) -> None:
+        if calls:
+            self._append_message(session_id, Message(role="user", content=[
+                ToolResultBlock(tool_use_id=call.id, is_error=True, content=reason)
+                for call in calls
+            ]))
+
+    def _tool_cycle_stalled(
+        self, calls: list[ToolUseBlock], results: list[ToolResultBlock]
+    ) -> bool:
+        signature = json.dumps(
+            [
+                (call.name, call.input, result.content, result.is_error)
+                for call, result in zip(calls, results)
+            ], ensure_ascii=False, sort_keys=True,
+        )
+        if signature == self._last_tool_signature:
+            self._same_tool_rounds += 1
+        else:
+            self._same_tool_rounds = 1
+            self._last_tool_signature = signature
+        return self._same_tool_rounds >= 4
 
     async def _finalize(
         self,
@@ -1056,9 +1291,8 @@ class AgentRuntime:
         build the :class:`RunResult` for this turn. Any still-running
         background jobs are cancelled so the session never leaks processes."""
         assert self.session_id is not None
-        if exit_reason is not ExitReason.TIME_BUDGET:
-            self._check_deadline()
-        await self._cancel_background_jobs()
+        if exit_reason not in (ExitReason.MAX_ROUNDS, ExitReason.TIME_BUDGET):
+            await self._cancel_background_jobs()
         await self._deliver_finished_jobs(recorder, self.session_id)
         duration_s = time.monotonic() - turn_started
         self._persist_session(exit_reason)
@@ -1072,6 +1306,7 @@ class AgentRuntime:
             rounds=self._rounds,
             total_usage=self._usage,
             duration_s=duration_s,
+            error=error,
         )
 
     async def _cancel_background_jobs(self) -> None:
@@ -1120,9 +1355,11 @@ class AgentRuntime:
 
     def _persist_session(self, exit_reason: ExitReason) -> None:
         assert self.session_id is not None
+        self._last_exit_reason = exit_reason
+        self._task_pending = exit_reason is not ExitReason.COMPLETED
         self._store.update_session(
             self.session_id,
-            status=exit_reason.value,
+            status="paused" if self._task_pending else "completed",
             exit_reason=exit_reason.value,
             rounds=self._rounds,
             input_tokens=self._usage.input_tokens,
@@ -1135,6 +1372,7 @@ class AgentRuntime:
     def _session_end_data(self, exit_reason: ExitReason) -> dict[str, Any]:
         return {
             "exit_reason": exit_reason.value,
+            "status": "paused" if self._task_pending else "completed",
             "rounds": self._rounds,
             "total_usage": {
                 "input_tokens": self._usage.input_tokens,

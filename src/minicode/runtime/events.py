@@ -34,5 +34,10 @@ class EventRecorder:
         """Persist one event, mirror it to the callback (if any), return it."""
         event = self._store.append_event(self._session_id, type, data)
         if self._on_event is not None:
-            await self._on_event(event)
+            try:
+                await self._on_event(event)
+            except Exception:
+                # Presentation callbacks are observers. Their failure must not
+                # interrupt an already-persisted agent transition.
+                pass
         return event

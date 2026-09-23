@@ -20,10 +20,9 @@ from pydantic import BaseModel
 from minicode.core.clock import utc_now
 from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
 from minicode.goals.spec import AcceptanceItem, AcceptanceSpec, ItemKind
-from minicode.tools.command import decode_shell_output, kill_process_tree, spawn_shell
+from minicode.tools.command import capture_bounded, decode_shell_output, kill_process_tree, spawn_shell
 from minicode.tools.files import SKIP_DIRS
 
-_FINGERPRINT_READ_CAP = 2 * 1024 * 1024  # hash only the first 2 MiB per file
 COMMAND_OUTPUT_LIMIT = 5000
 GOAL_COMMAND_TIMEOUT_S = 120.0
 
@@ -40,7 +39,7 @@ def workspace_fingerprint(workspace: Path) -> str:
     """Content fingerprint of *workspace*.
 
     Every file (under directories other than ``SKIP_DIRS``) contributes
-    ``sha256(relative_posix_path + "\\0" + first_2MiB_of_content + str(size))``;
+    ``sha256(relative_posix_path + "\\0" + full_content_hash + str(size))``;
     the sorted list of per-file digests is hashed once more. Empty (or absent)
     workspaces hash to ``sha256("")``. Pure and synchronous.
     """
@@ -55,16 +54,15 @@ def workspace_fingerprint(workspace: Path) -> str:
                 size = -1
                 try:
                     size = file_path.stat().st_size
-                    with file_path.open("rb") as handle:
-                        head = handle.read(_FINGERPRINT_READ_CAP)
+                    content_digest = _sha256_file(file_path).encode("ascii")
                 except OSError as exc:
                     # Distinguish unreadable/missing files from empty files;
                     # never reuse the preceding file's size after a failed stat.
-                    head = f"unreadable:{exc.errno}".encode("ascii")
+                    content_digest = f"unreadable:{exc.errno}".encode("ascii")
                 entry = hashlib.sha256()
                 entry.update(rel.encode("utf-8"))
                 entry.update(b"\0")
-                entry.update(head)
+                entry.update(content_digest)
                 entry.update(str(size).encode("utf-8"))
                 digests.append(entry.hexdigest())
     return hashlib.sha256("\n".join(sorted(digests)).encode("utf-8")).hexdigest()
@@ -103,7 +101,11 @@ class ProtectedSnapshot:
                 self._digests[raw] = None
                 self._unresolvable[raw] = f"受保护路径越界，无法追踪: {exc}"
                 continue
-            self._digests[raw] = _sha256_file(resolved) if resolved.is_file() else None
+            try:
+                self._digests[raw] = _sha256_file(resolved) if resolved.is_file() else None
+            except OSError as exc:
+                self._digests[raw] = None
+                self._unresolvable[raw] = f"受保护文件无法读取，无法建立基线: {exc}"
         self._captured = True
 
     def export(self) -> dict:
@@ -139,8 +141,14 @@ class ProtectedSnapshot:
                 continue
             if before is None:
                 out.append((raw, "受保护文件在快照时不存在，验收时新出现"))
-            elif _sha256_file(resolved) != before:
-                out.append((raw, "受保护文件内容在快照后被修改"))
+            else:
+                try:
+                    changed = _sha256_file(resolved) != before
+                except OSError as exc:
+                    out.append((raw, f"受保护文件无法读取: {exc}"))
+                    continue
+                if changed:
+                    out.append((raw, "受保护文件内容在快照后被修改"))
         return out
 
 
@@ -206,7 +214,7 @@ class GoalChecker:
         return GoalReport(
             passed=all(r.passed for r in results),
             items=results,
-            fingerprint=workspace_fingerprint(self.workspace),
+            fingerprint=await asyncio.to_thread(workspace_fingerprint, self.workspace),
             ran_at=ran_at,
         )
 
@@ -220,19 +228,21 @@ class GoalChecker:
             return self._result(item, passed=False, detail=f"命令无法启动: {exc}")
 
         try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=self.command_timeout_s
+            stdout, timed_out, over_limit = await capture_bounded(
+                proc, self.command_timeout_s
             )
-        except asyncio.TimeoutError:
+        except asyncio.CancelledError:
             await kill_process_tree(proc)
+            raise
+
+        if timed_out:
             return self._result(
                 item,
                 passed=False,
                 detail=f"命令超时（>{self.command_timeout_s:g}s），已强制终止进程树",
             )
-        except asyncio.CancelledError:
-            await kill_process_tree(proc)
-            raise
+        if over_limit:
+            return self._result(item, passed=False, detail="验收命令输出超过采集预算，已终止进程树")
 
         output = decode_shell_output(stdout)
         output = _truncate_output(output)

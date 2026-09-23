@@ -41,7 +41,8 @@ def test_read_offset_and_limit(tmp_path):
     ctx = make_ctx(tmp_path)
     outcome = run(ReadTool(), {"path": "a.txt", "offset": 2, "limit": 2}, ctx)
     assert outcome.success is True
-    assert outcome.output.splitlines() == ["     2\tl2", "     3\tl3"]
+    assert outcome.output.splitlines()[:2] == ["     2\tl2", "     3\tl3"]
+    assert "next_offset=4" in outcome.output
 
 
 def test_read_offset_beyond_eof(tmp_path):
@@ -64,9 +65,22 @@ def test_read_too_large(tmp_path):
     (tmp_path / "big.txt").write_text("x" * 200, encoding="utf-8")
     ctx = make_ctx(tmp_path, max_read_bytes=50)
     outcome = run(ReadTool(), {"path": "big.txt"}, ctx)
-    assert outcome.success is False
-    assert "file too large" in (outcome.error or "")
-    assert "200" in (outcome.error or "")
+    assert outcome.success is True
+    assert "next_cursor=" in outcome.output
+    assert "xxxxx" in outcome.output
+
+
+def test_read_large_file_pages_by_cursor_without_loading_whole_file(tmp_path):
+    (tmp_path / "big.txt").write_text("a" * 300_000 + "\nend\n", encoding="utf-8")
+    ctx = make_ctx(tmp_path)
+    first = run(ReadTool(), {"path": "big.txt"}, ctx)
+    assert first.success and "next_cursor=" in first.output
+    marker = first.output.rsplit("next_cursor=", 1)[1].split("]", 1)[0]
+    cursor = int(marker)
+    second = run(ReadTool(), {"path": "big.txt", "offset": 1, "cursor": cursor}, ctx)
+    assert second.success
+    assert "a" * 100 in second.output
+    assert cursor > 0
 
 
 def test_read_non_utf8(tmp_path):
@@ -180,8 +194,11 @@ def test_ls_truncates_entry_count(tmp_path):
     outcome = run(LsTool(), {}, ctx)
     assert outcome.success is True
     entries = outcome.output.splitlines()
-    assert len(entries) == 501  # 500 shown + summary line
-    assert entries[-1] == "...[10 more entries]"
+    assert len(entries) == 501  # 500 shown + next-page marker
+    assert "next_offset=500" in entries[-1]
+    next_page = run(LsTool(), {"offset": 500}, ctx)
+    assert next_page.success
+    assert len(next_page.output.splitlines()) == 10
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +249,29 @@ def test_edit_replace_all(tmp_path):
     )
     assert outcome.success is True
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "x\nx\n"
+
+
+def test_edit_large_file_streams_without_whole_file_cap(tmp_path):
+    target = tmp_path / "large.txt"
+    target.write_text("prefix\n" + "x" * 300_000 + "\nneedle\n", encoding="utf-8")
+    ctx = make_ctx(tmp_path, max_read_bytes=256)
+    outcome = run(EditTool(), {
+        "path": "large.txt", "old_text": "needle", "new_text": "fixed",
+    }, ctx)
+    assert outcome.success
+    assert "large file" in outcome.output
+    assert target.read_text(encoding="utf-8").endswith("\nfixed\n")
+
+
+def test_edit_large_file_keeps_ambiguity_guard(tmp_path):
+    target = tmp_path / "large.txt"
+    target.write_text("needle\n" + "x" * 300_000 + "\nneedle\n", encoding="utf-8")
+    outcome = run(EditTool(), {
+        "path": "large.txt", "old_text": "needle", "new_text": "fixed",
+    }, make_ctx(tmp_path, max_read_bytes=256))
+    assert not outcome.success
+    assert "matches 2 locations" in (outcome.error or "")
+    assert target.read_text(encoding="utf-8").count("needle") == 2
 
 
 def test_edit_on_missing_file_hints_write(tmp_path):
@@ -286,6 +326,16 @@ def test_write_overwrites_existing_file(tmp_path):
     assert lines[0].startswith("Applied change to a.txt")
     assert "-old" in lines
     assert "+new" in lines
+
+
+def test_write_overwrites_large_file_atomically(tmp_path):
+    target = tmp_path / "large.txt"
+    target.write_text("x" * 300_000, encoding="utf-8")
+    outcome = run(WriteTool(), {"path": "large.txt", "content": "new\n"},
+                  make_ctx(tmp_path, max_read_bytes=256))
+    assert outcome.success
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert "Large diff omitted" in outcome.output
 
 
 def test_write_refuses_directory_target(tmp_path):

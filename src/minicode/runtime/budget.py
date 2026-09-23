@@ -8,12 +8,11 @@ from minicode.core.models import Budget, Usage
 
 
 class BudgetChecker:
-    """Per-turn budget guard over session-cumulative counters.
+    """Per-activation budget guard over session-cumulative counters.
 
-    Wall-clock deadline is per turn; rounds/tokens are session-cumulative.
-    Construct one checker per ``run_turn`` call, seeding it with the
-    session's cumulative usage and round count so the caps apply across
-    turns, while the wall-clock deadline restarts each turn.
+    Wall-clock and round limits bound one activation of a task. They create
+    a durable checkpoint rather than a permanent session limit. The optional
+    token cap is cumulative because it is an explicit spending guard.
     """
 
     def __init__(self, budget: Budget, *, start_usage: Usage, start_rounds: int) -> None:
@@ -27,14 +26,14 @@ class BudgetChecker:
         return time.monotonic() >= self.deadline
 
     def rounds_exceeded(self, rounds: int) -> bool:
-        """True when *rounds* (session-cumulative) has reached the cap."""
-        return rounds >= self.budget.max_rounds
+        """True after this activation has consumed its round slice."""
+        return self.budget.max_rounds > 0 and rounds - self._base_rounds >= self.budget.max_rounds
 
     def tokens_exceeded(self, usage: Usage) -> bool:
         """True when *usage* (session-cumulative) exceeds the token cap.
 
-        A cap of ``0`` or less disables token accounting entirely; rounds and
-        wall-clock still bound the turn.
+        A cap of ``0`` or less disables token accounting entirely; round and
+        wall-clock slices still bound one activation.
         """
         if self.budget.max_total_tokens <= 0:
             return False

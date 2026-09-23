@@ -263,7 +263,7 @@ def test_goal_gate_exhausts_attempts_goal_not_met(harness_factory):
     assert sink.of_type(EventType.GOAL_CHECK)[0].data["attempt"] == 1
     assert sink.of_type(EventType.GOAL_CHECK)[-1].data["attempt"] == 2
     summary = store.get_session(result.session_id)
-    assert summary.status == "goal_not_met"
+    assert summary.status == "paused"
 
 
 def test_goal_gate_protected_snapshot_captured_on_first_turn(harness_factory):
@@ -374,7 +374,7 @@ def test_context_hard_limit_stops_before_provider_request(harness_factory):
 
     assert result.exit_reason is ExitReason.CONTEXT_LIMIT
     assert provider.turns_consumed == 0
-    assert store.get_session(result.session_id).status == "context_limit"
+    assert store.get_session(result.session_id).status == "paused"
 
 
 # ---------------------------------------------------------------------------

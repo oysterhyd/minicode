@@ -84,7 +84,8 @@ def test_fallback_max_results_cap(tmp_path, monkeypatch):
     ctx = make_ctx(tmp_path)
     outcome = run(GrepTool(), {"pattern": "needle", "max_results": 2}, ctx)
     assert outcome.success is True
-    assert len(outcome.output.splitlines()) == 2
+    assert len(outcome.output.splitlines()) == 3
+    assert "达到结果上限" in outcome.output
 
 
 def test_fallback_max_results_clamped_to_one(tmp_path, monkeypatch):
@@ -93,7 +94,7 @@ def test_fallback_max_results_clamped_to_one(tmp_path, monkeypatch):
     ctx = make_ctx(tmp_path)
     outcome = run(GrepTool(), {"pattern": "needle", "max_results": 0}, ctx)
     assert outcome.success is True
-    assert len(outcome.output.splitlines()) == 1
+    assert len(outcome.output.splitlines()) == 2
 
 
 def test_fallback_no_matches(tmp_path, monkeypatch):
