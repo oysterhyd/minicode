@@ -70,6 +70,7 @@ _EVENT_META: dict[EventType, tuple[str, str]] = {
     EventType.ASSISTANT_MESSAGE: ("助手消息", "assistant"),
     EventType.TOOL_CALL_START: ("工具调用", "tool"),
     EventType.TOOL_CALL_RESULT: ("工具结果", "tool"),
+    EventType.TOOL_OUTPUT: ("工具实时输出", "tool"),
     EventType.APPROVAL_REQUEST: ("审批请求", "approval"),
     EventType.APPROVAL_DECISION: ("审批决定", "approval"),
     EventType.ROUND_END: ("轮结束", "round"),
@@ -85,6 +86,7 @@ _EVENT_META: dict[EventType, tuple[str, str]] = {
     EventType.SKILL_DEACTIVATED: ("技能停用", "compact"),
     EventType.SUBAGENT_START: ("子任务启动", "bg"),
     EventType.SUBAGENT_RESULT: ("子任务结果", "bg"),
+    EventType.MCP_DISCOVERY: ("MCP 发现", "bg"),
 }
 
 # ---------------------------------------------------------------------------
@@ -349,6 +351,10 @@ def _tool_start_body(data: dict) -> str:
     name = _first(data, "name")
     if name:
         rows.append(_kv("工具", f"<code>{_esc(name)}</code>"))
+    source = data.get("source")
+    if isinstance(source, dict) and source.get("plugin"):
+        rows.append(_kv("来源", f"<code>{_esc(source.get('plugin'))}@{_esc(source.get('plugin_version'))}"
+                        f" sha256:{_esc(str(source.get('plugin_sha256', ''))[:12])}</code>"))
     args = data.get("arguments")
     if args is None:
         args = {}
@@ -388,6 +394,10 @@ def _tool_result_body(
         name = call_names.get(call_id) or ""
     if name:
         rows.append(_kv("工具", f"<code>{_esc(name)}</code>"))
+    source = data.get("source")
+    if isinstance(source, dict) and source.get("plugin"):
+        rows.append(_kv("来源", f"<code>{_esc(source.get('plugin'))}@{_esc(source.get('plugin_version'))}"
+                        f" sha256:{_esc(str(source.get('plugin_sha256', ''))[:12])}</code>"))
     exit_code = data.get("exit_code")
     if exit_code is not None:
         rows.append(_kv("退出码", f"<code>{_esc(exit_code)}</code>"))

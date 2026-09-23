@@ -177,6 +177,7 @@ class EventType(str, enum.Enum):
     ASSISTANT_MESSAGE = "assistant_message"
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_RESULT = "tool_call_result"
+    TOOL_OUTPUT = "tool_output"
     APPROVAL_REQUEST = "approval_request"
     APPROVAL_DECISION = "approval_decision"
     ROUND_END = "round_end"
@@ -196,6 +197,7 @@ class EventType(str, enum.Enum):
     SKILL_DEACTIVATED = "skill_deactivated"
     SUBAGENT_START = "subagent_start"
     SUBAGENT_RESULT = "subagent_result"
+    MCP_DISCOVERY = "mcp_discovery"
 
 
 class Event(BaseModel):

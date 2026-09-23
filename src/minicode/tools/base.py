@@ -78,6 +78,7 @@ class ToolContext:
     activate_skill: Callable[[str], str] | None = None
     deactivate_skill: Callable[[str], str] | None = None
     delegate: Callable[[str, str], Awaitable[ToolOutcome]] | None = None
+    on_output: Callable[[str], Awaitable[None]] | None = None
 
 
 def truncate_output(text: str, limit: int) -> str:

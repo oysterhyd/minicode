@@ -84,6 +84,8 @@ def _rule_decision(tool_name: str) -> PolicyDecision:
         )
     if tool_name == "bash":
         return PolicyDecision(behavior=PolicyBehavior.ASK, reason="shell command")
+    if tool_name.startswith("mcp__"):
+        return PolicyDecision(behavior=PolicyBehavior.ASK, reason="external MCP tool")
     return PolicyDecision(
         behavior=PolicyBehavior.DENY,
         reason=f"no rule for {tool_name!r}; applying policy default",

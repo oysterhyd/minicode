@@ -9,6 +9,7 @@ import pytest
 
 from minicode.context.extensions import ProjectInstructions, SkillCatalog
 from minicode.core.models import Budget, EventType, ExitReason, ToolResultBlock
+from minicode.core.models import ToolOutcome
 from minicode.providers.fake import FakeProvider, FakeProviderOptions, FakeToolCall, FakeTurn
 from minicode.runtime.loop import AgentRuntime
 from minicode.security.policy import AutoAllowPolicy
@@ -28,6 +29,36 @@ def _runtime(tmp_path, turns, *, skills=None, instructions=None, delegation=Fals
         project_instructions=instructions, skills=skills,
     )
     return workspace, store, runtime
+
+
+@pytest.mark.parametrize("token_cap,expected_overlap", [(0, 2), (10000, 1)])
+def test_independent_delegates_overlap_only_without_explicit_token_cap(
+    tmp_path, token_cap, expected_overlap
+):
+    _, store, runtime = _runtime(tmp_path, [
+        FakeTurn(tool_calls=[
+            FakeToolCall(name="delegate", arguments={"kind": "explore", "task": "module A"}),
+            FakeToolCall(name="delegate", arguments={"kind": "review", "task": "module B"}),
+        ]),
+        FakeTurn(text="done"),
+    ], delegation=True)
+    runtime._budget = Budget(max_rounds=10, max_total_tokens=token_cap)
+    active = 0
+    peak = 0
+
+    async def fake_delegate(kind, task):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return ToolOutcome(output=f"{kind}: {task}")
+
+    runtime._delegate = fake_delegate
+    result = asyncio.run(runtime.run_turn("inspect"))
+    assert result.exit_reason is ExitReason.COMPLETED
+    assert peak == expected_overlap
+    store.close()
 
 
 def test_nested_instructions_are_loaded_only_when_scope_is_touched(tmp_path):

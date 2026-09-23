@@ -10,8 +10,8 @@ Claude Code。
 预算与取消、SQLite 会话持久化与执行报告——已实现。P1 已接入分层上下文压缩与输出归档、
 会话恢复与未知副作用处理、Goal 验收器与证据绑定、后台命令、20 任务离线评测集、HTML
 执行报告和 Textual 全屏 TUI。压缩及归档仍有边界限制，见下方说明。
-优化方案 A–C 已接入：项目指令、按需加载的本地 Skills、单层只读 explore/review 子任务。
-MCP、Plugins 仍未实现；`TaskStore` 有独立实现和测试，但尚未接入主循环及交互入口。
+优化方案 A–D 已接入：项目指令、按需加载的 Skills、单层只读子任务、stdio MCP 与本地 Plugins。
+`TaskStore` 有独立实现和测试，但尚未接入主循环及交互入口。
 
 **交互与运行时增强**：启动 ASCII Banner（Oyster Harness + 版本/环境信息）、斜杠命令
 自动补全（Tab 补全 / ↑↓ 选择 / Esc 关闭 / Enter 确认）、`/model`（z.ai/glm-5.3-flash 与
@@ -97,7 +97,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 | `minicode sessions list` | 会话列表：ID、创建时间、工作区、模型、状态、轮数、token |
 | `minicode resume <会话ID>` | 恢复历史会话；用 `/continue` 续跑暂停任务。已落库结果不重复执行；未确认写入标记状态未知并要求核实 |
 | `minicode report <会话ID>` | 执行报告（text）；`--format html` 生成单文件离线 HTML（时间线、工具记录、diff、验收证据、用量） |
-| `minicode eval` | 运行 `evals/` 的 20 任务评测集（FakeProvider 离线），提供 b0/b1/b2 标签；目前 b1 与 b0 相同、b2 增加外层验收失败续跑；输出 JSON + Markdown 汇总 |
+| `minicode eval` | 运行 `evals/` 的 20 任务评测集（FakeProvider 离线）；b1 增加压缩与归档，b2 增加外层验收失败续跑；输出 JSON + Markdown 汇总 |
 
 常用选项（`run` / `chat` / `tui` 共享）：`--workspace`（默认当前目录）、
 `--provider auto|commandcode|anthropic|fake`、`--model`（缺省按 provider 选择）、
@@ -151,21 +151,34 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 - **后台命令**：`bash` 支持 `background` 参数返回 job id，完成后作为用户消息投递。
   轮次及时长切片续跑期间保持运行；暂停或取消时终止仍在运行的进程树，记录并展示 lost 结果。
 - **评测集**：`evals/` 20 个本地任务（分页边界、差一错误、除零保护等），FakeProvider 离线
-  运行；b1 尚未接入压缩，与 b0 相同；b2 在 runner 外层验收失败后续跑，并非直接评测运行时
+  运行；b1 接入分层压缩与归档并记录压缩事件，b2 在 runner 外层验收失败后续跑，并非直接评测运行时
   Goal 门。结果含成功率、轮数、脚本用量与失败分析，不代表真实模型能力或 token 节省。
 - **HTML 报告**：单文件、零外链、可离线打开；时间线、工具记录与 diff、验收证据表、用量。
 - **TUI**：Textual 全屏时间线；回复流式期间合并刷新，完成后渲染 Markdown；工具结果按需展开，
   已归档输出展开后按页读取，可滚动并用 `n` / `p` 翻页。运行状态与耗时独立显示。
-  浏览旧记录时保留滚动位置；运行中可编辑并排队下一条输入。
+  浏览旧记录时保留滚动位置；运行中可编辑并排队下一条输入。前台命令显示最近日志；`Ctrl+I`
+  在宽屏打开任务检查侧栏，在窄屏打开覆盖面板，展示用量、改动、验收和子任务。
 - **项目指令与 Skills**：根目录 `AGENTS.md` 启动时加载；子目录 `AGENTS.md` 在首次访问对应范围时加载并要求重试该次工具调用。会话记录来源路径与内容哈希；变更后恢复会提示冲突。扫描项目 `.minicode/skills/<name>/SKILL.md` 和用户 `~/.minicode/skills/<name>/SKILL.md` 的元数据，`/skill` 列出、`/skill <name>` 激活、`/skill off <name>` 停用；模型也可用 `skills_list`、`skill_load`、`skill_unload`、`skill_resource`。技能正文只在激活时加载，资源读取限于注册目录，脚本执行仍走普通 `bash` 审批。
-- **只读子任务**：模型可用 `delegate` 请求 `explore` 或 `review`；子会话只注册 `read`、`ls`、`grep`、`read_artifact`，不注册 shell 或写入工具。子会话单层、串行，与父会话共享显式轮数、时长和累计 token 预算；默认没有额外数值上限。父任务取消会取消子任务。子任务暂停后保留原会话，重复委派同一任务时续跑。父会话记录子会话 ID、用量和结果，返回摘要、发现、经工具记录验证的文件引用与未解决项。
+- **只读子任务**：模型可用 `delegate` 请求 `explore`、`review` 或本地插件定义的子助手；子会话只注册 `read`、`ls`、`grep`、`read_artifact`，不注册 shell 或写入工具。同一模型响应中的独立子任务最多两个并行；设置显式累计 token 上限时串行执行。子任务与父会话共享预算与取消；暂停后保留原会话，重复委派同一任务时续跑。父会话记录子会话 ID、用量和结果，返回摘要、发现、经工具记录验证的文件引用与未解决项。
+- **MCP 与 Plugins**：项目目录 `.minicode/plugins/<name>/plugin.json` 描述插件版本、启停、Skills、只读子助手和本地 stdio MCP server。工具经官方 Python SDK 发现并注册为 `mcp__<server>__<tool>`；调用沿用权限审批、事件、预算和完整输出归档，服务端只读注解不会自动免审批。`minicode plugins list` 查看来源与指纹，`minicode plugins lock` 生成 `.minicode/plugins.lock.json` 锁定版本和内容。复制 `examples/mcp_docs` 到 `.minicode/plugins/docs` 可试运行本地文档 server；将 `enabled` 设为 `false` 可停用插件，修改后重新生成锁文件。
+
+## 本地插件格式
+
+插件目录名需与 manifest 的 `name` 一致。`version` 和 `minicode_version` 使用 `x.y.z`；
+`enabled` 控制是否注册能力，省略时默认停用。可选 `skills`、`agents` 指向插件目录内的相对目录；
+Skills 使用 `<skills>/<name>/SKILL.md`，只读子助手使用 `<agents>/<name>/AGENT.md`，
+两者均需 `name`、`description` YAML front matter。插件能力使用 `plugin:<插件名>:<名称>` 命名空间。
+`mcp_servers` 中每项含 `name`、`command`、`args`，可选 `timeout_s`；`$PYTHON` 指当前解释器，
+server 的工作目录为插件目录。示例见 [plugin.json](examples/mcp_docs/plugin.json)。
+插件锁文件记录每个插件的版本和源文件 SHA-256；内容变动后需审查并运行 `minicode plugins lock`。
 
 ## 当前实现边界
 
 - 同一模型响应中连续的内置只读工具最多 4 个并发；写入、命令与未知工具是顺序屏障。
   后台命令在同一进程的执行期间保持运行；暂停、取消或进程退出时无法跨进程继承。
 - `TaskStore` 的依赖与认领能力尚未接入 Runtime，不能视为已有多代理调度。
-- 子任务目前串行执行，未提供并行子代理调度；证据引用仅验证子任务成功读取过对应路径及路径仍存在，不做语义真实性判断。
+- 子任务仅在同一模型响应中按最多两个独立调用并行；显式累计 token 上限下仍串行。证据引用仅验证子任务成功读取过对应路径及路径仍存在，不做语义真实性判断。
+- MCP 首版仅支持本地 stdio 工具；断连、超时和发现失败会显示明确状态。Resources、Prompts、远程 HTTP、OAuth 和插件自动安装仍未接入。
 - 缓存读/写用量与“provider 未返回 usage”状态会逐请求记入事件、累计写入 SQLite，并在 resume 后恢复；
   Anthropic 请求尚未主动配置 `cache_control`，OpenAI 兼容协议也不保证网关支持相同缓存行为。
 - TUI 的“本轮”是最近一次模型请求的命中率，“累计”是整个会话 `缓存读取 token / 输入 token`。
@@ -176,7 +189,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 
 ## 明确未实现（P2）
 
-- MCP 工具接入、Plugins 打包加载、项目长期记忆、并行或写入型子代理。
+- 项目长期记忆、写入型子代理、跨回合持久后台服务。
 - 多 worker worktree 协作、可续跑 workflow。
 - 定时任务、Web 操作界面。
 

@@ -8,8 +8,7 @@ FakeProvider 重放 ``script.json`` 驱动 AgentRuntime，然后由 runner 自�
 基线语义（详见 evals/README.md）：
 
 - ``b0`` 基础循环：一次 ``run_turn``，无压缩无验收门；结束后 runner 验收。
-- ``b1`` 同 b0：压缩钩子（compactor）参数位置已预留，主 agent 集成后接线；
-  当前仅用于记录未压缩时的 token 基线。
+- ``b1`` 基础循环 + 与 CLI 一致的分层上下文压缩和归档。
 - ``b2`` b1 + 验收失败续跑：验收失败且预算/续跑次数未耗尽时，把失败详情作为
   新一轮 ``run_turn`` 输入继续跑，最多 ``max_fix_attempts`` 次。
 
@@ -44,11 +43,12 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from minicode.core.models import Budget
+from minicode.core.models import Budget, EventType, ExitReason
+from minicode.context.compact import CompactConfig, ContextCompactor
 from minicode.providers import FakeProvider, FakeProviderOptions, FakeTurn
 from minicode.runtime import AgentRuntime
 from minicode.security import AutoAllowPolicy
-from minicode.storage import SqliteStore
+from minicode.storage import ArtifactStore, SqliteStore
 from minicode.tools.registry import default_registry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -303,6 +303,8 @@ class RunRecord:
     output_tokens: int
     seconds: float
     error: str | None
+    compactions: int = 0
+    estimated_context_reduction: int = 0
 
     def to_json(self) -> dict[str, Any]:
         # JSON key is literally "pass" per the results.json contract.
@@ -317,6 +319,8 @@ class RunRecord:
             "output_tokens": self.output_tokens,
             "seconds": round(self.seconds, 3),
             "error": self.error,
+            "compactions": self.compactions,
+            "estimated_context_reduction": self.estimated_context_reduction,
         }
 
 
@@ -338,12 +342,9 @@ async def run_combo(
     *,
     keep: bool = False,
     keep_root: Path | None = None,
-    # TODO(P1): 压缩钩子由主 agent 集成后，在 baseline == "b1" 时在此传入
-    # compactor 实例并接线到 AgentRuntime；当前 b1 与 b0 行为完全一致。
-    compactor: Any | None = None,
+    compactor: ContextCompactor | CompactConfig | None = None,
 ) -> RunRecord:
     """Run one (task, baseline) combo on a fresh workspace copy."""
-    del compactor  # reserved slot, see TODO above
     if not task.repo_dir.is_dir():
         raise EvalError(f"任务缺少 repo/ 目录: {task.repo_dir}")
     workspace, db_path, cleanup_dir = _fresh_workspace(
@@ -374,9 +375,31 @@ async def run_combo(
             model="scripted-fix",
             budget=budget,
         )
+        if baseline in {"b1", "b2"}:
+            if isinstance(compactor, ContextCompactor):
+                runtime._compactor = compactor
+            else:
+                artifact_store = ArtifactStore(store)
+                runtime._artifact_store = artifact_store
+                runtime._compactor = ContextCompactor(
+                    compactor or CompactConfig(max_context_tokens=max(runtime.context_window, 1)),
+                    spill_fn=lambda kind, content: artifact_store.spill(
+                        runtime.session_id, kind, content
+                    ).artifact_id,
+                    context_tokens_fn=(
+                        (lambda: compactor.max_context_tokens)
+                        if isinstance(compactor, CompactConfig)
+                        else (lambda: runtime.context_window)
+                    ),
+                    output_tokens_fn=runtime.effective_max_output_tokens,
+                    estimate_scale_fn=lambda: getattr(runtime.provider, "prompt_scale", 1.0),
+                )
         result = await runtime.run_turn(task.prompt)
         attempts = 1
         passed, failures = check_acceptance(task, workspace, protected_hashes)
+        if result.exit_reason is not ExitReason.COMPLETED:
+            passed = False
+            failures.append(f"agent stopped before completion: {result.exit_reason.value}")
         if baseline == "b2" and not passed:
             # b2: 验收失败续跑 —— 失败详情作为新的一轮输入，直到通过或预算耗尽。
             for _ in range(task.max_fix_attempts):
@@ -387,10 +410,15 @@ async def run_combo(
                 result = await runtime.run_turn(build_continuation_message(failures))
                 attempts += 1
                 passed, failures = check_acceptance(task, workspace, protected_hashes)
+                if result.exit_reason is not ExitReason.COMPLETED:
+                    passed = False
+                    failures.append(f"agent stopped before completion: {result.exit_reason.value}")
                 if passed:
                     break
         seconds = time.monotonic() - started
         usage = runtime.usage
+        compact_events = [event for event in store.get_events(result.session_id)
+                          if event.type is EventType.CONTEXT_COMPACTED]
         return RunRecord(
             task=task.id,
             baseline=baseline,
@@ -402,6 +430,11 @@ async def run_combo(
             output_tokens=usage.output_tokens,
             seconds=seconds,
             error=None if passed else "; ".join(failures),
+            compactions=len(compact_events),
+            estimated_context_reduction=sum(
+                max(0, int(event.data.get("tokens_before", 0))
+                    - int(event.data.get("tokens_after", 0))) for event in compact_events
+            ),
         )
     finally:
         store.close()
@@ -432,6 +465,7 @@ def baseline_stats(records: list[RunRecord], baseline: str) -> dict[str, float]:
         "avg_input": sum(r.input_tokens for r in rows) / count,
         "avg_output": sum(r.output_tokens for r in rows) / count,
         "avg_seconds": sum(r.seconds for r in rows) / count,
+        "compactions": sum(r.compactions for r in rows),
         "failures": count - passed,
     }
 
@@ -453,17 +487,17 @@ def build_summary_md(
     lines.append("")
     lines.append("## 基线对照")
     lines.append("")
-    lines.append("| 基线 | 通过 | 平均轮数 | 平均输入 token | 平均输出 token | 平均耗时(s) |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| 基线 | 通过 | 平均轮数 | 平均输入 token | 平均输出 token | 压缩次数 | 平均耗时(s) |")
+    lines.append("|---|---|---|---|---|---|---|")
     for baseline in baselines:
         stats = baseline_stats(records, baseline)
         if stats["total"] == 0:
-            lines.append(f"| {baseline} | - | - | - | - | - |")
+            lines.append(f"| {baseline} | - | - | - | - | - | - |")
             continue
         lines.append(
             f"| {baseline} | {_fmt_rate(int(stats['passed']), int(stats['total']))} "
             f"| {stats['avg_rounds']:.1f} | {stats['avg_input']:.0f} "
-            f"| {stats['avg_output']:.0f} | {stats['avg_seconds']:.1f} |"
+            f"| {stats['avg_output']:.0f} | {int(stats['compactions'])} | {stats['avg_seconds']:.1f} |"
         )
     lines.append("")
     lines.append("## 逐任务结果")

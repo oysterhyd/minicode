@@ -85,6 +85,8 @@ app = typer.Typer(
 )
 sessions_app = typer.Typer(help="查看历史会话。", no_args_is_help=True)
 app.add_typer(sessions_app, name="sessions")
+plugins_app = typer.Typer(help="查看和锁定本地 Plugins。", no_args_is_help=True)
+app.add_typer(plugins_app, name="plugins")
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +619,7 @@ class _Services:
     evidence_ledger: Any | None
     project_instructions: Any
     skills: Any
+    plugins: Any
 
 
 def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bool) -> _Services:
@@ -641,10 +644,16 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
             _print_p1_event(console, event)
 
     from minicode.context.extensions import ProjectInstructions, SkillCatalog
+    from minicode.plugins import PluginCatalog
 
     project_instructions = ProjectInstructions(setup.workspace)
-    skills = SkillCatalog(setup.workspace)
-    registry = default_registry(skills=skills, delegation=True)
+    plugins = PluginCatalog(setup.workspace)
+    skills = SkillCatalog(setup.workspace, plugin_roots=plugins.skill_roots())
+    registry = default_registry(skills=skills, delegation=True,
+                                agent_kinds=plugins.agent_names())
+    registry.plugin_catalog = plugins
+    for server in plugins.servers():
+        registry.add_mcp_server(server)
     policy: PermissionPolicy
     approval_handler: ApprovalHandler | None
     if yes:
@@ -676,6 +685,7 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
         evidence_ledger=evidence_ledger,
         project_instructions=project_instructions,
         skills=skills,
+        plugins=plugins,
     )
 
 
@@ -746,6 +756,11 @@ def _print_p1_event(console: Console, event: Event) -> None:
             Text(f"  ◆ 上下文已压缩：估算 {format_tokens(int(before or 0))} → {format_tokens(int(after or 0))}", style="dim")
         )
         return
+    if event.type is EventType.MCP_DISCOVERY:
+        error = event.data.get("error")
+        if error:
+            console.print(Text(f"  ◆ {error}", style="yellow"))
+        return
     if event.type is EventType.SUBAGENT_START:
         console.print(Text(
             f"  ◌ {event.data.get('kind')} 子任务已开始 · "
@@ -803,9 +818,12 @@ def _run_one_turn(runtime: AgentRuntime, user_message: str | None) -> RunResult:
             typer.secho("已被用户取消，会话状态已保存。", fg=typer.colors.YELLOW)
             raise
         finally:
-            close = getattr(runtime.provider, "aclose", None)
-            if close is not None:
-                await close()
+            try:
+                close = getattr(runtime.provider, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                await runtime._registry.aclose()
 
     return asyncio.run(_guarded())
 
@@ -1236,6 +1254,29 @@ def _make_resumed_runtime(
 # ---------------------------------------------------------------------------
 # Commands: sessions list / report
 # ---------------------------------------------------------------------------
+
+
+@plugins_app.command("list")
+def plugins_list(workspace: WorkspaceOpt = Path(".")) -> None:
+    """List local plugin versions, states, and manifest fingerprints."""
+    from minicode.plugins import PluginCatalog
+
+    catalog = PluginCatalog(workspace)
+    if not catalog.plugins:
+        typer.echo("No local plugins found.")
+        return
+    for plugin in catalog.plugins.values():
+        state = "enabled" if plugin.enabled else "disabled"
+        typer.echo(f"{plugin.name} {plugin.version} {state} sha256:{plugin.digest[:12]}")
+
+
+@plugins_app.command("lock")
+def plugins_lock(workspace: WorkspaceOpt = Path(".")) -> None:
+    """Pin exact local manifest versions after reviewing plugin changes."""
+    from minicode.plugins import PluginCatalog
+
+    catalog = PluginCatalog(workspace, check_lock=False)
+    typer.echo(str(catalog.write_lock()))
 
 
 @sessions_app.command("list")

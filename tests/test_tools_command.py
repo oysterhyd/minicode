@@ -52,6 +52,31 @@ def test_run_command_success(tmp_path):
     assert "minicode-ok" in outcome.output
 
 
+def test_command_streams_output_before_process_exits(tmp_path):
+    async def scenario():
+        seen = asyncio.Event()
+        previews = []
+
+        async def on_output(output):
+            previews.append(output)
+            if "first" in output:
+                seen.set()
+
+        command = _python_command(
+            "import time;print('first',flush=True);time.sleep(0.5);print('last',flush=True)"
+        )
+        running = asyncio.create_task(BashTool().run(
+            {"command": command}, ToolContext(workspace=tmp_path, on_output=on_output)
+        ))
+        await asyncio.wait_for(seen.wait(), 5)
+        assert not running.done()
+        outcome = await running
+        assert outcome.success and "last" in outcome.output
+        assert any("first" in preview for preview in previews)
+
+    asyncio.run(scenario())
+
+
 def test_run_command_nonzero_exit(tmp_path):
     # NOTE: PowerShell's -Command collapses a failing native child (e.g.
     # python sys.exit(3)) to exit code 1, but `exit 3` propagates exactly on

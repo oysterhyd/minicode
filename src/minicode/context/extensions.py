@@ -112,9 +112,11 @@ def _skill_metadata(path: Path) -> tuple[str, str]:
 
 
 class SkillCatalog:
-    def __init__(self, workspace: Path, user_root: Path | None = None):
+    def __init__(self, workspace: Path, user_root: Path | None = None,
+                 plugin_roots: list[tuple[str, Path]] | None = None):
         roots = [("user", user_root or Path.home() / ".minicode" / "skills"),
-                 ("project", workspace / ".minicode" / "skills")]
+                 ("project", workspace / ".minicode" / "skills"),
+                 *(plugin_roots or [])]
         self.skills: dict[str, Skill] = {}
         for origin, root in roots:
             if not root.is_dir():
@@ -125,10 +127,13 @@ class SkillCatalog:
                 name, description = _skill_metadata(path)
                 if name != path.parent.name:
                     raise ValueError(f"skill name must match directory: {path}")
+                key = f"{origin}:{name}" if origin.startswith("plugin:") else name
+                if key in self.skills:
+                    raise ValueError(f"duplicate skill name: {key}")
                 # A metadata fingerprint is enough for the catalog; full body
                 # hashing happens only when the skill is activated.
                 header = f"{name}\n{description}".encode()
-                self.skills[name] = Skill(name, description, path, path.parent.resolve(), origin,
+                self.skills[key] = Skill(key, description, path, path.parent.resolve(), origin,
                                           hashlib.sha256(header).hexdigest())
 
     def listing(self, max_chars: int | None = None) -> str:

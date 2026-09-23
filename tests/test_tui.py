@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -23,11 +24,11 @@ from rich.text import Text
 from minicode.cli import _Setup, _build_services
 from minicode.core.catalog import MODEL_CATALOG
 from minicode.slash import filter_commands
-from minicode.core.models import Budget, ModelResponse, TextBlock, Usage
+from minicode.core.models import Budget, EventType, ModelResponse, TextBlock, Usage
 from minicode.providers import FakeProvider, FakeProviderOptions, FakeTurn, ResponseDone, TextDelta
 from minicode.security import PermissionMode
 from minicode.storage import SqliteStore
-from minicode.ui.app import ApprovalModal, MiniCodeApp, ToolCard, run_tui
+from minicode.ui.app import ApprovalModal, InspectorModal, MiniCodeApp, ToolCard, run_tui
 
 #: Generous timeout so a busy CI machine cannot flake, small enough to fail fast.
 _WAIT_TIMEOUT_S = 20.0
@@ -375,6 +376,8 @@ def test_tool_card_pages_archived_command_output(tmp_path):
             await _wait_turn_done(app)
             card = list(app.query(ToolCard))[0]
             assert card._artifact_id is not None
+            assert any(event.type is EventType.TOOL_OUTPUT
+                       for event in app._store.get_events(app._runtime.session_id))
             await pilot.click(card)
             await pilot.pause()
             assert "偏移 0" in str(card._detail.content)
@@ -400,6 +403,68 @@ def test_timeline_remains_usable_at_common_terminal_widths(tmp_path, width):
             assert app.has_class("narrow") is (width < 100)
 
     _run(scenario())
+
+
+@pytest.mark.parametrize("width", [80, 120, 160])
+def test_inspector_uses_overlay_on_narrow_screen_and_side_panel_on_wide_screen(tmp_path, width):
+    app, _ws = _make_app(tmp_path, turns=[{"text": "回应"}])
+
+    async def scenario():
+        async with app.run_test(size=(width, 30)) as pilot:
+            await _submit(pilot, "请求")
+            await _wait_turn_done(app)
+            await pilot.press("ctrl+i")
+            await pilot.pause()
+            if width < 120:
+                assert isinstance(app.screen, InspectorModal)
+                assert "任务状态" in str(app.screen.query_one("#inspector-modal-content").content)
+                await pilot.press("escape")
+            else:
+                assert app.has_class("inspector-open")
+                assert app.query_one("#inspector").display
+                assert "任务状态" in str(app.query_one("#inspector-body").content)
+                await pilot.press("ctrl+i")
+                assert not app.has_class("inspector-open")
+            assert app.query_one("#prompt").size.width > 40
+
+    _run(scenario())
+
+
+def test_tui_reconnects_stdio_mcp_on_next_turn(tmp_path):
+    workspace = tmp_path / "ws"
+    plugin = workspace / ".minicode" / "plugins" / "docs"
+    plugin.mkdir(parents=True)
+    example = Path(__file__).resolve().parents[1] / "examples" / "mcp_docs"
+    shutil.copy(example / "plugin.json", plugin / "plugin.json")
+    shutil.copy(example / "server.py", plugin / "server.py")
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "guide.md").write_text("hello", encoding="utf-8")
+    provider = FakeProvider(FakeProviderOptions(turns=[
+        FakeTurn(tool_calls=[{"name": "mcp__docs__list_documents", "arguments": {}}]),
+        FakeTurn(text="first done"),
+        FakeTurn(tool_calls=[{"name": "mcp__docs__list_documents", "arguments": {}}]),
+        FakeTurn(text="second done"),
+    ]))
+    setup = _Setup(workspace, provider, "fake", "fake", Budget(max_rounds=10))
+    store = SqliteStore(tmp_path / "sessions.db")
+    services = _build_services(setup, store, Console(), True)
+    app = MiniCodeApp(setup=setup, store=store, services=services, yes=True)
+
+    async def scenario():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await _submit(pilot, "first")
+            await _wait_turn_done(app)
+            await _submit(pilot, "second")
+            await _wait_turn_done(app)
+            events = store.get_events(app._runtime.session_id)
+            assert sum(event.type is EventType.MCP_DISCOVERY for event in events) == 2
+            assert sum(event.type is EventType.TOOL_CALL_RESULT and event.data.get("success")
+                       for event in events) == 2
+
+    try:
+        _run(scenario())
+    finally:
+        store.close()
 
 
 def test_scrolling_up_is_preserved_when_new_content_arrives(tmp_path):

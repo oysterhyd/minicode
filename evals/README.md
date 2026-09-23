@@ -1,7 +1,7 @@
 # evals —— 本地任务评测集（20 任务，可离线运行）
 
-> 2026-09-22 核对：runner 提供 b0/b1/b2 三个标签，但 b1 与 b0 的执行路径相同。
-> 当前没有三种独立机制的消融结果，也不能用 FakeProvider 的脚本 token 数衡量真实压缩收益。
+> 2026-09-23 更新：b1 已接入分层压缩与归档，b2 在此基础上增加验收失败续跑。
+> FakeProvider 的脚本 token 数仍不能衡量真实压缩收益。
 
 这是一套完全离线的评测：20 个带 bug 的微型 Python 仓库，由 FakeProvider 重放
 确定性修复脚本驱动 `AgentRuntime`，runner 自己做验收（子进程跑验收命令 +
@@ -98,19 +98,19 @@ script: script.json
 
 - **b0 —— 基础循环**：一次 `run_turn(prompt)`，无上下文压缩、无验收门。
   结束后 runner 验收：验收命令退出码 0 且受保护文件哈希与运行前一致。
-- **b1 —— 同 b0（预留压缩钩子）**：行为与 b0 完全一致。`run_combo` 预留了
-  `compactor=None` 参数位置，但 `run_combo` 直接丢弃该参数；CLI/TUI 已接入压缩，评测
-  runner 尚未接入。当前记录的是相同脚本用量，不构成压缩效果对照。
+- **b1 —— b0 + 上下文压缩**：按 CLI 的配置归档旧交互并保留可回读引用；每条结果记录
+  压缩次数和估算上下文缩减量。微型任务通常不会达到压缩阈值，因此 b0/b1 的结果可能相同。
 - **b2 —— b1 + 验收失败续跑**：`run_turn` 结束后 runner 验收；若失败且未超
   `max_fix_attempts` 与预算（rounds/tokens），把失败详情（每个失败项 + 退出码 +
   “必须修复，不得改受保护文件”）作为新一轮 `run_turn` 输入继续跑，每次续跑后
   重新验收，最多 `max_fix_attempts` 次。这是 runner 的外层逻辑，没有装配运行时的
-  `GoalChecker`、`EvidenceLedger` 或 `ContextCompactor`，因此不能当作这些组件的集成评测。
+  `GoalChecker` 或 `EvidenceLedger`；压缩器已接入 b1/b2，验收仍是 runner 外层逻辑。
 
 ### 成功定义
 
-一次运行记为 **pass** 当且仅当：全部 `type: command` 验收项退出码为 0，且全部
-`type: protected` 文件哈希未变。失败、超时、预算耗尽、续跑耗尽全部计入分母。
+一次运行记为 **pass** 当且仅当：Agent 以 `completed` 结束、全部 `type: command`
+验收项退出码为 0，且全部 `type: protected` 文件哈希未变。失败、超时、预算耗尽、
+续跑耗尽全部计入分母。
 
 ## 结果目录结构
 
@@ -118,7 +118,8 @@ script: script.json
 <output>/
 ├── results.json   # 结构化结果：generated_at / baselines / run_count / passed / records[]
 │                  # 每条 record: task, baseline, pass, exit_reason, attempts,
-│                  #             rounds, input_tokens, output_tokens, seconds, error
+│                  #             rounds, input_tokens, output_tokens, compactions,
+│                  #             estimated_context_reduction, seconds, error
 ├── summary.md     # 基线对照表 + 逐任务结果表 + 失败任务与退出原因 + 确定性失败分析
 └── workspaces/    # 仅 --keep-workspaces 时存在：<task>__<baseline>/workspace/
 ```

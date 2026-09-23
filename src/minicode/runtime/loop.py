@@ -159,6 +159,7 @@ class AgentRuntime:
             if system_prompt is not None
             else build_system_prompt(str(workspace.resolve()), registry.names())
         )
+        self._auto_system_prompt = system_prompt is None
         self._system_prompt = self._base_system_prompt
         self._compactor = compactor
         self._goal_checker = goal_checker
@@ -426,6 +427,15 @@ class AgentRuntime:
                         EventType.SESSION_START,
                         start_data,
                     )
+                discovered = await self._registry.prepare()
+                if discovered:
+                    if self._auto_system_prompt:
+                        self._base_system_prompt = build_system_prompt(
+                            str(self._workspace.resolve()), self._registry.names()
+                        )
+                        self._refresh_system_prompt()
+                    for status in discovered:
+                        await recorder.emit(EventType.MCP_DISCOVERY, status)
                 # A timeout can leave a dangling call in this same process.
                 self._pending_dangling = self._find_dangling_calls(self._messages)
                 # Settle tool calls interrupted before their result was persisted.
@@ -569,6 +579,38 @@ class AgentRuntime:
                         index = 0
                         while index < len(calls):
                             self._check_deadline()
+                            if (calls[index].name == "delegate"
+                                    and self._budget.max_total_tokens <= 0):
+                                # Only independent child tasks overlap. With an
+                                # explicit token cap, serial execution avoids
+                                # two in-flight requests spending one balance.
+                                batch: list[ToolUseBlock] = []
+                                keys: set[tuple[str, str]] = set()
+                                while (index + len(batch) < len(calls)
+                                       and calls[index + len(batch)].name == "delegate"
+                                       and len(batch) < 2):
+                                    candidate = calls[index + len(batch)]
+                                    key = (str(candidate.input.get("kind")),
+                                           str(candidate.input.get("task")))
+                                    if key in keys:
+                                        break
+                                    keys.add(key)
+                                    batch.append(candidate)
+                                tasks = [asyncio.create_task(
+                                    self._execute_tool_call(recorder, call, session_id)
+                                ) for call in batch]
+                                try:
+                                    tool_results.extend(await asyncio.gather(*tasks))
+                                except BaseException:
+                                    for task in tasks:
+                                        task.cancel()
+                                    await asyncio.gather(*tasks, return_exceptions=True)
+                                    tool_results.extend(task.result() for task in tasks if
+                                                        task.done() and not task.cancelled() and
+                                                        task.exception() is None)
+                                    raise
+                                index += len(batch)
+                                continue
                             if calls[index].name not in _READ_ONLY_TOOLS:
                                 tool_results.append(
                                     await self._execute_tool_call(recorder, calls[index], session_id)
@@ -982,6 +1024,9 @@ class AgentRuntime:
         """
         started = time.monotonic()
         start_data = {"call_id": call.id, "name": call.name, "arguments": call.input}
+        source = getattr(self._registry.get(call.name), "source", None)
+        if source is not None:
+            start_data["source"] = source
         if recovered:
             start_data["recovered"] = True
         await recorder.emit(EventType.TOOL_CALL_START, start_data)
@@ -1011,6 +1056,8 @@ class AgentRuntime:
             }
         if recovered:
             result_data["recovered"] = True
+        if source is not None:
+            result_data["source"] = source
         await recorder.emit(EventType.TOOL_CALL_RESULT, result_data)
         return block
 
@@ -1105,9 +1152,10 @@ class AgentRuntime:
                 reason = f": {approved.reason}" if approved.reason else ""
                 return ToolOutcome.failure(f"approval denied{reason}")
 
-        return await self._run_tool(call, tool)
+        return await self._run_tool(call, tool, recorder)
 
-    async def _run_tool(self, call: ToolUseBlock, tool: Any) -> ToolOutcome:
+    async def _run_tool(self, call: ToolUseBlock, tool: Any,
+                        recorder: EventRecorder) -> ToolOutcome:
         """Execute one approved tool call with the shared services attached."""
         self._check_deadline()
         context = ToolContext(
@@ -1118,6 +1166,9 @@ class AgentRuntime:
             activate_skill=self.activate_skill if self._skills is not None else None,
             deactivate_skill=self.deactivate_skill if self._skills is not None else None,
             delegate=self._delegate if self._allow_delegation else None,
+            on_output=(lambda output: recorder.emit(EventType.TOOL_OUTPUT, {
+                "call_id": call.id, "name": call.name, "output_preview": output[-1000:],
+            })),
         )
         for attempt in range(2):
             try:
@@ -1136,6 +1187,17 @@ class AgentRuntime:
         from minicode.tools.files import LsTool, ReadTool
         from minicode.tools.search import GrepTool
 
+        agent_source = None
+        agent_instructions = ""
+        if kind not in {"explore", "review"}:
+            catalog = self._registry.plugin_catalog
+            if catalog is None:
+                return ToolOutcome.failure(f"unknown read-only subagent kind: {kind}")
+            try:
+                agent_instructions, agent_source = catalog.agent_instructions(kind)
+            except (ValueError, OSError, UnicodeError) as exc:
+                return ToolOutcome.failure(str(exc))
+
         if self.session_id is None:
             return ToolOutcome.failure("parent session has not started")
         assert self._budget_ledger is not None
@@ -1150,7 +1212,8 @@ class AgentRuntime:
             if event.type is EventType.SESSION_START:
                 await EventRecorder(self._store, self.session_id, self._on_event).emit(
                     EventType.SUBAGENT_START,
-                    {"kind": kind, "task": task, "child_session_id": child.session_id},
+                    {"kind": kind, "task": task, "child_session_id": child.session_id,
+                     "source": agent_source},
                 )
 
         key = (kind, task)
@@ -1165,6 +1228,7 @@ class AgentRuntime:
             "最终只输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、"
             "evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。"
             "不得编造证据。\n父任务要求：\n" + requirements
+            + ("\n插件子助手指令：\n" + agent_instructions if agent_instructions else "")
         )
         if child is None:
             paused_id = None
@@ -1272,6 +1336,7 @@ class AgentRuntime:
             "exit_reason": child_result.exit_reason.value if child_result else "unknown",
             "structured": structured,
             "usage": child.usage.model_dump(), "evidence_refs": verified,
+            "source": agent_source,
         }
         await EventRecorder(self._store, self.session_id, self._on_event).emit(
             EventType.SUBAGENT_RESULT, record

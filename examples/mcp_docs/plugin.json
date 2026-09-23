@@ -1,0 +1,14 @@
+{
+  "name": "docs",
+  "version": "0.1.0",
+  "minicode_version": "0.1.0",
+  "enabled": true,
+  "mcp_servers": [
+    {
+      "name": "docs",
+      "command": "$PYTHON",
+      "args": ["server.py", "../../../docs"],
+      "timeout_s": 20
+    }
+  ]
+}

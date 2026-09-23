@@ -78,7 +78,7 @@ class SkillResourceTool(BaseTool):
 
 
 class DelegateArgs(BaseModel):
-    kind: str = Field(pattern="^(explore|review)$")
+    kind: str = Field(min_length=1)
     task: str = Field(min_length=1)
 
 
@@ -91,7 +91,13 @@ class DelegateTool(BaseTool):
     )
     args_model = DelegateArgs
 
+    def __init__(self, agent_kinds: list[str] | None = None):
+        self.allowed_kinds = {"explore", "review", *(agent_kinds or [])}
+        self.description += " Available kinds: " + ", ".join(sorted(self.allowed_kinds))
+
     async def execute(self, args: DelegateArgs, ctx: ToolContext) -> ToolOutcome:
+        if args.kind not in self.allowed_kinds:
+            return ToolOutcome.failure(f"unknown read-only subagent kind: {args.kind}")
         if ctx.delegate is None:
             return ToolOutcome.failure("delegation is unavailable")
         return await ctx.delegate(args.kind, args.task)

@@ -95,7 +95,7 @@ _MODE_SHORT: dict[PermissionMode, str] = {
 def _help_text() -> Text:
     """Help block assembled from the shared slash-command registry."""
     lines = ["可用命令：", *format_command_lines()]
-    lines.append("快捷键：Enter 提交 · Shift+Enter 换行 · Ctrl+C 取消回合/再按一次退出 · Ctrl+L 清屏")
+    lines.append("快捷键：Enter 提交 · Shift+Enter 换行 · Ctrl+C 取消回合/再按一次退出 · Ctrl+L 清屏 · Ctrl+I 检查面板")
     return Text("\n".join(lines))
 
 
@@ -290,6 +290,7 @@ class ToolCard(Vertical):
         super().__init__(classes="tool-card")
         self.can_focus = True
         self.call_id = call_id
+        self.tool_name = name
         line = Text("  ▸ ", style="dim")
         line.append(name, style="bold cyan")
         if summary:
@@ -334,6 +335,20 @@ class ToolCard(Vertical):
             self._detail.update(Text(detail, style="dim"))
         if data.get("truncated") or self._artifact_id:
             line.append("  已截断 · 展开查看归档", style="yellow")
+        self._header_base = line
+        self._update_header()
+
+    def set_live_output(self, output: str) -> None:
+        """Show the most recent command lines before the final result arrives."""
+        if not output:
+            return
+        self._detail.update(Text(output, style="dim"))
+        self._has_detail = True
+        last_line = output.rstrip().splitlines()[-1] if output.rstrip() else ""
+        line = Text("  ◌ ", style="yellow")
+        line.append(self.tool_name, style="yellow")
+        if last_line:
+            line.append(f"  最近输出：{last_line[:80]}", style="dim")
         self._header_base = line
         self._update_header()
 
@@ -458,6 +473,25 @@ class ModelPickerModal(ModalScreen[str | None]):
         self.dismiss(self._names[index])
 
 
+class InspectorModal(ModalScreen[None]):
+    """Narrow-screen overlay for the same task facts as the side panel."""
+
+    BINDINGS = [Binding("escape", "dismiss_dialog", "关闭")]
+
+    def __init__(self, content: Text):
+        super().__init__()
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="inspector-dialog"):
+            yield Static("任务检查 · Esc 关闭", classes="approval-title")
+            with VerticalScroll(id="inspector-modal-scroll"):
+                yield Static(self._content, id="inspector-modal-content")
+
+    def action_dismiss_dialog(self) -> None:
+        self.dismiss(None)
+
+
 # ---------------------------------------------------------------------------
 # Presentation helpers (mirrors of the CLI one-liners, adapted to Text)
 # ---------------------------------------------------------------------------
@@ -511,6 +545,8 @@ def _p1_line(event: Event) -> Text:
         )
     if event.type is EventType.PROJECT_INSTRUCTIONS:
         return Text(f"  ◆ 已加载项目指令 {data.get('path')}", style="dim")
+    if event.type is EventType.MCP_DISCOVERY:
+        return Text(f"  ◆ {data.get('error')}", style="yellow")
     raise AssertionError(f"unhandled P1 event: {event.type}")
 
 
@@ -546,11 +582,15 @@ class MiniCodeApp(App[None]):
         Binding("ctrl+q", "quit", "退出", priority=True),
         Binding("ctrl+l", "clear_log", "清屏"),
         Binding("ctrl+end", "follow_log", "回到底部"),
+        Binding("ctrl+i", "toggle_inspector", "任务检查", priority=True),
     ]
 
     CSS = """
     Screen { layout: vertical; background: #151A1E; color: #E6E2D8; }
-    #log { height: 1fr; padding: 1 1 0 1; }
+    #work-area { height: 1fr; }
+    #log { width: 1fr; height: 1fr; padding: 1 1 0 1; }
+    #inspector { display: none; width: 42; height: 1fr; border-left: solid #74C5B5; padding: 1; background: #1D252B; }
+    #inspector-body { height: auto; }
     .msg-user { margin-top: 1; }
     .msg-assistant { margin-top: 1; }
     .msg-banner { margin-bottom: 1; color: #A0ADB5; }
@@ -580,6 +620,9 @@ class MiniCodeApp(App[None]):
     #status-right { width: auto; color: $text-muted; }
     ApprovalModal { align: center middle; }
     ModelPickerModal { align: center middle; }
+    InspectorModal { align: center middle; }
+    #inspector-dialog { width: 90%; height: 80%; border: round #74C5B5; background: #1D252B; padding: 1 2; }
+    #inspector-modal-scroll { height: 1fr; }
     #approval-dialog {
         width: 64; height: auto;
         border: round $warning; background: $surface; padding: 1 2;
@@ -628,6 +671,9 @@ class MiniCodeApp(App[None]):
         self._activity_label = "就绪"
         self._activity_widget: Static | None = None
         self._activity_timer: Any = None
+        self._inspector_events: deque[Event] = deque(maxlen=200)
+        self._inspector_open = False
+        self._inspector_context_tokens = 0
         # Slash-menu state machine: ``root`` command list or a cascading
         # ``submenu`` (命令 › /model). The view is re-derived from the prompt
         # text on every change; ``_backed_out`` keeps Esc'd submenus closed
@@ -672,8 +718,11 @@ class MiniCodeApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll(id="log"):
-            pass
+        with Horizontal(id="work-area"):
+            with VerticalScroll(id="log"):
+                pass
+            with VerticalScroll(id="inspector"):
+                yield Static("", id="inspector-body")
         yield Static("↓ 有新内容 · 点击回到底部", id="new-content")
         with Vertical(id="input-dock"):
             yield Static("就绪", id="activity")
@@ -707,6 +756,8 @@ class MiniCodeApp(App[None]):
         self._activity_widget = self.query_one("#activity", Static)
         self._activity_timer = self.set_interval(0.2, self._refresh_activity)
         self._refresh_status("就绪")
+        self._inspector_context_tokens = self._runtime.context_tokens_used()
+        self._refresh_inspector()
         self.query_one("#prompt", PromptArea).focus()
 
     # -- log helpers ----------------------------------------------------------
@@ -868,6 +919,11 @@ class MiniCodeApp(App[None]):
 
     async def _on_event(self, event: Event) -> None:
         etype = event.type
+        self._inspector_events.append(event)
+        if etype in {EventType.ASSISTANT_MESSAGE, EventType.CONTEXT_COMPACTED,
+                     EventType.MCP_DISCOVERY, EventType.SESSION_END}:
+            self._inspector_context_tokens = self._runtime.context_tokens_used()
+        self._refresh_inspector()
         if etype is EventType.TOOL_CALL_START:
             self._end_streaming()
             data = event.data
@@ -895,6 +951,11 @@ class MiniCodeApp(App[None]):
                 self._mount(card)
             card.set_result(event.data)
             return
+        if etype is EventType.TOOL_OUTPUT:
+            card = self._cards.get(str(event.data.get("call_id", "")))
+            if card is not None:
+                card.set_live_output(str(event.data.get("output_preview") or ""))
+            return
         if etype is EventType.ROUND_START:
             self._refresh_status("等待模型响应")
             return
@@ -917,9 +978,11 @@ class MiniCodeApp(App[None]):
             EventType.SUBAGENT_START,
             EventType.SUBAGENT_RESULT,
             EventType.PROJECT_INSTRUCTIONS,
+            EventType.MCP_DISCOVERY,
         ):
-            self._end_streaming()
-            self._add_line(_p1_line(event), "msg-event")
+            if etype is not EventType.MCP_DISCOVERY or event.data.get("error"):
+                self._end_streaming()
+                self._add_line(_p1_line(event), "msg-event")
 
     # -- turn execution -------------------------------------------------------
 
@@ -934,10 +997,15 @@ class MiniCodeApp(App[None]):
         self._end_streaming()
         self._set_busy(True, "等待模型响应")
         try:
-            result = (
-                await self._runtime.run_turn(text)
-                if text is not None else await self._runtime.continue_turn()
-            )
+            try:
+                result = (
+                    await self._runtime.run_turn(text)
+                    if text is not None else await self._runtime.continue_turn()
+                )
+            finally:
+                # MCP's SDK exit stack must close in the same worker task
+                # that entered it during this turn.
+                await self._services.registry.aclose()
         except asyncio.CancelledError:
             # The runtime already persisted the session as cancelled.
             self._end_streaming()
@@ -1046,12 +1114,90 @@ class MiniCodeApp(App[None]):
         self.query_one("#log", VerticalScroll).anchor()
         self.query_one("#new-content", Static).display = False
 
+    def _inspector_text(self) -> Text:
+        runtime = self._runtime
+        text = Text()
+        text.append("任务状态\n", style="bold cyan")
+        text.append(f"会话  {(runtime.session_id or '未开始')[:8]}\n")
+        text.append(f"模型  {runtime.provider_name}/{runtime.model}\n")
+        text.append(f"轮数  {runtime.rounds}\n")
+        text.append(f"上下文约 {format_tokens(self._inspector_context_tokens)} / "
+                    f"{format_tokens(runtime.context_window)}\n")
+        usage = runtime.usage
+        text.append(f"累计  {format_tokens(usage.total_tokens)} token\n")
+        text.append(f"缓存读/写  {format_tokens(usage.cache_read_tokens)} / "
+                    f"{format_tokens(usage.cache_write_tokens)}\n")
+        starts = {str(event.data.get("call_id")): event.data for event in self._inspector_events
+                  if event.type is EventType.TOOL_CALL_START}
+        changes = []
+        latest_command = None
+        latest_goal = None
+        children = []
+        for event in self._inspector_events:
+            data = event.data
+            if event.type is EventType.TOOL_CALL_RESULT:
+                if data.get("name") in {"edit", "write"} and data.get("success"):
+                    call = starts.get(str(data.get("call_id")), {})
+                    changes.append(str(call.get("arguments", {}).get("path", "?")))
+                if data.get("name") == "bash":
+                    latest_command = data
+            elif event.type is EventType.TOOL_OUTPUT and data.get("name") == "bash":
+                latest_command = {"success": None, "duration_s": "运行中",
+                                  "output_preview": data.get("output_preview")}
+            elif event.type is EventType.GOAL_CHECK:
+                latest_goal = data
+            elif event.type is EventType.SUBAGENT_RESULT:
+                children.append(data)
+        text.append("\n改动文件\n", style="bold cyan")
+        text.append("\n".join(dict.fromkeys(changes[-12:])) if changes else "暂无")
+        text.append("\n\n验收\n", style="bold cyan")
+        if latest_goal is None:
+            text.append("尚未运行")
+        else:
+            text.append("通过" if latest_goal.get("passed") else "未通过",
+                        style="green" if latest_goal.get("passed") else "yellow")
+        text.append("\n\n子任务\n", style="bold cyan")
+        if children:
+            for item in children[-5:]:
+                text.append(f"{item.get('kind')} · {item.get('exit_reason')} · "
+                            f"{str(item.get('child_session_id', ''))[:8]}\n")
+        else:
+            text.append("暂无\n")
+        text.append("\n最近命令\n", style="bold cyan")
+        if latest_command is None:
+            text.append("暂无")
+        else:
+            command_status = ("运行中" if latest_command.get("success") is None
+                              else "成功" if latest_command.get("success") else "失败")
+            duration = latest_command.get("duration_s", 0)
+            text.append(f"{command_status} · {duration}{'' if isinstance(duration, str) else 's'}\n")
+            text.append(str(latest_command.get("output_preview") or "")[-600:])
+            if latest_command.get("artifact_id"):
+                text.append("\n完整日志可展开时间线中的工具卡片。", style="dim")
+        return text
+
+    def _refresh_inspector(self) -> None:
+        if self.is_mounted:
+            self.query_one("#inspector-body", Static).update(self._inspector_text())
+
+    def action_toggle_inspector(self) -> None:
+        if self.size.width < 120:
+            self.push_screen(InspectorModal(self._inspector_text()))
+            return
+        self._inspector_open = not self._inspector_open
+        self.set_class(self._inspector_open, "inspector-open")
+        self.query_one("#inspector").display = self._inspector_open
+        self._refresh_inspector()
+
     @on(events.Click, "#new-content")
     def _on_new_content_click(self) -> None:
         self.action_follow_log()
 
     def on_resize(self, event: events.Resize) -> None:
         self.set_class(event.size.width < 100, "narrow")
+        self.set_class(self._inspector_open and event.size.width >= 120, "inspector-open")
+        if self.is_mounted:
+            self.query_one("#inspector").display = self._inspector_open and event.size.width >= 120
 
     async def on_unmount(self) -> None:
         if self._activity_timer is not None:
@@ -1379,6 +1525,9 @@ class MiniCodeApp(App[None]):
         """彻底重置上下文：重建 runtime，下一条消息开启全新会话。"""
         self._clear_log()
         self._build_runtime()
+        self._inspector_events.clear()
+        self._inspector_context_tokens = self._runtime.context_tokens_used()
+        self._refresh_inspector()
         self._add_line(
             Text("已重置对话上下文，新会话将在下一条消息时创建。", style="green"),
             "msg-system",
@@ -1569,6 +1718,9 @@ class MiniCodeApp(App[None]):
         self._setup = setup
         self._services = services
         self._runtime = runtime
+        self._inspector_events = deque(self._store.get_events(resolved), maxlen=200)
+        self._inspector_context_tokens = runtime.context_tokens_used()
+        self._refresh_inspector()
         if previous_provider is not setup.provider:
             close = getattr(previous_provider, "aclose", None)
             if close is not None:

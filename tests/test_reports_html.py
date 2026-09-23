@@ -105,6 +105,7 @@ SAMPLE_DATA: dict[EventType, dict[str, Any]] = {
         "exit_code": 0,
         "output_preview": "1 passed",
     },
+    EventType.TOOL_OUTPUT: {"call_id": "c1", "name": "bash", "output_preview": "collecting 12 tests"},
     EventType.APPROVAL_REQUEST: {
         "call_id": "c1",
         "tool_name": "bash",
@@ -138,6 +139,7 @@ SAMPLE_DATA: dict[EventType, dict[str, Any]] = {
     EventType.SKILL_DEACTIVATED: {"name": "review"},
     EventType.SUBAGENT_START: {"kind": "review", "child_session_id": "child-1"},
     EventType.SUBAGENT_RESULT: {"kind": "review", "child_session_id": "child-1", "exit_reason": "completed"},
+    EventType.MCP_DISCOVERY: {"server": "docs", "plugin": "docs", "protocol": "2026-07-28"},
 }
 
 # ---------------------------------------------------------------------------

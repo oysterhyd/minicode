@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -266,13 +267,22 @@ class BashTool(BaseTool):
             return ToolOutcome.failure(f"failed to start command: {exc}")
 
         with tempfile.TemporaryFile(mode="w+b") as captured:
+            live_tail = ""
+            last_emit = 0.0
             async def collect() -> tuple[int, bool]:
+                nonlocal live_tail, last_emit
                 assert proc.stdout is not None
                 total = 0
                 while chunk := await proc.stdout.read(64 * 1024):
                     remaining = ctx.limits.max_command_capture_bytes - total
                     captured.write(chunk[:max(0, remaining)])
                     total += min(len(chunk), max(0, remaining))
+                    if ctx.on_output is not None:
+                        live_tail = (live_tail + decode_shell_output(chunk))[-2000:]
+                        now = time.monotonic()
+                        if now - last_emit >= 0.25:
+                            await ctx.on_output(live_tail)
+                            last_emit = now
                     if len(chunk) > remaining:
                         await kill_process_tree(proc)
                         return total, True
