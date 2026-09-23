@@ -44,6 +44,7 @@ from minicode.providers.errors import ProviderAuthError, ProviderError, Provider
 from minicode.runtime.budget import BudgetChecker
 from minicode.runtime.events import EventCallback, EventRecorder
 from minicode.runtime.prompt import build_system_prompt
+from minicode.context.extensions import ProjectInstructions, SkillCatalog, Source
 from minicode.security.policy import PermissionPolicy, PolicyBehavior
 from minicode.storage import SessionStore
 from minicode.tools.base import ToolContext, ToolLimits
@@ -61,7 +62,7 @@ _SPILL_LIMITS = ToolLimits()
 
 #: Tool names that are safe to re-execute while resuming an interrupted
 #: session: they only read, so re-running them cannot duplicate side effects.
-_READ_ONLY_TOOLS = frozenset({"read", "ls", "grep", "read_artifact"})
+_READ_ONLY_TOOLS = frozenset({"read", "ls", "grep", "read_artifact", "skills_list", "skill_load", "skill_unload", "skill_resource"})
 _MAX_PARALLEL_READS = 4
 
 
@@ -136,6 +137,9 @@ class AgentRuntime:
         evidence_ledger: Any | None = None,
         background_manager: Any | None = None,
         artifact_store: Any | None = None,
+        project_instructions: ProjectInstructions | None = None,
+        skills: SkillCatalog | None = None,
+        allow_delegation: bool = True,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -148,16 +152,24 @@ class AgentRuntime:
         self._approval_handler = approval_handler
         self._on_text_delta = on_text_delta
         self._on_event = on_event
-        self._system_prompt = (
+        self._base_system_prompt = (
             system_prompt
             if system_prompt is not None
             else build_system_prompt(str(workspace.resolve()), registry.names())
         )
+        self._system_prompt = self._base_system_prompt
         self._compactor = compactor
         self._goal_checker = goal_checker
         self._evidence_ledger = evidence_ledger
         self._background_manager = background_manager
         self._artifact_store = artifact_store
+        self._project_instructions = project_instructions
+        self._skills = skills
+        self._active_skills: dict[str, str] = {}
+        self._active_skill_sources: dict[str, Source] = {}
+        self._allow_delegation = allow_delegation
+        self._pending_instruction_scopes: set[Path] = set()
+        self._refresh_system_prompt()
 
         self.session_id: str | None = None  # created on first run_turn
         self._messages: list[Message] = []  # mirrors the persisted conversation
@@ -263,6 +275,45 @@ class AgentRuntime:
             reserve_output_tokens=0,
         )
 
+    def _refresh_system_prompt(self) -> None:
+        sections = [self._base_system_prompt]
+        if self._project_instructions is not None and self._project_instructions.loaded:
+            sections.append(self._project_instructions.prompt_section())
+        if self._skills is not None and self._skills.skills:
+            sections.append("可用技能目录（正文按需加载）：\n" + self._skills.listing(6000))
+        sections.extend(
+            f"已激活技能 {name}；来源：{source.label()}\n{source.content}"
+            for name, source in self._active_skill_sources.items()
+        )
+        self._system_prompt = "\n\n".join(sections)
+
+    def activate_skill(self, name: str) -> str:
+        """Load a skill body once per content version for this session."""
+        if self._skills is None:
+            raise ValueError("no skills are configured")
+        source = self._skills.load(name)
+        if name in self._active_skills and self._active_skills[name] != source.digest:
+            raise ValueError(f"skill changed during this session; start a new session: {name}")
+        if self._active_skills.get(name) != source.digest:
+            self._active_skills[name] = source.digest
+            self._active_skill_sources[name] = source
+            self._refresh_system_prompt()
+            if self.session_id is not None:
+                self._store.append_event(self.session_id, EventType.SKILL_ACTIVATED, {
+                    "name": name, "path": str(source.path), "sha256": source.digest,
+                })
+        return f"已激活技能 {name}；来源：{source.label()}\n{source.content}"
+
+    def deactivate_skill(self, name: str) -> str:
+        if name not in self._active_skills:
+            raise ValueError(f"skill is not active: {name}")
+        self._active_skills.pop(name)
+        self._active_skill_sources.pop(name)
+        self._refresh_system_prompt()
+        if self.session_id is not None:
+            self._store.append_event(self.session_id, EventType.SKILL_DEACTIVATED, {"name": name})
+        return f"已停用技能 {name}"
+
     # -- live configuration ---------------------------------------------------
 
     def set_model(
@@ -350,6 +401,10 @@ class AgentRuntime:
                         "model": self._model,
                         "budget": self._budget.model_dump(),
                     }
+                    if self._project_instructions is not None:
+                        start_data["project_instructions"] = self._project_instructions.sources()
+                    if self._active_skills:
+                        start_data["active_skills"] = dict(self._active_skills)
                     resume_identity = getattr(self._provider, "resume_identity", None)
                     if callable(resume_identity):
                         start_data["provider_resume_identity"] = resume_identity()
@@ -413,6 +468,7 @@ class AgentRuntime:
                     self._store.update_session(session_id, rounds=self._rounds)
 
                     self._check_deadline()
+                    self._pending_instruction_scopes.clear()
                     response, failure, error, provider_exc = await self._stream_assistant_turn()
                     self._check_deadline()
                     if response is None:
@@ -584,6 +640,8 @@ class AgentRuntime:
         evidence_ledger: Any | None = None,
         background_manager: Any | None = None,
         artifact_store: Any | None = None,
+        project_instructions: ProjectInstructions | None = None,
+        skills: SkillCatalog | None = None,
     ) -> "AgentRuntime":
         """Continue a persisted session in a fresh process.
 
@@ -617,6 +675,16 @@ class AgentRuntime:
             raise ValueError(
                 f"workspace no longer exists: {resolved_workspace} (session {session_id})"
             )
+        if project_instructions is None and (
+            (start_event and start_event.data.get("project_instructions"))
+            or any(e.type is EventType.PROJECT_INSTRUCTIONS for e in events)
+        ):
+            project_instructions = ProjectInstructions(resolved_workspace)
+        if skills is None and (
+            (start_event and start_event.data.get("active_skills"))
+            or any(e.type is EventType.SKILL_ACTIVATED for e in events)
+        ):
+            skills = SkillCatalog(resolved_workspace)
 
         resolved_provider = provider_name or provider.name
         resolved_model = model or getattr(provider, "model", summary.model)
@@ -639,7 +707,32 @@ class AgentRuntime:
             evidence_ledger=evidence_ledger,
             background_manager=background_manager,
             artifact_store=artifact_store,
+            project_instructions=project_instructions,
+            skills=skills,
         )
+        if project_instructions is not None:
+            expected_sources = list(start_event.data.get("project_instructions", [])) if start_event else []
+            expected_sources.extend(event.data for event in events
+                                    if event.type is EventType.PROJECT_INSTRUCTIONS)
+            for saved in expected_sources:
+                path = Path(saved["path"])
+                if path != resolved_workspace / "AGENTS.md":
+                    relative = path.relative_to(resolved_workspace)
+                    project_instructions.discover(str(relative.parent / "_scope_probe"))
+                source = project_instructions.loaded.get(path)
+                if source is None or source.digest != saved["sha256"]:
+                    raise ValueError(f"project instructions changed since session start: {path}")
+            runtime._refresh_system_prompt()
+        active_skills = dict(start_event.data.get("active_skills", {})) if start_event else {}
+        for event in events:
+            if event.type is EventType.SKILL_ACTIVATED:
+                active_skills[str(event.data["name"])] = str(event.data["sha256"])
+            elif event.type is EventType.SKILL_DEACTIVATED:
+                active_skills.pop(str(event.data["name"]), None)
+        for name, digest in active_skills.items():
+            if skills is None or skills.load(name).digest != digest:
+                raise ValueError(f"activated skill changed since session start: {name}")
+            runtime.activate_skill(name)
         runtime.session_id = session_id
         runtime._messages = store.get_messages(session_id)
         runtime._usage = Usage(
@@ -678,6 +771,30 @@ class AgentRuntime:
                         cache_write_tokens=int(data.get("cache_write_tokens", 0)),
                         available=bool(data.get("available", False)),
                     )
+            elif event.type is EventType.SUBAGENT_RESULT:
+                data = event.data.get("usage")
+                if isinstance(data, dict):
+                    event_usage += Usage(**data)
+        child_ids = {
+            str(event.data["child_session_id"])
+            for event in events if event.type is EventType.SUBAGENT_START
+            and event.data.get("child_session_id")
+        }
+        settled_children = {
+            str(event.data["child_session_id"])
+            for event in events if event.type is EventType.SUBAGENT_RESULT
+            and event.data.get("child_session_id")
+        }
+        for child_id in child_ids:
+            child_events = store.get_events(child_id)
+            child_responses = [event for event in child_events
+                               if event.type is EventType.ASSISTANT_MESSAGE]
+            completed_responses += len(child_responses)
+            if child_id not in settled_children:
+                for child_event in child_responses:
+                    data = child_event.data.get("usage")
+                    if isinstance(data, dict):
+                        event_usage += Usage(**data)
         runtime._rounds = event_rounds
         restore_progress = getattr(provider, "restore_progress", None)
         resume_identity = getattr(provider, "resume_identity", None)
@@ -695,6 +812,12 @@ class AgentRuntime:
                 str(event.data.get("call_id", ""))
                 for event in events if event.type is EventType.TOOL_CALL_START
             )
+            for child_id in child_ids:
+                ids.extend(
+                    str(event.data.get("call_id", ""))
+                    for event in store.get_events(child_id)
+                    if event.type is EventType.TOOL_CALL_START
+                )
             fake_call_counter = max((
                 int(call_id.removeprefix("fake_tool_"))
                 for call_id in ids
@@ -894,6 +1017,25 @@ class AgentRuntime:
         if tool is None:
             return ToolOutcome.failure(f"unknown tool: {call.name}")
 
+        if self._project_instructions is not None and call.name in {"read", "ls", "grep", "edit", "write"}:
+            target = call.input.get("path")
+            if isinstance(target, str):
+                try:
+                    target_path = (self._workspace / target).resolve()
+                    if any(target_path.is_relative_to(scope) for scope in self._pending_instruction_scopes):
+                        return ToolOutcome.failure("该目录的新 AGENTS.md 指令刚被加载；请按新指令重新调用工具。")
+                    discovered = self._project_instructions.discover(target)
+                except (ValueError, OSError, UnicodeError) as exc:
+                    return ToolOutcome.failure(str(exc))
+                if discovered:
+                    self._pending_instruction_scopes.update(source.path.parent for source in discovered)
+                    self._refresh_system_prompt()
+                    for source in discovered:
+                        await recorder.emit(EventType.PROJECT_INSTRUCTIONS, {
+                            "path": str(source.path), "sha256": source.digest,
+                        })
+                    return ToolOutcome.failure("已加载该目录的 AGENTS.md 指令。请按新指令重新调用工具。")
+
         decision = await self._policy.check(call.name, call.input)
         if decision.behavior is PolicyBehavior.DENY:
             reason = f": {decision.reason}" if decision.reason else ""
@@ -939,6 +1081,9 @@ class AgentRuntime:
             artifact_store=self._artifact_store,
             background_manager=self._background_manager,
             session_id=self.session_id,
+            activate_skill=self.activate_skill if self._skills is not None else None,
+            deactivate_skill=self.deactivate_skill if self._skills is not None else None,
+            delegate=self._delegate if self._allow_delegation else None,
         )
         for attempt in range(2):
             try:
@@ -948,6 +1093,133 @@ class AgentRuntime:
                     return ToolOutcome.failure(f"internal tool error: {exc}")
                 await asyncio.sleep(0.1)
         raise AssertionError("tool retry loop must return")
+
+    async def _delegate(self, kind: str, task: str) -> ToolOutcome:
+        """Run one bounded child session with an independently restricted registry."""
+        from minicode.security.policy import DefaultPolicy
+        from minicode.tools.artifacts import ReadArtifactTool
+        from minicode.tools.files import LsTool, ReadTool
+        from minicode.tools.search import GrepTool
+
+        if self.session_id is None:
+            return ToolOutcome.failure("parent session has not started")
+        remaining = (self._budget.max_total_tokens - self._usage.total_tokens
+                     if self._budget.max_total_tokens > 0 else 10_000)
+        if remaining <= 0:
+            return ToolOutcome.failure("parent token budget is exhausted")
+        seconds = min(90.0, (self._deadline or time.monotonic() + 90) - time.monotonic() - 1)
+        if seconds <= 1:
+            return ToolOutcome.failure("parent time slice has no room for a child")
+
+        child_registry = ToolRegistry()
+        for tool in (ReadTool(), LsTool(), GrepTool(), ReadArtifactTool()):
+            child_registry.register(tool)
+        async def on_child_event(event: Any) -> None:
+            if event.type is EventType.SESSION_START:
+                await EventRecorder(self._store, self.session_id, self._on_event).emit(
+                    EventType.SUBAGENT_START,
+                    {"kind": kind, "task": task, "child_session_id": child.session_id},
+                )
+
+        child = AgentRuntime(
+            provider=self._provider, registry=child_registry, store=self._store,
+            policy=DefaultPolicy(), workspace=self._workspace,
+            provider_name=self._provider_name, model=self._model,
+            budget=Budget(max_rounds=8, max_total_tokens=min(10_000, remaining),
+                          max_seconds=seconds),
+            artifact_store=self._artifact_store,
+            project_instructions=ProjectInstructions(self._workspace),
+            allow_delegation=False,
+            on_event=on_child_event,
+        )
+        requirements = "\n".join(
+            block.text for message in self._messages[-12:] if message.role == "user"
+            for block in message.content if isinstance(block, TextBlock)
+        )[-4000:]
+        child._base_system_prompt += (
+            "\n\n你是只读子助手。只能调查与审查，不得执行 shell 或修改文件。"
+            "最终只输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、"
+            "evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。"
+            "不得编造证据。\n父任务要求：\n" + requirements
+        )
+        child._refresh_system_prompt()
+        child_result: RunResult | None = None
+        try:
+            child_result = await child.run_turn(f"{kind}：{task}")
+        finally:
+            self._usage = self._usage + child.usage
+            self._persist_counters()
+        child_id = child.session_id
+        assert child_id is not None
+        events = self._store.get_events(child_id)
+        successful_calls = {
+            str(event.data.get("call_id")) for event in events
+            if event.type is EventType.TOOL_CALL_RESULT and event.data.get("success")
+        }
+        observed = {
+            str(event.data["arguments"]["path"])
+            for event in events if event.type is EventType.TOOL_CALL_START
+            and str(event.data.get("call_id")) in successful_calls
+            and event.data.get("name") in {"read", "ls", "grep"}
+            and isinstance(event.data.get("arguments", {}).get("path"), str)
+        }
+        final_text = ""
+        for message in reversed(child._messages):
+            if message.role == "assistant":
+                final_text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+                break
+        structured = False
+        try:
+            payload = json.loads(final_text)
+            if not isinstance(payload, dict):
+                raise ValueError("child response is not an object")
+            if (not isinstance(payload.get("summary"), str)
+                    or any(not isinstance(payload.get(key), list)
+                           for key in ("findings", "evidence_refs", "unresolved"))):
+                raise ValueError("child response has an invalid schema")
+            summary = str(payload.get("summary", ""))[:600]
+            findings = [str(item)[:180] for item in payload.get("findings", [])[:5]]
+            unresolved = [str(item)[:160] for item in payload.get("unresolved", [])[:5]]
+            requested_refs = payload.get("evidence_refs", [])
+            if not isinstance(requested_refs, list):
+                requested_refs = []
+            structured = True
+        except (ValueError, TypeError, AttributeError):
+            summary, findings, requested_refs = final_text[:600], [], []
+            unresolved = ["子助手未返回有效的结构化结果。"]
+        verified: list[str] = []
+        for ref in requested_refs[:8]:
+            if not isinstance(ref, str):
+                continue
+            ref = ref[:120]
+            path = ref.split(":", 1)[0]
+            resolved = (self._workspace / path).resolve()
+            if path in observed and resolved.is_relative_to(self._workspace.resolve()) and resolved.exists():
+                verified.append(ref)
+            else:
+                unresolved.append(f"未验证的证据引用：{ref}")
+        unresolved = unresolved[:8]
+        record = {
+            "kind": kind, "child_session_id": child_id,
+            "exit_reason": child_result.exit_reason.value if child_result else "unknown",
+            "structured": structured,
+            "usage": child.usage.model_dump(), "evidence_refs": verified,
+        }
+        await EventRecorder(self._store, self.session_id, self._on_event).emit(
+            EventType.SUBAGENT_RESULT, record
+        )
+        status = record["exit_reason"] if structured else "invalid_result"
+        result = {"summary": summary, "findings": findings,
+                  "evidence_refs": verified, "unresolved": unresolved,
+                  "child_session_id": child_id, "status": status}
+        completed = (child_result is not None and child_result.exit_reason is ExitReason.COMPLETED
+                     and structured)
+        if not completed:
+            result["unresolved"].append(f"子任务状态：{status}")
+        return ToolOutcome(
+            success=completed, output=json.dumps(result, ensure_ascii=False),
+            error=None if completed else f"子任务未完成：{status}",
+        )
 
     @staticmethod
     def _approval_summary(name: str, arguments: dict[str, Any]) -> str:

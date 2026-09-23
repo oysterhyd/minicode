@@ -133,6 +133,11 @@ SAMPLE_DATA: dict[EventType, dict[str, Any]] = {
     EventType.BACKGROUND_JOB_STARTED: {"job_id": "j1", "command": "sleep 10"},
     EventType.BACKGROUND_JOB_COMPLETED: {"job_id": "j1", "exit_code": 0},
     EventType.BACKGROUND_JOB_LOST: {"job_id": "j1"},
+    EventType.PROJECT_INSTRUCTIONS: {"path": "AGENTS.md", "sha256": "abc"},
+    EventType.SKILL_ACTIVATED: {"name": "review", "sha256": "def"},
+    EventType.SKILL_DEACTIVATED: {"name": "review"},
+    EventType.SUBAGENT_START: {"kind": "review", "child_session_id": "child-1"},
+    EventType.SUBAGENT_RESULT: {"kind": "review", "child_session_id": "child-1", "exit_reason": "completed"},
 }
 
 # ---------------------------------------------------------------------------

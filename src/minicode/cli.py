@@ -615,6 +615,8 @@ class _Services:
     artifact_store: Any
     goal_checker: Any | None
     evidence_ledger: Any | None
+    project_instructions: Any
+    skills: Any
 
 
 def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bool) -> _Services:
@@ -638,7 +640,11 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
         else:
             _print_p1_event(console, event)
 
-    registry = default_registry()
+    from minicode.context.extensions import ProjectInstructions, SkillCatalog
+
+    project_instructions = ProjectInstructions(setup.workspace)
+    skills = SkillCatalog(setup.workspace)
+    registry = default_registry(skills=skills, delegation=True)
     policy: PermissionPolicy
     approval_handler: ApprovalHandler | None
     if yes:
@@ -668,6 +674,8 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
         artifact_store=ArtifactStore(store),
         goal_checker=goal_checker,
         evidence_ledger=evidence_ledger,
+        project_instructions=project_instructions,
+        skills=skills,
     )
 
 
@@ -713,6 +721,8 @@ def _new_runtime(setup: _Setup, store: SqliteStore, services: Any) -> Any:
         artifact_store=services.artifact_store,
         goal_checker=services.goal_checker,
         evidence_ledger=services.evidence_ledger,
+        project_instructions=services.project_instructions,
+        skills=services.skills,
     )
     _attach_compactor(runtime, services.artifact_store)
     return runtime
@@ -734,6 +744,18 @@ def _print_p1_event(console: Console, event: Event) -> None:
         console.print(
             Text(f"  ◆ 上下文已压缩：估算 {format_tokens(int(before or 0))} → {format_tokens(int(after or 0))}", style="dim")
         )
+        return
+    if event.type is EventType.SUBAGENT_START:
+        console.print(Text(
+            f"  ◌ {event.data.get('kind')} 子任务已开始 · "
+            f"{str(event.data.get('child_session_id', ''))[:8]}", style="yellow"
+        ))
+        return
+    if event.type is EventType.SUBAGENT_RESULT:
+        console.print(Text(
+            f"  ◆ {event.data.get('kind')} 子任务 {event.data.get('exit_reason')}"
+            f" · 证据 {len(event.data.get('evidence_refs', []))} 项", style="dim"
+        ))
         return
     if event.type is EventType.BACKGROUND_JOB_COMPLETED:
         ok = event.data.get("status") == "completed"
@@ -963,6 +985,16 @@ class _ChatRepl:
             self._cmd_effort(arg)
         elif verb == "/permissions":
             self._cmd_permissions(arg)
+        elif verb == "/skill":
+            if not arg:
+                self.console.print(self.services.skills.listing())
+            else:
+                try:
+                    result = (self.runtime.deactivate_skill(arg[4:].strip())
+                              if arg.startswith("off ") else self.runtime.activate_skill(arg))
+                    self.console.print(result.split("\n", 1)[0])
+                except (ValueError, OSError, UnicodeError) as exc:
+                    self.console.print(f"[yellow]{exc}[/]")
         elif verb == "/sessions":
             self._cmd_sessions()
         elif verb == "/continue":
@@ -1197,6 +1229,8 @@ def _make_resumed_runtime(
             evidence_ledger=services.evidence_ledger,
             background_manager=services.background_manager,
             artifact_store=services.artifact_store,
+            project_instructions=services.project_instructions,
+            skills=services.skills,
         )
     except ValueError as exc:
         _fail(str(exc))

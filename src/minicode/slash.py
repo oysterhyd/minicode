@@ -58,6 +58,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/clear", "/clear", "清空屏幕显示（保留会话上下文）"),
     SlashCommand("/new", "/new", "彻底重置上下文，开启全新会话"),
     SlashCommand("/compact", "/compact", "手动压缩当前会话上下文"),
+    SlashCommand("/skill", "/skill [名称|off 名称]", "列出、激活或停用本地技能"),
     SlashCommand("/sessions", "/sessions", "列出历史会话"),
     SlashCommand("/resume", "/resume <会话ID8>", "恢复一个历史会话"),
     SlashCommand("/continue", "/continue", "从上次暂停处继续未完成任务"),

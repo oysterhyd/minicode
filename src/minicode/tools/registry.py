@@ -32,7 +32,7 @@ class ToolRegistry:
         return list(self._tools)
 
 
-def default_registry() -> ToolRegistry:
+def default_registry(*, skills=None, delegation: bool = False) -> ToolRegistry:
     """Registry preloaded with the built-in tools.
 
     The first four mirror the Pi agent's core tool set (read / bash /
@@ -49,4 +49,13 @@ def default_registry() -> ToolRegistry:
         ReadArtifactTool(),
     ):
         registry.register(tool)
+    if skills is not None:
+        from minicode.tools.extensions import SkillLoadTool, SkillUnloadTool, SkillResourceTool, SkillsListTool
+
+        for tool in (SkillsListTool(skills), SkillLoadTool(), SkillUnloadTool(), SkillResourceTool(skills)):
+            registry.register(tool)
+    if delegation:
+        from minicode.tools.extensions import DelegateTool
+
+        registry.register(DelegateTool())
     return registry

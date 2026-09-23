@@ -6,11 +6,12 @@
 执行协议、权限、预算、取消与持久化；不将调用模型包装成模型训练能力，也不宣称完整复刻商业
 Claude Code。
 
-**当前状态（2026-09-22 核对）**：P0 最小闭环——单轮任务、交互会话、基础工具、权限审批、
+**当前状态（2026-09-23 核对）**：P0 最小闭环——单轮任务、交互会话、基础工具、权限审批、
 预算与取消、SQLite 会话持久化与执行报告——已实现。P1 已接入分层上下文压缩与输出归档、
 会话恢复与未知副作用处理、Goal 验收器与证据绑定、后台命令、20 任务离线评测集、HTML
 执行报告和 Textual 全屏 TUI。压缩及归档仍有边界限制，见下方说明。
-当前没有子代理、MCP、Skills 或 Plugins；`TaskStore` 有独立实现和测试，但尚未接入主循环及交互入口。
+优化方案 A–C 已接入：项目指令、按需加载的本地 Skills、单层只读 explore/review 子任务。
+MCP、Plugins 仍未实现；`TaskStore` 有独立实现和测试，但尚未接入主循环及交互入口。
 
 **交互与运行时增强**：启动 ASCII Banner（Oyster Harness + 版本/环境信息）、斜杠命令
 自动补全（Tab 补全 / ↑↓ 选择 / Esc 关闭 / Enter 确认）、`/model`（z.ai/glm-5.3-flash 与
@@ -150,19 +151,22 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 - **HTML 报告**：单文件、零外链、可离线打开；时间线、工具记录与 diff、验收证据表、用量。
 - **TUI**：Textual 全屏时间线；回复流式期间合并刷新，完成后渲染 Markdown；工具结果按需展开，
   运行状态与耗时独立显示。浏览旧记录时保留滚动位置；运行中可编辑并排队下一条输入。
+- **项目指令与 Skills**：根目录 `AGENTS.md` 启动时加载；子目录 `AGENTS.md` 在首次访问对应范围时加载并要求重试该次工具调用。会话记录来源路径与内容哈希；变更后恢复会提示冲突。扫描项目 `.minicode/skills/<name>/SKILL.md` 和用户 `~/.minicode/skills/<name>/SKILL.md` 的元数据，`/skill` 列出、`/skill <name>` 激活、`/skill off <name>` 停用；模型也可用 `skills_list`、`skill_load`、`skill_unload`、`skill_resource`。技能正文只在激活时加载，资源读取限于注册目录，脚本执行仍走普通 `bash` 审批。
+- **只读子任务**：模型可用 `delegate` 请求 `explore` 或 `review`；子会话只注册 `read`、`ls`、`grep`、`read_artifact`，不注册 shell 或写入工具。子会话单层、串行、最多 8 轮与 90 秒，使用父任务剩余 token 上限；父任务取消会取消子任务。父会话记录子会话 ID、用量和结果，返回摘要、发现、经工具记录验证的文件引用与未解决项。
 
 ## 当前实现边界
 
 - 同一模型响应中连续的内置只读工具最多 4 个并发；写入、命令与未知工具是顺序屏障。
   后台命令在同一进程的自动续跑期间保持运行；真正暂停、取消或进程退出时无法跨进程继承。
 - `TaskStore` 的依赖与认领能力尚未接入 Runtime，不能视为已有多代理调度。
+- 子任务目前串行执行，未提供并行子代理调度；证据引用仅验证子任务成功读取过对应路径及路径仍存在，不做语义真实性判断。
 - 缓存读/写用量与“provider 未返回 usage”状态会逐请求记入事件、累计写入 SQLite，并在 resume 后恢复；
   Anthropic 请求尚未主动配置 `cache_control`，OpenAI 兼容协议也不保证网关支持相同缓存行为。
 - token 估算仍采用字符数 / 3，不是服务端 tokenizer 的严格上界；服务端拒绝时会尝试归档缩减后重试。
 
 ## 明确未实现（P2）
 
-- Subagents、MCP 工具接入、Skills 按需加载、Plugins 打包加载、项目指令自动加载与项目记忆。
+- MCP 工具接入、Plugins 打包加载、项目长期记忆、并行或写入型子代理。
 - 多 worker worktree 协作、可续跑 workflow。
 - 定时任务、Web 操作界面。
 
@@ -172,7 +176,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 → 结果回填」循环，`core` 提供共享 pydantic 契约，事件与消息实时写入 SQLite。
 模块图、事件流与关键语义见 [docs/architecture.md](docs/architecture.md)，
 原始设计记录见 [plan.md](plan.md)；本轮功能扩展、TUI 与效率优化建议见
-[探索与优化方案](docs/optimization-design.md)（A、B 阶段已实现，C–D 阶段待迭代）。
+[探索与优化方案](docs/optimization-design.md)（A–C 阶段已实现，D 阶段待迭代）。
 
 ## 运行测试
 

@@ -467,6 +467,20 @@ def _p1_line(event: Event) -> Text:
         return Text(
             f"  ◆ {data.get('name')} 的副作用状态未知，需要先核实", style="yellow"
         )
+    if event.type is EventType.SUBAGENT_START:
+        return Text(
+            f"  ◌ {data.get('kind')} 子任务已开始 · {str(data.get('child_session_id', ''))[:8]}",
+            style="yellow",
+        )
+    if event.type is EventType.SUBAGENT_RESULT:
+        return Text(
+            f"  ✓ {data.get('kind')} 子任务 {data.get('exit_reason')}"
+            f" · 证据 {len(data.get('evidence_refs', []))} 项"
+            f" · {str(data.get('child_session_id', ''))[:8]}",
+            style="green" if data.get("exit_reason") == "completed" and data.get("structured") else "yellow",
+        )
+    if event.type is EventType.PROJECT_INSTRUCTIONS:
+        return Text(f"  ◆ 已加载项目指令 {data.get('path')}", style="dim")
     raise AssertionError(f"unhandled P1 event: {event.type}")
 
 
@@ -615,6 +629,8 @@ class MiniCodeApp(App[None]):
             on_event=self._on_event,
             background_manager=services.background_manager,
             artifact_store=services.artifact_store,
+            project_instructions=services.project_instructions,
+            skills=services.skills,
             goal_checker=services.goal_checker,
             evidence_ledger=services.evidence_ledger,
         )
@@ -850,6 +866,9 @@ class MiniCodeApp(App[None]):
             EventType.BACKGROUND_JOB_COMPLETED,
             EventType.BACKGROUND_JOB_LOST,
             EventType.SIDE_EFFECT_UNKNOWN,
+            EventType.SUBAGENT_START,
+            EventType.SUBAGENT_RESULT,
+            EventType.PROJECT_INSTRUCTIONS,
         ):
             self._end_streaming()
             self._add_line(_p1_line(event), "msg-event")
@@ -1284,6 +1303,17 @@ class MiniCodeApp(App[None]):
             self._cmd_effort(arg)
         elif verb == "/permissions":
             self._cmd_permissions(arg)
+        elif verb == "/skill":
+            if not arg:
+                self._add_line(Text(self._services.skills.listing()), "msg-system")
+            else:
+                try:
+                    result = (self._runtime.deactivate_skill(arg[4:].strip())
+                              if arg.startswith("off ") else self._runtime.activate_skill(arg))
+                    result = result.split("\n", 1)[0]
+                    self._add_line(Text(result, style="green"), "msg-system")
+                except (ValueError, OSError, UnicodeError) as exc:
+                    self._add_line(Text(str(exc), style="yellow"), "msg-warn")
         elif verb == "/sessions":
             self._cmd_sessions()
         elif verb == "/resume":
@@ -1484,6 +1514,8 @@ class MiniCodeApp(App[None]):
                 evidence_ledger=services.evidence_ledger,
                 background_manager=services.background_manager,
                 artifact_store=services.artifact_store,
+                project_instructions=services.project_instructions,
+                skills=services.skills,
             )
         except (ValueError, RuntimeError, ProviderRequestError, Exit) as exc:
             self._add_line(Text(f"恢复会话失败: {exc}", style="red"), "msg-warn")

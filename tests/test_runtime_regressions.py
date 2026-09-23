@@ -63,7 +63,8 @@ def test_builtin_services_expose_session_artifact_readback(env):
     setup = _Setup(ws, scripted(), "fake", "fake", Budget())
     services = _build_services(setup, store, Console(), True)
     assert set(services.registry.names()) == {
-        "read", "write", "edit", "bash", "ls", "grep", "read_artifact"
+        "read", "write", "edit", "bash", "ls", "grep", "read_artifact",
+        "skills_list", "skill_load", "skill_unload", "skill_resource", "delegate",
     }
     runtime = runtime_for(env, artifact_store=services.artifact_store)
     assert "read_artifact" in runtime._system_prompt
@@ -170,13 +171,13 @@ def test_deadline_cancels_stream_and_closes_provider(env):
 def test_deadline_stops_running_tool_and_never_starts_next_write(env, monkeypatch, blocking):
     ws, store = env
     provider = scripted({"tool_calls": [{"name": "read", "arguments": {"path": "x"}}, write_call()]})
-    runtime = runtime_for(env, provider, budget=Budget(max_seconds=.05))
+    runtime = runtime_for(env, provider, budget=Budget(max_seconds=.3))
     cancelled = []
 
     async def slow_tool(*args):
         try:
             if blocking:
-                time.sleep(.1)
+                time.sleep(.7)
                 return ToolOutcome(output="finished synchronous work")
             await asyncio.sleep(30)
         finally:

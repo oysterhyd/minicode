@@ -191,6 +191,11 @@ class EventType(str, enum.Enum):
     BACKGROUND_JOB_STARTED = "background_job_started"
     BACKGROUND_JOB_COMPLETED = "background_job_completed"
     BACKGROUND_JOB_LOST = "background_job_lost"
+    PROJECT_INSTRUCTIONS = "project_instructions"
+    SKILL_ACTIVATED = "skill_activated"
+    SKILL_DEACTIVATED = "skill_deactivated"
+    SUBAGENT_START = "subagent_start"
+    SUBAGENT_RESULT = "subagent_result"
 
 
 class Event(BaseModel):

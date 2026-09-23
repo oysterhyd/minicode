@@ -80,6 +80,11 @@ _EVENT_META: dict[EventType, tuple[str, str]] = {
     EventType.BACKGROUND_JOB_STARTED: ("后台任务启动", "bg"),
     EventType.BACKGROUND_JOB_COMPLETED: ("后台任务完成", "bg"),
     EventType.BACKGROUND_JOB_LOST: ("后台任务丢失", "warn"),
+    EventType.PROJECT_INSTRUCTIONS: ("项目指令", "compact"),
+    EventType.SKILL_ACTIVATED: ("技能激活", "compact"),
+    EventType.SKILL_DEACTIVATED: ("技能停用", "compact"),
+    EventType.SUBAGENT_START: ("子任务启动", "bg"),
+    EventType.SUBAGENT_RESULT: ("子任务结果", "bg"),
 }
 
 # ---------------------------------------------------------------------------

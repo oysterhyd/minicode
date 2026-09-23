@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable, ClassVar, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ValidationError
 
@@ -62,6 +62,9 @@ class ToolContext:
     artifact_store: ArtifactStoreLike | None = None
     background_manager: BackgroundManagerLike | None = None
     session_id: str | None = None
+    activate_skill: Callable[[str], str] | None = None
+    deactivate_skill: Callable[[str], str] | None = None
+    delegate: Callable[[str, str], Awaitable[ToolOutcome]] | None = None
 
 
 def truncate_output(text: str, limit: int) -> str:

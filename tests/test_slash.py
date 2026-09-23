@@ -32,7 +32,7 @@ def test_filter_empty_prefix_returns_everything():
 def test_filter_by_prefix():
     assert [cmd.name for cmd in filter_commands("/h")] == ["/help"]
     assert [cmd.name for cmd in filter_commands("/m")] == ["/model"]
-    assert {cmd.name for cmd in filter_commands("/s")} == {"/sessions"}
+    assert {cmd.name for cmd in filter_commands("/s")} == {"/sessions", "/skill"}
     assert filter_commands("/zzz") == []
 
 
