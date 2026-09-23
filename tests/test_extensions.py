@@ -139,6 +139,112 @@ def test_delegate_is_read_only_and_charges_parent(tmp_path):
     store.close()
 
 
+def test_delegate_uses_unlimited_parent_defaults(tmp_path):
+    child_turns = []
+    for index in range(10):
+        child_turns.append(FakeTurn(
+            tool_calls=[FakeToolCall(name="read", arguments={"path": f"{index}.txt"})],
+            input_tokens=1000, output_tokens=100,
+        ))
+    child_turns.append(FakeTurn(text=json.dumps({
+        "summary": "checked", "findings": [], "evidence_refs": ["0.txt"],
+        "unresolved": [],
+    }), input_tokens=1000, output_tokens=100))
+    workspace, store, runtime = _runtime(tmp_path, [
+        FakeTurn(tool_calls=[FakeToolCall(name="delegate", arguments={
+            "kind": "explore", "task": "read ten files",
+        })], input_tokens=1000, output_tokens=100),
+        *child_turns,
+        FakeTurn(text="done", input_tokens=1000, output_tokens=100),
+    ], delegation=True)
+    runtime._budget = Budget()
+    for index in range(10):
+        (workspace / f"{index}.txt").write_text(str(index), encoding="utf-8")
+    result = asyncio.run(runtime.run_turn("inspect"))
+    assert result.exit_reason is ExitReason.COMPLETED
+    assert result.total_usage.total_tokens == 13 * 1100
+    child_id = next(e.data["child_session_id"] for e in store.get_events(result.session_id)
+                    if e.type is EventType.SUBAGENT_RESULT)
+    assert store.get_session(child_id).rounds == 11
+    store.close()
+
+
+def test_delegate_and_parent_share_explicit_token_cap(tmp_path):
+    workspace, store, runtime = _runtime(tmp_path, [
+        FakeTurn(tool_calls=[FakeToolCall(name="delegate", arguments={
+            "kind": "explore", "task": "inspect",
+        })]),
+        FakeTurn(tool_calls=[FakeToolCall(name="read", arguments={"path": "a.txt"})]),
+        FakeTurn(tool_calls=[FakeToolCall(name="read", arguments={"path": "b.txt"})]),
+        FakeTurn(text="should not run"),
+    ], delegation=True)
+    runtime._budget = Budget(max_total_tokens=350)
+    (workspace / "a.txt").write_text("a", encoding="utf-8")
+    (workspace / "b.txt").write_text("b", encoding="utf-8")
+    result = asyncio.run(runtime.run_turn("inspect"))
+    assert result.exit_reason is ExitReason.TOKEN_BUDGET
+    assert result.total_usage.total_tokens == 360
+    child_id = next(e.data["child_session_id"] for e in store.get_events(result.session_id)
+                    if e.type is EventType.SUBAGENT_RESULT)
+    assert store.get_session(child_id).exit_reason == ExitReason.TOKEN_BUDGET.value
+    assert not any(e.data.get("name") == "read" and e.data.get("arguments", {}).get("path") == "b.txt"
+                   for e in store.get_events(child_id) if e.type is EventType.TOOL_CALL_START)
+    store.close()
+
+
+def test_paused_child_resumes_from_its_session_without_repeating_read(tmp_path):
+    class NoRestoreProvider:
+        name = "fake"
+        model = "fake-model"
+
+        def __init__(self, turns):
+            self.inner = FakeProvider(FakeProviderOptions(turns=turns))
+
+        async def stream(self, **kwargs):
+            async for event in self.inner.stream(**kwargs):
+                yield event
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("evidence", encoding="utf-8")
+    store = SqliteStore(tmp_path / "sessions.db")
+    delegate = FakeToolCall(name="delegate", arguments={
+        "kind": "explore", "task": "inspect a.txt",
+    })
+    provider = NoRestoreProvider([
+        FakeTurn(tool_calls=[delegate]),
+        FakeTurn(tool_calls=[FakeToolCall(name="read", arguments={"path": "a.txt"})]),
+        FakeTurn(tool_calls=[delegate]),
+        FakeTurn(text=json.dumps({"summary": "done", "findings": [],
+                                  "evidence_refs": ["a.txt"], "unresolved": []})),
+        FakeTurn(text="parent done"),
+    ])
+    runtime = AgentRuntime(
+        provider=provider, registry=default_registry(delegation=True),
+        store=store, policy=AutoAllowPolicy(), workspace=workspace,
+        provider_name="fake", model="fake-model", budget=Budget(max_rounds=2),
+    )
+    first = asyncio.run(runtime.run_turn("inspect"))
+    assert first.exit_reason is ExitReason.MAX_ROUNDS
+    child_id = next(e.data["child_session_id"] for e in store.get_events(first.session_id)
+                    if e.type is EventType.SUBAGENT_RESULT)
+    resumed = AgentRuntime.resume(
+        store=store, session_id=first.session_id, provider=provider,
+        registry=default_registry(delegation=True), policy=AutoAllowPolicy(),
+        workspace=workspace, provider_name="fake", model="fake-model",
+        budget=Budget(),
+    )
+    finished = asyncio.run(resumed.continue_turn())
+    assert finished.exit_reason is ExitReason.COMPLETED
+    child_results = [e for e in store.get_events(finished.session_id)
+                     if e.type is EventType.SUBAGENT_RESULT]
+    assert [e.data["child_session_id"] for e in child_results] == [child_id, child_id]
+    reads = [e for e in store.get_events(child_id)
+             if e.type is EventType.TOOL_CALL_START and e.data.get("name") == "read"]
+    assert len(reads) == 1
+    store.close()
+
+
 def test_activated_skill_is_restored_with_version_check(tmp_path):
     workspace = tmp_path / "repo"
     skill_dir = workspace / ".minicode" / "skills" / "inspect"
@@ -207,4 +313,75 @@ def test_parent_cancellation_cancels_child(tmp_path):
                     if e.type is EventType.SUBAGENT_START)
     assert store.get_session(child_id).exit_reason == ExitReason.CANCELLED.value
     assert store.get_session(runtime.session_id).exit_reason == ExitReason.CANCELLED.value
+    store.close()
+
+
+def test_cancelled_delegate_recovers_child_without_repeating_completed_read(tmp_path):
+    started = asyncio.Event()
+
+    class BlockingAfterRead(FakeProvider):
+        async def stream(self, *, system, messages, tools):
+            if self.turns_consumed >= 2:
+                started.set()
+                await asyncio.Event().wait()
+            async for event in super().stream(system=system, messages=messages, tools=tools):
+                yield event
+
+    class NoRestoreProvider:
+        name = "fake"
+        model = "fake-model"
+
+        def __init__(self, turns):
+            self.inner = FakeProvider(FakeProviderOptions(turns=turns))
+
+        async def stream(self, **kwargs):
+            async for event in self.inner.stream(**kwargs):
+                yield event
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("evidence", encoding="utf-8")
+    store = SqliteStore(tmp_path / "sessions.db")
+    initial = BlockingAfterRead(FakeProviderOptions(turns=[
+        FakeTurn(tool_calls=[FakeToolCall(name="delegate", arguments={
+            "kind": "explore", "task": "inspect a.txt",
+        })]),
+        FakeTurn(tool_calls=[FakeToolCall(name="read", arguments={"path": "a.txt"})]),
+    ]))
+    runtime = AgentRuntime(
+        provider=initial, registry=default_registry(delegation=True),
+        store=store, policy=AutoAllowPolicy(), workspace=workspace,
+        provider_name="fake", model="fake-model",
+    )
+
+    async def cancel_after_read():
+        running = asyncio.create_task(runtime.run_turn("inspect"))
+        await asyncio.wait_for(started.wait(), 2)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    asyncio.run(cancel_after_read())
+    parent_id = runtime.session_id
+    assert parent_id is not None
+    child_id = next(e.data["child_session_id"] for e in store.get_events(parent_id)
+                    if e.type is EventType.SUBAGENT_START)
+    resumed_provider = NoRestoreProvider([
+        FakeTurn(text=json.dumps({"summary": "done", "findings": [],
+                                  "evidence_refs": ["a.txt"], "unresolved": []})),
+        FakeTurn(text="parent done"),
+    ])
+    resumed = AgentRuntime.resume(
+        store=store, session_id=parent_id, provider=resumed_provider,
+        registry=default_registry(delegation=True), policy=AutoAllowPolicy(),
+        workspace=workspace, provider_name="fake", model="fake-model",
+    )
+    result = asyncio.run(resumed.continue_turn())
+    assert result.exit_reason is ExitReason.COMPLETED
+    child_results = [e for e in store.get_events(parent_id)
+                     if e.type is EventType.SUBAGENT_RESULT]
+    assert child_results[-1].data["child_session_id"] == child_id
+    reads = [e for e in store.get_events(child_id)
+             if e.type is EventType.TOOL_CALL_START and e.data.get("name") == "read"]
+    assert len(reads) == 1
     store.close()

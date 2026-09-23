@@ -17,17 +17,30 @@ class ToolLimits(BaseModel):
     """Resource caps applied by every built-in tool."""
 
     max_read_bytes: int = 256_000           # read cap
-    max_output_chars: int = 20_000          # ls / grep output cap
-    max_command_output_chars: int = 10_000  # bash output cap
+    max_output_chars: int = 50 * 1024       # UTF-8 page budget for read/ls/grep
+    max_command_output_chars: int = 50 * 1024  # UTF-8 tail budget for bash
     max_command_capture_bytes: int = 100_000_000  # disk-backed log quota
-    default_command_timeout_s: float = 60.0
-    max_command_timeout_s: float = 300.0
+    default_command_timeout_s: float | None = None
+    max_command_timeout_s: float | None = None
     max_search_results: int = 100
     search_max_file_bytes: int = 1_000_000
-    # Tool outputs longer than this are spilled to an artifact; the model
-    # sees a preview plus an archive reference.
-    spill_threshold_chars: int = 4_000
-    spill_preview_chars: int = 1_000
+
+def utf8_prefix(text: str, max_bytes: int) -> str:
+    """Return the longest UTF-8 prefix that fits without splitting a character."""
+    if max_bytes <= 0:
+        return ""
+    raw = text.encode("utf-8")
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def tail_output(text: str, max_bytes: int = 50 * 1024, max_lines: int = 2000) -> str:
+    """Keep the end of command output within both line and UTF-8 byte limits."""
+    lines = text.splitlines(keepends=True)
+    tail = "".join(lines[-max_lines:])
+    raw = tail.encode("utf-8")
+    if len(raw) > max_bytes:
+        tail = raw[-max_bytes:].decode("utf-8", errors="ignore")
+    return tail
 
 
 @runtime_checkable
@@ -49,7 +62,7 @@ class ArtifactStoreLike(Protocol):
 class BackgroundManagerLike(Protocol):
     """What tools need from the background job manager (see tasks.background)."""
 
-    def start(self, command: str, cwd: Path, timeout_s: float) -> Any: ...
+    def start(self, command: str, cwd: Path, timeout_s: float | None) -> Any: ...
 
 
 @dataclass(slots=True)

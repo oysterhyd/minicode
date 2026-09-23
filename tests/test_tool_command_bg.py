@@ -42,7 +42,7 @@ def test_background_start_returns_job_id(tmp_path):
     assert "echo hi" in outcome.output
     assert "job_id" in outcome.output
     # The command was handed to the manager, never run in the foreground.
-    assert manager.calls == [("echo hi", tmp_path.resolve(), 60.0)]
+    assert manager.calls == [("echo hi", tmp_path.resolve(), None)]
 
 
 def test_background_passes_resolved_cwd_and_timeout(tmp_path):

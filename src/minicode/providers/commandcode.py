@@ -38,6 +38,8 @@ from minicode.core.models import (
     ToolUseBlock,
     Usage,
 )
+from minicode.context.estimate import estimate_messages_tokens
+from minicode.core.catalog import lookup_model
 
 from .base import ResponseDone, StreamEvent, TextDelta
 from .errors import ProviderAuthError, ProviderError, ProviderRequestError
@@ -75,6 +77,7 @@ def _build_payload(
     tools: list[ToolSpec],
     max_tokens: int = DEFAULT_MAX_TOKENS,
     reasoning_effort: str | None = None,
+    prompt_scale: float = 1.0,
 ) -> dict[str, Any]:
     """Serialize the normalized conversation into an OpenAI-compatible
     request body.
@@ -133,12 +136,17 @@ def _build_payload(
             if not tool_messages or text:
                 chat_messages.append({"role": "user", "content": text})
 
+    prompt_estimate = int(estimate_messages_tokens(
+        system, messages, tools, reserve_output_tokens=0
+    ) * prompt_scale)
+    window = lookup_model(model).context_window
+    available_output = max(1, window - prompt_estimate - 1024)
     payload: dict[str, Any] = {
         "model": model,
         "messages": chat_messages,
         "stream": True,
         "stream_options": {"include_usage": True},
-        "max_tokens": max_tokens,
+        "max_tokens": min(max_tokens, available_output),
     }
     if reasoning_effort is not None and reasoning_effort != "off":
         payload["reasoning_effort"] = reasoning_effort
@@ -242,7 +250,8 @@ class CommandCodeProvider:
         ``max_tokens``; ``None`` keeps :data:`DEFAULT_MAX_TOKENS`. Hosts pass
         the model's real output length from the catalog
         (:attr:`~minicode.core.catalog.ModelInfo.max_output_tokens`) so a long
-        answer is not cut off by the harness. ``transport`` is **test-only**:
+        answer is not cut off by the harness; each request lowers it to fit
+        the estimated remaining context window. ``transport`` is **test-only**:
         an optional ``httpx`` async transport (e.g. ``httpx.MockTransport``)
         injected so tests can run without any network access.
         """
@@ -250,6 +259,7 @@ class CommandCodeProvider:
         self.timeout_s = timeout_s
         self.reasoning_effort = reasoning_effort
         self.max_tokens = DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
+        self.prompt_scale = 1.0
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
         self._client_loop: asyncio.AbstractEventLoop | None = None
@@ -337,7 +347,10 @@ class CommandCodeProvider:
             tools=tools,
             max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
+            prompt_scale=self.prompt_scale,
         )
+        estimated_input = estimate_messages_tokens(system, messages, tools,
+                                                   reserve_output_tokens=0)
 
         text_parts: list[str] = []
         tool_buffers: dict[int, dict[str, str]] = {}
@@ -422,6 +435,10 @@ class CommandCodeProvider:
             # Transport failures (connect/read errors, mid-stream breaks).
             # asyncio.CancelledError is a BaseException and propagates untouched.
             raise ProviderError(f"commandcode stream failed: {exc}") from exc
+
+        if usage.available and usage.input_tokens > 0 and estimated_input > 0:
+            observed = min(3.0, max(0.5, usage.input_tokens / estimated_input))
+            self.prompt_scale = (self.prompt_scale + observed) / 2
 
         # Assemble the final response blocks.
         blocks: list[Block] = []

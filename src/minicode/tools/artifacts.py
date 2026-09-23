@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext
+from minicode.tools.base import BaseTool, ToolContext, utf8_prefix
 
 
 class ReadArtifactArgs(BaseModel):
@@ -50,6 +50,13 @@ class ReadArtifactTool(BaseTool):
             return ToolOutcome.failure(
                 f"offset {args.offset} beyond end of artifact ({total} characters)"
             )
+        if ctx.limits.max_output_chars <= 200:
+            return ToolOutcome.failure("artifact page budget is too small")
+        fitted = utf8_prefix(page, ctx.limits.max_output_chars - 200)
+        if fitted != page:
+            page = fitted
+            has_more = True
+            total = None
         end = args.offset + len(page)
         total_label = str(total) if total is not None else "?"
         status = f"artifact {args.artifact_id} · characters {args.offset}-{end} of {total_label}"

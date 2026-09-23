@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -41,7 +42,7 @@ from minicode.core.models import (
 )
 from minicode.providers.base import Provider, TextDelta
 from minicode.providers.errors import ProviderAuthError, ProviderError, ProviderRequestError
-from minicode.runtime.budget import BudgetChecker
+from minicode.runtime.budget import BudgetChecker, SharedBudgetLedger
 from minicode.runtime.events import EventCallback, EventRecorder
 from minicode.runtime.prompt import build_system_prompt
 from minicode.context.extensions import ProjectInstructions, SkillCatalog, Source
@@ -56,13 +57,13 @@ TextDeltaCallback = Callable[[str], Awaitable[None]]
 #: Tool output echoed in TOOL_CALL_RESULT events is capped at this length.
 _OUTPUT_PREVIEW_CHARS = 500
 
-#: Spill thresholds (same defaults as ToolLimits; kept here so the loop does
-#: not reach into per-tool limits configured elsewhere).
+#: Tool output limits for generic tools; individual tools page before this.
 _SPILL_LIMITS = ToolLimits()
 
 #: Tool names that are safe to re-execute while resuming an interrupted
 #: session: they only read, so re-running them cannot duplicate side effects.
 _READ_ONLY_TOOLS = frozenset({"read", "ls", "grep", "read_artifact", "skills_list", "skill_load", "skill_unload", "skill_resource"})
+_REPLAY_SAFE_TOOLS = _READ_ONLY_TOOLS | {"delegate"}
 _MAX_PARALLEL_READS = 4
 
 
@@ -140,6 +141,7 @@ class AgentRuntime:
         project_instructions: ProjectInstructions | None = None,
         skills: SkillCatalog | None = None,
         allow_delegation: bool = True,
+        shared_budget: SharedBudgetLedger | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -168,12 +170,16 @@ class AgentRuntime:
         self._active_skills: dict[str, str] = {}
         self._active_skill_sources: dict[str, Source] = {}
         self._allow_delegation = allow_delegation
+        self._shared_budget = shared_budget
+        self._budget_ledger: SharedBudgetLedger | None = shared_budget
+        self._child_sessions: dict[tuple[str, str], AgentRuntime] = {}
         self._pending_instruction_scopes: set[Path] = set()
         self._refresh_system_prompt()
 
         self.session_id: str | None = None  # created on first run_turn
         self._messages: list[Message] = []  # mirrors the persisted conversation
         self._usage = Usage()
+        self._last_model_usage: Usage | None = None
         self._rounds = 0
         self._goal_attempts = 0
         self._own_pass_fingerprint: str | None = None  # fallback without a ledger
@@ -194,6 +200,11 @@ class AgentRuntime:
     def usage(self) -> Usage:
         """Session-cumulative token usage."""
         return self._usage
+
+    @property
+    def last_model_usage(self) -> Usage | None:
+        """Usage for the most recent model response, if one exists."""
+        return self._last_model_usage
 
     @property
     def task_pending(self) -> bool:
@@ -236,15 +247,8 @@ class AgentRuntime:
         return lookup_model(self._model).context_window
 
     def prompt_budget_tokens(self) -> int:
-        """How much prompt the active model can take *and still answer*.
-
-        ``context_window`` minus the model's maximum response length: the
-        window has to hold both, so compacting only against the window would
-        let a long answer push the request past it. This is the number
-        compaction should trigger on — not the session's token budget, which
-        counts cumulative spend rather than context size.
-        """
-        return max(0, self.context_window - self.effective_max_output_tokens())
+        """Compaction trigger, reserving 16,384 tokens for the next answer."""
+        return max(0, self.context_window - 16_384)
 
     def effective_max_output_tokens(self) -> int:
         """Response budget actually sent by the active provider.
@@ -268,12 +272,12 @@ class AgentRuntime:
         """
         from minicode.context.estimate import estimate_messages_tokens
 
-        return estimate_messages_tokens(
+        return int(estimate_messages_tokens(
             self._system_prompt,
             self._messages,
             self._registry.specs(),
             reserve_output_tokens=0,
-        )
+        ) * getattr(self._provider, "prompt_scale", 1.0))
 
     def _refresh_system_prompt(self) -> None:
         sections = [self._base_system_prompt]
@@ -389,11 +393,21 @@ class AgentRuntime:
         assert session_id is not None  # set directly above on the first turn
         recorder = EventRecorder(self._store, session_id, self._on_event)
         user_recorded = False
-        self._deadline = turn_started + self._budget.max_seconds
+        if self._shared_budget is None:
+            self._budget_ledger = SharedBudgetLedger(
+                usage=self._usage,
+                deadline=(turn_started + self._budget.max_seconds
+                          if self._budget.max_seconds > 0 else None),
+            )
+        else:
+            self._budget_ledger = self._shared_budget
+        self._deadline = self._budget_ledger.deadline
         try:
             if first_turn:
                 self._bind_goal_session()
-            async with asyncio.timeout(max(0, self._deadline - time.monotonic())):
+            async with asyncio.timeout(
+                max(0, self._deadline - time.monotonic()) if self._deadline is not None else None
+            ):
                 if first_turn:
                     start_data = {
                         "workspace": str(self._workspace.resolve()),
@@ -437,12 +451,12 @@ class AgentRuntime:
                 truncations = 0
                 while True:
                     self._check_deadline()
-                    if checker.tokens_exceeded(self._usage):
+                    if checker.tokens_exceeded(self._budget_ledger.usage):
                         return await self._finalize(
                             recorder, ExitReason.TOKEN_BUDGET, turn_started,
                             error="已达到显式 Token 费用上限；提高预算后可继续当前任务。",
                         )
-                    if checker.rounds_exceeded(self._rounds):
+                    if self._budget.max_rounds > 0 and self._budget_ledger.rounds >= self._budget.max_rounds:
                         return await self._finalize(
                             recorder, ExitReason.MAX_ROUNDS, turn_started
                         )
@@ -463,6 +477,8 @@ class AgentRuntime:
                             error=str(exc),
                         )
 
+                    if not self._budget_ledger.reserve_round(self._budget.max_rounds):
+                        return await self._finalize(recorder, ExitReason.MAX_ROUNDS, turn_started)
                     self._rounds += 1
                     await recorder.emit(EventType.ROUND_START, {"round": self._rounds})
                     self._store.update_session(session_id, rounds=self._rounds)
@@ -488,6 +504,8 @@ class AgentRuntime:
                         session_id, Message(role="assistant", content=list(response.blocks))
                     )
                     self._usage = self._usage + response.usage
+                    self._last_model_usage = response.usage
+                    self._budget_ledger.add_usage(response.usage)
                     await recorder.emit(
                         EventType.ASSISTANT_MESSAGE,
                         {
@@ -508,7 +526,7 @@ class AgentRuntime:
 
                     # Token budget fires before any tool of this round runs: side
                     # effects must not start once the budget is already blown.
-                    if checker.tokens_exceeded(self._usage):
+                    if checker.tokens_exceeded(self._budget_ledger.usage):
                         self._backfill_unexecuted_calls(
                             session_id, response.tool_calls, "未执行：显式 Token 费用上限已达到。"
                         )
@@ -642,6 +660,8 @@ class AgentRuntime:
         artifact_store: Any | None = None,
         project_instructions: ProjectInstructions | None = None,
         skills: SkillCatalog | None = None,
+        allow_delegation: bool = True,
+        shared_budget: SharedBudgetLedger | None = None,
     ) -> "AgentRuntime":
         """Continue a persisted session in a fresh process.
 
@@ -709,6 +729,8 @@ class AgentRuntime:
             artifact_store=artifact_store,
             project_instructions=project_instructions,
             skills=skills,
+            allow_delegation=allow_delegation,
+            shared_budget=shared_budget,
         )
         if project_instructions is not None:
             expected_sources = list(start_event.data.get("project_instructions", [])) if start_event else []
@@ -764,13 +786,15 @@ class AgentRuntime:
                 completed_responses += 1
                 data = event.data.get("usage")
                 if isinstance(data, dict):
-                    event_usage += Usage(
+                    response_usage = Usage(
                         input_tokens=int(data.get("input_tokens", 0)),
                         output_tokens=int(data.get("output_tokens", 0)),
                         cache_read_tokens=int(data.get("cache_read_tokens", 0)),
                         cache_write_tokens=int(data.get("cache_write_tokens", 0)),
                         available=bool(data.get("available", False)),
                     )
+                    event_usage += response_usage
+                    runtime._last_model_usage = response_usage
             elif event.type is EventType.SUBAGENT_RESULT:
                 data = event.data.get("usage")
                 if isinstance(data, dict):
@@ -876,7 +900,7 @@ class AgentRuntime:
 
         results: list[ToolResultBlock] = []
         for call in pending:
-            if call.name in _READ_ONLY_TOOLS:
+            if call.name in _REPLAY_SAFE_TOOLS:
                 # Re-check the *current* policy; permissions may have changed
                 # since the original call was interrupted.
                 results.append(await self._execute_tool_call(
@@ -978,7 +1002,11 @@ class AgentRuntime:
                 "exit_code": outcome.exit_code,
                 "error": outcome.error,
                 "output_preview": presented.output[:_OUTPUT_PREVIEW_CHARS],
-                "output_detail": presented.output[:4000],
+                "output_detail": presented.output if "[artifact:" not in presented.output else presented.output[:4000],
+                "artifact_id": (match.group(1) if (
+                    match := re.search(r"\[artifact:([A-Za-z0-9_-]+)\]", presented.output)
+                ) else None),
+                "truncated": "已截断" in presented.output or "truncated" in presented.output,
                 "duration_s": round(time.monotonic() - started, 3),
             }
         if recovered:
@@ -996,15 +1024,21 @@ class AgentRuntime:
         is the authoritative source in that case.
         """
         original = outcome.full_output if outcome.full_output is not None else outcome.output
-        if self._artifact_store is None or len(original) <= _SPILL_LIMITS.spill_threshold_chars:
+        if (self._artifact_store is None or (
+            outcome.full_output is None
+            and len(original.encode("utf-8")) <= _SPILL_LIMITS.max_output_chars
+        )):
             return outcome.model_copy(update={"full_output": None})
         ref = self._artifact_store.spill(
             session_id, "tool_output", original
         )
-        preview = original[: _SPILL_LIMITS.spill_preview_chars]
+        preview = outcome.output
+        if len(preview.encode("utf-8")) > _SPILL_LIMITS.max_output_chars:
+            from minicode.tools.base import utf8_prefix
+            preview = utf8_prefix(preview, _SPILL_LIMITS.max_output_chars - 200)
         note = (
-            f"\n...[输出共 {len(original)} 字符，已转存为 artifact "
-            f"[artifact:{ref.artifact_id}]；完整内容保存在会话归档中]"
+            f"\n...[完整输出已归档为 [artifact:{ref.artifact_id}]；"
+            "用 read_artifact 分页续读]"
         )
         return outcome.model_copy(update={"output": preview + note, "full_output": None})
 
@@ -1095,7 +1129,8 @@ class AgentRuntime:
         raise AssertionError("tool retry loop must return")
 
     async def _delegate(self, kind: str, task: str) -> ToolOutcome:
-        """Run one bounded child session with an independently restricted registry."""
+        """Run a read-only child under the parent's model and shared budget."""
+        from minicode.context.compact import CompactConfig, ContextCompactor
         from minicode.security.policy import DefaultPolicy
         from minicode.tools.artifacts import ReadArtifactTool
         from minicode.tools.files import LsTool, ReadTool
@@ -1103,13 +1138,10 @@ class AgentRuntime:
 
         if self.session_id is None:
             return ToolOutcome.failure("parent session has not started")
-        remaining = (self._budget.max_total_tokens - self._usage.total_tokens
-                     if self._budget.max_total_tokens > 0 else 10_000)
-        if remaining <= 0:
+        assert self._budget_ledger is not None
+        if (self._budget.max_total_tokens > 0
+                and self._budget_ledger.usage.total_tokens >= self._budget.max_total_tokens):
             return ToolOutcome.failure("parent token budget is exhausted")
-        seconds = min(90.0, (self._deadline or time.monotonic() + 90) - time.monotonic() - 1)
-        if seconds <= 1:
-            return ToolOutcome.failure("parent time slice has no room for a child")
 
         child_registry = ToolRegistry()
         for tool in (ReadTool(), LsTool(), GrepTool(), ReadArtifactTool()):
@@ -1121,34 +1153,72 @@ class AgentRuntime:
                     {"kind": kind, "task": task, "child_session_id": child.session_id},
                 )
 
-        child = AgentRuntime(
-            provider=self._provider, registry=child_registry, store=self._store,
-            policy=DefaultPolicy(), workspace=self._workspace,
-            provider_name=self._provider_name, model=self._model,
-            budget=Budget(max_rounds=8, max_total_tokens=min(10_000, remaining),
-                          max_seconds=seconds),
-            artifact_store=self._artifact_store,
-            project_instructions=ProjectInstructions(self._workspace),
-            allow_delegation=False,
-            on_event=on_child_event,
-        )
+        key = (kind, task)
+        child = self._child_sessions.get(key)
         requirements = "\n".join(
             block.text for message in self._messages[-12:] if message.role == "user"
             for block in message.content if isinstance(block, TextBlock)
-        )[-4000:]
-        child._base_system_prompt += (
-            "\n\n你是只读子助手。只能调查与审查，不得执行 shell 或修改文件。"
+        )
+        child_prompt = (
+            build_system_prompt(str(self._workspace.resolve()), child_registry.names())
+            + "\n\n你是只读子助手。只能调查与审查，不得执行 shell 或修改文件。"
             "最终只输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、"
             "evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。"
             "不得编造证据。\n父任务要求：\n" + requirements
         )
-        child._refresh_system_prompt()
+        if child is None:
+            paused_id = None
+            for event in reversed(self._store.get_events(self.session_id)):
+                if (event.type in {EventType.SUBAGENT_RESULT, EventType.SUBAGENT_START}
+                        and event.data.get("kind") == kind
+                        and event.data.get("task") == task):
+                    if event.data.get("exit_reason") in {
+                        ExitReason.MAX_ROUNDS.value, ExitReason.TIME_BUDGET.value,
+                        ExitReason.TOKEN_BUDGET.value,
+                    } or event.type is EventType.SUBAGENT_START:
+                        paused_id = event.data.get("child_session_id")
+                    break
+            common = dict(
+                provider=self._provider, registry=child_registry, store=self._store,
+                policy=DefaultPolicy(), workspace=self._workspace,
+                provider_name=self._provider_name, model=self._model,
+                budget=self._budget, artifact_store=self._artifact_store,
+                project_instructions=ProjectInstructions(self._workspace),
+                allow_delegation=False, on_event=on_child_event,
+                shared_budget=self._budget_ledger, system_prompt=child_prompt,
+            )
+            child = (AgentRuntime.resume(session_id=paused_id, **common)
+                     if isinstance(paused_id, str) else AgentRuntime(**common))
+            self._child_sessions[key] = child
+        else:
+            child._shared_budget = self._budget_ledger
+            child._budget_ledger = self._budget_ledger
+        if self._artifact_store is not None:
+            child._compactor = ContextCompactor(
+                CompactConfig(max_context_tokens=max(child.context_window, 1)),
+                spill_fn=lambda archive_kind, content: self._artifact_store.spill(
+                    child.session_id, archive_kind, content
+                ).artifact_id,
+                context_tokens_fn=lambda: child.context_window,
+                output_tokens_fn=child.effective_max_output_tokens,
+                estimate_scale_fn=lambda: getattr(child.provider, "prompt_scale", 1.0),
+            )
         child_result: RunResult | None = None
+        child_usage_before = child.usage
         try:
-            child_result = await child.run_turn(f"{kind}：{task}")
+            child_result = (await child.continue_turn() if child.session_id is not None
+                            else await child.run_turn(f"{kind}：{task}"))
         finally:
-            self._usage = self._usage + child.usage
+            delta = child.usage.model_copy(update={
+                "input_tokens": child.usage.input_tokens - child_usage_before.input_tokens,
+                "output_tokens": child.usage.output_tokens - child_usage_before.output_tokens,
+                "cache_read_tokens": child.usage.cache_read_tokens - child_usage_before.cache_read_tokens,
+                "cache_write_tokens": child.usage.cache_write_tokens - child_usage_before.cache_write_tokens,
+            })
+            self._usage = self._usage + delta
             self._persist_counters()
+        if child_result.exit_reason is ExitReason.COMPLETED:
+            self._child_sessions.pop(key, None)
         child_id = child.session_id
         assert child_id is not None
         events = self._store.get_events(child_id)
@@ -1177,30 +1247,28 @@ class AgentRuntime:
                     or any(not isinstance(payload.get(key), list)
                            for key in ("findings", "evidence_refs", "unresolved"))):
                 raise ValueError("child response has an invalid schema")
-            summary = str(payload.get("summary", ""))[:600]
-            findings = [str(item)[:180] for item in payload.get("findings", [])[:5]]
-            unresolved = [str(item)[:160] for item in payload.get("unresolved", [])[:5]]
+            summary = str(payload.get("summary", ""))
+            findings = [str(item) for item in payload.get("findings", [])]
+            unresolved = [str(item) for item in payload.get("unresolved", [])]
             requested_refs = payload.get("evidence_refs", [])
             if not isinstance(requested_refs, list):
                 requested_refs = []
             structured = True
         except (ValueError, TypeError, AttributeError):
-            summary, findings, requested_refs = final_text[:600], [], []
+            summary, findings, requested_refs = final_text, [], []
             unresolved = ["子助手未返回有效的结构化结果。"]
         verified: list[str] = []
-        for ref in requested_refs[:8]:
+        for ref in requested_refs:
             if not isinstance(ref, str):
                 continue
-            ref = ref[:120]
             path = ref.split(":", 1)[0]
             resolved = (self._workspace / path).resolve()
             if path in observed and resolved.is_relative_to(self._workspace.resolve()) and resolved.exists():
                 verified.append(ref)
             else:
                 unresolved.append(f"未验证的证据引用：{ref}")
-        unresolved = unresolved[:8]
         record = {
-            "kind": kind, "child_session_id": child_id,
+            "kind": kind, "task": task, "child_session_id": child_id,
             "exit_reason": child_result.exit_reason.value if child_result else "unknown",
             "structured": structured,
             "usage": child.usage.model_dump(), "evidence_refs": verified,
@@ -1420,8 +1488,8 @@ class AgentRuntime:
 
         estimate_fits = estimate_messages_tokens(
             self._system_prompt, self._messages, specs,
-            reserve_output_tokens=self.effective_max_output_tokens(),
-        ) <= self.context_window
+            reserve_output_tokens=0,
+        ) * getattr(self._provider, "prompt_scale", 1.0) + 1024 <= self.context_window
         fits_hard_limit = getattr(self._compactor, "fits_hard_limit", None)
         return estimate_fits and (
             not callable(fits_hard_limit)
@@ -1492,6 +1560,13 @@ class AgentRuntime:
                     "job_id": job.job_id, "command": job.command,
                 })
         for job in self._background_manager.poll_completed():
+            artifact_id = None
+            full_output = getattr(job, "full_output", None)
+            if full_output is not None and self._artifact_store is not None:
+                ref = self._artifact_store.spill(session_id, "command_output", full_output)
+                artifact_id = ref.artifact_id
+                job.output += f"\n[artifact:{artifact_id}] · 用 read_artifact 分页续读"
+                job.full_output = None
             await recorder.emit(
                 EventType.BACKGROUND_JOB_LOST if job.status == "lost" else EventType.BACKGROUND_JOB_COMPLETED,
                 {
@@ -1500,6 +1575,8 @@ class AgentRuntime:
                     "status": job.status,
                     "exit_code": job.exit_code,
                     "output_preview": job.output[:_OUTPUT_PREVIEW_CHARS],
+                    "artifact_id": artifact_id,
+                    "truncated": artifact_id is not None,
                 },
             )
             self._append_message(

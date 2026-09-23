@@ -22,8 +22,8 @@ Invariants:
   units are cut only at fresh human input (a user message without
   tool_result), and every archive/merge span is pairing-checked before it is
   removed.
-* The most recent ``tail_keep_rounds`` units are never archived or merged;
-  their structure, text and tool_use blocks stay byte-identical.
+* Recent context of about ``tail_keep_tokens`` is kept verbatim; an explicit
+  ``tail_keep_rounds`` overrides that selection.
 * ``compact`` never mutates its input: untouched messages are reused as-is,
   modified ones are rebuilt as new objects.
 """
@@ -69,12 +69,15 @@ class CompactConfig(BaseModel):
     """Tuning knobs for :class:`ContextCompactor`."""
 
     max_context_tokens: int = Field(gt=0, description="estimated prompt budget")
-    trigger_fraction: float = Field(
-        default=0.8, gt=0.0, le=1.0, description="compact when estimate exceeds max * fraction"
+    trigger_fraction: float | None = Field(
+        default=None, gt=0.0, le=1.0,
+        description="optional fractional trigger; default reserves 16384 tokens"
     )
     tail_keep_rounds: int = Field(
-        default=4, ge=0, description="most recent interaction units kept verbatim"
+        default=0, ge=0, description="minimum recent interaction units kept verbatim"
     )
+    tail_keep_tokens: int = Field(default=20_000, ge=0,
+                                  description="approximate recent token volume kept verbatim")
     shrink_preview_chars: int = Field(
         default=200, ge=0, description="kept length of a shrunken tool result"
     )
@@ -316,10 +319,9 @@ class ContextCompactor:
     kind, content).artifact_id``.
 
     ``context_tokens_fn`` supplies the model's hard context window and
-    ``output_tokens_fn`` the response reserve actually sent by the provider.
-    Both are read on every check so a mid-session ``/model`` switch is
-    honoured. Without callbacks the static window and legacy 2000-token
-    response reserve are used.
+    ``estimate_scale_fn`` calibrates the character estimate against actual
+    provider usage. ``output_tokens_fn`` remains accepted for compatibility;
+    output is now sized dynamically per request by the provider.
     """
 
     def __init__(
@@ -328,15 +330,17 @@ class ContextCompactor:
         spill_fn: Callable[[str, str], str] | None = None,
         context_tokens_fn: Callable[[], int] | None = None,
         output_tokens_fn: Callable[[], int] | None = None,
+        estimate_scale_fn: Callable[[], float] | None = None,
     ) -> None:
         self.config = config
         self._spill_fn = spill_fn
         self._context_tokens_fn = context_tokens_fn
         self._output_tokens_fn = output_tokens_fn
+        self._estimate_scale_fn = estimate_scale_fn
 
     @property
     def output_tokens(self) -> int:
-        """Response reserve included in estimates (legacy default: 2000)."""
+        """Legacy configured response maximum (not part of the trigger)."""
         if self._output_tokens_fn is None:
             return 2000
         return max(0, self._output_tokens_fn())
@@ -347,12 +351,13 @@ class ContextCompactor:
         messages: list[Message],
         tool_specs: list[ToolSpec] | None,
     ) -> int:
-        return estimate_messages_tokens(
+        estimate = estimate_messages_tokens(
             system,
             messages,
             tool_specs,
-            reserve_output_tokens=self.output_tokens,
+            reserve_output_tokens=0,
         )
+        return int(estimate * (self._estimate_scale_fn() if self._estimate_scale_fn else 1.0))
 
     @property
     def context_tokens(self) -> int:
@@ -363,7 +368,22 @@ class ContextCompactor:
 
     @property
     def _threshold(self) -> float:
-        return self.context_tokens * self.config.trigger_fraction
+        if self.config.trigger_fraction is not None:
+            return self.context_tokens * self.config.trigger_fraction
+        return max(0, self.context_tokens - min(16_384, self.context_tokens // 5))
+
+    def _tail_count(self, messages: list[Message], units: list[tuple[int, int]]) -> int:
+        if self.config.tail_keep_rounds > 0:
+            return self.config.tail_keep_rounds
+        target = min(self.config.tail_keep_tokens, self.context_tokens // 2)
+        count = 0
+        used = 0
+        for start, end in reversed(units):
+            if used >= target and count >= self.config.tail_keep_rounds:
+                break
+            used += estimate_messages_tokens(None, messages[start:end], reserve_output_tokens=0)
+            count += 1
+        return max(count, self.config.tail_keep_rounds)
 
     def needs_compaction(
         self,
@@ -381,7 +401,7 @@ class ContextCompactor:
         tool_specs: list[ToolSpec] | None = None,
     ) -> bool:
         """Whether the next prompt plus configured response fits the window."""
-        return self._estimate(system, messages, tool_specs) <= self.context_tokens
+        return self._estimate(system, messages, tool_specs) + 1024 <= self.context_tokens
 
     def compact(
         self,
@@ -418,7 +438,7 @@ class ContextCompactor:
 
     def _archive_early_units(self, messages: list[Message]) -> tuple[list[Message], int]:
         _head_end, units = _segment(messages)
-        early = _early_units(units, self.config.tail_keep_rounds)
+        early = _early_units(units, self._tail_count(messages, units))
         if len(early) < self.config.min_archive_units:
             return messages, 0
 
@@ -484,7 +504,7 @@ class ContextCompactor:
             spans.append((index, index + 2))
             index += 2
 
-        early = _early_units(spans, self.config.tail_keep_rounds)
+        early = _early_units(spans, self._tail_count(messages, spans))
         if len(early) < self.config.min_archive_units:
             return messages, 0
         span_start = early[0][0]
@@ -519,6 +539,15 @@ class ContextCompactor:
         protected = (
             set(positions[len(positions) - keep_recent :]) if keep_recent > 0 else set()
         )
+        recent_budget = (0 if self.config.tail_keep_rounds > 0 else
+                         min(self.config.tail_keep_tokens, self.context_tokens // 2))
+        for message_index in range(len(messages) - 1, -1, -1):
+            recent_budget -= estimate_messages_tokens(
+                None, [messages[message_index]], reserve_output_tokens=0
+            )
+            protected.update(pos for pos in positions if pos[0] == message_index)
+            if recent_budget <= 0:
+                break
         preview = self.config.shrink_preview_chars
         shrunk = 0
         rebuilt: list[Message] = []
@@ -562,7 +591,7 @@ class ContextCompactor:
         if self._estimate(system, messages, tool_specs) <= self._threshold:
             return messages, 0
         _head_end, units = _segment(messages)
-        early = _early_units(units, self.config.tail_keep_rounds)
+        early = _early_units(units, self._tail_count(messages, units))
         if len(early) < 2:
             return messages, 0
 

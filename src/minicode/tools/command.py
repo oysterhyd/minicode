@@ -23,7 +23,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext, bounded_output, resolve_or_fail
+from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, tail_output
 
 #: Force the Windows shells to speak UTF-8 on the pipe. Without this,
 #: PowerShell writes its output in the console code page (cp936 on a Chinese
@@ -90,7 +90,7 @@ def decode_shell_output(raw: bytes) -> str:
 
 
 async def capture_bounded(
-    proc: asyncio.subprocess.Process, timeout_s: float, max_bytes: int = 2_000_000
+    proc: asyncio.subprocess.Process, timeout_s: float | None, max_bytes: int = 100_000_000
 ) -> tuple[bytes, bool, bool]:
     """Drain a child with bounded memory; kill on timeout or output overflow."""
     output = bytearray()
@@ -220,7 +220,9 @@ class BashTool(BaseTool):
         "bash elsewhere) and return its combined output and exit code. "
         "Set background=true to start the command as a background job "
         "instead: it returns a job_id immediately and the result is "
-        "delivered by the system once the job completes. Requires approval."
+        "delivered by the system once the job completes. Output shows the last "
+        "2,000 lines or 50 KiB, with complete output in an artifact. "
+        "No timeout by default; timeout_s sets one. Requires approval."
     )
     requires_approval = True
     args_model = BashArgs
@@ -237,7 +239,10 @@ class BashTool(BaseTool):
             if args.timeout_s is None
             else args.timeout_s
         )
-        timeout_s = max(1.0, min(timeout_s, ctx.limits.max_command_timeout_s))
+        if timeout_s is not None:
+            timeout_s = max(1.0, timeout_s)
+            if ctx.limits.max_command_timeout_s is not None:
+                timeout_s = min(timeout_s, ctx.limits.max_command_timeout_s)
 
         if args.background:
             manager = ctx.background_manager
@@ -265,9 +270,10 @@ class BashTool(BaseTool):
                 assert proc.stdout is not None
                 total = 0
                 while chunk := await proc.stdout.read(64 * 1024):
-                    captured.write(chunk)
-                    total += len(chunk)
-                    if total > ctx.limits.max_command_capture_bytes:
+                    remaining = ctx.limits.max_command_capture_bytes - total
+                    captured.write(chunk[:max(0, remaining)])
+                    total += min(len(chunk), max(0, remaining))
+                    if len(chunk) > remaining:
                         await kill_process_tree(proc)
                         return total, True
                 return total, False
@@ -298,19 +304,24 @@ class BashTool(BaseTool):
             captured.seek(0)
             if total <= 2_000_000:
                 output = decode_shell_output(captured.read())
-                outcome = bounded_output(
-                    output, ctx.limits.max_command_output_chars,
+                preview = tail_output(output, ctx.limits.max_command_output_chars - 200)
+                if preview != output:
+                    preview = "...[output truncated; 完整输出见归档]\n" + preview
+                outcome = ToolOutcome(
+                    output=preview, full_output=output if preview != output else None,
                     success=not timed_out and not quota_hit and proc.returncode == 0,
                     exit_code=proc.returncode,
                 )
             else:
-                preview = decode_shell_output(captured.read(1200))[:1000]
+                captured.seek(max(0, total - 256_000))
+                preview = tail_output(decode_shell_output(captured.read()),
+                                      ctx.limits.max_command_output_chars - 200)
                 spill = getattr(ctx.artifact_store, "spill_binary_stream", None)
                 if callable(spill) and ctx.session_id is not None:
                     ref = await spill(ctx.session_id, "command_output", captured)
-                    output = f"{preview}\n...[完整输出见 [artifact:{ref.artifact_id}]]"
+                    output = f"...[output truncated; 完整输出见 [artifact:{ref.artifact_id}]]\n{preview}"
                 else:
-                    output = f"{preview}\n...[输出超过内存预览预算；请重定向到文件后分页读取]"
+                    output = f"...[前部已截断；归档不可用]\n{preview}"
                 outcome = ToolOutcome(
                     success=not timed_out and not quota_hit and proc.returncode == 0,
                     output=output, exit_code=proc.returncode,

@@ -13,12 +13,11 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext, bounded_output, resolve_or_fail
+from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail
 from minicode.tools.files import SKIP_DIRS
 
 _RG_TIMEOUT_S = 30.0
-_RG_MAX_COUNT = 50
-_MAX_LINE_CHARS = 200
+_MAX_LINE_CHARS = 500
 _BINARY_SNIFF_BYTES = 8192
 
 # rg output line: <path>:<line>:<text> (relative paths contain no colons).
@@ -30,15 +29,16 @@ class GrepArgs(BaseModel):
     path: str = "."
     glob: str | None = None
     max_results: int | None = None
-    case_sensitive: bool = False
+    case_sensitive: bool = True
 
 
 class GrepTool(BaseTool):
     name = "grep"
     description = (
         "Search file contents in the workspace with a regular expression and "
-        "return 'path:line: text' match lines. Optional filename glob filter; "
-        "case-insensitive by default."
+        "return 'path:line: text' match lines (100 by default, 50 KiB maximum). "
+        "Path may be a file or directory; case-sensitive by default. "
+        "Set case_sensitive=false for case-insensitive search."
     )
     requires_approval = False
     args_model = GrepArgs
@@ -47,13 +47,13 @@ class GrepTool(BaseTool):
         base, failure = resolve_or_fail(ctx, args.path)
         if failure is not None:
             return failure
-        if not base.is_dir():
-            return ToolOutcome.failure(f"path is not a directory: {args.path}")
+        if not base.is_dir() and not base.is_file():
+            return ToolOutcome.failure(f"path is not a file or directory: {args.path}")
 
         effective_max = (
             ctx.limits.max_search_results if args.max_results is None else args.max_results
         )
-        effective_max = max(1, min(effective_max, ctx.limits.max_search_results))
+        effective_max = max(1, effective_max)
 
         # Validate up front so both strategies fail identically on bad patterns.
         flags = 0 if args.case_sensitive else re.IGNORECASE
@@ -72,7 +72,18 @@ class GrepTool(BaseTool):
             return ToolOutcome.failure("search timed out; narrow path or glob and retry")
         if not matches:
             return ToolOutcome(output="(no matches)")
-        return bounded_output("\n".join(matches), ctx.limits.max_output_chars)
+        output: list[str] = []
+        remaining = ctx.limits.max_output_chars - 120
+        for match in matches:
+            size = len(match.encode("utf-8")) + (1 if output else 0)
+            if size > remaining:
+                output.append("...[达到 50 KiB 输出上限；请缩小 path 或 glob]")
+                break
+            output.append(match)
+            remaining -= size
+        preview = "\n".join(output)
+        full = "\n".join(matches)
+        return ToolOutcome(output=preview, full_output=full if preview != full else None)
 
     # ------------------------------------------------------------------
     # ripgrep strategy: returns match lines, [] for no matches, or None
@@ -102,7 +113,7 @@ class GrepTool(BaseTool):
             argv.append("--ignore-case")
         if args.glob:
             argv += ["--glob", args.glob]
-        argv += ["--max-count", str(_RG_MAX_COUNT), args.pattern, rel_base]
+        argv += ["--", args.pattern, rel_base]
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -158,7 +169,10 @@ class GrepTool(BaseTool):
                 path = path[2:]
             if prefix and path.startswith(prefix):
                 path = path[len(prefix) :]
-            normalized.append(f"{path}:{match.group('lineno')}: {match.group('text')}")
+            content = match.group("text")
+            clipped = content[:_MAX_LINE_CHARS]
+            suffix = "...[行已截断]" if len(content) > _MAX_LINE_CHARS or "[Omitted end" in content else ""
+            normalized.append(f"{path}:{match.group('lineno')}: {clipped}{suffix}")
         if capped:
             normalized.append("...[达到结果上限；请缩小 path 或 glob 继续搜索]")
         return normalized
@@ -178,7 +192,8 @@ class GrepTool(BaseTool):
         matches: list[str] = []
         skipped_large = 0
         deadline = time.monotonic() + _RG_TIMEOUT_S
-        for dirpath, dirnames, filenames in os.walk(base):
+        roots = os.walk(base) if base.is_dir() else [(str(base.parent), [], [base.name])]
+        for dirpath, dirnames, filenames in roots:
             if time.monotonic() >= deadline:
                 raise TimeoutError("python search timed out")
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
@@ -198,7 +213,7 @@ class GrepTool(BaseTool):
                 if text is None:
                     continue
                 try:
-                    rel = fpath.relative_to(base).as_posix()
+                    rel = fpath.relative_to(base).as_posix() if base.is_dir() else base.name
                 except ValueError:  # pragma: no cover - walk stays below base
                     rel = fpath.as_posix()
                 for lineno, line in enumerate(text.splitlines(), start=1):
@@ -206,7 +221,9 @@ class GrepTool(BaseTool):
                         raise TimeoutError("python search timed out")
                     if regex.search(line) is None:
                         continue
-                    matches.append(f"{rel}:{lineno}: {line[:_MAX_LINE_CHARS]}")
+                    clipped = line[:_MAX_LINE_CHARS]
+                    suffix = "...[行已截断]" if len(line) > _MAX_LINE_CHARS else ""
+                    matches.append(f"{rel}:{lineno}: {clipped}{suffix}")
                     if len(matches) >= max_results:
                         matches.append("...[达到结果上限；请缩小 path 或 glob 继续搜索]")
                         return matches

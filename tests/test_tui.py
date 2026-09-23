@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
 import time
 from pathlib import Path
 
@@ -320,6 +321,24 @@ def test_auto_allow_skips_modal(tmp_path):
     _run(scenario())
 
 
+def test_status_distinguishes_latest_and_cumulative_cache_rates(tmp_path):
+    app, _ws = _make_app(tmp_path, turns=[
+        {"text": "first", "input_tokens": 50, "cache_read_tokens": 0},
+        {"text": "second", "input_tokens": 100, "cache_read_tokens": 80},
+    ])
+
+    async def scenario():
+        async with app.run_test(size=(160, 32)) as pilot:
+            await _submit(pilot, "first")
+            await _wait_turn_done(app)
+            await _submit(pilot, "second")
+            await _wait_turn_done(app)
+            status = str(app.query_one("#status-right").content)
+            assert "缓存本轮 80.0% / 累计 53.3%" in status
+
+    _run(scenario())
+
+
 def test_tool_details_expand_on_click(tmp_path):
     app, ws = _make_app(tmp_path, turns=[
         {"tool_calls": [{"name": "read", "arguments": {"path": "sample.txt"}}]},
@@ -337,7 +356,32 @@ def test_tool_details_expand_on_click(tmp_path):
             await pilot.click(card)
             await pilot.pause()
             assert card._body.display
-            assert "detail visible on demand" in str(card._body.content)
+            assert "detail visible on demand" in str(card._detail.content)
+
+    _run(scenario())
+
+
+def test_tool_card_pages_archived_command_output(tmp_path):
+    exe = sys.executable.replace("\\", "/")
+    command = f'{exe} -c "print(\'x\'*60000)"'
+    app, _ws = _make_app(tmp_path, turns=[
+        {"tool_calls": [{"name": "bash", "arguments": {"command": command}}]},
+        {"text": "done"},
+    ], yes=True)
+
+    async def scenario():
+        async with app.run_test(size=(120, 32)) as pilot:
+            await _submit(pilot, "run")
+            await _wait_turn_done(app)
+            card = list(app.query(ToolCard))[0]
+            assert card._artifact_id is not None
+            await pilot.click(card)
+            await pilot.pause()
+            assert "偏移 0" in str(card._detail.content)
+            card.focus()
+            await pilot.press("n")
+            await pilot.pause()
+            assert "偏移 20000" in str(card._detail.content)
 
     _run(scenario())
 

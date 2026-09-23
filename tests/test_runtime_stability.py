@@ -84,7 +84,7 @@ def test_paused_task_continues_after_process_style_resume(tmp_path):
         store.close()
 
 
-def test_time_slice_auto_continues_when_task_makes_progress(tmp_path):
+def test_time_slice_pauses_then_continues_explicitly(tmp_path):
     class SlowThenFast:
         name = "fake"
 
@@ -101,6 +101,8 @@ def test_time_slice_auto_continues_when_task_makes_progress(tmp_path):
     runtime, store, _ = make_runtime(tmp_path, provider, budget=Budget(max_seconds=.15))
     try:
         result = _run_one_turn(runtime, "go")
+        assert result.exit_reason is ExitReason.TIME_BUDGET
+        result = _run_one_turn(runtime, None)
         assert result.exit_reason is ExitReason.COMPLETED
         assert provider.calls == 2
     finally:
@@ -124,7 +126,7 @@ def test_time_slice_pauses_after_no_progress(tmp_path):
     try:
         result = _run_one_turn(runtime, "go")
         assert result.exit_reason is ExitReason.TIME_BUDGET
-        assert provider.calls == 2
+        assert provider.calls == 1
         assert store.get_session(result.session_id).status == "paused"
     finally:
         store.close()

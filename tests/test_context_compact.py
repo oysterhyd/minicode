@@ -132,19 +132,19 @@ def test_estimate_messages_tokens_counts_all_components():
 def test_needs_compaction_threshold():
     compactor = ContextCompactor(CompactConfig(max_context_tokens=10_000))  # trigger at 8000
     small = build_history(1, result_chars=50)
-    big = build_history(20, result_chars=1000)
+    big = build_history(30, result_chars=1000)
 
     assert compactor.needs_compaction("system", small) is False
     assert compactor.needs_compaction("system", big) is True
 
-    # Exactly consistent with the estimator and the trigger fraction.
-    estimate = estimate_messages_tokens("system", big)
+    # Exactly consistent with the prompt-only estimator and reserved window.
+    estimate = estimate_messages_tokens("system", big, reserve_output_tokens=0)
     assert compactor.needs_compaction("system", big) == (estimate > 10_000 * 0.8)
 
     # Tool schemas count towards the estimate.
     spec = ToolSpec(name="t", description="d" * 5000, input_schema={"type": "object"})
     assert compactor.needs_compaction(None, [], [spec]) is False  # ~1666 + 2000 < 8000
-    heavy = ContextCompactor(CompactConfig(max_context_tokens=3000))
+    heavy = ContextCompactor(CompactConfig(max_context_tokens=1800))
     assert heavy.needs_compaction(None, [], [spec]) is True
 
 
@@ -159,7 +159,7 @@ def test_compact_noop_on_empty_and_tiny_histories():
     empty = compactor.compact(None, [])  # no system prompt: reserve only
     assert empty.changed is False
     assert empty.messages == []
-    assert empty.stats == CompactStats(tokens_before=2000, tokens_after=2000)
+    assert empty.stats == CompactStats(tokens_before=0, tokens_after=0)
 
     # A single unit is the tail: nothing may be archived.
     single = build_history(1)
@@ -326,7 +326,8 @@ def test_structured_summary_merges_remaining_early_units():
     # min_archive_units=5 blocks step A (only 3 early units); the estimate
     # stays over budget after shrinking, so step C must merge units 1-3.
     compactor = ContextCompactor(
-        CompactConfig(max_context_tokens=2500, tail_keep_rounds=1, min_archive_units=5),
+        CompactConfig(max_context_tokens=2500, trigger_fraction=0.7,
+                      tail_keep_rounds=1, min_archive_units=5),
         FakeSpill(),
     )
 
@@ -401,7 +402,8 @@ def test_pairing_safety_allows_archive_when_span_is_complete():
     ]
     spill = FakeSpill()
     compactor = ContextCompactor(
-        CompactConfig(max_context_tokens=10_000, tail_keep_rounds=0, min_archive_units=1),
+        CompactConfig(max_context_tokens=10_000, tail_keep_rounds=0,
+                      tail_keep_tokens=0, min_archive_units=1),
         spill,
     )
 
@@ -504,7 +506,7 @@ def test_shrinking_preserves_artifact_reference_from_result_tail():
     assert "[artifact:tool_output_abc123]" in oldest
 
 
-def test_hard_limit_accounts_for_dynamic_output_reserve():
+def test_hard_limit_keeps_minimum_output_reserve():
     reserve = {"tokens": 1000}
     compactor = ContextCompactor(
         CompactConfig(max_context_tokens=10_000),
@@ -515,4 +517,4 @@ def test_hard_limit_accounts_for_dynamic_output_reserve():
 
     assert compactor.fits_hard_limit(None, messages) is True
     reserve["tokens"] = 3000
-    assert compactor.fits_hard_limit(None, messages) is False
+    assert compactor.fits_hard_limit(None, messages) is True

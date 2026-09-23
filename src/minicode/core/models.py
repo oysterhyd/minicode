@@ -234,12 +234,13 @@ class Budget(BaseModel):
     keeping the context inside the model's window is the compactor's job
     (``context/``). ``0`` or a negative value means *no token cap at all*, which
     is the default. ``max_rounds`` and ``max_seconds`` are checkpoint slices,
-    not lifetime caps. A non-positive round slice disables round checkpoints.
+    not lifetime caps. ``0`` disables each corresponding guard; all three
+    guards default to disabled.
     """
 
-    max_rounds: int = 20
+    max_rounds: int = 0
     max_total_tokens: int = 0
-    max_seconds: float = 600.0
+    max_seconds: float = 0.0
 
 
 class RunResult(BaseModel):

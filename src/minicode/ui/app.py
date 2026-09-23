@@ -18,7 +18,7 @@ from collections import deque
 import time
 from typer import Exit
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -285,7 +285,8 @@ class ToolCard(Vertical):
     """One tool call: a start line that is later finalized to ✓/✗ plus an
     output preview (details-style body, shown only when there is output)."""
 
-    def __init__(self, call_id: str, name: str, summary: str) -> None:
+    def __init__(self, call_id: str, name: str, summary: str,
+                 artifact_page: Callable[[str, int, int], tuple[str, int | None, bool] | None] | None = None) -> None:
         super().__init__(classes="tool-card")
         self.can_focus = True
         self.call_id = call_id
@@ -295,8 +296,13 @@ class ToolCard(Vertical):
             line.append(f" {summary}")
         self.header_text = line
         self._header = Static(line)
-        self._body = Static(Text(""), classes="tool-body")
+        self._detail = Static(Text(""), classes="tool-body")
+        self._body = VerticalScroll(self._detail, classes="tool-detail-scroll")
         self._body.display = False
+        self._artifact_page = artifact_page
+        self._artifact_id: str | None = None
+        self._page_offset = 0
+        self._has_more = False
         self._has_detail = False
         self._expanded = False
         self._header_base = line
@@ -322,9 +328,12 @@ class ToolCard(Vertical):
         if isinstance(duration, (int, float)):
             line.append(f"  {duration:.1f}s", style="dim")
         detail = str(data.get("output_detail") or data.get("output_preview") or "")
-        self._has_detail = bool(detail.strip())
+        self._artifact_id = str(data["artifact_id"]) if data.get("artifact_id") else None
+        self._has_detail = bool(detail.strip() or self._artifact_id)
         if self._has_detail:
-            self._body.update(Text(detail, style="dim"))
+            self._detail.update(Text(detail, style="dim"))
+        if data.get("truncated") or self._artifact_id:
+            line.append("  已截断 · 展开查看归档", style="yellow")
         self._header_base = line
         self._update_header()
 
@@ -338,8 +347,23 @@ class ToolCard(Vertical):
     def toggle_detail(self) -> None:
         if self._has_detail:
             self._expanded = not self._expanded
+            if self._expanded and self._artifact_id and self._artifact_page:
+                self._load_page(0)
             self._body.display = self._expanded
             self._update_header()
+
+    def _load_page(self, offset: int) -> None:
+        if not self._artifact_id or not self._artifact_page:
+            return
+        result = self._artifact_page(self._artifact_id, offset, 20_000)
+        if result is None:
+            self._detail.update(Text("归档内容不可用", style="red"))
+            return
+        page, _total, self._has_more = result
+        self._page_offset = offset
+        hint = "\n\n[n 下一页 · p 上一页 · 滚动查看本页]" if self._has_more or offset else ""
+        self._detail.update(Text(f"归档 {self._artifact_id} · 偏移 {offset}\n{page}{hint}", style="dim"))
+        self._body.scroll_home(animate=False)
 
     def on_click(self) -> None:
         self.toggle_detail()
@@ -347,6 +371,12 @@ class ToolCard(Vertical):
     def on_key(self, event: events.Key) -> None:
         if event.key in ("enter", "space"):
             self.toggle_detail()
+            event.stop()
+        elif self._expanded and self._artifact_id and event.key == "n" and self._has_more:
+            self._load_page(self._page_offset + 20_000)
+            event.stop()
+        elif self._expanded and self._artifact_id and event.key == "p" and self._page_offset:
+            self._load_page(max(0, self._page_offset - 20_000))
             event.stop()
 
 
@@ -528,6 +558,7 @@ class MiniCodeApp(App[None]):
     .tool-card:focus { border-left: solid #74C5B5; }
     .tool-card > Static { height: auto; }
     .tool-body { color: #A0ADB5; height: auto; padding: 0 1 1 1; }
+    .tool-detail-scroll { height: auto; max-height: 20; }
     .msg-event { color: #A0ADB5; margin-top: 1; }
     .msg-system { margin-top: 1; }
     .msg-warn { color: $warning; margin-top: 1; }
@@ -751,7 +782,18 @@ class MiniCodeApp(App[None]):
     def _stats_text(self) -> Text:
         runtime = self._runtime
         usage = runtime.usage
+        last_usage = runtime.last_model_usage
         session_id = runtime.session_id
+        latest_cache = (
+            "—" if last_usage is None else
+            "未知" if not last_usage.available else
+            f"{last_usage.cache_hit_rate:.1%}"
+        )
+        total_cache = (
+            "—" if usage.input_tokens == 0 else
+            "未知" if not usage.available else
+            f"{usage.cache_hit_rate:.1%}"
+        )
         line = Text(style="dim")
         line.append(runtime.model)
         line.append(" · ")
@@ -761,13 +803,13 @@ class MiniCodeApp(App[None]):
                 f"{self._fmt_tokens(runtime.context_window)}"
             )
             line.append(f" · token {format_tokens(usage.total_tokens)}")
-            line.append(f" · 缓存 {usage.cache_hit_rate:.0%}")
+            line.append(f" · 缓存本轮{latest_cache}/累计{total_cache}")
         else:
             line.append(
                 self._context_bar(runtime.context_tokens_used(), runtime.context_window)
             )
             line.append(f" · 输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}")
-            line.append(f" · 缓存 {usage.cache_hit_rate:.0%}")
+            line.append(f" · 缓存本轮 {latest_cache} / 累计 {total_cache}")
             line.append(f" · 会话 {session_id[:8] if session_id else '未开始'}")
         return line
 
@@ -831,7 +873,10 @@ class MiniCodeApp(App[None]):
             data = event.data
             call_id = str(data.get("call_id", ""))
             name = str(data.get("name", "?"))
-            card = ToolCard(call_id, name, _tool_args_summary(name, data.get("arguments") or {}))
+            session_id = self._runtime.session_id
+            reader = (lambda artifact_id, offset, limit:
+                      self._services.artifact_store.read_page(session_id, artifact_id, offset, limit)) if session_id else None
+            card = ToolCard(call_id, name, _tool_args_summary(name, data.get("arguments") or {}), reader)
             self._cards[call_id] = card
             self._mount(card)
             self._refresh_status(f"执行工具 {name}")
@@ -842,7 +887,10 @@ class MiniCodeApp(App[None]):
             if card is None:
                 # Result without a seen start (e.g. recovered calls).
                 name = str(event.data.get("name", "?"))
-                card = ToolCard(call_id, name, "")
+                session_id = self._runtime.session_id
+                reader = (lambda artifact_id, offset, limit:
+                          self._services.artifact_store.read_page(session_id, artifact_id, offset, limit)) if session_id else None
+                card = ToolCard(call_id, name, "", reader)
                 self._cards[call_id] = card
                 self._mount(card)
             card.set_result(event.data)
@@ -886,18 +934,10 @@ class MiniCodeApp(App[None]):
         self._end_streaming()
         self._set_busy(True, "等待模型响应")
         try:
-            message_count = self._runtime.message_count
             result = (
                 await self._runtime.run_turn(text)
                 if text is not None else await self._runtime.continue_turn()
             )
-            while result.exit_reason in (ExitReason.MAX_ROUNDS, ExitReason.TIME_BUDGET):
-                if (result.exit_reason is ExitReason.TIME_BUDGET
-                        and self._runtime.message_count <= message_count):
-                    break
-                message_count = self._runtime.message_count
-                self._refresh_status("已保存进度 · 继续执行")
-                result = await self._runtime.continue_turn()
         except asyncio.CancelledError:
             # The runtime already persisted the session as cancelled.
             self._end_streaming()

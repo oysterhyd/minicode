@@ -409,6 +409,26 @@ def test_background_job_delivered_once_as_user_message(harness_factory):
     assert manager.cancelled is True  # cancelled at finalize
 
 
+def test_background_output_archives_full_log(harness_factory):
+    job = bg_job()
+    full = "begin\n" + "x" * 60_000 + "\nend\n"
+    job.full_output = full
+    job.output = "...[output truncated]\nend\n"
+    artifacts = FakeArtifactStore()
+    runtime, store, sink = harness_factory(
+        FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="done")])),
+        background_manager=FakeBackgroundManager([job]), artifact_store=artifacts,
+    )
+    result = asyncio.run(runtime.run_turn("go"))
+    assert result.exit_reason is ExitReason.COMPLETED
+    assert artifacts.spilled == [("command_output", full)]
+    event = sink.of_type(EventType.BACKGROUND_JOB_COMPLETED)[0]
+    assert event.data["artifact_id"] == "command_output_deadbeef"
+    texts = [block.text for message in store.get_messages(result.session_id)
+             for block in message.content if isinstance(block, TextBlock)]
+    assert any("[artifact:command_output_deadbeef]" in text for text in texts)
+
+
 # ---------------------------------------------------------------------------
 # Output spilling
 # ---------------------------------------------------------------------------
@@ -417,13 +437,13 @@ def test_background_job_delivered_once_as_user_message(harness_factory):
 def test_large_output_spilled_with_readback_reference(harness_factory):
     # grep over a big file produces an output above the spill threshold
     # (long lines: the search results cap alone would keep the output small).
-    big = "\n".join(f"needle line {i} " + "x" * 200 for i in range(200))
+    big = "\n".join(f"needle line {i} " + "x" * 400 for i in range(300))
     provider = FakeProvider(
         FakeProviderOptions(
             turns=[
                 FakeTurn(
                     tool_calls=[
-                        FakeToolCall(name="grep", arguments={"pattern": "needle"})
+                        FakeToolCall(name="grep", arguments={"pattern": "needle", "max_results": 300})
                     ]
                 ),
                 FakeTurn(text="done"),
@@ -451,7 +471,7 @@ def test_large_output_spilled_with_readback_reference(harness_factory):
     assert len(result_blocks) == 1
     assert "tool_output_deadbeef" in result_blocks[0].content
     assert "[artifact:" in result_blocks[0].content
-    assert len(result_blocks[0].content) < len(big) // 2
+    assert len(result_blocks[0].content.encode("utf-8")) <= 50 * 1024 + 200
 
 
 def test_failed_output_spills_the_unabridged_log(harness_factory):
@@ -603,6 +623,8 @@ def test_resume_restores_usage_rounds_and_history(harness_factory, tmp_path):
     runtime, store, _ = harness_factory(provider)
     first = asyncio.run(runtime.run_turn("一"))
     old_session = first.session_id
+    assert runtime.last_model_usage is not None
+    assert runtime.last_model_usage.cache_hit_rate == 20 / 50
 
     resumed = AgentRuntime.resume(
         store=store,
@@ -622,12 +644,16 @@ def test_resume_restores_usage_rounds_and_history(harness_factory, tmp_path):
         registry=default_registry(),
         policy=AutoAllowPolicy(),
     )
+    assert resumed.last_model_usage is not None
+    assert resumed.last_model_usage.cache_hit_rate == 20 / 50
     second = asyncio.run(resumed.run_turn("二"))
 
     assert second.rounds == 2  # cumulative across the resume boundary
     assert second.total_usage.input_tokens == 120
     assert second.total_usage.cache_read_tokens == 50
     assert second.total_usage.cache_write_tokens == 12
+    assert resumed.last_model_usage is not None
+    assert resumed.last_model_usage.cache_hit_rate == 30 / 70
     summary = store.get_session(old_session)
     assert summary.cache_read_tokens == 50
     assert summary.cache_write_tokens == 12

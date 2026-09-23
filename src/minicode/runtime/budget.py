@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 from minicode.core.models import Budget, Usage
+
+
+@dataclass
+class SharedBudgetLedger:
+    """One activation's counters, shared by parent and concurrent children."""
+
+    usage: Usage
+    rounds: int = 0
+    deadline: float | None = None
+
+    def add_usage(self, usage: Usage) -> None:
+        # Model completions run on one event loop; this update has no await.
+        self.usage = self.usage + usage
+
+    def reserve_round(self, limit: int) -> bool:
+        if limit > 0 and self.rounds >= limit:
+            return False
+        self.rounds += 1
+        return True
 
 
 class BudgetChecker:
@@ -19,11 +39,12 @@ class BudgetChecker:
         self.budget = budget
         self._base_usage = start_usage
         self._base_rounds = start_rounds
-        self.deadline = time.monotonic() + budget.max_seconds
+        self.deadline = (time.monotonic() + budget.max_seconds
+                         if budget.max_seconds > 0 else None)
 
     def time_exceeded(self) -> bool:
         """True once this turn's wall-clock deadline has passed."""
-        return time.monotonic() >= self.deadline
+        return self.deadline is not None and time.monotonic() >= self.deadline
 
     def rounds_exceeded(self, rounds: int) -> bool:
         """True after this activation has consumed its round slice."""
@@ -32,8 +53,8 @@ class BudgetChecker:
     def tokens_exceeded(self, usage: Usage) -> bool:
         """True when *usage* (session-cumulative) exceeds the token cap.
 
-        A cap of ``0`` or less disables token accounting entirely; round and
-        wall-clock slices still bound one activation.
+        A cap of ``0`` or less disables token accounting entirely. Round and
+        wall-clock slices apply only when explicitly configured.
         """
         if self.budget.max_total_tokens <= 0:
             return False

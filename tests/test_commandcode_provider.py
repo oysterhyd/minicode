@@ -692,8 +692,17 @@ def test_missing_cache_details_count_as_zero():
 
 def test_payload_max_tokens_overrides_the_default():
     """The request budget is the model's real output length, not a constant."""
-    payload = _build_payload(model="m", system=None, messages=[], tools=[], max_tokens=384_000)
+    payload = _build_payload(model="deepseek/deepseek-v4.1-flash", system=None,
+                             messages=[], tools=[], max_tokens=384_000)
     assert payload["max_tokens"] == 384_000
+
+
+def test_payload_limits_output_to_remaining_context(monkeypatch):
+    monkeypatch.setattr("minicode.providers.commandcode.estimate_messages_tokens",
+                        lambda *_args, **_kwargs: 995_000)
+    payload = _build_payload(model="deepseek/deepseek-v4.1-flash", system=None,
+                             messages=[], tools=[], max_tokens=384_000)
+    assert payload["max_tokens"] == 3976
 
 
 def test_provider_threads_its_max_tokens_into_the_request(monkeypatch):

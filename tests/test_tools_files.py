@@ -33,7 +33,7 @@ def test_read_happy_path_line_numbers(tmp_path):
     assert outcome.success is True
     assert outcome.error is None
     lines = outcome.output.splitlines()
-    assert lines == ["     1\talpha", "     2\tbeta"]
+    assert lines == ["1\talpha", "2\tbeta"]
 
 
 def test_read_offset_and_limit(tmp_path):
@@ -41,7 +41,7 @@ def test_read_offset_and_limit(tmp_path):
     ctx = make_ctx(tmp_path)
     outcome = run(ReadTool(), {"path": "a.txt", "offset": 2, "limit": 2}, ctx)
     assert outcome.success is True
-    assert outcome.output.splitlines()[:2] == ["     2\tl2", "     3\tl3"]
+    assert outcome.output.splitlines()[:2] == ["2\tl2", "3\tl3"]
     assert "next_offset=4" in outcome.output
 
 
@@ -80,6 +80,22 @@ def test_read_large_file_pages_by_cursor_without_loading_whole_file(tmp_path):
     second = run(ReadTool(), {"path": "big.txt", "offset": 1, "cursor": cursor}, ctx)
     assert second.success
     assert "a" * 100 in second.output
+    assert cursor > 0
+
+
+def test_read_defaults_to_two_thousand_lines_and_utf8_page(tmp_path):
+    (tmp_path / "lines.txt").write_text("x\n" * 2100, encoding="utf-8")
+    lines = run(ReadTool(), {"path": "lines.txt"}, make_ctx(tmp_path))
+    assert "next_offset=2001" in lines.output
+    assert len([line for line in lines.output.splitlines() if "\tx" in line]) == 2000
+
+    (tmp_path / "wide.txt").write_text("汉" * 30_000, encoding="utf-8")
+    first = run(ReadTool(), {"path": "wide.txt"}, make_ctx(tmp_path))
+    assert len(first.output.encode("utf-8")) <= 50 * 1024
+    cursor = int(first.output.rsplit("next_cursor=", 1)[1].split("]", 1)[0])
+    second = run(ReadTool(), {"path": "wide.txt", "cursor": cursor}, make_ctx(tmp_path))
+    assert first.success and second.success
+    assert "�" not in first.output + second.output
     assert cursor > 0
 
 
@@ -167,7 +183,7 @@ def test_ls_tree_sorted_and_skip_dirs(tmp_path):
     (tmp_path / ".venv" / "pyvenv.cfg").write_text("x", encoding="utf-8")
 
     ctx = make_ctx(tmp_path)
-    outcome = run(LsTool(), {}, ctx)
+    outcome = run(LsTool(), {"recursive": True}, ctx)
     assert outcome.success is True
     entries = outcome.output.splitlines()
     assert entries == sorted(entries)
@@ -199,6 +215,48 @@ def test_ls_truncates_entry_count(tmp_path):
     next_page = run(LsTool(), {"offset": 500}, ctx)
     assert next_page.success
     assert len(next_page.output.splitlines()) == 10
+
+
+def test_ls_defaults_to_current_directory(tmp_path):
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "inside.txt").write_text("x", encoding="utf-8")
+    direct = run(LsTool(), {}, make_ctx(tmp_path))
+    recursive = run(LsTool(), {"recursive": True}, make_ctx(tmp_path))
+    assert direct.output == "nested/"
+    assert "nested/inside.txt" in recursive.output
+
+
+def test_large_recursive_ls_compacts_paths_without_losing_entries(tmp_path):
+    relative = "repository-materials-with-a-long-name/course-assets"
+    folder = tmp_path / relative
+    folder.mkdir(parents=True)
+    for index in range(510):
+        (folder / f"chapter-{index:04d}.txt").write_text("x", encoding="utf-8")
+    ctx = make_ctx(tmp_path)
+    first = run(LsTool(), {"recursive": True}, ctx)
+    assert first.success
+    assert "目录树（缩进表示路径层级）" in first.output
+    assert "next_offset=500" in first.output
+
+    reconstructed: set[str] = set()
+    parents: list[str] = []
+    for line in first.output.splitlines()[1:]:
+        if line.startswith("..."):
+            break
+        depth = (len(line) - len(line.lstrip(" "))) // 2
+        name = line.strip()
+        if name.endswith("/"):
+            parents = parents[:depth] + [name[:-1]]
+        else:
+            reconstructed.add("/".join(parents[:depth] + [name]))
+    assert len(reconstructed) == 498
+    assert f"{relative}/chapter-0000.txt" in reconstructed
+
+    second = run(LsTool(), {"recursive": True, "offset": 500}, ctx)
+    assert second.success
+    assert len([line for line in second.output.splitlines() if line.endswith(".txt")]) == 12
+    flat_size = sum(len(f"{relative}/chapter-{index:04d}.txt\n") for index in range(498))
+    assert len(first.output) < flat_size * 0.7
 
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ from typing import Awaitable, Callable, Literal
 from pydantic import BaseModel, Field
 
 from minicode.core.clock import utc_now
-from minicode.tools.base import truncate_output
+from minicode.tools.base import tail_output
 from minicode.tools.command import capture_bounded, decode_shell_output, kill_process_tree, spawn_shell
 
 #: Called when a job reaches a terminal state (completed / failed).
@@ -42,6 +42,7 @@ class BackgroundJob(BaseModel):
     status: JobStatus = "running"
     exit_code: int | None = None
     output: str = ""
+    full_output: str | None = None
     started_at: str = Field(default_factory=utc_now)
     finished_at: str | None = None
 
@@ -81,7 +82,7 @@ class BackgroundManager:
     def __init__(
         self,
         on_complete: CompleteCallback | None = None,
-        max_output_chars: int = 10_000,
+        max_output_chars: int = 50 * 1024,
     ) -> None:
         self._on_complete = on_complete
         self._max_output_chars = max_output_chars
@@ -93,7 +94,7 @@ class BackgroundManager:
 
     # -- starting -----------------------------------------------------------
 
-    async def start(self, command: str, cwd: Path, timeout_s: float) -> str:
+    async def start(self, command: str, cwd: Path, timeout_s: float | None) -> str:
         """Start *command* in *cwd* and return its job id immediately.
 
         The command is wrapped for the platform shell exactly like the
@@ -132,7 +133,7 @@ class BackgroundManager:
         self,
         job: BackgroundJob,
         proc: asyncio.subprocess.Process,
-        timeout_s: float,
+        timeout_s: float | None,
     ) -> None:
         """Wait for the process, then record the terminal state and notify.
 
@@ -153,7 +154,10 @@ class BackgroundManager:
             output = decode_shell_output(stdout)
             job.exit_code = None if timed_out or over_limit else proc.returncode
             job.status = "completed" if proc.returncode == 0 and not timed_out and not over_limit else "failed"
-            job.output = truncate_output(output, self._max_output_chars)
+            job.output = tail_output(output, self._max_output_chars - 200)
+            if job.output != output:
+                job.full_output = output
+                job.output = "...[output truncated; 完整输出见归档]\n" + job.output
             if timed_out:
                 job.output += f"\ncommand timed out after {timeout_s}s and was killed"
             if over_limit:

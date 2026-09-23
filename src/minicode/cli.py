@@ -359,7 +359,7 @@ MaxRoundsOpt = Annotated[int, typer.Option(help="每次执行的轮次切片（0
 MaxTokensOpt = Annotated[
     int, typer.Option(help="会话累计 token 上限（0 = 不限制，默认）")
 ]
-MaxSecondsOpt = Annotated[float, typer.Option(help="每次执行的时长切片（秒）")]
+MaxSecondsOpt = Annotated[float, typer.Option(help="每次执行的时长切片（秒；0 = 不限）")]
 YesOpt = Annotated[bool, typer.Option("--yes", "-y", help="自动允许全部工具调用，不再逐个审批")]
 DbOpt = Annotated[Path, typer.Option(help="会话数据库路径（默认 ~/.minicode/sessions.db）")]
 AcceptanceOpt = Annotated[
@@ -553,7 +553,7 @@ def _print_header(console: Console, goal: str, setup: _Setup) -> None:
         f"[bold]预算[/]   单次轮次 "
         f"{('不限' if setup.budget.max_rounds <= 0 else '≤ ' + str(setup.budget.max_rounds))}"
         f" · token {_token_budget_label(setup.budget.max_total_tokens)}"
-        f" · ≤ {setup.budget.max_seconds:g} 秒"
+        f" · 时长 {('不限' if setup.budget.max_seconds <= 0 else '≤ ' + format(setup.budget.max_seconds, 'g') + ' 秒')}"
     )
     console.print()
 
@@ -702,6 +702,7 @@ def _attach_compactor(runtime: Any, artifact_store: Any) -> None:
         spill_fn=spill,
         context_tokens_fn=lambda: runtime.context_window,
         output_tokens_fn=runtime.effective_max_output_tokens,
+        estimate_scale_fn=lambda: getattr(runtime.provider, "prompt_scale", 1.0),
     )
 def _new_runtime(setup: _Setup, store: SqliteStore, services: Any) -> Any:
     """Build a fresh AgentRuntime from an already-assembled services bundle."""
@@ -793,17 +794,10 @@ def _run_one_turn(runtime: AgentRuntime, user_message: str | None) -> RunResult:
 
     async def _guarded() -> RunResult:
         try:
-            message_count = runtime.message_count
             result = (
                 await runtime.run_turn(user_message)
                 if user_message is not None else await runtime.continue_turn()
             )
-            while result.exit_reason in (ExitReason.MAX_ROUNDS, ExitReason.TIME_BUDGET):
-                if (result.exit_reason is ExitReason.TIME_BUDGET
-                        and runtime.message_count <= message_count):
-                    break
-                message_count = runtime.message_count
-                result = await runtime.continue_turn()
             return result
         except asyncio.CancelledError:
             typer.secho("已被用户取消，会话状态已保存。", fg=typer.colors.YELLOW)
@@ -828,9 +822,9 @@ def run(
     provider: ProviderOpt = ProviderChoice.auto,
     model: ModelOpt = None,
     script: ScriptOpt = None,
-    max_rounds: MaxRoundsOpt = 20,
+    max_rounds: MaxRoundsOpt = 0,
     max_tokens: MaxTokensOpt = 0,
-    max_seconds: MaxSecondsOpt = 600.0,
+    max_seconds: MaxSecondsOpt = 0.0,
     yes: YesOpt = False,
     acceptance: AcceptanceOpt = None,
     db: DbOpt = DEFAULT_DB_PATH,
@@ -869,9 +863,9 @@ def chat(
     provider: ProviderOpt = ProviderChoice.auto,
     model: ModelOpt = None,
     script: ScriptOpt = None,
-    max_rounds: MaxRoundsOpt = 20,
+    max_rounds: MaxRoundsOpt = 0,
     max_tokens: MaxTokensOpt = 0,
-    max_seconds: MaxSecondsOpt = 600.0,
+    max_seconds: MaxSecondsOpt = 0.0,
     yes: YesOpt = False,
     acceptance: AcceptanceOpt = None,
     db: DbOpt = DEFAULT_DB_PATH,
@@ -1158,9 +1152,9 @@ def resume(
     provider: ProviderOpt = ProviderChoice.auto,
     model: ModelOpt = None,
     script: ScriptOpt = None,
-    max_rounds: MaxRoundsOpt = 30,
+    max_rounds: MaxRoundsOpt = 0,
     max_tokens: MaxTokensOpt = 0,
-    max_seconds: MaxSecondsOpt = 600.0,
+    max_seconds: MaxSecondsOpt = 0.0,
     yes: YesOpt = False,
     acceptance: AcceptanceOpt = None,
     db: DbOpt = DEFAULT_DB_PATH,
@@ -1448,9 +1442,9 @@ def tui(
     provider: ProviderOpt = ProviderChoice.auto,
     model: ModelOpt = None,
     script: ScriptOpt = None,
-    max_rounds: MaxRoundsOpt = 20,
+    max_rounds: MaxRoundsOpt = 0,
     max_tokens: MaxTokensOpt = 0,
-    max_seconds: MaxSecondsOpt = 600.0,
+    max_seconds: MaxSecondsOpt = 0.0,
     yes: YesOpt = False,
     acceptance: AcceptanceOpt = None,
     db: DbOpt = DEFAULT_DB_PATH,

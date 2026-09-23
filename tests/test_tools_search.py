@@ -65,7 +65,7 @@ def test_fallback_case_sensitivity(tmp_path, monkeypatch):
     (tmp_path / "case.txt").write_text("Needle here\nplain needle\n", encoding="utf-8")
     ctx = make_ctx(tmp_path)
 
-    insensitive = run(GrepTool(), {"pattern": "needle"}, ctx)
+    insensitive = run(GrepTool(), {"pattern": "needle", "case_sensitive": False}, ctx)
     assert insensitive.success is True
     assert "case.txt:1: Needle here" in insensitive.output
     assert "case.txt:2" in insensitive.output
@@ -74,6 +74,23 @@ def test_fallback_case_sensitivity(tmp_path, monkeypatch):
     assert sensitive.success is True
     assert "case.txt:1" not in sensitive.output
     assert "case.txt:2: plain needle" in sensitive.output
+
+
+def test_file_path_default_case_and_long_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    (tmp_path / "one.txt").write_text("Needle\nneedle " + "x" * 800, encoding="utf-8")
+    outcome = run(GrepTool(), {"pattern": "needle", "path": "one.txt"}, make_ctx(tmp_path))
+    assert "one.txt:1" not in outcome.output
+    assert "one.txt:2" in outcome.output
+    assert "行已截断" in outcome.output
+    assert len(outcome.output.splitlines()[0]) < 550
+
+
+def test_caller_can_raise_match_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    (tmp_path / "many.txt").write_text("hit\n" * 130, encoding="utf-8")
+    outcome = run(GrepTool(), {"pattern": "hit", "max_results": 120}, make_ctx(tmp_path))
+    assert len([line for line in outcome.output.splitlines() if line.startswith("many.txt:")]) == 120
 
 
 def test_fallback_max_results_cap(tmp_path, monkeypatch):

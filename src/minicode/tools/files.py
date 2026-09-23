@@ -26,6 +26,7 @@ from minicode.tools.base import (
     ToolContext,
     bounded_output,
     resolve_or_fail,
+    utf8_prefix,
 )
 
 # Directory names never descended into when walking the workspace
@@ -194,10 +195,11 @@ class ReadTool(BaseTool):
         if not target.is_file():
             return ToolOutcome.failure(f"path is not a file: {args.path}")
 
-        page_chars = min(ctx.limits.max_output_chars - 200, ctx.limits.max_read_bytes // 4)
-        if page_chars < 10:
+        page_bytes = min(ctx.limits.max_output_chars - 200,
+                         max(20, ctx.limits.max_read_bytes // 4))
+        if page_bytes < 10:
             return ToolOutcome.failure("read page budget is too small (need at least 10 characters)")
-        line_limit = args.limit if args.limit is not None else 200
+        line_limit = min(args.limit or 2000, 2000)
         try:
             with target.open("r", encoding="utf-8", newline=None) as handle:
                 if args.cursor is not None:
@@ -207,7 +209,7 @@ class ReadTool(BaseTool):
                     # have to be materialized just to reach a later line.
                     skipped = 0
                     while skipped < args.offset - 1:
-                        fragment = handle.readline(page_chars)
+                        fragment = handle.readline(max(1, page_bytes))
                         if not fragment:
                             return ToolOutcome.failure(
                                 f"offset {args.offset} beyond end of file ({skipped} lines)"
@@ -217,15 +219,23 @@ class ReadTool(BaseTool):
 
                 lines: list[str] = []
                 line_number = args.offset
-                remaining = page_chars
+                remaining = page_bytes
                 while len(lines) < line_limit and remaining > 8:
-                    prefix = f"{line_number:>6}\t"
-                    fragment = handle.readline(max(1, remaining - len(prefix)))
+                    prefix = f"{line_number}\t"
+                    start = handle.tell()
+                    fragment = handle.readline(max(1, remaining - len(prefix.encode("utf-8")) - 1))
                     if not fragment:
                         break
+                    allowed = remaining - len(prefix.encode("utf-8")) - 1
+                    fitted = utf8_prefix(fragment, allowed)
+                    if fitted != fragment:
+                        handle.seek(start)
+                        fragment = handle.read(len(fitted))
+                        if not fragment:
+                            break
                     complete_line = fragment.endswith("\n")
                     lines.append(prefix + fragment.rstrip("\r\n"))
-                    remaining -= len(lines[-1]) + 1
+                    remaining -= len(lines[-1].encode("utf-8")) + 1
                     if complete_line:
                         line_number += 1
                     else:
@@ -255,13 +265,15 @@ class LsArgs(BaseModel):
     path: str = "."
     offset: int = Field(default=0, ge=0, description="zero-based entry offset for paging")
     limit: int = Field(default=500, ge=1, le=500, description="entries in one page")
+    recursive: bool = Field(default=False, description="descend into subdirectories (default: false)")
 
 
 class LsTool(BaseTool):
     name = "ls"
     description = (
-        "List a bounded page of files and directories under a workspace directory. "
-        "Use next_offset to continue; narrow path for large trees."
+        "List up to 500 entries in one directory (50 KiB UTF-8 maximum). "
+        "Set recursive=true to descend; large recursive results use an indented "
+        "tree to avoid repeating path prefixes. Use next_offset to continue."
     )
     requires_approval = False
     args_model = LsArgs
@@ -279,6 +291,7 @@ class LsTool(BaseTool):
         entries: list[str] = []
         seen = 0
         has_more = False
+        used_bytes = 0
         for dirpath, dirnames, filenames in os.walk(base):
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
             rel_dir = os.path.relpath(dirpath, base)
@@ -288,17 +301,46 @@ class LsTool(BaseTool):
                 (f"{prefix}{name}" for name in sorted(filenames)),
             ):
                 if seen >= args.offset:
-                    if len(entries) >= args.limit:
+                    size = len(entry.encode("utf-8")) + (1 if entries else 0)
+                    if len(entries) >= args.limit or used_bytes + size > ctx.limits.max_output_chars - 100:
                         has_more = True
                         break
                     entries.append(entry)
+                    used_bytes += size
                 seen += 1
             if has_more:
                 break
+            if not args.recursive:
+                break
         entries.sort()
+        body = "\n".join(entries)
+        if args.recursive and len(body.encode("utf-8")) > 8192:
+            tree = "目录树（缩进表示路径层级）：\n" + self._render_tree(entries)
+            if len(tree.encode("utf-8")) <= ctx.limits.max_output_chars - 100:
+                body = tree
         if has_more:
-            entries.append(f"...[达到列表页上限；next_offset={args.offset + len(entries)}]")
-        return bounded_output("\n".join(entries), ctx.limits.max_output_chars)
+            body += f"\n...[达到列表页上限；next_offset={args.offset + len(entries)}]"
+        return bounded_output(body, ctx.limits.max_output_chars)
+
+    @staticmethod
+    def _render_tree(entries: list[str]) -> str:
+        """Render the same paths with each common directory prefix shown once."""
+        lines: list[str] = []
+        previous_parents: list[str] = []
+        for entry in entries:
+            parts = entry.rstrip("/").split("/")
+            is_dir = entry.endswith("/")
+            parents = parts if is_dir else parts[:-1]
+            common = 0
+            while (common < min(len(previous_parents), len(parents))
+                   and previous_parents[common] == parents[common]):
+                common += 1
+            for depth in range(common, len(parents)):
+                lines.append("  " * depth + parents[depth] + "/")
+            if not is_dir:
+                lines.append("  " * len(parents) + parts[-1])
+            previous_parents = parents
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

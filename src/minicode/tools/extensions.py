@@ -79,7 +79,7 @@ class SkillResourceTool(BaseTool):
 
 class DelegateArgs(BaseModel):
     kind: str = Field(pattern="^(explore|review)$")
-    task: str = Field(min_length=1, max_length=4000)
+    task: str = Field(min_length=1)
 
 
 class DelegateTool(BaseTool):

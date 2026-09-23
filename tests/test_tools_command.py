@@ -91,6 +91,15 @@ def test_run_command_output_truncated(tmp_path):
     assert len(outcome.full_output) > 50_000
 
 
+def test_command_keeps_last_two_thousand_lines(tmp_path):
+    outcome = run({"command": _python_command("print('\\n'.join(str(i) for i in range(2100)))")}, tmp_path)
+    assert outcome.success
+    assert outcome.output.startswith("...[output truncated")
+    assert "\n2099\n" in outcome.output
+    assert "\n0\n" not in outcome.output
+    assert len(outcome.output.encode("utf-8")) <= 50 * 1024
+
+
 def test_large_command_output_spills_to_pageable_artifact(tmp_path):
     store = SqliteStore(tmp_path / "logs.sqlite3")
     session_id = store.create_session(workspace=str(tmp_path), provider="fake", model="fake")

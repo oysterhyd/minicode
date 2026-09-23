@@ -84,14 +84,14 @@ CLI 用 Rich `Confirm` 展示工具名与摘要；拒绝则以错误 tool_result
 参数变化即视为新调用，重新过权限门。
 
 **预算顺序**。`run_turn` 是可恢复的执行切片，内部可包含多个模型轮次。墙钟 deadline
-在每次执行开始时重置，轮数按本次执行计数；CLI/TUI 达到轮次切片时自动调用 `continue_turn`，
-时长切片在持久化消息有进展时也会自动续跑，无进展则暂停；
+在每次执行开始时重置，轮数按本次执行计数；默认的轮数、时长与累计 token 预算均为 0（不限）。
+显式轮次或时长切片到期后暂停，用户可通过 `/continue` 续跑；
 token 预算在**助手响应已计入、但其工具尚未执行之前**检查——预算已耗尽时不再产生任何
 副作用。未执行的 tool_use 会收到明确的错误 tool_result，避免恢复时误判为副作用未知。
 正常完成和暂停均经由 `_finalize`，取消经由专门的清理与持久化路径。
 
 **token 默认不限制**。`Budget.max_total_tokens` 为 0（或负）时 token 检查恒不触发，
-默认以轮数与时长切片保存进度。它统计**各轮输入与输出 token 的累计值**（每轮重发上下文，
+默认不以预算暂停。它统计**各轮输入与输出 token 的累计值**（每轮重发上下文，
 所以 20 轮 × 20k 输入 ≈ 400k 输入 token，另加输出），不是当前上下文占用。
 `--max-tokens N` 是 token 量上限，不区分缓存折扣，不能直接等同于货币成本上限。
 
@@ -145,12 +145,11 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
 
 两段式：
 
-1. **工具结果转存**（loop 内，逐调用）：工具在裁剪模型预览时同时保留原文；成功或失败输出超过
-   `spill_threshold_chars`（4000）时，原文写入 `ArtifactStore`
-   （`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），模型看到前 1000 字符预览与
+1. **工具结果转存**（loop 内，逐调用）：各工具先按自身的行数和 50 KiB UTF-8 边界分页或截断；
+   截断原文写入 `ArtifactStore`（`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），模型看到工具提供的可读部分与
    `[artifact:<id>]`。`read_artifact` 只在当前 session manifest 中查找，并按字符 offset/limit 分页回读。
-2. **轮前压缩**（`ContextCompactor`）：估算 prompt 与 provider 实际 `max_tokens` 的合计超过当前模型
-   窗口的 `trigger_fraction`（0.8）时依次执行；模型切换后两个值都立即重读。按 user 请求归档早期
+2. **轮前压缩**（`ContextCompactor`）：估算 prompt 超过当前模型窗口减去 16,384 token 预留时依次执行；
+   小于 81,920 token 的窗口预留 20%；模型切换后窗口立即重读。优先保留最近约 20,000 token，按 user 请求归档早期
    历史；若整个长任务只有一条初始 user 消息，则改按已闭合的 assistant/tool-result 交互组归档。
    归档摘要逐字带回 user 文本，原始初始请求保持独立；随后缩短较旧工具结果
    → 满足条件时合并早期单元为确定性摘要；归档/合并前检查调用结果配对。归档原文落 artifact，压缩后的
@@ -241,8 +240,9 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
   SQLite schema v4 与 resume 保存并恢复这些累计值，缺失 usage 不再冒充真实的零。
 - Anthropic 请求没有设置 `cache_control`；兼容网关是否支持缓存、返回哪些 usage 字段，
   必须实际核验，不能由 API 格式兼容推断。
-- `_build_provider` 与 `_provider_for_model` 都把目录最大输出传给 provider；Runtime 从 provider 的
-  实际 `max_tokens` 计算 prompt 预算，压缩器使用同一值作为响应预留。
+- `_build_provider` 与 `_provider_for_model` 都把目录最大输出传给 provider；CommandCode 每次请求按
+  估算 prompt 占用与窗口剩余额度下调 `max_tokens`，并用实际 usage 校准下一次估算。Runtime 与压缩器
+  用相同的估算比例；上下文拒绝仍保留归档重试兜底。
   `/effort off` 省略字段，表示采用网关默认行为，不等于明确关闭推理。
 - 基础工具表含七个内置工具（含 `read_artifact`）；CLI/TUI 另注册本地 Skills 目录/加载/资源读取与 `delegate`。
   子会话使用独立的四工具只读注册表和默认拒绝策略，不能继承父会话的 bypass 权限；

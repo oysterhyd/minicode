@@ -417,7 +417,7 @@ def test_token_budget_stops_before_tool_execution(harness_factory):
 
 
 # ---------------------------------------------------------------------------
-# 11. Time budget: max_seconds=0 exits before any round runs
+# 11. Time budget: max_seconds=0 means unlimited
 # ---------------------------------------------------------------------------
 
 
@@ -427,11 +427,10 @@ def test_time_budget_zero_seconds(harness_factory):
 
     result = asyncio.run(harness.runtime.run_turn("go"))
 
-    assert result.exit_reason is ExitReason.TIME_BUDGET
-    assert result.rounds == 0
-    # The user message is persisted, but no assistant round ever ran.
-    assert [m.role for m in harness.store.get_messages(result.session_id)] == ["user"]
-    assert harness.events.of_type(EventType.ROUND_START) == []
+    assert result.exit_reason is ExitReason.COMPLETED
+    assert result.rounds == 1
+    assert [m.role for m in harness.store.get_messages(result.session_id)] == ["user", "assistant"]
+    assert len(harness.events.of_type(EventType.ROUND_START)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -557,9 +556,7 @@ def test_set_model_swaps_provider_and_updates_session(harness_factory, tmp_path)
     assert runtime.model == glm.name
     assert runtime.provider is new_provider
     assert runtime.context_window == glm.context_window == 1_048_576
-    # Compaction triggers on the prompt budget, not the window: the model has
-    # to be able to emit its full response on top of the prompt.
-    assert runtime.prompt_budget_tokens() == 1_048_576 - 128_000
+    assert runtime.prompt_budget_tokens() == 1_048_576 - 16_384
     # The persisted session row reflects the switch.
     summary = harness.store.get_session(result.session_id)
     assert summary is not None and summary.model == glm.name

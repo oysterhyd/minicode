@@ -8,10 +8,10 @@ from minicode.core.models import Budget, Usage
 from minicode.runtime.budget import BudgetChecker
 
 
-def test_time_deadline_honored_with_zero_seconds():
-    """max_seconds=0: the deadline is construction time, so it is already past."""
+def test_zero_seconds_disables_time_deadline():
+    """max_seconds=0 disables the wall-clock guard."""
     checker = BudgetChecker(Budget(max_seconds=0), start_usage=Usage(), start_rounds=0)
-    assert checker.time_exceeded() is True
+    assert checker.time_exceeded() is False
 
 
 def test_time_deadline_not_reached_with_headroom():
