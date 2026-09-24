@@ -43,6 +43,7 @@ _WIN_NULL_REDIRECT_RE = re.compile(r"(?P<redir>[12]?>>|[12]?>)\s*/dev/null\b")
 #: SGR colour escapes; PowerShell colourises formatted tables even when its
 #: output is a pipe. Pure noise (and token cost) for the model.
 _ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+_PIPE_DRAIN_GRACE_S = 1.0
 
 
 def _translate_posix_redirects(command: str) -> str:
@@ -90,10 +91,42 @@ def decode_shell_output(raw: bytes) -> str:
     return _ANSI_SGR_RE.sub("", text).replace("\r\n", "\n")
 
 
+def _close_stdout_pipe(proc: asyncio.subprocess.Process) -> None:
+    """Release a pipe inherited by a descendant after the shell has exited."""
+    if proc.stdout is not None:
+        transport = getattr(proc.stdout, "_transport", None)
+        if transport is not None:
+            transport.close()
+
+
+async def _wait_for_capture(
+    proc: asyncio.subprocess.Process, collector: asyncio.Task[Any]
+) -> tuple[Any, bool]:
+    """Wait for the shell and a bounded tail drain, even with inherited pipes.
+
+    On Windows ``Process.wait`` can wait for stdout's transport as well as the
+    process. A descendant retaining the pipe then leaves it pending after the
+    shell has exited. ``returncode`` is set at process exit independently.
+    """
+    if os.name == "nt":
+        while proc.returncode is None:
+            await asyncio.sleep(0.05)
+    else:
+        await proc.wait()
+    try:
+        return await asyncio.wait_for(asyncio.shield(collector), _PIPE_DRAIN_GRACE_S), False
+    except asyncio.TimeoutError:
+        _close_stdout_pipe(proc)
+        try:
+            return await asyncio.wait_for(collector, _PIPE_DRAIN_GRACE_S), True
+        except asyncio.TimeoutError:
+            return None, True
+
+
 async def capture_bounded(
     proc: asyncio.subprocess.Process, timeout_s: float | None, max_bytes: int = 100_000_000
-) -> tuple[bytes, bool, bool]:
-    """Drain a child with bounded memory; kill on timeout or output overflow."""
+) -> tuple[bytes, bool, bool, bool]:
+    """Return output and timeout, overflow, and inherited-pipe flags."""
     output = bytearray()
 
     async def collect() -> bool:
@@ -108,14 +141,15 @@ async def capture_bounded(
 
     collector = asyncio.create_task(collect())
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(proc.wait(), collector), timeout=timeout_s
+        (over_limit, pipe_lingered) = await asyncio.wait_for(
+            _wait_for_capture(proc, collector), timeout=timeout_s
         )
-        return bytes(output), False, results[1]
+        return bytes(output), False, bool(over_limit), pipe_lingered
     except asyncio.TimeoutError:
         await kill_process_tree(proc)
+        _close_stdout_pipe(proc)
         await asyncio.gather(collector, return_exceptions=True)
-        return bytes(output), True, False
+        return bytes(output), True, False, False
     except asyncio.CancelledError:
         await kill_process_tree(proc)
         collector.cancel()
@@ -137,11 +171,16 @@ async def spawn_shell(command: str, cwd: str | Path) -> asyncio.subprocess.Proce
     """
     kwargs: dict[str, Any] = {
         "cwd": str(cwd),
+        # Commands must never consume the host's terminal / NDJSON RPC input.
+        # NonInteractive alone does not close stdin for PowerShell or its children.
+        "stdin": asyncio.subprocess.DEVNULL,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.STDOUT,
     }
     if os.name != "nt":
         kwargs["start_new_session"] = True
+    else:
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     # Cancellation can arrive while the OS has created the child but asyncio
     # has not handed us its handle. Finish spawning, then reap that child.
     spawning = asyncio.create_task(
@@ -195,6 +234,7 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
         except (OSError, subprocess.SubprocessError):
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
+        _close_stdout_pipe(proc)
     else:
         try:
             # start_new_session makes the child a session leader, so its
@@ -219,11 +259,14 @@ class BashTool(BaseTool):
     description = (
         "Run a shell command inside the workspace (PowerShell on Windows, "
         "bash elsewhere) and return its combined output and exit code. "
-        "Set background=true to start the command as a background job "
-        "instead: it returns a job_id immediately and the result is "
-        "delivered by the system once the job completes. Output shows the last "
+        "Foreground commands are killed after timeout_s (default 300s, capped "
+        "at 3600s) so a stuck shell cannot block the turn; set timeout_s to "
+        "raise the bound. Set background=true to start the command as a "
+        "background job instead: it returns a job_id immediately, runs without "
+        "the default bound (timeout_s still applies when given) and its result "
+        "is delivered by the system once the job completes. Output shows the last "
         "2,000 lines or 50 KiB, with complete output in an artifact. "
-        "No timeout by default; timeout_s sets one. Requires approval."
+        "Requires approval."
     )
     requires_approval = True
     args_model = BashArgs
@@ -235,6 +278,9 @@ class BashTool(BaseTool):
         if not cwd.is_dir():
             return ToolOutcome.failure(f"path is not a directory: {args.cwd}")
 
+        # Foreground commands get the context default so a wedged shell cannot
+        # block the turn forever; an explicit timeout_s always wins, and both
+        # are clamped to the configured maximum.
         timeout_s = (
             ctx.limits.default_command_timeout_s
             if args.timeout_s is None
@@ -251,7 +297,11 @@ class BashTool(BaseTool):
                 return ToolOutcome.failure(
                     "background execution requested but no background manager is configured"
                 )
-            job_id = await manager.start(args.command, cwd, timeout_s)
+            # A background job is the escape hatch for work that legitimately
+            # runs long, so it stays unbounded unless the caller asked for a
+            # bound; the turn is not waiting on it either way.
+            job_timeout = None if args.timeout_s is None else timeout_s
+            job_id = await manager.start(args.command, cwd, job_timeout)
             return ToolOutcome(
                 success=True,
                 job_id=job_id,
@@ -291,15 +341,16 @@ class BashTool(BaseTool):
             collector = asyncio.create_task(collect())
             timed_out = False
             try:
-                results = await asyncio.wait_for(
-                    asyncio.gather(proc.wait(), collector), timeout=timeout_s
+                collected, pipe_lingered = await asyncio.wait_for(
+                    _wait_for_capture(proc, collector), timeout=timeout_s
                 )
-                total, quota_hit = results[1]
+                total, quota_hit = collected if collected is not None else (captured.tell(), False)
             except asyncio.TimeoutError:
                 timed_out = True
                 await kill_process_tree(proc)
+                _close_stdout_pipe(proc)
                 await asyncio.gather(collector, return_exceptions=True)
-                total, quota_hit = captured.tell(), False
+                total, quota_hit, pipe_lingered = captured.tell(), False, False
             except asyncio.CancelledError:
                 await kill_process_tree(proc)
                 collector.cancel()
@@ -340,6 +391,11 @@ class BashTool(BaseTool):
                 return outcome.model_copy(update={
                     "success": False,
                     "error": f"command timed out after {timeout_s}s and was killed",
+                })
+            if pipe_lingered:
+                return outcome.model_copy(update={
+                    "success": False,
+                    "error": "shell exited but an inherited output pipe stayed open; output capture was stopped",
                 })
             if quota_hit:
                 return outcome.model_copy(update={

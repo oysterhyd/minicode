@@ -755,8 +755,8 @@ class MiniCodeApp(App[None]):
         log.anchor()
         self._activity_widget = self.query_one("#activity", Static)
         self._activity_timer = self.set_interval(0.2, self._refresh_activity)
-        self._refresh_status("就绪")
         self._inspector_context_tokens = self._runtime.context_tokens_used()
+        self._refresh_status("就绪")
         self._refresh_inspector()
         self.query_one("#prompt", PromptArea).focus()
 
@@ -850,14 +850,14 @@ class MiniCodeApp(App[None]):
         line.append(" · ")
         if self.size.width < 140:
             line.append(
-                f"ctx {self._fmt_tokens(runtime.context_tokens_used())}/"
+                f"ctx {self._fmt_tokens(self._inspector_context_tokens)}/"
                 f"{self._fmt_tokens(runtime.context_window)}"
             )
             line.append(f" · token {format_tokens(usage.total_tokens)}")
             line.append(f" · 缓存本轮{latest_cache}/累计{total_cache}")
         else:
             line.append(
-                self._context_bar(runtime.context_tokens_used(), runtime.context_window)
+                self._context_bar(self._inspector_context_tokens, runtime.context_window)
             )
             line.append(f" · 输入 {format_tokens(usage.input_tokens)} / 输出 {format_tokens(usage.output_tokens)}")
             line.append(f" · 缓存本轮 {latest_cache} / 累计 {total_cache}")
@@ -920,7 +920,7 @@ class MiniCodeApp(App[None]):
     async def _on_event(self, event: Event) -> None:
         etype = event.type
         self._inspector_events.append(event)
-        if etype in {EventType.ASSISTANT_MESSAGE, EventType.CONTEXT_COMPACTED,
+        if etype in {EventType.ROUND_START, EventType.ASSISTANT_MESSAGE, EventType.CONTEXT_COMPACTED,
                      EventType.MCP_DISCOVERY, EventType.SESSION_END}:
             self._inspector_context_tokens = self._runtime.context_tokens_used()
         self._refresh_inspector()

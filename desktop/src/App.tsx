@@ -1,236 +1,128 @@
-import { useEffect, useRef, useState } from 'react'
-import { ArrowUp, AtSign, ChevronDown, FolderOpen, Plus, Shield, Square, SquarePen } from 'lucide-react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { AnimatePresence, MotionConfig, motion } from 'motion/react'
+import { ArrowUp, AtSign, CircleAlert, Cpu, ListPlus, Plus, Search, Shield, Square, SquarePen, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SessionFeed } from './components/SessionFeed'
 import { SettingsPanel, type SettingsTab } from './components/SettingsPanel'
 import { WorkPanel } from './components/WorkPanel'
+import { CommandPalette } from './components/CommandPalette'
+import { RunStatus } from './components/RunStatus'
+import { SelectMenu } from './components/SelectMenu'
 import type { AgentState, Capabilities, Change, Command, DesktopEvent, FeedItem, Model, Session, SessionDetail, SessionTask, SlashResult } from './types'
-import { historyItems } from './types'
+import { useConversations } from './hooks/useConversations'
 
-const initialState: AgentState = { model: 'fake', effort: 'off', permissionMode: 'default', sessionId: null,
-  taskPending: false, rounds: 0, contextTokens: 0, contextWindow: 200000, usage: null,
-  budget: { max_rounds: 0, max_total_tokens: 0, max_seconds: 0 }, acceptance: '' }
 type McpDiscovery = { servers: Array<{ server: string; protocol: string | null; server_version: string | null; error: string | null }>; tools: string[] }
 type Suggestion = { value: string; detail: string; kind: 'command' | 'value' }
 
+function savedPreference(key: string) { try { return localStorage.getItem(`minicode.${key}`) } catch { return null } }
+function savePreference(key: string, value: string) { try { localStorage.setItem(`minicode.${key}`, value) } catch { /* Preferences are optional. */ } }
+
 export default function App() {
-  const [workspace, setWorkspace] = useState<string | null>(null)
-  const [sessions, setSessions] = useState<Session[]>([])
-  const [sessionId, setSessionId] = useState<string | null>(null)
-  const [models, setModels] = useState<Model[]>([])
-  const [commands, setCommands] = useState<Command[]>([])
-  const [agentState, setAgentState] = useState<AgentState>(initialState)
-  const [capabilities, setCapabilities] = useState<Capabilities | null>(null)
-  const [mcpDiscovery, setMcpDiscovery] = useState<McpDiscovery | null>(null)
+  const { workspace, sessions, sessionId, models, commands, agentState, capabilities, items, trace, changes, tasks, files,
+    draft, busy, loading, queue, error, activeKey, views, startedAt, setAgentState, setCapabilities, setDraft, setItems, setError,
+    setBusy, removeQueued, refresh, loadCapabilities, request, openSession, sendNow, newSession: createSession } = useConversations()
+  const [discoveries, setDiscoveries] = useState<Record<string, McpDiscovery | null>>({})
+  const mcpDiscovery = discoveries[activeKey] || null
+  function setMcpDiscovery(value: McpDiscovery | null) { setDiscoveries(previous => ({ ...previous, [activeKey]: value })) }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
-  const [leftCollapsed, setLeftCollapsed] = useState(false)
-  const [rightCollapsed, setRightCollapsed] = useState(false)
-  const [items, setItems] = useState<FeedItem[]>([])
-  const [trace, setTrace] = useState<DesktopEvent['item'][]>([])
-  const [changes, setChanges] = useState<Change[]>([])
-  const [tasks, setTasks] = useState<SessionTask[]>([])
-  const [files, setFiles] = useState<string[]>([])
-  const [draft, setDraft] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [queue, setQueue] = useState<string[]>([])
-  const [error, setError] = useState('')
+  const [leftCollapsed, setLeftCollapsed] = useState(() => savedPreference('left-collapsed') === 'true')
+  const [rightCollapsed, setRightCollapsed] = useState(() => savedPreference('right-collapsed') === 'true')
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const saved = savedPreference('theme')
+    return saved === 'light' || saved === 'dark' ? saved : window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  })
+  const [commandOpen, setCommandOpen] = useState(false)
+  const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
+  const [mentionIndex, setMentionIndex] = useState(0)
   const [mentionOpen, setMentionOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false)
   const [slashIndex, setSlashIndex] = useState(0)
-  const sessionRef = useRef<string | null>(null)
-  const busyRef = useRef(false)
-  const queueRef = useRef<string[]>([])
-  const sendNowRef = useRef<(text: string) => void>(() => {})
-  const refreshRef = useRef<() => void>(() => {})
-  const applyStateRef = useRef<(state: AgentState) => void>(() => {})
-  const streamId = useRef('')
   const textarea = useRef<HTMLTextAreaElement>(null)
 
-  function applyState(state: AgentState) { setAgentState(state) }
-  applyStateRef.current = applyState
-
-  function refresh() {
-    window.desktop.request<Session[]>('listSessions').then(setSessions).catch(e => setError(String(e)))
-    window.desktop.request<Change[]>('changes').then(setChanges).catch(e => setError(String(e)))
-    window.desktop.request<string[]>('listFiles').then(setFiles).catch(e => setError(String(e)))
-    if (sessionRef.current) window.desktop.request<SessionTask[]>('listTasks', { sessionId: sessionRef.current }).then(setTasks).catch(e => setError(String(e)))
-    else setTasks([])
-  }
-  refreshRef.current = refresh
-
-  function loadCapabilities(root: string) {
-    window.desktop.request<Capabilities>('getCapabilities', { workspace: root }).then(setCapabilities).catch(e => setError(String(e)))
-  }
-
   useEffect(() => {
-    Promise.all([
-      window.desktop.request<string | null>('getWorkspace'),
-      window.desktop.request<{ sessions: Session[]; models: Model[]; defaultModel: string; commands: Command[]; state: AgentState }>('initialize'),
-    ]).then(([root, initial]) => {
-      setWorkspace(root); setSessions(initial.sessions); setModels(initial.models); setCommands(initial.commands)
-      applyStateRef.current(initial.state)
-      if (root) { refreshRef.current(); window.desktop.request<Capabilities>('getCapabilities', { workspace: root }).then(setCapabilities).catch(e => setError(String(e))) }
-    }).catch(e => setError(String(e)))
-
-    return window.desktop.onEvent((event: DesktopEvent) => {
-      if (event.event === 'bridge_error') { setError(event.error || 'Agent bridge 出错'); return }
-      if (event.event === 'run_error') {
-        setError(event.error || '执行失败'); setBusy(false); busyRef.current = false
-        setItems(previous => previous.map(item => item.approvalId ? { ...item, approvalId: undefined, granted: false } : item))
-        refreshRef.current(); return
-      }
-      if (event.event === 'run_done') {
-        setBusy(false); busyRef.current = false; refreshRef.current()
-        setItems(previous => previous.map(item => item.approvalId ? { ...item, approvalId: undefined, granted: false } : item))
-        window.desktop.request<AgentState>('getState').then(applyStateRef.current).catch(e => setError(String(e)))
-        if (event.result?.exit_reason && event.result.exit_reason !== 'completed') {
-          setItems(previous => [...previous, { id: `notice-${Date.now()}`, kind: 'notice', text: `任务已暂停：${event.result?.error || event.result?.exit_reason}` }])
-        }
-        const next = queueRef.current.shift()
-        setQueue([...queueRef.current])
-        if (next) setTimeout(() => sendNowRef.current(next), 0)
-        return
-      }
-      if (event.event === 'agent_event' && event.item?.type === 'session_start' && event.sessionId) {
-        sessionRef.current = event.sessionId; setSessionId(event.sessionId)
-      }
-      if (sessionRef.current && event.sessionId !== sessionRef.current) return
-      if (event.event === 'agent_event' && event.item) setTrace(previous => [...previous, event.item!].slice(-200))
-      if (event.event === 'text_delta' && event.text) {
-        const id = streamId.current || (streamId.current = `stream-${Date.now()}`)
-        setItems(previous => {
-          const index = previous.findIndex(item => item.id === id)
-          if (index < 0) return [...previous, { id, kind: 'assistant', text: event.text, pending: true }]
-          return previous.map(item => item.id === id ? { ...item, text: (item.text || '') + event.text } : item)
-        })
-      }
-      if (event.event === 'approval' && event.request) {
-        setItems(previous => [...previous, { id: `approval-${event.approvalId}`, kind: 'approval', name: event.request!.tool_name,
-          args: event.request!.arguments, approvalId: event.approvalId }])
-      }
-      if (event.event === 'agent_event' && event.item) {
-        const { type, data, seq } = event.item
-        if (type === 'round_start') setItems(previous => [...previous, { id: `thinking-${seq}`, kind: 'thinking', text: 'Thinking…' }])
-        if (type === 'assistant_message') {
-          const id = streamId.current; streamId.current = ''
-          setItems(previous => {
-            const withoutStream = previous.filter(item => item.kind !== 'thinking' && item.id !== id)
-            return data.text ? [...withoutStream, { id: `assistant-${seq}`, kind: 'assistant', text: String(data.text) }] : withoutStream
-          })
-        }
-        if (type === 'tool_call_start') setItems(previous => [...previous, { id: String(data.call_id), kind: 'tool', name: String(data.name),
-          args: data.arguments as Record<string, unknown>, pending: true }])
-        if (type === 'tool_call_result') {
-          setItems(previous => previous.map(item => item.id === String(data.call_id) ? { ...item, pending: false,
-            success: Boolean(data.success), output: String(data.output_detail || data.error || ''),
-            artifactId: data.artifact_id ? String(data.artifact_id) : undefined } : item))
-          refreshRef.current()
-        }
-        if (type === 'tool_output') setItems(previous => previous.map(item => item.id === String(data.call_id) ? { ...item, output: String(data.output_preview || '') } : item))
-        if (type === 'approval_decision') setItems(previous => previous.map(item => item.kind === 'approval' && item.approvalId ? { ...item, approvalId: undefined, granted: Boolean(data.granted) } : item))
-        if (type === 'subagent_start') setItems(previous => previous.map(item => item.kind === 'tool' && item.name === 'delegate' && item.args?.kind === data.kind && item.args?.task === data.task ? { ...item, childSessionId: String(data.child_session_id) } : item))
-        if (type === 'mcp_discovery' && data.error) setItems(previous => [...previous, { id: `mcp-${seq}`, kind: 'notice', text: String(data.error) }])
-        if (type === 'context_compacted') setItems(previous => [...previous, { id: `compact-${seq}`, kind: 'notice', text: 'Context compacted' }])
-        if (type === 'goal_check') setItems(previous => [...previous, { id: `goal-${seq}`, kind: 'notice', text: `Goal check: ${data.passed ? 'passed' : 'needs work'}` }])
-        if (type === 'background_job_completed' || type === 'background_job_lost') setItems(previous => [...previous, { id: `job-${seq}`, kind: 'notice', text: `Background job ${String(data.job_id || '')}: ${type === 'background_job_completed' ? 'completed' : 'lost'}` }])
-        if (type === 'side_effect_unknown') setItems(previous => [...previous, { id: `unknown-${seq}`, kind: 'notice', text: `Tool side effect needs review: ${String(data.name || data.call_id || '')}` }])
-      }
-    })
+    document.documentElement.dataset.theme = theme
+    void window.desktop.request('setAppearance', { theme }).catch(() => {})
+  }, [theme])
+  useEffect(() => { savePreference('left-collapsed', String(leftCollapsed)) }, [leftCollapsed])
+  useEffect(() => { savePreference('right-collapsed', String(rightCollapsed)) }, [rightCollapsed])
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const update = () => { if (!savedPreference('theme')) setTheme(media.matches ? 'dark' : 'light') }
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
   }, [])
-
-  async function bindWorkspace(root: string) {
-    if (busyRef.current) return
-    await window.desktop.request('setWorkspace', { workspace: root })
-    await window.desktop.request('resetSession')
-    applyState(await window.desktop.request<AgentState>('setAcceptance', { path: '' }))
-    setWorkspace(root); sessionRef.current = null; setSessionId(null); setItems([]); setTrace([]); setError(''); setMcpDiscovery(null)
-    setTasks([])
-    refresh(); loadCapabilities(root)
+  function resizeComposer() {
+    const input = textarea.current
+    if (input) { input.style.height = 'auto'; input.style.height = `${Math.min(190, Math.max(76, input.scrollHeight))}px` }
   }
-  async function chooseWorkspace() { if (busyRef.current) return; const root = await window.desktop.chooseWorkspace(); if (root) await bindWorkspace(root) }
+  useLayoutEffect(resizeComposer, [draft, items.length === 0, leftCollapsed, rightCollapsed])
+  useEffect(() => {
+    window.addEventListener('resize', resizeComposer)
+    return () => window.removeEventListener('resize', resizeComposer)
+  }, [])
+  function toggleTheme() { setTheme(value => { const next = value === 'dark' ? 'light' : 'dark'; savePreference('theme', next); return next }) }
+  function showSettings() { setSettingsOpen(true); setSettingsTab('general'); if (workspace) loadCapabilities() }
+  function suggestPrompt(text: string) { setDraft(text); textarea.current?.focus() }
+  function handleAction(action: () => Promise<unknown>) { void action().catch(e => setError(String(e))) }
 
-  async function openSession(session: Session) {
-    if (busyRef.current) return
-    if (workspace !== session.workspace) await bindWorkspace(session.workspace)
-    const detail = await window.desktop.request<SessionDetail>('getSession', { sessionId: session.session_id })
-    sessionRef.current = session.session_id; setSessionId(session.session_id)
-    setItems(historyItems(detail)); setTrace(detail.events); setError('')
-    setTasks(await window.desktop.request<SessionTask[]>('listTasks', { sessionId: session.session_id }))
-    try { applyState(await window.desktop.request<AgentState>('selectSession', { sessionId: session.session_id })) }
-    catch (e) { setError(String(e)) }
-    loadCapabilities(session.workspace)
-  }
-
-  async function newSession() {
-    if (busyRef.current) return
-    applyState(await window.desktop.request<AgentState>('resetSession'))
-    sessionRef.current = null; setSessionId(null); setItems([]); setTrace([]); setTasks([]); setError(''); textarea.current?.focus()
-  }
-
-  async function sendNow(text: string) {
-    if (!workspace) { setError('请先选择本地工作区'); return }
-    setError(''); setBusy(true); busyRef.current = true
-    setItems(previous => [...previous, { id: `user-${Date.now()}`, kind: 'user', text }])
-    try {
-      const result = await window.desktop.request<{ sessionId: string }>('sendPrompt', { text, workspace, sessionId: sessionRef.current, model: agentState.model })
-      sessionRef.current = result.sessionId; setSessionId(result.sessionId); refresh()
-    } catch (e) { setError(String(e)); setBusy(false); busyRef.current = false }
-  }
-  sendNowRef.current = sendNow
+  function applyState(state: AgentState) { setAgentState(state) }
+  async function bindWorkspace(root: string) { await createSession(root) }
+  async function chooseWorkspace() { const root = await window.desktop.chooseWorkspace(); if (root) await bindWorkspace(root) }
+  async function newSession() { await createSession(); requestAnimationFrame(() => textarea.current?.focus()) }
 
   async function changeModel(value: string) {
-    try { applyState(await window.desktop.request<AgentState>('setModel', { model: value })); setModelMenuOpen(false); setError('') }
+    try { applyState(await request<AgentState>('setModel', { model: value })); setModelMenuOpen(false); setError('') }
     catch (e) { setError(String(e)) }
   }
   async function changeEffort(value: string) {
-    try { applyState(await window.desktop.request<AgentState>('setEffort', { effort: value })); setError('') }
+    try { applyState(await request<AgentState>('setEffort', { effort: value })); setError('') }
     catch (e) { setError(String(e)) }
   }
   async function changePermission(value: string) {
-    try { applyState(await window.desktop.request<AgentState>('setPermissionMode', { mode: value })); setPermissionMenuOpen(false); setError('') }
+    try { applyState(await request<AgentState>('setPermissionMode', { mode: value })); setPermissionMenuOpen(false); setError('') }
     catch (e) { setError(String(e)) }
   }
   async function changeBudget(value: AgentState['budget']) {
-    try { applyState(await window.desktop.request<AgentState>('setBudget', value)); setError('') }
+    try { applyState(await request<AgentState>('setBudget', value)); setError('') }
     catch (e) { setError(String(e)) }
   }
   async function changeAcceptance(path: string) {
-    try { applyState(await window.desktop.request<AgentState>('setAcceptance', { path })); setError('') }
+    try { applyState(await request<AgentState>('setAcceptance', { path })); setError('') }
     catch (e) { setError(String(e)) }
   }
   async function changeSkill(name: string, active: boolean) {
     if (!workspace) return
     try {
-      await window.desktop.request('setSkillActive', { name, active, workspace, sessionId })
-      loadCapabilities(workspace); setError('')
+      await request('setSkillActive', { name, active, workspace, sessionId })
+      loadCapabilities(); setError('')
     } catch (e) { setError(String(e)) }
   }
   async function changePlugin(name: string, enabled: boolean) {
     if (!workspace) return
-    try { setCapabilities(await window.desktop.request<Capabilities>('setPluginEnabled', { name, enabled, workspace })); setMcpDiscovery(null); setError('') }
+    try { setCapabilities(await request<Capabilities>('setPluginEnabled', { name, enabled, workspace })); setMcpDiscovery(null); setError('') }
     catch (e) { setError(String(e)) }
   }
   async function refreshMcp() {
     if (!workspace) return
-    try { setMcpDiscovery(await window.desktop.request<McpDiscovery>('refreshMcp', { workspace })); setError('') }
+    try { setMcpDiscovery(await request<McpDiscovery>('refreshMcp', { workspace })); setError('') }
     catch (e) { setError(String(e)) }
   }
 
   async function executeSlash(text: string) {
-    if (busyRef.current) { setError('当前回合结束后再执行命令'); return }
+    if (busy) { setError('当前回合结束后再执行命令'); return }
     try {
-      const result = await window.desktop.request<SlashResult>('runSlash', { text, workspace, sessionId: sessionRef.current })
+      const result = await request<SlashResult>('runSlash', { text, workspace, sessionId: sessionId })
       if (result.state) applyState(result.state)
       if (result.action === 'new') await newSession()
       if (result.action === 'clear') setItems([])
-      if (result.action === 'exit') { await window.desktop.request('closeWindow'); return }
+      if (result.action === 'exit') { await request('closeWindow'); return }
       if (result.action === 'resume' && result.sessionId) {
         const selected = sessions.find(session => session.session_id === result.sessionId)
         if (selected) await openSession(selected)
       }
-      if (result.action === 'continue') { setBusy(true); busyRef.current = true }
+      if (result.action === 'continue') setBusy(true)
       if (result.action === 'skills') { setSettingsTab('skills'); setSettingsOpen(true) }
       if (result.action === 'model' || result.action === 'effort' || result.action === 'permissions' || result.action === 'sessions') {
         setDraft(result.action === 'sessions' ? '/resume ' : `/${result.action} `); setSlashIndex(0); textarea.current?.focus()
@@ -242,24 +134,24 @@ export default function App() {
 
   function submit() {
     const text = draft.trim()
-    if (!text) return
+    if (!text || loading) return
     setDraft(''); setMentionOpen(false)
     if (text.startsWith('/')) { void executeSlash(text); return }
-    if (busyRef.current) { queueRef.current.push(text); setQueue([...queueRef.current]) }
-    else void sendNow(text)
+    void sendNow(text)
+    requestAnimationFrame(() => textarea.current?.focus())
   }
 
   async function decide(approvalId: string, granted: boolean) {
-    try { await window.desktop.request('resolveApproval', { approvalId, granted }) }
+    try { await request('resolveApproval', { approvalId, granted }) }
     catch (e) { setError(String(e)) }
   }
 
   const mention = draft.match(/@([\w./-]*)$/)?.[1]
-  const fileSuggestions = mentionOpen && mention !== undefined && !draft.startsWith('/') ? files.filter(file => file.toLowerCase().includes(mention.toLowerCase())).slice(0, 7) : []
+  const fileSuggestions = !suggestionsDismissed && mentionOpen && mention !== undefined && !draft.startsWith('/') ? files.filter(file => file.toLowerCase().includes(mention.toLowerCase())).slice(0, 7) : []
   function insertFile(file: string) { setDraft(value => value.replace(/@[\w./-]*$/, `@${file} `)); setMentionOpen(false); textarea.current?.focus() }
 
   let slashOptions: Suggestion[] = []
-  if (draft.startsWith('/')) {
+  if (!suggestionsDismissed && draft.startsWith('/')) {
     const verb = draft.split(/\s/, 1)[0].toLowerCase()
     const hasSpace = draft.includes(' ')
     const query = hasSpace ? draft.slice(draft.indexOf(' ') + 1).toLowerCase() : ''
@@ -286,57 +178,83 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.ctrlKey && event.key.toLowerCase() === 'n') { event.preventDefault(); newSession() }
-      if (event.ctrlKey && event.key.toLowerCase() === 'l') { event.preventDefault(); setItems([]) }
-      if (event.ctrlKey && event.key.toLowerCase() === 'i') { event.preventDefault(); setSettingsTab('general'); setSettingsOpen(true) }
-      if (event.ctrlKey && event.key.toLowerCase() === 'c' && busyRef.current) { event.preventDefault(); void window.desktop.request('cancelTurn') }
-      if (event.key === 'Escape' && settingsOpen) { event.preventDefault(); setSettingsOpen(false) }
+      if (event.defaultPrevented) return
+      const modifier = event.ctrlKey || event.metaKey
+      if (modifier && event.key.toLowerCase() === 'k') { event.preventDefault(); setSettingsOpen(false); setCommandOpen(value => !value); return }
+      if (settingsOpen || commandOpen) return
+      if (modifier && event.key.toLowerCase() === 'n') { event.preventDefault(); handleAction(newSession) }
+      if (modifier && event.key.toLowerCase() === 'l' && !busy) { event.preventDefault(); setItems([]) }
+      if (modifier && ['i', ','].includes(event.key.toLowerCase())) { event.preventDefault(); showSettings() }
+      if (modifier && event.key.toLowerCase() === 'b') { event.preventDefault(); if (event.shiftKey) setRightCollapsed(value => !value); else setLeftCollapsed(value => !value) }
+      if (modifier && event.key === '.' && busy) { event.preventDefault(); handleAction(() => request('cancelTurn')) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   })
 
-  const title = sessions.find(session => session.session_id === sessionId)?.title || '新建任务'
+  const title = sessions.find(session => session.session_id === sessionId)?.title || items.find(item => item.kind === 'user')?.text || '新建任务'
   const contextPercent = Math.min(100, Math.round(100 * agentState.contextTokens / Math.max(1, agentState.contextWindow)))
-  return <><div className="titlebar-drag" aria-hidden="true" /><div className="app-shell grid text-primary" style={{ gridTemplateColumns: `${leftCollapsed ? '54px' : 'min(292px, 22vw)'} minmax(0, 1fr) ${rightCollapsed ? '54px' : 'min(380px, 30vw)'}` }}>
-    <Sidebar workspace={workspace} sessions={sessions} activeSession={sessionId}
-      collapsed={leftCollapsed} onToggle={() => setLeftCollapsed(value => !value)}
-      onSettings={() => { setSettingsOpen(true); setSettingsTab('general'); if (workspace) loadCapabilities(workspace) }}
-      onChoose={chooseWorkspace} onNew={newSession} onWorkspace={bindWorkspace} onSession={openSession} />
-    <main className="flex min-w-0 flex-col bg-main">
-      <header className="flex h-16 shrink-0 items-center justify-between border-b border-edge px-7">
-        <div className="min-w-0"><div className="truncate text-base font-semibold text-white">{title}</div><div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-subtle"><FolderOpen size={12} />{workspace ? workspace.split(/[\\/]/).pop() : '选择工作区开始'}</div></div>
-        <button className="icon-button" title="新建任务" aria-label="新建任务" onClick={newSession}><SquarePen size={18} /></button>
-      </header>
-      <SessionFeed key={sessionId || 'new'} sessionId={sessionId} items={items} busy={busy} onDecide={decide} />
-      {error && <div className="mx-7 mb-2 rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-primary">{error}</div>}
-      <div className="shrink-0 px-6 pb-5 pt-2">
-        <div className="composer relative mx-auto max-w-[900px]">
-          {fileSuggestions.length > 0 && <div className="mention-popover"><div className="section-label px-3 py-2">引用本地文件</div>{fileSuggestions.map(file => <button key={file} onClick={() => insertFile(file)}><AtSign size={14} /><span className="truncate">{file}</span></button>)}</div>}
-          {slashOptions.length > 0 && <div className="slash-popover"><div className="section-label px-3 py-2">Commands · ↑↓ 选择 · Tab 补全 · Enter 执行</div>{slashOptions.map((option, index) => <button key={option.value} className={index === optionIndex ? 'slash-option-active' : ''} onClick={() => chooseSlash(option)}><span className="font-mono text-accent">{option.value}</span><span className="truncate text-xs text-subtle">{option.detail}</span></button>)}</div>}
-          <textarea ref={textarea} value={draft} onChange={event => { setDraft(event.target.value); setMentionOpen(true); setSlashIndex(0) }}
+  const awaitingApproval = items.some(item => Boolean(item.approvalId))
+  const fileIndex = Math.min(mentionIndex, Math.max(0, fileSuggestions.length - 1))
+  const stop = () => handleAction(() => request('cancelTurn'))
+  const composer = <div className="composer-area">
+        <AnimatePresence initial={false}>{error && <motion.div className="error-banner" role="alert" initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}><CircleAlert size={16} /><span>{error}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError('')}><X size={14} /></button></motion.div>}</AnimatePresence>
+        <AnimatePresence>{busy && <motion.div className="run-status-wrapper" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}><RunStatus key={activeKey} startedAt={startedAt} approval={awaitingApproval} onStop={stop} /></motion.div>}</AnimatePresence>
+        {queue.length > 0 && <div className="queue-list" aria-label="排队消息"><div className="section-label">等待执行 · {queue.length}</div><AnimatePresence initial={false}>{queue.map((text, index) => <motion.div className="queue-item" key={`${index}-${text}`} initial={{ opacity: 0, x: -5 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }}><ListPlus size={14} /><span title={text}>{text}</span><button className="icon-button" aria-label={`取消排队消息 ${index + 1}`} onClick={() => removeQueued(index)}><X size={13} /></button></motion.div>)}</AnimatePresence></div>}
+        <motion.div layoutId="task-composer" transition={{ type: "spring", stiffness: 350, damping: 35 }} className={`composer ${busy ? 'composer-busy' : ''}`}>
+          {fileSuggestions.length > 0 && <div className="mention-popover" id="file-suggestions" role="listbox" aria-label="引用本地文件"><div className="section-label">引用本地文件<small>↑↓ 选择 · Tab 插入</small></div>{fileSuggestions.map((file, index) => <button key={file} id={`file-option-${index}`} role="option" aria-selected={index === fileIndex} className={index === fileIndex ? 'slash-option-active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => insertFile(file)}><AtSign size={14} /><span className="truncate">{file}</span></button>)}</div>}
+          {slashOptions.length > 0 && <div className="slash-popover" id="slash-suggestions" role="listbox" aria-label="命令建议"><div className="section-label">快捷命令<small>↑↓ 选择 · Enter 执行</small></div>{slashOptions.map((option, index) => <button key={option.value} id={`slash-option-${index}`} role="option" aria-selected={index === optionIndex} className={index === optionIndex ? 'slash-option-active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => chooseSlash(option)}><span className="font-mono text-accent">{option.value}</span><span className="truncate text-xs text-subtle">{option.detail}</span></button>)}</div>}
+          <textarea ref={textarea} value={draft} onChange={event => { setDraft(event.target.value); setMentionOpen(true); setSuggestionsDismissed(false); setSlashIndex(0); setMentionIndex(0) }}
             onKeyDown={event => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return
+              if (fileSuggestions.length > 0 && ['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); setMentionIndex(value => (value + (event.key === 'ArrowDown' ? 1 : -1) + fileSuggestions.length) % fileSuggestions.length); return }
+              if (fileSuggestions.length > 0 && ['Tab', 'Enter'].includes(event.key) && !event.shiftKey) { event.preventDefault(); insertFile(fileSuggestions[fileIndex]); return }
               if (slashOptions.length > 0 && ['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); setSlashIndex(value => (value + (event.key === 'ArrowDown' ? 1 : -1) + slashOptions.length) % slashOptions.length); return }
               if (slashOptions.length > 0 && ['Tab', 'Enter'].includes(event.key) && !event.shiftKey) { event.preventDefault(); chooseSlash(slashOptions[optionIndex]); return }
-              if (event.key === 'Escape') { setModelMenuOpen(false); setPermissionMenuOpen(false); setDraft(''); return }
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() }
-            }} placeholder={workspace ? '让 MiniCode 帮你做任何事。输入 / 查看命令，@ 引用文件…' : '先选择本地工作区…'} rows={3} aria-label="任务输入" />
-          <div className="flex items-center gap-2 px-3 pb-3">
-            <button className="composer-icon" title="引用文件" aria-label="引用文件" onClick={() => { setDraft(value => value + '@'); setMentionOpen(true); textarea.current?.focus() }}><Plus size={19} /></button>
-            <div className="relative"><button className="composer-control" onClick={() => { setPermissionMenuOpen(value => !value); setModelMenuOpen(false) }}><Shield size={14} />{agentState.permissionMode}<ChevronDown size={12} /></button>{permissionMenuOpen && <div className="composer-menu">{['default', 'accept_edits', 'bypass'].map(mode => <button key={mode} onClick={() => changePermission(mode)}>{mode}</button>)}</div>}</div>
-            <span className="text-xs text-subtle">{queue.length > 0 ? `${queue.length} queued` : 'Enter 发送 · Shift Enter 换行'}</span>
-            <div className="ml-auto flex items-center gap-2"><span className="hidden text-xs text-subtle xl:block">{contextPercent}%</span><div className="relative"><button className="composer-control max-w-[220px]" onClick={() => { setModelMenuOpen(value => !value); setPermissionMenuOpen(false) }} title="切换模型"><span className="truncate">{agentState.model}</span><ChevronDown size={13} /></button>{modelMenuOpen && <div className="composer-menu composer-model-menu">{models.map(option => <button key={option.id} onClick={() => changeModel(option.id)}><span className="truncate">{option.id}</span><span className="text-[11px] text-subtle">{option.available ? option.provider : '未配置'}</span></button>)}</div>}</div><button className="send-button" onClick={busy ? () => void window.desktop.request('cancelTurn') : submit} disabled={!busy && !draft.trim()} aria-label={busy ? '停止任务' : '发送任务'}>{busy ? <Square size={15} fill="currentColor" /> : <ArrowUp size={19} />}</button></div>
+              if (event.key === 'Escape') { setModelMenuOpen(false); setPermissionMenuOpen(false); setMentionOpen(false); setSuggestionsDismissed(true); return }
+              if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (workspace || draft.startsWith('/')) submit() }
+            }} placeholder={workspace ? '描述任务，或输入 / 查看命令、@ 引用文件…' : '先打开工作区，再描述你想完成的任务…'} rows={2} aria-label="任务输入"
+            aria-controls={fileSuggestions.length ? 'file-suggestions' : slashOptions.length ? 'slash-suggestions' : undefined} aria-activedescendant={fileSuggestions.length ? `file-option-${fileIndex}` : slashOptions.length ? `slash-option-${optionIndex}` : undefined} />
+          <div className="composer-toolbar">
+            <button className="composer-icon" title="引用文件" aria-label="引用文件" disabled={!workspace} onClick={() => { setDraft(value => value + (value && !value.endsWith(' ') ? ' @' : '@')); setMentionOpen(true); setSuggestionsDismissed(false); setMentionIndex(0); textarea.current?.focus() }}><Plus size={18} /></button>
+            <span className="toolbar-divider" />
+            <SelectMenu label="切换模型" value={agentState.model} icon={<Cpu size={14} />} open={modelMenuOpen} onOpen={open => { setModelMenuOpen(open); setPermissionMenuOpen(false) }} onSelect={changeModel}
+              options={models.map(option => ({ value: option.id, label: option.id === 'fake' ? '离线演示' : option.id, detail: option.available ? option.provider : '尚未配置', disabled: !option.available && option.id !== agentState.model }))} />
+            <SelectMenu label="权限模式" value={agentState.permissionMode} icon={<Shield size={13} />} open={permissionMenuOpen} onOpen={open => { setPermissionMenuOpen(open); setModelMenuOpen(false) }} onSelect={changePermission}
+              options={[{ value: 'default', label: '逐项确认', detail: '写入与命令执行前请求批准' }, { value: 'accept_edits', label: '自动编辑', detail: '文件编辑自动批准，命令仍需确认' }, { value: 'bypass', label: '全部允许', detail: '自动批准所有工具操作' }]} />
+            <div className="composer-send"><span className="context-meter" title={`上下文 ${agentState.contextTokens.toLocaleString()} / ${agentState.contextWindow.toLocaleString()} tokens`}>{contextPercent}%</span>
+              <button className={`send-button ${busy && !draft.trim() ? 'send-stop' : ''}`} onClick={busy && !draft.trim() ? stop : submit} disabled={loading || (!busy && (!draft.trim() || (!workspace && !draft.startsWith('/'))))} aria-label={busy ? draft.trim() ? '加入队列' : '停止任务' : '发送任务'} title={busy ? draft.trim() ? '加入队列' : '停止任务 · Ctrl .' : '发送任务'}>{busy ? draft.trim() ? <ListPlus size={18} /> : <Square size={13} fill="currentColor" /> : <ArrowUp size={19} />}</button>
+            </div>
           </div>
-        </div>
+        </motion.div>
+        <div className="composer-footer"><span><kbd>Enter</kbd> {busy ? '加入队列' : '发送'}<span className="footer-separator" /><kbd>Shift Enter</kbd> 换行</span><span>{agentState.model === 'fake' ? '离线演示模式' : '在你的本地工作区运行'}</span></div>
       </div>
+  return <MotionConfig reducedMotion="user"><div className="window-titlebar"><span>MiniCode</span><span className="window-titlebar-project">{workspace ? workspace.split(/[\\/]/).pop() : 'Desktop'}</span></div>
+  <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightCollapsed ? 'right-collapsed' : ''}`}>
+    <Sidebar workspace={workspace} sessions={sessions} activeSession={sessionId} runningSessions={Object.values(views).filter(view => view.busy && view.sessionId).map(view => ({ id: view.sessionId!, approval: view.items.some(item => Boolean(item.approvalId)) }))} unreadSessions={Object.values(views).filter(view => view.unread && view.sessionId).map(view => view.sessionId!)} theme={theme} onTheme={toggleTheme} onSearch={() => setCommandOpen(true)}
+      collapsed={leftCollapsed} onToggle={() => setLeftCollapsed(value => !value)} onSettings={showSettings}
+      onChoose={() => handleAction(chooseWorkspace)} onNew={() => handleAction(newSession)} onWorkspace={root => handleAction(() => bindWorkspace(root))} onSession={session => handleAction(() => openSession(session))} />
+    <main className={`main-panel ${items.length ? "has-conversation" : "is-empty"}`}>
+      <header className="main-header">
+        <div className="main-heading"><span className="section-label">{sessionId ? '任务' : '工作空间'}</span><h2 title={title}>{title}</h2></div>
+        <div className="header-actions"><span className={`connection-status ${busy ? 'status-running' : ''} ${awaitingApproval ? 'status-waiting' : ''}`}><i />{awaitingApproval ? '等待审批' : loading ? '载入中' : busy ? '运行中' : workspace ? '就绪' : '未选择工作区'}</span>
+          <button className="icon-button" title="快捷操作 · Ctrl K" aria-label="打开快捷操作" onClick={() => setCommandOpen(true)}><Search size={16} /></button>
+          <button className="icon-button" title="新建任务 · Ctrl N" aria-label="新建任务" onClick={() => handleAction(newSession)}><SquarePen size={17} /></button>
+        </div>
+      </header>
+      <SessionFeed key={activeKey} sessionId={sessionId} clientKey={activeKey} items={items} busy={busy} workspace={workspace} onChoose={() => handleAction(chooseWorkspace)} onPrompt={suggestPrompt} onDecide={decide}>{items.length === 0 ? composer : null}</SessionFeed>
+      {items.length > 0 && composer}
     </main>
     <WorkPanel workspace={workspace} changes={changes} files={files} items={items} tasks={tasks} state={agentState} trace={trace.filter(Boolean) as NonNullable<DesktopEvent['item']>[]} refresh={refresh}
       collapsed={rightCollapsed} onToggle={() => setRightCollapsed(value => !value)} />
-    {settingsOpen && <SettingsPanel tab={settingsTab} setTab={setSettingsTab} onClose={() => setSettingsOpen(false)}
+  </div>
+  <AnimatePresence mode="wait">
+    {settingsOpen && <SettingsPanel key="settings" tab={settingsTab} setTab={setSettingsTab} onClose={() => setSettingsOpen(false)}
       models={models} state={agentState} capabilities={capabilities} mcpDiscovery={mcpDiscovery} trace={trace.filter(Boolean) as NonNullable<DesktopEvent['item']>[]} error={error}
       onModel={changeModel} onEffort={changeEffort} onPermission={changePermission} onBudget={changeBudget} onAcceptance={changeAcceptance}
       onChooseAcceptance={() => window.desktop.chooseAcceptanceFile()} onSkill={changeSkill}
-      onPlugin={changePlugin} onRefreshMcp={refreshMcp} onLockPlugins={async () => { if (workspace) { try { await window.desktop.request('lockPlugins', { workspace }); loadCapabilities(workspace); setError('') } catch (e) { setError(String(e)) } } }}
+      onPlugin={changePlugin} onRefreshMcp={refreshMcp} onLockPlugins={async () => { if (workspace) { try { await request('lockPlugins', { workspace }); loadCapabilities(); setError('') } catch (e) { setError(String(e)) } } }}
       onUseAgent={kind => { setDraft(value => `${value ? `${value.trimEnd()}\n` : ''}请使用 ${kind} 子助手调查并报告证据。`); setSettingsOpen(false); textarea.current?.focus() }} />}
-  </div></>
+    {commandOpen && <CommandPalette key="commands" sessions={sessions} busy={busy} onClose={() => setCommandOpen(false)} onNew={() => handleAction(newSession)} onChoose={() => handleAction(chooseWorkspace)} onSettings={showSettings} onLeft={() => setLeftCollapsed(value => !value)} onRight={() => setRightCollapsed(value => !value)} onTheme={toggleTheme} onSession={session => handleAction(() => openSession(session))} />}
+  </AnimatePresence></MotionConfig>
 }

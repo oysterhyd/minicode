@@ -1,26 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="MiniCode">
-  <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#303030"/>
-      <stop offset=".55" stop-color="#1a1a1a"/>
-      <stop offset="1" stop-color="#0d0d0d"/>
-    </linearGradient>
-    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#f8f8f8" stop-opacity=".78"/>
-      <stop offset=".55" stop-color="#797979" stop-opacity=".42"/>
-      <stop offset="1" stop-color="#bcbcbc" stop-opacity=".66"/>
-    </linearGradient>
-    <linearGradient id="ribbon" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#fff"/>
-      <stop offset=".52" stop-color="#e7e7e7"/>
-      <stop offset="1" stop-color="#9f9f9f"/>
-    </linearGradient>
-    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="4"/>
-    </filter>
-  </defs>
-  <rect x="1" y="1" width="126" height="126" rx="28" fill="url(#tile)" stroke="url(#edge)" stroke-width="1.5"/>
-  <path d="M30 91V40L64 72L98 40V91" fill="none" stroke="#000" stroke-opacity=".55" stroke-width="19" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow)" transform="translate(0 3)"/>
-  <path d="M30 91V40L64 72L98 40V91" fill="none" stroke="url(#ribbon)" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M30 40L64 72" fill="none" stroke="#fff" stroke-opacity=".34" stroke-width="2" stroke-linecap="round"/>
+  <rect x="1" y="1" width="126" height="126" rx="28" fill="#c75330" stroke="#df7858" stroke-width="2"/>
+  <path d="M30 91V40L64 72L98 40V91" fill="none" stroke="#fff8ee" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

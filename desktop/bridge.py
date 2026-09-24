@@ -42,18 +42,15 @@ def provider_for(model: str, effort: str = "off"):
                                reasoning_effort=None if effort == "off" else effort)
 
 
-def first_prompt(messages) -> str:
-    for message in messages:
-        if message.role == "user":
-            for block in message.content:
-                if block.type == "text" and block.text.strip():
-                    return block.text.strip().splitlines()[0][:72]
-    return "新建任务"
-
-
 class Bridge:
-    def __init__(self) -> None:
-        self.store = SqliteStore()
+    def __init__(self, store: SqliteStore | None = None) -> None:
+        self.store = store if store is not None else SqliteStore()
+        self.client_key: str | None = None
+        #: Client key that owns the in-flight turn. Events keep this tag until
+        #: the run ends, so a request arriving from another key (or from a
+        #: handler that forgot to send one) cannot re-label a live conversation's
+        #: stream and send it to the wrong view.
+        self.event_key: str | None = None
         self.runtime: AgentRuntime | None = None
         self.run_task: asyncio.Task | None = None
         self.approvals: dict[str, asyncio.Future] = {}
@@ -68,11 +65,41 @@ class Bridge:
         self.registry = None
         self.artifacts: ArtifactStore | None = None
 
+    def emit(self, message: dict) -> None:
+        emit(message | {"clientKey": self.event_key or self.client_key})
+
+    def busy(self) -> bool:
+        """Whether a turn is currently in flight for this conversation."""
+        return bool(self.run_task and not self.run_task.done())
+
     def sessions(self):
-        return [summary.model_dump() | {"title": first_prompt(self.store.get_messages(summary.session_id))}
+        titles = self.store.first_user_texts()
+        return [summary.model_dump() | {"title": titles.get(summary.session_id, "新建任务")}
                 for summary in self.store.list_sessions()]
 
+    async def discard_runtime(self) -> None:
+        previous = self.runtime
+        if previous is None:
+            return
+        self.runtime = None
+        registry = self.registry
+        self.registry = None
+        if registry is not None:
+            await registry.aclose()
+        await self.discard_provider(previous.provider)
+
+    async def discard_provider(self, provider: object | None = None) -> None:
+        """Close a provider's HTTP client, if it has one.
+
+        ``discard_runtime`` clears the runtime first, so the eviction path passes
+        the provider explicitly instead of relying on the runtime still being set.
+        """
+        close = getattr(provider, "aclose", None)
+        if close is not None:
+            await close()
+
     async def create_runtime(self, workspace: Path, model: str, session_id: str | None):
+        await self.discard_runtime()
         provider = provider_for(model, self.effort)
         plugins = PluginCatalog(workspace)
         skills = SkillCatalog(workspace, plugin_roots=plugins.skill_roots())
@@ -91,17 +118,17 @@ class Bridge:
             evidence_ledger = EvidenceLedger()
 
         async def on_text_delta(delta: str):
-            emit({"event": "text_delta", "sessionId": self.runtime.session_id, "text": delta})
+            self.emit({"event": "text_delta", "sessionId": self.runtime.session_id, "text": delta})
 
         async def on_event(event):
-            emit({"event": "agent_event", "sessionId": self.runtime.session_id, "item": event.model_dump(mode="json")})
+            self.emit({"event": "agent_event", "sessionId": self.runtime.session_id, "item": event.model_dump(mode="json")})
 
         async def on_approval(request: ApprovalRequest) -> ApprovalDecision:
             self.approval_seq += 1
-            approval_id = str(self.approval_seq)
+            approval_id = f"{self.runtime.session_id}:{self.approval_seq}"
             future = asyncio.get_running_loop().create_future()
             self.approvals[approval_id] = future
-            emit({"event": "approval", "sessionId": self.runtime.session_id,
+            self.emit({"event": "approval", "sessionId": self.runtime.session_id,
                   "approvalId": approval_id, "request": request.model_dump()})
             try:
                 granted = await future
@@ -140,17 +167,64 @@ class Bridge:
         self.artifacts = artifacts
 
     async def run_prompt(self, text: str | None):
+        message = None
         try:
             result = await (self.runtime.run_turn(text) if text is not None else self.runtime.continue_turn())
-            emit({"event": "run_done", "sessionId": self.runtime.session_id,
-                  "result": result.model_dump(mode="json")})
+            message = {"event": "run_done", "sessionId": self.runtime.session_id,
+                       "result": result.model_dump(mode="json")}
         except asyncio.CancelledError:
-            emit({"event": "run_done", "sessionId": self.runtime.session_id,
-                  "result": {"exit_reason": "cancelled"}})
+            message = {"event": "run_done", "sessionId": self.active_session_id(),
+                       "result": {"exit_reason": "cancelled"}}
         except Exception as exc:
-            emit({"event": "run_error", "sessionId": self.runtime.session_id, "error": str(exc)})
+            message = {"event": "run_error", "sessionId": self.active_session_id(), "error": str(exc)}
         finally:
-            await self.registry.aclose()
+            # Cleanup runs even when the turn was cancelled, and must survive a
+            # second Stop (Ctrl .): a CancelledError raised here used to skip
+            # emit(), so the frontend never saw run_done and the conversation
+            # stayed "running" forever. Shield it and remember the verdict.
+            cleanup_error = None
+            cleanup = asyncio.create_task(self._aclose_registry())
+            try:
+                cleanup_error = await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                cleanup_error = cleanup.result()
+            except Exception as exc:  # noqa: BLE001 - surface, never mask, the verdict
+                cleanup_error = f"清理工具连接失败：{exc}"
+            if message is None:
+                message = {"event": "run_error", "sessionId": self.active_session_id(),
+                           "error": cleanup_error or "运行结束但没有产生结果"}
+            elif cleanup_error and message["event"] == "run_done":
+                # A task that finished must not be reported as a failure. Keep
+                # the real verdict and record the cleanup problem alongside it.
+                message["result"] = {**message.get("result", {}), "cleanup_error": cleanup_error}
+            self.emit(message)
+            # The run is over: stop pinning events to its key so later requests
+            # from any other conversation cannot be attributed to it.
+            self.event_key = None
+
+    def active_session_id(self) -> str | None:
+        """The active session id, safe to read after a runtime teardown."""
+        return self.runtime.session_id if self.runtime is not None else None
+
+    async def _aclose_registry(self) -> str | None:
+        """Close the tool registry, returning an error message instead of raising.
+
+        Used by :meth:`run_prompt`, whose ``finally`` must always reach its
+        ``emit`` even when the turn was cancelled.
+        """
+        registry = self.registry
+        if registry is None:
+            return None
+        try:
+            await registry.aclose()
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            return f"清理工具连接失败：{exc}"
+        return None
 
     def state(self):
         runtime = self.runtime
@@ -191,15 +265,21 @@ class Bridge:
             raise ValueError(f"未知模型：{model}")
         provider = provider_for(model, self.effort)
         if self.runtime:
+            previous = self.runtime.provider
             self.runtime.set_model(provider=provider,
                                    provider_name="fake" if model == "fake" else lookup_model(model).provider,
                                    model=model)
+            close = getattr(previous, "aclose", None)
+            if close is not None:
+                await close()
         self.model = model
         return self.state()
 
     async def execute_slash(self, text: str, workspace: Path | None, session_id: str | None):
         verb, _, raw_arg = text.partition(" ")
         verb, arg = verb.lower(), raw_arg.strip()
+        if self.run_task and not self.run_task.done() and verb not in {"/help", "/?"}:
+            raise ValueError("当前回合结束后才能执行命令")
         if verb in {"/help", "/?"}:
             return {"message": "可用命令：\n" + "\n".join(format_command_lines())}
         if verb in {"/exit", "/quit"}:
@@ -207,7 +287,7 @@ class Bridge:
         if verb == "/clear":
             return {"action": "clear", "message": "已清屏，会话上下文保留。"}
         if verb == "/new":
-            self.runtime = None
+            await self.discard_runtime()
             return {"action": "new", "message": "已开启新会话。"}
         if verb == "/sessions":
             return {"message": "\n".join(f"{s['session_id'][:8]} · {s['title']} · {s['status']}" for s in self.sessions()[:20]) or "暂无会话。"}
@@ -252,6 +332,7 @@ class Bridge:
                 raise ValueError("当前没有暂停的任务")
             if self.run_task and not self.run_task.done():
                 raise ValueError("当前任务仍在运行")
+            self.event_key = self.client_key
             self.run_task = asyncio.create_task(self.run_prompt(None))
             return {"action": "continue", "state": self.state()}
         if verb == "/compact":
@@ -300,7 +381,9 @@ class Bridge:
             return {"text": page, "total": total, "hasMore": has_more}
         if method == "selectSession":
             if self.run_task and not self.run_task.done():
-                raise ValueError("当前任务仍在运行")
+                if self.runtime and self.runtime.session_id == params["sessionId"]:
+                    return self.state()
+                raise ValueError("不能替换正在运行的会话")
             summary = self.store.get_session(params["sessionId"])
             if summary is None:
                 raise ValueError("找不到会话")
@@ -311,7 +394,7 @@ class Bridge:
         if method == "resetSession":
             if self.run_task and not self.run_task.done():
                 raise ValueError("当前任务仍在运行")
-            self.runtime = None
+            await self.discard_runtime()
             return self.state()
         if method == "getCapabilities":
             return self.capabilities(Path(params["workspace"]).resolve())
@@ -356,7 +439,7 @@ class Bridge:
             if path:
                 AcceptanceSpec.from_yaml(path)
             self.acceptance = path
-            self.runtime = None
+            await self.discard_runtime()
             return self.state()
         if method == "setSkillActive":
             if self.run_task and not self.run_task.done():
@@ -374,7 +457,7 @@ class Bridge:
             manifest["enabled"] = bool(params["enabled"])
             plugin.path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             PluginCatalog(workspace, check_lock=False).write_lock()
-            self.runtime = None
+            await self.discard_runtime()
             return self.capabilities(workspace)
         if method == "lockPlugins":
             if self.run_task and not self.run_task.done():
@@ -419,24 +502,122 @@ class Bridge:
             await self.ensure_runtime(workspace, session_id, model)
             if self.runtime.model != model:
                 await self.change_model(model)
+            self.event_key = self.client_key
             self.run_task = asyncio.create_task(self.run_prompt(text))
             await asyncio.sleep(0)
             return {"sessionId": self.runtime.session_id}
         if method == "resolveApproval":
-            self.approvals[params["approvalId"]].set_result(bool(params["granted"]))
+            future = self.approvals.get(params["approvalId"])
+            if future is None or future.done():
+                return False
+            future.set_result(bool(params["granted"]))
             return True
         raise ValueError(f"未知请求：{method}")
 
 
+class BridgeRouter:
+    """Keep each conversation's runtime alive independently of the selected UI."""
+
+    #: How many idle conversations keep a live runtime. Each one owns a
+    #: provider, a tool registry and possibly MCP child processes, so they are
+    #: released when a conversation has not been used for a while.
+    IDLE_LIMIT = 6
+
+    def __init__(self, store: SqliteStore | None = None) -> None:
+        self.store = store if store is not None else SqliteStore()
+        self.clients: dict[str, Bridge] = {}
+        self.sessions: dict[str, Bridge] = {}
+        #: Insertion-ordered recency of conversations, oldest first.
+        self.recent: list[str] = []
+
+    def _touch(self, session_id: str | None) -> None:
+        if session_id and session_id in self.recent:
+            self.recent.remove(session_id)
+        if session_id:
+            self.recent.append(session_id)
+
+    async def _evict_idle(self) -> None:
+        """Release the least recently used conversations that are not running.
+
+        A conversation is only released when no other key still points at it and
+        nothing is in flight: its runtime owns a provider, a tool registry and
+        possibly MCP child processes, which must not stay alive for the whole
+        app session. Resuming a released conversation goes through the normal
+        ``resume`` path, so nothing is lost from the store.
+        """
+        while len([key for key in self.recent if key in self.sessions]) > self.IDLE_LIMIT:
+            stale = next(key for key in self.recent if key in self.sessions)
+            self.recent.remove(stale)
+            context = self.sessions.pop(stale)
+            if context.busy():
+                continue
+            if any(other is context for other in self.sessions.values()):
+                continue  # another conversation still uses this runtime
+            for key, value in list(self.clients.items()):
+                if value is context:
+                    del self.clients[key]
+            await context.discard_runtime()
+
+    async def handle(self, method: str, params: dict):
+        client_key = params.get("clientKey") or "default"
+        session_id = params.get("sessionId")
+        context = self.sessions.get(session_id) if session_id else self.clients.get(client_key)
+        if context is None:
+            context = Bridge(self.store)
+            source = self.clients.get(params.get("sourceClientKey"))
+            if source is not None:
+                context.model = source.model
+                context.effort = source.effort
+                context.budget = source.budget.model_copy()
+                context.policy.set_mode(source.policy.mode)
+            if session_id:
+                self.sessions[session_id] = context
+        self.clients[client_key] = context
+        # A running conversation keeps the key that started its turn, so a
+        # stray request (for example an artifact page fetched without a
+        # clientKey) cannot retag its event stream into another view.
+        if not context.busy():
+            context.client_key = client_key
+        if method in {"setPluginEnabled", "lockPlugins"}:
+            root = Path(params["workspace"]).resolve()
+            if any(item.runtime and item.runtime.workspace == root and item.busy()
+                   for item in set(self.clients.values())):
+                raise ValueError("该工作区的任务结束后才能修改插件")
+        result = await context.handle(method, params)
+        if context.runtime and context.runtime.session_id:
+            self.sessions[context.runtime.session_id] = context
+            self._touch(context.runtime.session_id)
+        await self._evict_idle()
+        return result
+
+    async def aclose(self):
+        contexts = set(self.clients.values()) | set(self.sessions.values())
+        running = [context.run_task for context in contexts if context.run_task and not context.run_task.done()]
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+        await asyncio.gather(*(context.discard_runtime() for context in contexts), return_exceptions=True)
+        self.store.close()
+
+
 async def main():
-    bridge = Bridge()
-    while line := await asyncio.to_thread(sys.stdin.readline):
-        request = json.loads(line)
-        try:
-            result = await bridge.handle(request["method"], request.get("params", {}))
-            emit({"id": request["id"], "result": result})
-        except Exception as exc:
-            emit({"id": request["id"], "error": str(exc)})
+    bridge = BridgeRouter()
+    try:
+        while line := await asyncio.to_thread(sys.stdin.readline):
+            try:
+                request = json.loads(line)
+                request_id = request["id"]
+                method = request["method"]
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                emit({"event": "bridge_error", "error": f"无效请求: {exc}"})
+                continue
+            try:
+                result = await bridge.handle(method, request.get("params", {}))
+                emit({"id": request_id, "result": result})
+            except Exception as exc:
+                emit({"id": request_id, "error": str(exc)})
+    finally:
+        await bridge.aclose()
 
 
 if __name__ == "__main__":

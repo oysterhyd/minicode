@@ -20,10 +20,15 @@ class ToolLimits(BaseModel):
     max_output_chars: int = 50 * 1024       # UTF-8 page budget for read/ls/grep
     max_command_output_chars: int = 50 * 1024  # UTF-8 tail budget for bash
     max_command_capture_bytes: int = 100_000_000  # disk-backed log quota
-    default_command_timeout_s: float | None = None
-    max_command_timeout_s: float | None = None
+    #: Fallback when a call site does not set an explicit default. The desktop
+    #: bridge relies on this: an unbounded ``await`` on a wedged shell (a
+    #: descendant holding the output pipe, a command that never exits) would
+    #: otherwise freeze the whole turn with no way back except cancel.
+    default_command_timeout_s: float | None = 300.0
+    max_command_timeout_s: float | None = 3600.0
     max_search_results: int = 100
     search_max_file_bytes: int = 1_000_000
+
 
 def utf8_prefix(text: str, max_bytes: int) -> str:
     """Return the longest UTF-8 prefix that fits without splitting a character."""

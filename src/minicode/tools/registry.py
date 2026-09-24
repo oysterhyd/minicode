@@ -18,7 +18,9 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
+        self._specs_cache: list[ToolSpec] | None = None
         self._mcp: list[McpConnector] = []
+        self._mcp_tool_names: set[str] = set()
         self.plugin_catalog: PluginCatalog | None = None
         self.discovery_errors: list[str] = []
 
@@ -27,12 +29,15 @@ class ToolRegistry:
         if tool.name in self._tools:
             raise ValueError(f"tool already registered: {tool.name}")
         self._tools[tool.name] = tool
+        self._specs_cache = None
 
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
     def specs(self) -> list[ToolSpec]:
-        return [tool.spec() for tool in self._tools.values()]
+        if self._specs_cache is None:
+            self._specs_cache = [tool.spec() for tool in self._tools.values()]
+        return list(self._specs_cache)
 
     def names(self) -> list[str]:
         return list(self._tools)
@@ -43,16 +48,25 @@ class ToolRegistry:
     async def prepare(self) -> list[dict[str, str | None]]:
         """Connect and discover before provider schemas are assembled."""
         self.discovery_errors = []
+        if self._mcp_tool_names:
+            for name in self._mcp_tool_names:
+                self._tools.pop(name, None)
+            self._mcp_tool_names.clear()
+            self._specs_cache = None
         statuses: list[dict[str, str | None]] = []
         for connector in self._mcp:
             try:
                 tools = await connector.discover()
+                discovered_names: set[str] = set()
                 for tool in tools:
-                    existing = self.get(tool.name)
-                    if existing is not None and (not hasattr(existing, "connector")
-                                                 or existing.connector is not connector):
+                    if tool.name in self._tools or tool.name in discovered_names:
                         raise ValueError(f"tool name collision: {tool.name}")
+                    discovered_names.add(tool.name)
+                for tool in tools:
                     self._tools[tool.name] = tool
+                if tools:
+                    self._mcp_tool_names.update(discovered_names)
+                    self._specs_cache = None
                 statuses.append({"server": connector.config.name, "plugin": connector.config.plugin,
                                  "protocol": connector.protocol_version,
                                  "server_version": connector.server_version, "error": None})

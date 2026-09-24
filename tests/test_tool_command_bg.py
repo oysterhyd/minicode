@@ -14,9 +14,9 @@ class RecordingManager:
     """Fake BackgroundManagerLike that records start() calls."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, Path, float]] = []
+        self.calls: list[tuple[str, Path, float | None]] = []
 
-    async def start(self, command: str, cwd: Path, timeout_s: float) -> str:
+    async def start(self, command: str, cwd: Path, timeout_s: float | None) -> str:
         self.calls.append((command, cwd, timeout_s))
         return f"bg_{len(self.calls)}"
 
@@ -42,6 +42,8 @@ def test_background_start_returns_job_id(tmp_path):
     assert "echo hi" in outcome.output
     assert "job_id" in outcome.output
     # The command was handed to the manager, never run in the foreground.
+    # No explicit timeout_s: a background job is the long-running escape hatch,
+    # so it stays unbounded while a foreground command gets the default.
     assert manager.calls == [("echo hi", tmp_path.resolve(), None)]
 
 

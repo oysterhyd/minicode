@@ -27,7 +27,35 @@ npm run dev
 
 桌面端读取与 TUI 共用的 `/` 命令目录，支持 `/help`、`/model`、`/effort`、`/permissions`、`/clear`、`/new`、`/compact`、`/skill`、`/sessions`、`/resume`、`/continue` 和 `/exit`。输入 `/` 可用方向键、Tab 和 Enter 选择命令。输入框下方的模型与权限按钮会直接更新当前 Agent 运行状态。
 
-Settings 提供模型、推理预算、权限模式、回合/Token/时长预算、YAML 验收文件、Skills 激活/停用、MCP 发现、项目插件启用/停用及锁定、只读 Subagents 目录和会话 Inspector。验收文件需在新会话开始前设置。Agent 注册了与 CLI/TUI 相同的 Skills、MCP、任务、记忆、背景命令及 `delegate` 工具。启用或停用插件会更新工作区 `.minicode/plugins` 中对应的 `plugin.json` 和 `.minicode/plugins.lock.json`，下一回合重载工具。界面参考 MiniCode 标志与工作台布局，采用黑白灰配色、本机 Anthropic Serif Text 字体和兼容减少动态效果偏好的过渡动画。
+设置提供模型、推理预算、权限模式、回合/Token/时长预算、YAML 验收文件、Skills 激活/停用、MCP 发现、项目插件启用/停用及锁定、只读子助手目录和运行记录。验收文件需在新会话开始前设置。Agent 注册了与 CLI/TUI 相同的 Skills、MCP、任务、记忆、背景命令及 `delegate` 工具。启用或停用插件会更新工作区 `.minicode/plugins` 中对应的 `plugin.json` 和 `.minicode/plugins.lock.json`，下一回合重载工具。
+
+## 界面与交互
+
+三栏界面统一使用暖白/石墨灰主题与陶土橙强调色。使用本机 Segoe UI / 微软雅黑及 Cascadia Code 字体，无远程字体请求。首次跟随系统主题，手动主题与侧栏收拢状态保存在本机。首页输入区紧邻任务入口，任务开始后移至底部；回复支持 Markdown、代码块与复制，流式输出在向上阅读时停止自动滚动。
+
+- `Ctrl K`：搜索操作与最近任务。
+- `Ctrl N`：新建任务；`Ctrl ,` / `Ctrl I`：设置。
+- `Ctrl B` / `Ctrl Shift B`：收拢左右面板。
+- `Ctrl .`：停止当前任务，`Ctrl C` 保留复制行为。
+- 输入 `/` 或 `@` 后使用方向键、Tab、Enter 选择；Esc 关闭建议并保留草稿。
+- 运行中可追加排队消息，也可逐项取消。权限审批、文件读取和暂存提供状态反馈。
+- 每个会话都有自己独立的 Agent 运行实例，任务运行期间可以自由切换会话；后台会话的进度、审批和结果保持在原会话中，侧栏用图标标出运行中与等待审批的会话。
+
+动效覆盖选中项、工作台标签、弹窗进入/退出、任务输入区位置变化和运行状态；遵循系统“减少动态效果”偏好。弹窗管理焦点与键盘循环，工作台标签支持左右方向键。
+
+## UI 回归检查
+
+在 `desktop` 目录运行 `npm test` 可检查主进程关闭时序，包括窗口销毁后的迟到消息、桥接退出、待处理 IPC 请求清理和重复退出。
+
+先启动 `npm run dev`，然后在仓库根目录执行以下命令。检查通过测试专用 IPC 数据运行，不调用真实模型或修改项目文件。
+
+```powershell
+npx --yes --package @playwright/cli playwright-cli -s=minicode-ui open about:blank
+npx --yes --package @playwright/cli playwright-cli -s=minicode-ui run-code --filename desktop/tests/ui-fixture.cjs
+npx --yes --package @playwright/cli playwright-cli -s=minicode-ui run-code --filename desktop/tests/ui-checks.cjs
+```
+
+检查覆盖深浅主题、1030×680 / 1280×800 / 1920×1080 窗口、命令面板、键盘补全、焦点管理、文件搜索与预览、队列、审批和流式滚动。截图保存在 `output/playwright/`，该目录不提交到仓库。
 
 ## 目录
 

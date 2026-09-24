@@ -354,6 +354,23 @@ class SqliteStore:
         ).fetchall()
         return [self._summary(row) for row in rows]
 
+    def first_user_texts(self) -> dict[str, str]:
+        """Read only each session's first user message for sidebar titles."""
+        rows = self._conn.execute(
+            "SELECT s.session_id, (SELECT m.content FROM messages m "
+            "WHERE m.session_id = s.session_id AND m.role = 'user' "
+            "ORDER BY m.seq LIMIT 1) AS content FROM sessions s"
+        ).fetchall()
+        titles: dict[str, str] = {}
+        for row in rows:
+            if row["content"] is None:
+                continue
+            for block in json.loads(row["content"]):
+                if block.get("type") == "text" and str(block.get("text", "")).strip():
+                    titles[row["session_id"]] = str(block["text"]).strip().splitlines()[0][:72]
+                    break
+        return titles
+
     @staticmethod
     def _summary(row: sqlite3.Row) -> SessionSummary:
         return SessionSummary(

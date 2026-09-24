@@ -93,6 +93,26 @@ def test_run_command_python_child_runs(tmp_path):
     assert "child-ok" in outcome.output
 
 
+def test_command_standard_input_is_eof(tmp_path):
+    outcome = run({
+        "command": _python_command("import sys;print('stdin='+repr(sys.stdin.read()))"),
+        "timeout_s": 3,
+    }, tmp_path)
+    assert outcome.success
+    assert "stdin=''" in outcome.output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows desktop PowerShell pipeline")
+def test_windows_git_select_string_pipeline_completes(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "README.md").write_text("test", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "README.md"], check=True, capture_output=True)
+    outcome = run({"command": 'git ls-files | Select-String -NotMatch "^\\.playwright|^desktop/dist"', "timeout_s": 5}, tmp_path)
+    assert outcome.success
+    assert "README.md" in outcome.output
+
+
 def test_run_command_timeout_kills_process(tmp_path):
     outcome = run(
         {"command": _python_command("import time; time.sleep(5)"), "timeout_s": 1},
@@ -101,6 +121,39 @@ def test_run_command_timeout_kills_process(tmp_path):
     assert outcome.success is False
     assert outcome.error is not None and "timed out" in outcome.error
     assert "1.0s" in (outcome.error or "")
+
+
+def test_explicit_timeout_is_clamped_to_the_maximum(tmp_path):
+    """A huge timeout_s is clamped, and the reported value is the clamped one."""
+    outcome = run(
+        {"command": _python_command("import time; time.sleep(30)"), "timeout_s": 9999.0},
+        tmp_path,
+        max_command_timeout_s=2.0,
+    )
+    assert outcome.success is False
+    assert "timed out after 2.0s" in (outcome.error or "")
+
+
+def test_run_command_without_timeout_uses_the_default(tmp_path):
+    """A command that never exits is still killed by the default timeout.
+
+    Regression test for the desktop hang: ``ToolLimits`` used to ship
+    ``default_command_timeout_s = None``, so ``asyncio.wait_for(..., None)``
+    waited forever on a shell that never returned and froze the whole turn.
+    """
+    from minicode.tools.base import ToolLimits
+
+    assert ToolLimits().default_command_timeout_s == 300.0
+    outcome = run(
+        {
+            "command": _python_command("import time; time.sleep(30)"),
+        },
+        tmp_path,
+        default_command_timeout_s=2.0,
+    )
+    assert outcome.success is False
+    assert outcome.error is not None and "timed out" in outcome.error
+    assert "2.0s" in outcome.error
 
 
 def test_run_command_output_truncated(tmp_path):

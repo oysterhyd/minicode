@@ -31,6 +31,7 @@ export type FeedItem = {
   output?: string
   success?: boolean
   pending?: boolean
+  interrupted?: boolean
   approvalId?: string
   granted?: boolean
   childSessionId?: string
@@ -38,6 +39,7 @@ export type FeedItem = {
 }
 
 export type DesktopEvent = {
+  clientKey?: string
   event: 'agent_event' | 'text_delta' | 'approval' | 'run_done' | 'run_error' | 'bridge_error'
   sessionId?: string
   item?: AgentEvent

@@ -31,7 +31,7 @@ async def check_hidden(task_id: str, workspace: Path) -> tuple[bool, str]:
             sys.executable, "-m", "pytest", str(test_path), "-q", "-p", "no:cacheprovider",
             **kwargs,
         )
-        output, timed_out, overflow = await capture_bounded(
+        output, timed_out, overflow, pipe_lingered = await capture_bounded(
             process, HIDDEN_TIMEOUT_S, max_bytes=1_000_000
         )
     except OSError as exc:
@@ -39,6 +39,6 @@ async def check_hidden(task_id: str, workspace: Path) -> tuple[bool, str]:
     detail = decode_shell_output(output)[-2000:]
     if timed_out:
         return False, f"host-side test timed out after {HIDDEN_TIMEOUT_S:g}s\n{detail}"
-    if overflow:
-        return False, f"host-side test output exceeded 1 MB\n{detail}"
+    if overflow or pipe_lingered:
+        return False, f"host-side test output capture was cut short\n{detail}"
     return process.returncode == 0, detail

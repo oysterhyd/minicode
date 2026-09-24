@@ -249,7 +249,7 @@ class GoalChecker:
             return self._result(item, passed=False, detail=f"命令无法启动: {exc}")
 
         try:
-            stdout, timed_out, over_limit = await capture_bounded(
+            stdout, timed_out, over_limit, pipe_lingered = await capture_bounded(
                 proc, self.command_timeout_s
             )
         except asyncio.CancelledError:
@@ -264,6 +264,8 @@ class GoalChecker:
             )
         if over_limit:
             return self._result(item, passed=False, detail="验收命令输出超过采集预算，已终止进程树")
+        if pipe_lingered:
+            return self._result(item, passed=False, detail="命令已退出，但子进程占用输出管道，输出采集已停止")
 
         output = decode_shell_output(stdout)
         output = _truncate_output(output)

@@ -60,8 +60,8 @@ def _git_snapshot(workspace: Path) -> str:
 
 async def _check(command: str, workspace: Path, timeout_s: float) -> tuple[int, str]:
     process = await spawn_shell(command, workspace)
-    raw, timed_out, overflow = await capture_bounded(process, timeout_s, max_bytes=10_000_000)
-    code = 124 if timed_out else (125 if overflow else process.returncode)
+    raw, timed_out, overflow, pipe_lingered = await capture_bounded(process, timeout_s, max_bytes=10_000_000)
+    code = 124 if timed_out else (125 if overflow or pipe_lingered else process.returncode)
     return code, decode_shell_output(raw)
 
 

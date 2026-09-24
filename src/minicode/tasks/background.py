@@ -141,7 +141,7 @@ class BackgroundManager:
         result before propagating to the caller.
         """
         try:
-            stdout, timed_out, over_limit = await capture_bounded(proc, timeout_s)
+            stdout, timed_out, over_limit, pipe_lingered = await capture_bounded(proc, timeout_s)
         except asyncio.CancelledError:
             await kill_process_tree(proc)
             await self._mark_lost(job)
@@ -152,8 +152,8 @@ class BackgroundManager:
             job.output = f"background command capture failed: {exc}"
         else:
             output = decode_shell_output(stdout)
-            job.exit_code = None if timed_out or over_limit else proc.returncode
-            job.status = "completed" if proc.returncode == 0 and not timed_out and not over_limit else "failed"
+            job.exit_code = None if timed_out or over_limit or pipe_lingered else proc.returncode
+            job.status = "completed" if proc.returncode == 0 and not timed_out and not over_limit and not pipe_lingered else "failed"
             job.output = tail_output(output, self._max_output_chars - 200)
             if job.output != output:
                 job.full_output = output
@@ -162,6 +162,8 @@ class BackgroundManager:
                 job.output += f"\ncommand timed out after {timeout_s}s and was killed"
             if over_limit:
                 job.output += "\ncommand output exceeded capture quota and was killed"
+            if pipe_lingered:
+                job.output += "\nshell exited but an inherited output pipe stayed open; output capture was stopped"
         finally:
             self._procs.pop(job.job_id, None)
 

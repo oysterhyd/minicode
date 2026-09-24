@@ -7,6 +7,7 @@ build/
 .venv/
 .pytest_cache/
 /.pytest-tmp-*/
+/.pytest-local-tmp/
 .ruff_cache/
 .coverage
 htmlcov/
@@ -45,3 +46,5 @@ htmlcov/
 ds-state.png
 /desktop/node_modules/
 /desktop/dist/
+/.playwright-cli/
+/output/playwright/

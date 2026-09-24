@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 
 def build_system_prompt(workspace: str, tool_names: list[str]) -> str:
     """Build the (Chinese) system prompt handed to the provider each round.
@@ -17,6 +19,15 @@ def build_system_prompt(workspace: str, tool_names: list[str]) -> str:
         "你是运行在本地代码仓库里的编码助手，通过调用工具帮助用户完成编码任务。\n"
         "\n"
         f"当前工作区路径：{workspace}\n"
+        + ("命令环境：Windows PowerShell。bash 工具实际运行 PowerShell，不是 cmd.exe；"
+           "不要使用 cd /d。用工具的 cwd 参数指定工作目录。命令没有交互式标准输入；"
+           "需要用户输入的命令必须改用明确参数。前台命令默认 300 秒后会被强制结束"
+           "（timeout_s 可调，上限 3600 秒）；长时间命令请用 background 参数，"
+           "后台任务不受默认 300 秒限制。\n"
+           if os.name == "nt" else "命令环境：bash，标准输入关闭；需要输入时请使用命令参数或显式重定向。"
+           "前台命令默认 300 秒后会被强制结束（timeout_s 可调，上限 3600 秒）；"
+           "长时间命令请用 background 参数，后台任务不受默认 300 秒限制。\n")
+        +
         "\n"
         f"可用工具清单：{tools}\n"
         "注意：所有文件路径都相对于工作区；不要访问工作区之外的任何路径。\n"
