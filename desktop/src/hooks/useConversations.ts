@@ -207,11 +207,14 @@ export function useConversations() {
       viewsRef.current = { ...viewsRef.current, [key]: { ...emptyView(session.workspace), sessionId: session.session_id } }
       setViews(viewsRef.current)
     }
+    // Remember which conversation the user is leaving: its Bridge holds the
+    // permission mode, budget, effort and model they are working with.
+    const source = activeRef.current
     activate(key)
     if (viewsRef.current[key].loaded || viewsRef.current[key].busy) { void refresh(key); return }
     update(key, { loading: true })
     try {
-      const agentState = await requestFor<AgentState>(key, 'selectSession')
+      const agentState = await requestFor<AgentState>(key, 'selectSession', { sourceClientKey: source })
       const detail = await requestFor<SessionDetail>(key, 'getSession')
       update(key, { agentState, items: historyItems(detail).map(item => item.pending ? { ...item, pending: false, interrupted: true } : item),
         trace: detail.events, loaded: true, error: '' })

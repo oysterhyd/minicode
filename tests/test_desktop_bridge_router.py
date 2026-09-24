@@ -395,3 +395,48 @@ def test_idle_conversations_are_released(monkeypatch, store, workspace, events):
             await router.aclose()
 
     asyncio.run(scenario())
+
+
+def test_stale_session_entry_does_not_block_a_switch(monkeypatch, store, workspace, events):
+    """A stale sessions[] entry must not make a switch look like swapping a run.
+
+    The router used to hand a request to whatever Bridge a session id was
+    registered against, even after that Bridge's runtime had moved on to
+    another session. The stale entry then satisfied selectSession's
+    "different session while busy" branch and rejected a legitimate switch.
+    """
+    monkeypatch.setattr(bridge_mod, "provider_for", scripted(3.0))
+
+    async def scenario():
+        router = bridge_mod.BridgeRouter(store)
+        try:
+            await router.handle("initialize", {"clientKey": "draft-0"})
+            approver = asyncio.create_task(approve_pending(router, events))
+
+            # Two conversations, each with its own runtime.
+            first = (await router.handle("sendPrompt", {
+                "text": "first", "workspace": str(workspace), "model": "fake",
+                "sessionId": None, "clientKey": "draft-a"}))["sessionId"]
+            second = (await router.handle("sendPrompt", {
+                "text": "second", "workspace": str(workspace), "model": "fake",
+                "sessionId": None, "clientKey": "draft-b"}))["sessionId"]
+            assert first != second
+
+            # Force the stale alias the router must defend against: register a
+            # session id against a Bridge whose runtime belongs to another one.
+            router.sessions[second] = router.sessions[first]
+
+            at = time.monotonic()
+            state = await router.handle("selectSession", {
+                "sessionId": second, "workspace": str(workspace), "clientKey": "draft-b"})
+            elapsed = time.monotonic() - at
+            assert state["sessionId"] == second, "the switch landed on the wrong conversation"
+            assert elapsed < 2.0, "the stale entry delayed the switch"
+            # The defensive drop must leave a real entry behind.
+            assert router.sessions[second].runtime.session_id == second
+
+            approver.cancel()
+        finally:
+            await router.aclose()
+
+    asyncio.run(scenario())

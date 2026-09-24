@@ -197,7 +197,9 @@ app.whenReady().then(() => {
   startBridge()
   ipcMain.handle('desktop:choose-workspace', async () => {
     const result = await dialog.showOpenDialog(window, { properties: ['openDirectory'] })
-    if (result.canceled) return workspace
+    // A cancelled dialog must not look like a fresh choice: the frontend treats
+    // any non-null result as a new workspace and would start a task view.
+    if (result.canceled) return null
     workspace = result.filePaths[0]
     fs.writeFileSync(settingsPath, JSON.stringify({ workspace }))
     return workspace

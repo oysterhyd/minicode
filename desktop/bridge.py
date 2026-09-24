@@ -561,7 +561,20 @@ class BridgeRouter:
     async def handle(self, method: str, params: dict):
         client_key = params.get("clientKey") or "default"
         session_id = params.get("sessionId")
-        context = self.sessions.get(session_id) if session_id else self.clients.get(client_key)
+        context = self.sessions.get(session_id) if session_id else None
+        if context is not None and context.runtime is not None \
+                and context.runtime.session_id != session_id:
+            # This conversation's entry outlived the runtime it was created for
+            # (the Bridge was reused for another session). Serving the request
+            # from here would hand it a foreign run slot and could reject a
+            # legitimate switch with 不能替换正在运行的会话, so drop the entry —
+            # and any client key still pointing at it, which is equally stale.
+            del self.sessions[session_id]
+            if self.clients.get(client_key) is context:
+                del self.clients[client_key]
+            context = None
+        if context is None:
+            context = self.clients.get(client_key)
         if context is None:
             context = Bridge(self.store)
             source = self.clients.get(params.get("sourceClientKey"))
@@ -572,6 +585,9 @@ class BridgeRouter:
                 context.policy.set_mode(source.policy.mode)
             if session_id:
                 self.sessions[session_id] = context
+        # Remember which Bridge serves this UI view key. This must also run when
+        # the Bridge was found through its session id: switching views is
+        # exactly the case where the new key has to learn its conversation.
         self.clients[client_key] = context
         # A running conversation keeps the key that started its turn, so a
         # stray request (for example an artifact page fetched without a
@@ -580,8 +596,11 @@ class BridgeRouter:
             context.client_key = client_key
         if method in {"setPluginEnabled", "lockPlugins"}:
             root = Path(params["workspace"]).resolve()
+            # Scan both maps: a Bridge can be reachable only through `sessions`
+            # once its client key has been rebound.
+            contexts = set(self.clients.values()) | set(self.sessions.values())
             if any(item.runtime and item.runtime.workspace == root and item.busy()
-                   for item in set(self.clients.values())):
+                   for item in contexts):
                 raise ValueError("该工作区的任务结束后才能修改插件")
         result = await context.handle(method, params)
         if context.runtime and context.runtime.session_id:
