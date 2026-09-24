@@ -1,0 +1,21 @@
+id: log_context
+title: 长日志中的同一请求应返回最后状态
+prompt: |
+  service.py 的 final_status 应返回指定请求在 trace.log 中最后一次出现的状态。
+  当前测试在长日志上失败。请按需搜索或分页读取日志，修复 service.py 并运行测试。
+  只允许修改 service.py，不得修改 trace.log 或测试。
+allowed_paths: [service.py]
+protected_paths: [trace.log, test_service.py]
+items:
+  - id: tests-pass
+    type: command
+    command: python -m pytest test_service.py -q
+  - id: log-unchanged
+    type: protected
+    path: trace.log
+  - id: tests-unchanged
+    type: protected
+    path: test_service.py
+budget: {max_rounds: 14, max_tokens: 120000, max_seconds: 180}
+max_fix_attempts: 3
+script: script.json

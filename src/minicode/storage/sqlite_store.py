@@ -218,6 +218,12 @@ class SqliteStore:
         """Close the underlying connection (tidy teardown in tests / CLI)."""
         self._conn.close()
 
+    def __enter__(self) -> "SqliteStore":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """Write transaction: BEGIN IMMEDIATE up front, commit on success,

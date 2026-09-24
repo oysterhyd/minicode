@@ -78,6 +78,8 @@ class ToolContext:
     activate_skill: Callable[[str], str] | None = None
     deactivate_skill: Callable[[str], str] | None = None
     delegate: Callable[[str, str], Awaitable[ToolOutcome]] | None = None
+    task_store: Any | None = None
+    project_memory: Any | None = None
     on_output: Callable[[str], Awaitable[None]] | None = None
 
 
@@ -139,6 +141,13 @@ class BaseTool(ABC):
             requires_approval=self.requires_approval,
         )
 
+    def validate_args(self, raw_args: dict[str, Any]) -> dict[str, Any]:
+        """Return the canonical arguments used for both approval and execution."""
+        unknown = set(raw_args) - set(self.args_model.model_fields)
+        if unknown:
+            raise ValueError(f"unknown argument fields: {', '.join(sorted(unknown))}")
+        return self.args_model.model_validate(raw_args).model_dump(exclude_none=True)
+
     async def run(self, raw_args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
         """Validate *raw_args* and dispatch to :meth:`execute`.
 
@@ -146,8 +155,8 @@ class BaseTool(ABC):
         tool body.
         """
         try:
-            args = self.args_model(**raw_args)
-        except ValidationError as exc:
+            args = self.args_model.model_validate(self.validate_args(raw_args))
+        except (ValidationError, ValueError) as exc:
             return ToolOutcome.failure(f"invalid arguments for {self.name}: {exc}")
         return await self.execute(args, ctx)
 

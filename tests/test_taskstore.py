@@ -104,7 +104,7 @@ def test_claim_not_ready_reports_status_and_blocking_deps(tasks):
     tasks.add("s1", "a", "A")
     tasks.add("s1", "b", "B", depends_on=["a", "zz-done"])
     tasks.claim("s1", "a", owner="w")
-    tasks.complete("s1", "a", ok=True)
+    tasks.complete("s1", "a", ok=True, owner="w")
 
     with pytest.raises(ValueError, match="current status: pending"):
         tasks.claim("s1", "b", owner="w2")
@@ -124,14 +124,22 @@ def test_claim_not_ready_reports_status_and_blocking_deps(tasks):
 def test_complete_requires_running(tasks):
     tasks.add("s1", "t1", "First")
     with pytest.raises(ValueError, match="not running"):
-        tasks.complete("s1", "t1", ok=True)
+        tasks.complete("s1", "t1", ok=True, owner="w")
+
+
+def test_complete_rejects_different_owner(tasks):
+    tasks.add("s1", "t1", "First")
+    tasks.claim("s1", "t1", owner="worker-1")
+    with pytest.raises(ValueError, match="owned by"):
+        tasks.complete("s1", "t1", ok=True, owner="worker-2")
+    assert tasks.list_tasks("s1")[0].status == "running"
 
 
 def test_complete_ok_done_and_cascade_ready(tasks):
     tasks.add("s1", "a", "A")
     tasks.add("s1", "b", "B", depends_on=["a"])
     tasks.claim("s1", "a", owner="w")
-    tasks.complete("s1", "a", ok=True)
+    tasks.complete("s1", "a", ok=True, owner="w")
 
     rows = by_id(tasks.list_tasks("s1"))
     assert rows["a"].status == "done"
@@ -142,7 +150,7 @@ def test_complete_failed_does_not_cascade(tasks):
     tasks.add("s1", "a", "A")
     tasks.add("s1", "b", "B", depends_on=["a"])
     tasks.claim("s1", "a", owner="w")
-    tasks.complete("s1", "a", ok=False)
+    tasks.complete("s1", "a", ok=False, owner="w")
 
     rows = by_id(tasks.list_tasks("s1"))
     assert rows["a"].status == "failed"
@@ -155,11 +163,11 @@ def test_cascade_waits_for_all_dependencies(tasks):
     tasks.add("s1", "m", "M", depends_on=["a", "c"])
 
     tasks.claim("s1", "a", owner="w")
-    tasks.complete("s1", "a", ok=True)
+    tasks.complete("s1", "a", ok=True, owner="w")
     assert by_id(tasks.list_tasks("s1"))["m"].status == "pending"  # c still open
 
     tasks.claim("s1", "c", owner="w")
-    tasks.complete("s1", "c", ok=True)
+    tasks.complete("s1", "c", ok=True, owner="w")
     assert by_id(tasks.list_tasks("s1"))["m"].status == "ready"
 
 
@@ -171,14 +179,14 @@ def test_cascade_is_transitive_in_one_pass(tasks):
     tasks.add("s1", "d", "D", depends_on=["c"])
 
     tasks.claim("s1", "a", owner="w")
-    tasks.complete("s1", "a", ok=True)
+    tasks.complete("s1", "a", ok=True, owner="w")
     rows = by_id(tasks.list_tasks("s1"))
     assert rows["b"].status == "ready"
     assert rows["c"].status == "pending"
     assert rows["d"].status == "pending"
 
     tasks.claim("s1", "b", owner="w")
-    tasks.complete("s1", "b", ok=True)
+    tasks.complete("s1", "b", ok=True, owner="w")
     assert by_id(tasks.list_tasks("s1"))["c"].status == "ready"
 
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
+from minicode.core.paths import is_link_or_junction
 from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail
 from minicode.tools.files import SKIP_DIRS
 
@@ -106,9 +107,13 @@ class GrepTool(BaseTool):
         rel_base = "." if rel in ("", ".") else rel
 
         argv = [
-            "rg", "--no-heading", "--line-number", "--color", "never",
+            "rg", "--no-ignore", "--hidden", "--no-heading", "--line-number", "--color", "never",
             "--max-columns", str(_MAX_LINE_CHARS), "--max-columns-preview",
         ]
+        # The workspace can itself live below an ignored parent (for example
+        # pytest's .pytest_cache). Host ignore files must not hide its files.
+        for skipped in sorted(SKIP_DIRS):
+            argv += ["--glob", f"!**/{skipped}/**"]
         if not args.case_sensitive:
             argv.append("--ignore-case")
         if args.glob:
@@ -196,13 +201,18 @@ class GrepTool(BaseTool):
         for dirpath, dirnames, filenames in roots:
             if time.monotonic() >= deadline:
                 raise TimeoutError("python search timed out")
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS
+                                 and not is_link_or_junction(Path(dirpath) / d))
             for filename in sorted(filenames):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("python search timed out")
                 if glob is not None and not fnmatch.fnmatch(filename, glob):
                     continue
                 fpath = Path(dirpath) / filename
+                # A fallback search must not dereference a workspace link to
+                # a file outside the workspace. ripgrep skips links by default.
+                if is_link_or_junction(fpath):
+                    continue
                 try:
                     if fpath.stat().st_size > ctx.limits.search_max_file_bytes:
                         skipped_large += 1

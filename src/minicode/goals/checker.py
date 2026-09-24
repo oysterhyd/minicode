@@ -18,10 +18,12 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from minicode.core.clock import utc_now
-from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
+from minicode.core.paths import PathOutsideWorkspaceError, is_link_or_junction, resolve_in_workspace
 from minicode.goals.spec import AcceptanceItem, AcceptanceSpec, ItemKind
 from minicode.tools.command import capture_bounded, decode_shell_output, kill_process_tree, spawn_shell
 from minicode.tools.files import SKIP_DIRS
+
+_FINGERPRINT_SKIP_DIRS = SKIP_DIRS - {".minicode"}
 
 COMMAND_OUTPUT_LIMIT = 5000
 GOAL_COMMAND_TIMEOUT_S = 120.0
@@ -38,7 +40,7 @@ def _sha256_file(path: Path) -> str:
 def workspace_fingerprint(workspace: Path) -> str:
     """Content fingerprint of *workspace*.
 
-    Every file (under directories other than ``SKIP_DIRS``) contributes
+    Every file (under transient directories other than ``.minicode``) contributes
     ``sha256(relative_posix_path + "\\0" + full_content_hash + str(size))``;
     the sorted list of per-file digests is hashed once more. Empty (or absent)
     workspaces hash to ``sha256("")``. Pure and synchronous.
@@ -47,14 +49,33 @@ def workspace_fingerprint(workspace: Path) -> str:
     digests: list[str] = []
     if root.is_dir():
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            ordinary_dirs = []
+            for dirname in sorted(dirnames):
+                if dirname in _FINGERPRINT_SKIP_DIRS:
+                    continue
+                child = Path(dirpath) / dirname
+                if is_link_or_junction(child):
+                    rel = child.relative_to(root).as_posix()
+                    try:
+                        link_target = os.readlink(child)
+                    except OSError as exc:
+                        link_target = f"unreadable:{exc.errno}"
+                    digests.append(hashlib.sha256(
+                        f"{rel}\0symlink:{link_target}".encode("utf-8")
+                    ).hexdigest())
+                else:
+                    ordinary_dirs.append(dirname)
+            dirnames[:] = ordinary_dirs
             for name in sorted(filenames):
                 file_path = Path(dirpath) / name
                 rel = file_path.relative_to(root).as_posix()
                 size = -1
                 try:
-                    size = file_path.stat().st_size
-                    content_digest = _sha256_file(file_path).encode("ascii")
+                    if is_link_or_junction(file_path):
+                        content_digest = f"symlink:{os.readlink(file_path)}".encode("utf-8")
+                    else:
+                        size = file_path.stat().st_size
+                        content_digest = _sha256_file(file_path).encode("ascii")
                 except OSError as exc:
                     # Distinguish unreadable/missing files from empty files;
                     # never reuse the preceding file's size after a failed stat.

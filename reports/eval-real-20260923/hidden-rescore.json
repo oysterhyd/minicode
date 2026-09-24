@@ -1,0 +1,7 @@
+{
+  "generated_at": "2026-09-23T16:08:07.658188+00:00",
+  "source_results_sha256": "fda4189e0722487ab8fb53573f795d3baf1a1ca032d6bcee754b0720edb36882",
+  "record_count": 120,
+  "hidden_suite_sha256": "0a7704d336e9a5508ecb32a4b952caf2518e752f49457be5fb29d84b6e17062a",
+  "scoring": "visible checks retained; held-out tests run only after model execution"
+}

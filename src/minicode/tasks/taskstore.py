@@ -178,7 +178,7 @@ class TaskStore:
                 (owner, now, session_id, task_id),
             )
 
-    def complete(self, session_id: str, task_id: str, ok: bool) -> None:
+    def complete(self, session_id: str, task_id: str, ok: bool, *, owner: str) -> None:
         """Finish a ``running`` task as ``done``/``failed``, then cascade.
 
         On success every pending task whose dependencies are all ``done``
@@ -194,6 +194,8 @@ class TaskStore:
                     f"task {task_id} is not running (current status: {row['status']});"
                     " only running tasks can be completed"
                 )
+            if row["owner"] != owner:
+                raise ValueError(f"task {task_id} is owned by {row['owner']!r}, not {owner!r}")
             new_status = "done" if ok else "failed"
             conn.execute(
                 "UPDATE tasks SET status = ?, updated_at = ?"

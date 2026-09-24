@@ -16,8 +16,26 @@ htmlcov/
 *.db
 *.db-journal
 
-# Generated eval / report outputs (reproducible; fixtures in evals/ are committed)
-/reports/
+# Generated run workspaces and traces stay local; publish compact raw records.
+/reports/*
+!/reports/eval/
+/reports/eval/*
+!/reports/eval/results.json
+!/reports/eval/summary.md
+!/reports/eval-scenarios/
+/reports/eval-scenarios/*
+!/reports/eval-scenarios/results.json
+!/reports/eval-scenarios/summary.md
+!/reports/eval-real-20260923/
+/reports/eval-real-20260923/*
+!/reports/eval-real-20260923/config.json
+!/reports/eval-real-20260923/hidden-rescore.json
+!/reports/eval-real-20260923/results.json
+!/reports/eval-real-20260923/summary.md
+!/reports/demo/
+/reports/demo/*
+!/reports/demo/pagination-real-trace-replay.mp4
+!/reports/demo/pagination-real-trace-replay.json
 
 # Teaching reference (has its own git repo, kept local only)
 /learn-claude-code/
@@ -25,3 +43,5 @@ htmlcov/
 # Local tool artifacts / stray files
 .playwright-mcp/
 ds-state.png
+/desktop/node_modules/
+/desktop/dist/

@@ -1,4 +1,4 @@
-"""minicode CLI: the user-facing layer of the minimal closed loop.
+"""minicode CLI: the user-facing layer of the coding agent harness.
 
 Commands:
 
@@ -79,7 +79,7 @@ from minicode.storage import DEFAULT_DB_PATH, SessionStore, SessionSummary, Sqli
 from minicode.tools.registry import default_registry
 
 app = typer.Typer(
-    help="minicode —— 轻量级 CLI 编码 Agent（P0 最小闭环）。",
+    help="minicode —— 可恢复、可验收的轻量级 CLI 编码 Agent。",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -87,6 +87,10 @@ sessions_app = typer.Typer(help="查看历史会话。", no_args_is_help=True)
 app.add_typer(sessions_app, name="sessions")
 plugins_app = typer.Typer(help="查看和锁定本地 Plugins。", no_args_is_help=True)
 app.add_typer(plugins_app, name="plugins")
+memory_app = typer.Typer(help="显式管理项目长期记忆。", no_args_is_help=True)
+app.add_typer(memory_app, name="memory")
+workflow_app = typer.Typer(help="可续跑的固定工作流。", no_args_is_help=True)
+app.add_typer(workflow_app, name="workflow")
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +653,7 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
     project_instructions = ProjectInstructions(setup.workspace)
     plugins = PluginCatalog(setup.workspace)
     skills = SkillCatalog(setup.workspace, plugin_roots=plugins.skill_roots())
-    registry = default_registry(skills=skills, delegation=True,
+    registry = default_registry(skills=skills, delegation=True, tasks=True, memory=True,
                                 agent_kinds=plugins.agent_names())
     registry.plugin_catalog = plugins
     for server in plugins.servers():
@@ -1256,6 +1260,105 @@ def _make_resumed_runtime(
 # ---------------------------------------------------------------------------
 
 
+@workflow_app.command("review")
+def workflow_review(
+    check: Annotated[str, typer.Option("--check", help="由宿主执行的检查命令")],
+    output: Annotated[Path, typer.Option("--output", help="工作区外的 journal 与产物目录")],
+    workspace: WorkspaceOpt = Path("."),
+    model: str = DEFAULT_MODEL,
+    retry_unknown: bool = typer.Option(False, "--retry-unknown", help="核实后重试状态未知的检查命令"),
+) -> None:
+    """快照、运行检查，并由只读 Agent 审查；中断后原地续跑。"""
+    from minicode.providers.commandcode import CommandCodeProvider
+    from minicode.workflow import run_review
+
+    async def execute() -> dict[str, Any]:
+        provider = CommandCodeProvider(model=model, max_tokens=lookup_model(model).max_output_tokens)
+        try:
+            return await run_review(workspace, output, check, provider, model,
+                                    retry_unknown=retry_unknown)
+        finally:
+            await provider.aclose()
+
+    try:
+        journal = asyncio.run(execute())
+    except (ValueError, OSError, ProviderRequestError) as exc:
+        _fail(str(exc))
+    if journal["check"] == "unknown":
+        typer.echo("检查命令在中断时状态未知；核实其效果后用 --retry-unknown 续跑。")
+        raise typer.Exit(2)
+    typer.echo(f"review={journal['review']} check_exit={journal['check_exit_code']} output={output}")
+
+
+@memory_app.command("add")
+def memory_add(
+    fact: str,
+    source: Annotated[str, typer.Option("--source", help="事实来源，例如文件路径或用户说明")],
+    scope: Annotated[str, typer.Option("--scope", help="适用的工作区相对目录或文件")] = ".",
+    workspace: WorkspaceOpt = Path("."),
+    db: DbOpt = DEFAULT_DB_PATH,
+) -> None:
+    """保存一条由用户明确确认的稳定项目事实。"""
+    from minicode.context.memory import ProjectMemoryStore
+
+    with SqliteStore(db) as store:
+        try:
+            row = ProjectMemoryStore(store).add(workspace, fact, source, scope)
+        except (ValueError, OSError) as exc:
+            _fail(str(exc))
+    typer.echo(f"已保存 {row.id}（范围 {row.scope}）")
+
+
+@memory_app.command("list")
+def memory_list(workspace: WorkspaceOpt = Path("."), db: DbOpt = DEFAULT_DB_PATH) -> None:
+    """列出当前项目已确认的长期记忆。"""
+    from minicode.context.memory import ProjectMemoryStore
+
+    with SqliteStore(db) as store:
+        try:
+            rows = ProjectMemoryStore(store).list(workspace)
+        except (ValueError, OSError) as exc:
+            _fail(str(exc))
+    for row in rows:
+        typer.echo(f"{row.id} [{row.scope}] {row.fact} (source: {row.source}; updated: {row.updated_at})")
+    if not rows:
+        typer.echo("暂无项目记忆。")
+
+
+@memory_app.command("update")
+def memory_update(
+    memory_id: str,
+    fact: str,
+    source: Annotated[str, typer.Option("--source", help="更新后的来源")],
+    workspace: WorkspaceOpt = Path("."),
+    db: DbOpt = DEFAULT_DB_PATH,
+) -> None:
+    """修订项目事实，并更新时间与来源。"""
+    from minicode.context.memory import ProjectMemoryStore
+
+    with SqliteStore(db) as store:
+        try:
+            row = ProjectMemoryStore(store).update(workspace, memory_id, fact, source)
+        except (ValueError, OSError) as exc:
+            _fail(str(exc))
+    typer.echo(f"已更新 {row.id}")
+
+
+@memory_app.command("delete")
+def memory_delete(
+    memory_id: str, workspace: WorkspaceOpt = Path("."), db: DbOpt = DEFAULT_DB_PATH,
+) -> None:
+    """删除一条项目记忆。"""
+    from minicode.context.memory import ProjectMemoryStore
+
+    with SqliteStore(db) as store:
+        try:
+            ProjectMemoryStore(store).delete(workspace, memory_id)
+        except (ValueError, OSError) as exc:
+            _fail(str(exc))
+    typer.echo(f"已删除 {memory_id}")
+
+
 @plugins_app.command("list")
 def plugins_list(workspace: WorkspaceOpt = Path(".")) -> None:
     """List local plugin versions, states, and manifest fingerprints."""
@@ -1452,9 +1555,15 @@ def eval_cmd(
     output: Annotated[Path, typer.Option("--output", "-o", help="结果输出目录")] = Path("reports/eval"),
 ) -> None:
     """运行本地评测集（FakeProvider 离线跑通三基线对照）。"""
+    import importlib.util
+
+    if importlib.util.find_spec("pytest") is None:
+        _fail("运行评测需要 pytest；请安装 minicode[eval] 或 minicode[dev]。")
     runner = _find_eval_runner()
     if runner is None:
-        _fail("找不到 evals/run_eval.py（请在仓库根目录运行，或先安装完整仓库）。")
+        _fail("找不到评测 runner；请重新安装包含 evals 的 minicode 包。")
+    if tasks_dir == Path("evals/tasks") and not tasks_dir.is_dir():
+        tasks_dir = runner.parent / "tasks"
     cmd = [
         sys.executable, str(runner),
         "--tasks-dir", str(tasks_dir),
@@ -1469,8 +1578,9 @@ def eval_cmd(
 
 
 def _find_eval_runner() -> Path | None:
-    """Locate evals/run_eval.py relative to cwd or the package root."""
-    for base in (Path.cwd(), Path(__file__).resolve().parent.parent.parent):
+    """Locate evals/run_eval.py in a checkout or installed wheel."""
+    package_file = Path(__file__).resolve()
+    for base in (Path.cwd(), package_file.parent.parent.parent, package_file.parent.parent):
         candidate = base / "evals" / "run_eval.py"
         if candidate.is_file():
             return candidate

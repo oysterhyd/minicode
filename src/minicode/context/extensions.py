@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from minicode.core.paths import is_link_or_junction
+
 
 _MAX_INSTRUCTIONS = 64_000
 _MAX_SKILL = 64_000
@@ -39,6 +41,8 @@ class ProjectInstructions:
         self.loaded: dict[Path, Source] = {}
         root = self.workspace / "AGENTS.md"
         if root.is_file():
+            if is_link_or_junction(root):
+                raise ValueError(f"project instructions path is a link: {root}")
             self.loaded[root] = Source.read(root, _MAX_INSTRUCTIONS)
 
     def discover(self, target: str) -> list[Source]:
@@ -54,6 +58,8 @@ class ProjectInstructions:
             current /= part
             candidate = current / "AGENTS.md"
             if candidate.is_file() and candidate not in self.loaded:
+                if is_link_or_junction(candidate):
+                    raise ValueError(f"project instructions path is a link: {candidate}")
                 source = Source.read(candidate, _MAX_INSTRUCTIONS)
                 self.loaded[candidate] = source
                 found.append(source)
@@ -121,8 +127,10 @@ class SkillCatalog:
         for origin, root in roots:
             if not root.is_dir():
                 continue
+            if origin == "project" and (is_link_or_junction(root) or is_link_or_junction(root.parent)):
+                raise ValueError(f"project skills directory is a link: {root}")
             for path in sorted(root.glob("*/SKILL.md")):
-                if path.is_symlink() or path.parent.is_symlink():
+                if is_link_or_junction(path) or is_link_or_junction(path.parent):
                     continue
                 name, description = _skill_metadata(path)
                 if name != path.parent.name:
@@ -150,7 +158,7 @@ class SkillCatalog:
         skill = self.skills.get(name)
         if skill is None:
             raise ValueError(f"unknown skill: {name}")
-        if (skill.path.is_symlink() or skill.path.parent.is_symlink()
+        if (is_link_or_junction(skill.path) or is_link_or_junction(skill.path.parent)
                 or skill.path.parent.resolve() != skill.root):
             raise ValueError(f"skill path changed: {name}")
         return Source.read(skill.path, _MAX_SKILL)
@@ -159,7 +167,7 @@ class SkillCatalog:
         skill = self.skills.get(name)
         if skill is None:
             raise ValueError(f"unknown skill: {name}")
-        if skill.path.is_symlink() or skill.path.parent.resolve() != skill.root:
+        if is_link_or_junction(skill.path) or skill.path.parent.resolve() != skill.root:
             raise ValueError(f"skill path changed: {name}")
         root = skill.root
         target = (root / path).resolve()

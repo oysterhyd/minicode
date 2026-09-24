@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 
 from minicode import __version__
+from minicode.core.paths import is_link_or_junction
 
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -26,13 +27,25 @@ _MAX_PLUGIN_BYTES = 16_000_000
 def _fingerprint(root: Path) -> str:
     digest = hashlib.sha256()
     total = 0
-    for path in sorted(root.rglob("*")):
-        if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
-            continue
-        if path.is_symlink():
-            raise ValueError(f"plugin contains a symbolic link: {path}")
-        if not path.is_file():
-            continue
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        descend = []
+        for name in sorted(dirnames):
+            if name == "__pycache__":
+                continue
+            path = Path(dirpath) / name
+            if is_link_or_junction(path):
+                raise ValueError(f"plugin contains a link or junction: {path}")
+            descend.append(name)
+        dirnames[:] = descend
+        for name in sorted(filenames):
+            path = Path(dirpath) / name
+            if path.suffix in {".pyc", ".pyo"}:
+                continue
+            if is_link_or_junction(path):
+                raise ValueError(f"plugin contains a link or junction: {path}")
+            files.append(path)
+    for path in sorted(files):
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         with path.open("rb") as stream:
             while chunk := stream.read(64 * 1024):
@@ -77,7 +90,7 @@ def _directory(root: Path, relative: Any) -> Path | None:
     if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
         raise ValueError("plugin directory must be a relative path")
     path = root / relative
-    if path.is_symlink() or not path.resolve().is_relative_to(root) or not path.is_dir():
+    if is_link_or_junction(path) or not path.resolve().is_relative_to(root) or not path.is_dir():
         raise ValueError(f"plugin directory is missing or outside plugin: {relative}")
     return path.resolve()
 
@@ -93,9 +106,11 @@ class PluginCatalog:
         self._agents: dict[str, Path] = {}
         server_names: set[str] = set()
         if self.root.is_dir():
+            if is_link_or_junction(self.root) or is_link_or_junction(self.root.parent):
+                raise ValueError(f"plugin directory is a link or junction: {self.root}")
             for path in sorted(self.root.glob("*/plugin.json")):
                 root = path.parent.resolve()
-                if path.is_symlink() or path.parent.is_symlink() or not root.is_relative_to(self.root.resolve()):
+                if is_link_or_junction(path) or is_link_or_junction(path.parent) or not root.is_relative_to(self.root.resolve()):
                     raise ValueError(f"plugin path is not trusted: {path}")
                 data = path.read_bytes()
                 if len(data) > _MAX_MANIFEST:
@@ -149,7 +164,7 @@ class PluginCatalog:
                 )
                 if enabled and agent_root is not None:
                     for agent_file in sorted(agent_root.glob("*/AGENT.md")):
-                        if agent_file.is_symlink() or agent_file.parent.is_symlink():
+                        if is_link_or_junction(agent_file) or is_link_or_junction(agent_file.parent):
                             raise ValueError(f"agent path is not trusted: {agent_file}")
                         agent_name = agent_file.parent.name
                         if not _NAME.fullmatch(agent_name):

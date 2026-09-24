@@ -4,8 +4,8 @@
 > FakeProvider 的脚本 token 数仍不能衡量真实压缩收益。
 
 这是一套完全离线的评测：20 个带 bug 的微型 Python 仓库，由 FakeProvider 重放
-确定性修复脚本驱动 `AgentRuntime`，runner 自己做验收（子进程跑验收命令 +
-对比受保护文件哈希），不依赖 goals 包、不需要任何模型密钥。
+确定性修复脚本驱动 `AgentRuntime`，runner 自己做验收（子进程跑验收命令、
+对比受保护文件哈希与允许修改范围、执行工作区外的隐藏测试），不依赖 goals 包、不需要模型密钥。
 
 ## 目录结构
 
@@ -18,6 +18,7 @@ evals/
     ├── repo/                # 带 bug 的微型仓库：<module>.py + test_<module>.py
     ├── task.yaml            # 任务定义（schema 见下，goals 模块兼容此格式）
     └── script.json          # FakeProvider 修复脚本（read → edit → bash → 总结）
+hidden_tests/<task_id>/test_hidden.py  # 宿主侧验收，不复制到 Agent 工作区
 ```
 
 每个任务的仓库刻意保持极小（每文件 < 40 行）：测试**先失败**（红），
@@ -109,8 +110,9 @@ script: script.json
 ### 成功定义
 
 一次运行记为 **pass** 当且仅当：Agent 以 `completed` 结束、全部 `type: command`
-验收项退出码为 0，且全部 `type: protected` 文件哈希未变。失败、超时、预算耗尽、
-续跑耗尽全部计入分母。
+验收项退出码为 0、全部 `type: protected` 文件哈希未变、工作区改动只在
+`allowed_paths` 内，且宿主侧隐藏测试通过。隐藏测试仅在模型执行结束后运行，
+失败详情不会回填给 Agent。任务失败、超时、预算耗尽及续跑耗尽均计入分母。
 
 ## 结果目录结构
 
@@ -119,7 +121,7 @@ script: script.json
 ├── results.json   # 结构化结果：generated_at / baselines / run_count / passed / records[]
 │                  # 每条 record: task, baseline, pass, exit_reason, attempts,
 │                  #             rounds, input_tokens, output_tokens, compactions,
-│                  #             estimated_context_reduction, seconds, error
+│                  #             estimated_context_reduction, seconds, error, hidden_pass
 ├── summary.md     # 基线对照表 + 逐任务结果表 + 失败任务与退出原因 + 确定性失败分析
 └── workspaces/    # 仅 --keep-workspaces 时存在：<task>__<baseline>/workspace/
 ```
@@ -135,6 +137,33 @@ FakeProvider 的 usage 来自脚本或固定默认值，不随实际请求长度
 结果也不能证明上下文压缩、工具输出裁剪或缓存带来了费用下降。
 在当前脚本保证一次修复成功的设定下，b0/b1/b2 的成功率和轮数必然一致，b2 的
 续跑分支只在验收失败时才会产生差异（runner 的失败分析模板也照此措辞）。
+
+## 真实模型重复评测
+
+`python -m evals.run_real_eval --baselines b0,b2 --repeats 3 --output reports/eval-real`
+使用当前 CommandCode 配置和默认模型。运行会产生 API 用量；`--task <id>` 可先试跑单题。
+每次运行都复制干净的 `repo/`，保留独立 SQLite 会话、工作区、原始判分记录和汇总。
+默认一次仅运行一个任务，以减少网关并发排队对时长预算的干扰；可显式设置 `--concurrency`
+做吞吐实验，并在 `config.json` 记录它。B0/B2 按重复次数交替排列以减轻顺序偏差。
+已有 `record.json` 且模型与 fixture 指纹相同的运行不会重做；不完整运行目录会报错，
+避免在未知状态下覆盖 trace。
+
+真实模型 B0 使用基础循环；B2 增加与 CLI 相同的上下文压缩和 Runtime Goal 门。
+两组用相同模型、工具、自动允许策略、任务预算和独立宿主评分。宿主评分要求 Runtime
+返回 `completed`、验收命令通过、受保护文件未变化、修改只发生在 `allowed_paths`，
+并通过宿主侧隐藏测试。
+基础设施错误和未完成运行保留在分母。每条记录含退出原因、Token、耗时、会话 ID、
+任务与 prompt 指纹、Git 提交和失败原因。网关不提供 seed 时不宣称可逐 token 复现；
+没有经核实的当日价格表时费用记为未知，不用 token 量编造金额。
+
+这 20 个 fixture 都是微型单文件 bug，适合比较基本修复闭环；它们不测大仓库、
+跨文件功能开发或真实生产故障。另有 [补充场景](scenarios/README.md) 覆盖跨文件修复、
+长日志与验收失败续跑；恢复、路径边界、压缩和外部工具失败由独立机制测试覆盖。
+
+已保存的真实模型工作区可运行
+`python -m evals.rescore_hidden --output reports/eval-real-20260923`
+追加隐藏判分，不重复调用 API。逐条结果保留 `visible_pass`、`hidden_pass`、
+隐藏测试指纹和最终 `pass`；`hidden-rescore.json` 记录原始汇总摘要与本次测试集指纹。
 
 ## 再生成
 

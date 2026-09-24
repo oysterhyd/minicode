@@ -6,12 +6,40 @@
 执行协议、权限、预算、取消与持久化；不将调用模型包装成模型训练能力，也不宣称完整复刻商业
 Claude Code。
 
-**当前状态（2026-09-23 核对）**：P0 最小闭环——单轮任务、交互会话、基础工具、权限审批、
+**当前状态（2026-09-24 核对）**：P0 最小闭环——单轮任务、交互会话、基础工具、权限审批、
 预算与取消、SQLite 会话持久化与执行报告——已实现。P1 已接入分层上下文压缩与输出归档、
 会话恢复与未知副作用处理、Goal 验收器与证据绑定、后台命令、20 任务离线评测集、HTML
 执行报告和 Textual 全屏 TUI。压缩及归档仍有边界限制，见下方说明。
 优化方案 A–D 已接入：项目指令、按需加载的 Skills、单层只读子任务、stdio MCP 与本地 Plugins。
-`TaskStore` 有独立实现和测试，但尚未接入主循环及交互入口。
+持久任务图已通过 `task_create` / `task_list` / `task_claim` / `task_complete` 接入模型工具；
+项目长期记忆由用户显式维护，Agent 只能用 `memory_list` 读取。
+
+```mermaid
+flowchart LR
+  U[CLI 任务与验收] --> R[AgentRuntime]
+  R --> P[模型 Provider]
+  R --> T[权限门与工具]
+  T --> W[本地工作区]
+  R --> S[SQLite 会话与事件]
+  R --> G[宿主 Goal 验收]
+  S --> H[离线报告与恢复]
+```
+
+**真实模型评测（2026-09-23）**：20 个微型修复任务，CommandCode
+`deepseek/deepseek-v4.1-flash`，B0/B2 各运行 3 次；宿主独立执行可见验收、
+允许路径检查和工作区外的隐藏测试。
+
+| 基线 | 最终通过 | 误报完成 | 首轮无响应超时 | Runtime 中位耗时 |
+| --- | ---: | ---: | ---: | ---: |
+| B0 基础循环 | 47/60 | 0 | 3 | 65.8 秒 |
+| B2 压缩 + 运行时 Goal 门 | 51/60 | 0 | 1 | 68.0 秒 |
+
+该批运行使用 4 并发、每任务 120 秒上限；网关排队与单文件小题限制了对两基线差异的解释。
+详见 [评测方法与限制](docs/evaluation-20260923.md)、[逐次结果](reports/eval-real-20260923/results.json)
+和 [配置](reports/eval-real-20260923/config.json)。
+另有 [三个补充场景](evals/scenarios/README.md) 覆盖跨文件修复、长日志和验收失败续跑；
+其 FakeProvider 离线结果为 B0 2/3、B1 2/3、B2 3/3，不计入上述真实模型结果。
+[发布核验](docs/release-readiness.md)列出已验证能力和仍需保留的边界。
 
 **交互与运行时增强**：启动 ASCII Banner（Oyster Harness + 版本/环境信息）、斜杠命令
 自动补全（Tab 补全 / ↑↓ 选择 / Esc 关闭 / Enter 确认）、`/model`（z.ai/glm-5.3-flash 与
@@ -26,11 +54,17 @@ DeepSeek V4.1 Flash，模型目录配置约 1M 上下文，另含 Claude Sonnet 
 要求 Python 3.11+（Windows / Linux 均可）。
 
 ```bash
-git clone <repo-url> miniclaudecode && cd miniclaudecode
+# 在本仓库根目录执行
 python -m venv .venv
-source .venv/Scripts/activate        # Windows Git Bash；Linux 为 .venv/bin/activate
-pip install -e ".[dev]"
+.venv/bin/python -m pip install -e ".[dev]"  # Linux/macOS
 ```
+
+Windows PowerShell 用 `.\.venv\Scripts\python.exe -m pip install -e ".[dev]"`
+替换第二行；后续可用 `.\.venv\Scripts\minicode.exe`，无需激活环境。
+
+Windows + Python 3.12 可用 [已验证依赖快照](requirements-windows-py312.lock)
+替换最后一步：`python -m pip install -r requirements-windows-py312.lock`。
+其他平台和 Python 版本由 CI 的安装与测试矩阵验证；本地快照不冒充跨平台锁文件。
 
 ### 模型 provider
 
@@ -98,6 +132,15 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 | `minicode resume <会话ID>` | 恢复历史会话；用 `/continue` 续跑暂停任务。已落库结果不重复执行；未确认写入标记状态未知并要求核实 |
 | `minicode report <会话ID>` | 执行报告（text）；`--format html` 生成单文件离线 HTML（时间线、工具记录、diff、验收证据、用量） |
 | `minicode eval` | 运行 `evals/` 的 20 任务评测集（FakeProvider 离线）；b1 增加压缩与归档，b2 增加外层验收失败续跑；输出 JSON + Markdown 汇总 |
+| `minicode memory add/list/update/delete` | 显式管理按项目和目录限定的稳定事实；每条事实记录来源与更新时间 |
+| `minicode workflow review --check "python -m pytest" --output <工作区外目录>` | 固定的快照→检查→只读模型审查；journal 支持跨进程续跑 |
+
+若通过 wheel 安装基础包并使用 `minicode eval`，需安装评测额外依赖：
+`python -m pip install "minicode[eval]"`。从源码按快速开始安装 `[dev]` 时已包含 pytest。
+
+真实模型重复评测使用 `python -m evals.run_real_eval --baselines b0,b2 --repeats 3`；
+每次运行保留干净工作区、SQLite trace 和独立判分记录。此命令会调用当前 CommandCode API。
+离线和真实评测的 B2 定义不同：离线 B2 是 runner 外层续跑；真实评测 B2 装配运行时 Goal 门。
 
 常用选项（`run` / `chat` / `tui` 共享）：`--workspace`（默认当前目录）、
 `--provider auto|commandcode|anthropic|fake`、`--model`（缺省按 provider 选择）、
@@ -161,6 +204,8 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
 - **项目指令与 Skills**：根目录 `AGENTS.md` 启动时加载；子目录 `AGENTS.md` 在首次访问对应范围时加载并要求重试该次工具调用。会话记录来源路径与内容哈希；变更后恢复会提示冲突。扫描项目 `.minicode/skills/<name>/SKILL.md` 和用户 `~/.minicode/skills/<name>/SKILL.md` 的元数据，`/skill` 列出、`/skill <name>` 激活、`/skill off <name>` 停用；模型也可用 `skills_list`、`skill_load`、`skill_unload`、`skill_resource`。技能正文只在激活时加载，资源读取限于注册目录，脚本执行仍走普通 `bash` 审批。
 - **只读子任务**：模型可用 `delegate` 请求 `explore`、`review` 或本地插件定义的子助手；子会话只注册 `read`、`ls`、`grep`、`read_artifact`，不注册 shell 或写入工具。同一模型响应中的独立子任务最多两个并行；设置显式累计 token 上限时串行执行。子任务与父会话共享预算与取消；暂停后保留原会话，重复委派同一任务时续跑。父会话记录子会话 ID、用量和结果，返回摘要、发现、经工具记录验证的文件引用与未解决项。
 - **MCP 与 Plugins**：项目目录 `.minicode/plugins/<name>/plugin.json` 描述插件版本、启停、Skills、只读子助手和本地 stdio MCP server。工具经官方 Python SDK 发现并注册为 `mcp__<server>__<tool>`；调用沿用权限审批、事件、预算和完整输出归档，服务端只读注解不会自动免审批。`minicode plugins list` 查看来源与指纹，`minicode plugins lock` 生成 `.minicode/plugins.lock.json` 锁定版本和内容。复制 `examples/mcp_docs` 到 `.minicode/plugins/docs` 可试运行本地文档 server；将 `enabled` 设为 `false` 可停用插件，修改后重新生成锁文件。
+- **任务图与记忆**：任务依赖、认领与完成持久保存在会话数据库；依赖未完成时不能认领，完成任务时核对 owner。模型可维护任务板，但任务板不自动调度写入型 worker。`minicode memory add "事实" --source "来源" --scope src` 显式保存项目事实；可列出、修订、删除，模型只有只读的 `memory_list` 工具。记忆与会话压缩摘要分别存储。
+- **固定 review workflow**：`minicode workflow review` 保存 Git 快照、执行指定检查命令、再启动只读模型审查；每步前后写入 journal。中断时若检查命令状态未知，续跑不会自动重做，核实后需显式使用 `--retry-unknown`；模型审查会从持久会话续跑。
 
 ## 本地插件格式
 
@@ -176,7 +221,7 @@ server 的工作目录为插件目录。示例见 [plugin.json](examples/mcp_doc
 
 - 同一模型响应中连续的内置只读工具最多 4 个并发；写入、命令与未知工具是顺序屏障。
   后台命令在同一进程的执行期间保持运行；暂停、取消或进程退出时无法跨进程继承。
-- `TaskStore` 的依赖与认领能力尚未接入 Runtime，不能视为已有多代理调度。
+- 任务图已接入单 Agent 工具，但不负责自动执行依赖任务，也没有写入型多代理调度。
 - 子任务仅在同一模型响应中按最多两个独立调用并行；显式累计 token 上限下仍串行。证据引用仅验证子任务成功读取过对应路径及路径仍存在，不做语义真实性判断。
 - MCP 首版仅支持本地 stdio 工具；断连、超时和发现失败会显示明确状态。Resources、Prompts、远程 HTTP、OAuth 和插件自动安装仍未接入。
 - 缓存读/写用量与“provider 未返回 usage”状态会逐请求记入事件、累计写入 SQLite，并在 resume 后恢复；
@@ -189,8 +234,8 @@ server 的工作目录为插件目录。示例见 [plugin.json](examples/mcp_doc
 
 ## 明确未实现（P2）
 
-- 项目长期记忆、写入型子代理、跨回合持久后台服务。
-- 多 worker worktree 协作、可续跑 workflow。
+- 写入型子代理、跨回合持久后台服务。
+- 多 worker worktree 协作；固定 review workflow 已提供，通用 workflow 编辑器尚未实现。
 - 定时任务、Web 操作界面。
 
 ## 架构
@@ -213,4 +258,4 @@ pytest                                       # pip install -e ".[dev]" 之后
 ## 致谢与许可
 
 机制设计基于本地教学项目 [learn-claude-code](learn-claude-code/README-zh.md)
-（s01–s17 教学主线）的阅读与改造，未直接复制其代码；项目以 MIT 许可发布。
+（s01–s17 教学主线）的阅读与改造，未直接复制其代码；项目许可见 [MIT LICENSE](LICENSE)。

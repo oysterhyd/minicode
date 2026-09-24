@@ -146,6 +146,13 @@ class AgentRuntime:
         self._provider = provider
         self._registry = registry
         self._store = store
+        # The board shares the session database; its tools only appear when
+        # the host explicitly registers them. Reopening a session keeps tasks.
+        from minicode.storage.sqlite_store import SqliteStore
+        from minicode.tasks.taskstore import TaskStore
+        from minicode.context.memory import ProjectMemoryStore
+        self._task_store = TaskStore(store) if isinstance(store, SqliteStore) else None
+        self._project_memory = ProjectMemoryStore(store) if isinstance(store, SqliteStore) else None
         self._policy = policy
         self._workspace = workspace
         self._provider_name = provider_name
@@ -194,6 +201,7 @@ class AgentRuntime:
         self._last_tool_signature: str | None = None
         self._same_tool_rounds = 0
         self._last_exit_reason: ExitReason | None = None
+        self._provider_in_flight = False
 
     # -- read-only state ----------------------------------------------------
 
@@ -495,7 +503,9 @@ class AgentRuntime:
 
                     self._check_deadline()
                     self._pending_instruction_scopes.clear()
+                    self._provider_in_flight = True
                     response, failure, error, provider_exc = await self._stream_assistant_turn()
+                    self._provider_in_flight = False
                     self._check_deadline()
                     if response is None:
                         assert failure is not None  # always set when response is None
@@ -659,11 +669,21 @@ class AgentRuntime:
                             error="重复的工具调用没有产生新证据。",
                         )
         except TimeoutError:
+            if self._provider_in_flight:
+                # The gateway may have billed a request without delivering
+                # usage. A reported zero would be misleading.
+                self._usage = self._usage.model_copy(update={"available": False})
+                self._provider_in_flight = False
+                self._persist_counters()
             if user_message is not None and not user_recorded:
                 self._append_message(session_id, Message(role="user", content=[TextBlock(text=user_message)]))
                 self._task_pending = True
             return await self._finalize(recorder, ExitReason.TIME_BUDGET, turn_started)
         except asyncio.CancelledError:
+            if self._provider_in_flight:
+                self._usage = self._usage.model_copy(update={"available": False})
+                self._provider_in_flight = False
+                self._persist_counters()
             await self._finalize_cancelled(recorder)
             raise  # never swallow cancellation
         except Exception as exc:  # noqa: BLE001 - checkpoint unexpected failures
@@ -1098,8 +1118,13 @@ class AgentRuntime:
         if tool is None:
             return ToolOutcome.failure(f"unknown tool: {call.name}")
 
+        try:
+            validated_input = tool.validate_args(call.input)
+        except Exception as exc:  # invalid schemas/arguments are tool failures
+            return ToolOutcome.failure(f"invalid arguments for {call.name}: {exc}")
+
         if self._project_instructions is not None and call.name in {"read", "ls", "grep", "edit", "write"}:
-            target = call.input.get("path")
+            target = validated_input.get("path")
             if isinstance(target, str):
                 try:
                     target_path = (self._workspace / target).resolve()
@@ -1117,7 +1142,7 @@ class AgentRuntime:
                         })
                     return ToolOutcome.failure("已加载该目录的 AGENTS.md 指令。请按新指令重新调用工具。")
 
-        decision = await self._policy.check(call.name, call.input)
+        decision = await self._policy.check(call.name, validated_input)
         if decision.behavior is PolicyBehavior.DENY:
             reason = f": {decision.reason}" if decision.reason else ""
             return ToolOutcome.failure(f"permission denied by policy{reason}")
@@ -1131,13 +1156,13 @@ class AgentRuntime:
             # tool. Keep its dialogs sequential while the approved reads may
             # still overlap afterwards.
             async with self._approval_lock:
-                summary = self._approval_summary(call.name, call.input)
+                summary = self._approval_summary(call.name, validated_input)
                 await recorder.emit(
                     EventType.APPROVAL_REQUEST,
                     {"call_id": call.id, "tool_name": call.name, "summary": summary},
                 )
                 approved = await self._approval_handler(
-                    ApprovalRequest(tool_name=call.name, arguments=call.input, summary=summary)
+                    ApprovalRequest(tool_name=call.name, arguments=validated_input, summary=summary)
                 )
                 await recorder.emit(
                     EventType.APPROVAL_DECISION,
@@ -1152,7 +1177,9 @@ class AgentRuntime:
                 reason = f": {approved.reason}" if approved.reason else ""
                 return ToolOutcome.failure(f"approval denied{reason}")
 
-        return await self._run_tool(call, tool, recorder)
+        return await self._run_tool(
+            call.model_copy(update={"input": validated_input}), tool, recorder
+        )
 
     async def _run_tool(self, call: ToolUseBlock, tool: Any,
                         recorder: EventRecorder) -> ToolOutcome:
@@ -1166,6 +1193,8 @@ class AgentRuntime:
             activate_skill=self.activate_skill if self._skills is not None else None,
             deactivate_skill=self.deactivate_skill if self._skills is not None else None,
             delegate=self._delegate if self._allow_delegation else None,
+            task_store=self._task_store,
+            project_memory=self._project_memory,
             on_output=(lambda output: recorder.emit(EventType.TOOL_OUTPUT, {
                 "call_id": call.id, "name": call.name, "output_preview": output[-1000:],
             })),

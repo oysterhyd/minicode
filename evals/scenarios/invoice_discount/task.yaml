@@ -1,0 +1,18 @@
+id: invoice_discount
+title: 跨文件发票折扣与税额计算
+prompt: |
+  发票总额有两处问题：折扣应在计税前扣除，CA 税率应为 7.5%。
+  请阅读 invoice.py、tax.py 和测试，修复两处实现并运行测试。
+  只允许修改 invoice.py 和 tax.py，不得修改测试。
+allowed_paths: [invoice.py, tax.py]
+protected_paths: [test_invoice.py]
+items:
+  - id: tests-pass
+    type: command
+    command: python -m pytest test_invoice.py -q
+  - id: tests-unchanged
+    type: protected
+    path: test_invoice.py
+budget: {max_rounds: 14, max_tokens: 120000, max_seconds: 180}
+max_fix_attempts: 3
+script: script.json

@@ -1,0 +1,10 @@
+{
+  "session_id": "c190316fbae94ac69fbdcce450cca965",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "created_at": "2026-09-23T14:16:53.205913+00:00",
+  "source_db_sha256": "ec75ebbce84706c89fd7a22df90da42b4abcc644ae1da1c759ff4e5ae7084bd5",
+  "format": "condensed historical trace replay",
+  "slide_count": 16,
+  "seconds_per_slide": 4,
+  "video": "pagination-real-trace-replay.mp4"
+}

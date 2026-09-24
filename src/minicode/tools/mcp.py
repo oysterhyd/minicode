@@ -136,6 +136,10 @@ class McpTool(BaseTool):
         return ToolSpec(name=self.name, description=self.description,
                         input_schema=self.schema, requires_approval=True)
 
+    def validate_args(self, raw_args: dict[str, Any]) -> dict[str, Any]:
+        Draft202012Validator(self.schema).validate(raw_args)
+        return dict(raw_args)
+
     async def run(self, raw_args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
         try:
             Draft202012Validator(self.schema).validate(raw_args)

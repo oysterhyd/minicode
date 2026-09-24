@@ -21,6 +21,7 @@ import tempfile
 from pydantic import BaseModel, Field
 
 from minicode.core.models import ToolOutcome
+from minicode.core.paths import is_link_or_junction
 from minicode.tools.base import (
     BaseTool,
     ToolContext,
@@ -293,7 +294,8 @@ class LsTool(BaseTool):
         has_more = False
         used_bytes = 0
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS
+                                 and not is_link_or_junction(Path(dirpath) / d))
             rel_dir = os.path.relpath(dirpath, base)
             prefix = "" if rel_dir == "." else Path(rel_dir).as_posix() + "/"
             for entry in chain(

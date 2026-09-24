@@ -1,16 +1,17 @@
 # Mini Claude Code 项目方案
 
-> 原始日期：2026-09-07；状态核对：2026-09-22。本文件保留最初的设计目标、阶段划分与验收设想，不是当前功能清单。
+> 原始日期：2026-09-07；状态核对：2026-09-23（对应提交 `9494137`）。本文件保留最初的设计目标、阶段划分与验收设想，不是当前功能清单；里程碑实际进度见 §8。
 > 基于本地 `learn-claude-code/` 新版 s01–s17 教学主线制定。以下工期、指标及尚未落地的机制均为计划，不代表已有成果。
 > 当前实际实现以 [README](README.md)、[架构说明](docs/architecture.md) 为准；后续建议见 [探索与优化方案](docs/optimization-design.md)。
 
 ## 当前实现与原方案的差异
 
-- P0 闭环与 P1 的压缩、恢复、Goal 验收、后台命令、HTML 报告、Textual TUI 已有实现。
-- 原方案中的只读子 Agent 尚未提供；任务依赖存储已有实现，但未接入主循环或交互入口。
-- 输出归档尚无模型回读入口；不能将下文“完整原文保留、按需回读、约束保留”当作已满足的保证。
-- 离线评测提供 b0/b1/b2 标签，但 b1 与 b0 相同，b2 是 runner 外层验收续跑；尚未完成下文设计的真实模型消融实验。
-- MCP、Skills、Plugins、项目记忆和多 worker 协作均为后续工作。下文 P0/P1/P2 是原始分期，不意味着该阶段所有条目已经完成。
+- P0 最小闭环与 P1 的分层压缩与归档、会话恢复、Goal 验收、后台命令、20 任务离线评测、HTML 报告、Textual TUI 均已实现。
+- 优化方案 A–D 阶段（可靠上下文与测量、TUI 与有界只读并发、项目指令 / Skills / 一层只读子任务、stdio MCP 与本地 Plugins）已实现。
+- 模型回读入口已提供：`read_artifact` 按字符 offset/limit 分页读取本会话归档，不再只是“原文保留”。
+- 任务依赖存储 `TaskStore` 有独立实现和测试，但未接入 Runtime 或交互入口，不能视为已有任务图调度。
+- 离线评测为 FakeProvider 脚本重放，b1 已接入分层压缩与归档；b2 是 runner 外层验收续跑，未装配运行时 Goal 门。每任务只运行一次，尚未完成下文设计的真实模型消融与重复运行。
+- 项目长期记忆、多 worker worktree 协作、可续跑 workflow、定时任务与 Web 界面仍未提供；ADR、失败复盘与 CI 尚未落地（见 §8 与 §10）。
 
 ## 1. 项目定位与范围
 
@@ -56,7 +57,7 @@
 
 - CLI 单轮执行、交互会话、流式文本展示、Ctrl+C 取消。
 - 一个真实模型适配器和一个确定性 Fake Provider；模型名称与凭证由配置提供。
-- `read_file`、`list_files`、`search_text`、`apply_patch`、`run_command` 基础工具。
+- `read_file`、`list_files`、`search_text`、`apply_patch`、`run_command` 基础工具（实际实现对应 `read` / `ls` / `grep` / `edit` / `write` / `bash` / `read_artifact`）。
 - 工具参数校验、工作区边界、修改审批、命令超时与输出限制。
 - 会话持久化、事件追踪、diff 与命令退出码报告。
 - 最大轮数、总 token 预算、总时长；退出原因可区分。
@@ -214,7 +215,7 @@ miniclaudecode/
 ├── examples/                  # 演示仓库、任务与录屏脚本
 └── docs/                      # 架构、ADR、评测结果、故障复盘
 ```
-
+下列 CLI 已在实现中落地；实际可用命令与选项以 [README](README.md) 为准（`eval` 实际使用 `--tasks-dir` / `--task` / `--baselines`，无 `--suite`）：
 规划中的 CLI（实现前不应宣称已经可运行）：
 
 ```text
@@ -223,7 +224,7 @@ minicode chat --workspace ./examples/pagination
 minicode run "修复分页越界错误" --acceptance ./evals/pagination.yaml
 minicode sessions list
 minicode resume <session-id>
-minicode report <session-id> --format html
+minicode eval --baselines b0,b1,b2 --output ./reports
 minicode eval --suite core --output ./reports
 ```
 
@@ -231,17 +232,17 @@ minicode eval --suite core --output ./reports
 
 ## 8. 实施里程碑与验收
 
-| 阶段 | 工期与内容 | 完成标准 |
-| --- | --- | --- |
-| M0：规格与基线 | 第 1 周前半；初始化包、核心契约、Fake Provider、3 个小任务 | 无密钥可跑通工具调用协议测试；任务 fixtures 有可执行验收条件 |
-| M1：最小编码闭环 | 第 1 周后半–第 2 周；CLI、真实 Provider、基础工具、权限、预算、取消 | 完成至少一个真实修复任务并留下 trace；越界拒绝、命令超时、错误回填有测试 |
-| M2：状态与恢复 | 第 3 周；SQLite、产物、恢复、结构化报告 | 注入三类崩溃后恢复符合规则；未知副作用不自动重放；旧结果可追溯 |
-| M3：长任务与验收 | 第 4 周；上下文压缩、Goal、证据失效 | 长日志任务可继续；工具配对不破坏；模型自述“通过”不能绕过真实验收 |
-| M4：受控任务执行 | 第 5 周；任务图、后台命令 | 依赖与认领测试通过；取消传递有效 |
-| M5：面试展示版 | 第 6 周；20 个任务、对照评测、HTML 报告、README、录屏 | 新环境按文档可复现；发布真实结果及失败样例；演示有离线回放备份 |
-| M6：差异化扩展 | 第 7–8 周；选择真实 MCP，加 Skills，或深化 worktree/workflow | 所选功能有真实端到端案例与失败测试，明确未实现范围 |
+| 阶段 | 工期与内容 | 完成标准 | 实际状态（2026-09-23） |
+| --- | --- | --- | --- |
+| M0：规格与基线 | 第 1 周前半；初始化包、核心契约、Fake Provider、3 个小任务 | 无密钥可跑通工具调用协议测试；任务 fixtures 有可执行验收条件 | **已完成**。`core/models.py` 契约、`providers/fake.py`、`examples/pagination` fixture 与端到端测试（`tests/test_cli.py`）齐备；任务数已超出 3 个，`evals/tasks` 共 20 个。 |
+| M1：最小编码闭环 | 第 1 周后半–第 2 周；CLI、真实 Provider、基础工具、权限、预算、取消 | 完成至少一个真实修复任务并留下 trace；越界拒绝、命令超时、错误回填有测试 | **已完成**。`cli.py` 提供 run / chat；provider 为 CommandCode、Anthropic、Fake 三种；内置工具 `read`/`bash`/`edit`/`write`/`ls`/`grep`/`read_artifact`；ALLOW/ASK/DENY 权限门、命令超时、错误回填均有测试。离线端到端修复任务可复现；**真实模型修复任务尚未记录 trace**。 |
+| M2：状态与恢复 | 第 3 周；SQLite、产物、恢复、结构化报告 | 注入三类崩溃后恢复符合规则；未知副作用不自动重放；旧结果可追溯 | **已完成（机制层）**。SQLite schema v4 持久化消息/事件/用量；`ArtifactStore` 归档；`resume` + `/continue`；只读悬空调用重执行、写与 Shell 标记 `SIDE_EFFECT_UNKNOWN` 不重放，见 `tests/test_runtime_p1.py`、`tests/test_runtime_regressions.py`。**尚缺**：按 §6.3 三处崩溃点（执行前 / 落库前 / 落库后）的系统性注入测试集。 |
+| M3：长任务与验收 | 第 4 周；上下文压缩、Goal、证据失效 | 长日志任务可继续；工具配对不破坏；模型自述“通过”不能绕过真实验收 | **已完成**。四步分层压缩（归档 → 交互组归档 → 缩短旧结果 → 结构化摘要）保留 tool_use/tool_result 配对与用户约束；`goals/` 三类检查项 + `EvidenceLedger` 绑定工作区指纹，代码变更即失效；`--acceptance` 下模型自述不跳过验收，见 `tests/test_goals.py`。 |
+| M4：受控任务执行 | 第 5 周；任务图、后台命令 | 依赖与认领测试通过；取消传递有效 | **部分完成**。后台命令已接入 Runtime（job id、完成事件、暂停/取消终止进程树、`BACKGROUND_JOB_LOST`）；取消沿父子链传递。`TaskStore` 的依赖与事务认领有实现和测试，但**未接入 Runtime**，取消传递仅在子任务层验证。 |
+| M5：面试展示版 | 第 6 周；20 个任务、对照评测、HTML 报告、README、录屏 | 新环境按文档可复现；发布真实结果及失败样例；演示有离线回放备份 | **未完成**。已具备：20 任务离线评测集、HTML 报告、完整 README、FakeProvider 离线回放。**缺口**：真实模型对照评测（每任务 ≥3 次重复）、失败样例记录、录屏、ADR 与失败复盘。 |
+| M6：差异化扩展 | 第 7–8 周；选择真实 MCP，加 Skills，或深化 worktree/workflow | 所选功能有真实端到端案例与失败测试，明确未实现范围 | **大部分完成**。MCP 采用官方 Python SDK 2.2.0 接入本地 stdio server，工具注册为 `mcp__server__tool`；Skills 与项目指令按需加载；本地 Plugins 支持版本、指纹与锁文件。**未完成**：worktree / workflow 方向未启动；MCP 仅本地 stdio，无 Resources/Prompts、远程 HTTP、OAuth。 |
 
-每个里程碑形成可运行版本、简短 ADR 和演示记录。阶段延期时先削减 P2，再削减界面，不削减权限、恢复边界和评测真实性。
+阶段完成度整体快于原计划，但 M5（面试展示版）是当前唯一有实质缺口的里程碑，缺口集中在真实模型评测与作品集材料，而不是功能实现。原计划另有若干承诺未兑现，见 §10。
 
 ## 9. 评测与验证设计
 
@@ -283,7 +284,7 @@ minicode eval --suite core --output ./reports
 - 模型判断器返回错误 JSON、误判完成、连续无进展、预算用尽。
 - 选做 MCP 时测试服务断开、重复工具名、慢调用和错误返回。
 
-CI 运行无密钥确定性测试；真实模型评测手动触发并显式设预算。Windows 与 Linux 分别验证基础文件和命令能力；容器相关检查只在具备运行环境时执行并明确标记，不能将跳过视为通过。
+CI 尚未配置（无 `.github/`，也未在其他 CI 上运行）。当前验证方式是在本地以独立 `--basetemp` 运行 `pytest`：2026-09-23 实测 **466 passed, 2 skipped**（约 122s），两项跳过均因当前 Windows 账户无法创建符号链接。使用默认临时目录时，pytest 收尾清理会触发 `PermissionError`，需指定独立 `--basetemp`。真实模型评测手动触发并显式设预算；Windows 与 Linux 分别验证基础文件和命令能力；容器相关检查只在具备运行环境时执行并明确标记，不能将跳过视为通过。
 
 ## 10. 面试展示与项目包装
 
@@ -313,6 +314,19 @@ README 首屏说明解决的问题，提供一条启动命令、一张架构图�
 | 权限规则和沙箱有什么区别？ | 展示授权门、执行环境、worktree 各自的边界 |
 
 最终作品集包括：可安装 CLI、架构文档、至少 4 篇 ADR（权限、恢复、压缩、验收）、评测脚本与原始结果、2–3 篇失败复盘、演示视频、第三方致谢和许可证说明。
+
+上述清单的当前状态：
+
+| 交付物 | 状态 |
+| --- | --- |
+| 可安装 CLI（`pip install -e .`） | 已有 |
+| 架构文档 | 已有（[architecture.md](docs/architecture.md)），部分段落仍停留在 D 阶段之前 |
+| ADR ≥ 4 篇（权限、恢复、压缩、验收） | **缺失**，`docs/` 无 ADR 文件 |
+| 评测脚本与原始结果 | 已有（`evals/`、`reports/eval/`），但结果为 FakeProvider 重放，且 `reports/eval/*` 早于 b1 压缩接入，需重新生成 |
+| 失败复盘 2–3 篇 | **缺失** |
+| 演示视频 / 录屏 | **缺失** |
+| 第三方致谢与许可证说明 | 已有（README） |
+| GitHub Actions CI | **缺失**，`plan.md` §4 与 §9.3 曾列为质量路线 |
 
 简历描述模板，仅在对应能力实现后使用：
 

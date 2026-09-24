@@ -29,6 +29,7 @@ if str(_SRC) not in sys.path:
 
 import argparse
 import asyncio
+import fnmatch
 import hashlib
 import json
 import os
@@ -50,10 +51,13 @@ from minicode.runtime import AgentRuntime
 from minicode.security import AutoAllowPolicy
 from minicode.storage import ArtifactStore, SqliteStore
 from minicode.tools.registry import default_registry
+from minicode.tools.files import SKIP_DIRS
+from minicode.core.paths import is_link_or_junction
+from evals.hidden import check_hidden
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TASKS_DIR = Path(__file__).resolve().parent / "tasks"
-DEFAULT_OUTPUT = REPO_ROOT / "reports" / "eval"
+DEFAULT_OUTPUT = Path.cwd() / "reports" / "eval"
 BASELINES = ("b0", "b1", "b2")
 ACCEPTANCE_TIMEOUT_S = 120.0
 
@@ -131,6 +135,7 @@ class TaskDef:
     max_fix_attempts: int
     repo_dir: Path
     script_path: Path
+    require_hidden: bool = False
 
 
 def load_task(task_dir: Path) -> TaskDef:
@@ -183,6 +188,7 @@ def load_task(task_dir: Path) -> TaskDef:
         max_fix_attempts=int(raw.get("max_fix_attempts", 0)),
         repo_dir=task_dir / "repo",
         script_path=task_dir / str(script_name),
+        require_hidden=True,
     )
 
 
@@ -248,7 +254,11 @@ def run_acceptance_command(command: str, workspace: Path) -> tuple[int, str]:
 def sha256_file(path: Path) -> str | None:
     """SHA-256 of a file, or None when it does not exist / cannot be read."""
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 16), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
     except OSError:
         return None
 
@@ -256,6 +266,44 @@ def sha256_file(path: Path) -> str | None:
 def snapshot_protected(task: TaskDef, workspace: Path) -> dict[str, str | None]:
     """Hash every protected file right after the clean copy (before the run)."""
     return {rel: sha256_file(workspace / rel) for rel in task.protected_paths}
+
+
+def snapshot_workspace(workspace: Path) -> dict[str, str]:
+    """Hash source paths for host-side allowed-path scoring, without following links."""
+    files: dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(workspace):
+        descend = []
+        for dirname in sorted(dirnames):
+            if dirname in SKIP_DIRS - {".minicode"}:
+                continue
+            path = Path(dirpath) / dirname
+            if is_link_or_junction(path):
+                name = path.relative_to(workspace).as_posix()
+                try:
+                    files[name] = f"link:{os.readlink(path)}"
+                except OSError:
+                    files[name] = "unreadable-link"
+            else:
+                descend.append(dirname)
+        dirnames[:] = descend
+        for filename in sorted(filenames):
+            path = Path(dirpath) / filename
+            name = path.relative_to(workspace).as_posix()
+            if is_link_or_junction(path):
+                try:
+                    files[name] = f"link:{os.readlink(path)}"
+                except OSError:
+                    files[name] = "unreadable-link"
+            else:
+                files[name] = sha256_file(path) or "unreadable"
+    return files
+
+
+def check_allowed_paths(task: TaskDef, before: dict[str, str], workspace: Path) -> list[str]:
+    after = snapshot_workspace(workspace)
+    changed = {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    return [f"[allowed-paths] unauthorized modification: {name}" for name in sorted(changed)
+            if not any(fnmatch.fnmatch(name, pattern) for pattern in task.allowed_paths)]
 
 
 def check_acceptance(
@@ -303,6 +351,7 @@ class RunRecord:
     output_tokens: int
     seconds: float
     error: str | None
+    hidden_pass: bool | None = None
     compactions: int = 0
     estimated_context_reduction: int = 0
 
@@ -319,6 +368,7 @@ class RunRecord:
             "output_tokens": self.output_tokens,
             "seconds": round(self.seconds, 3),
             "error": self.error,
+            "hidden_pass": self.hidden_pass,
             "compactions": self.compactions,
             "estimated_context_reduction": self.estimated_context_reduction,
         }
@@ -329,11 +379,20 @@ def _fresh_workspace(task: TaskDef, baseline: str, keep: bool, keep_root: Path) 
     if keep:
         combo_dir = keep_root / f"{task.id}__{baseline}"
         if combo_dir.exists():
-            shutil.rmtree(combo_dir)
+            _safe_rmtree(combo_dir, keep_root)
         combo_dir.mkdir(parents=True)
         return combo_dir / "workspace", combo_dir / "session.sqlite3", None
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"minicode-eval-{task.id}-{baseline}-"))
     return tmp_dir / "workspace", tmp_dir / "session.sqlite3", tmp_dir
+
+
+def _safe_rmtree(path: Path, root: Path) -> None:
+    """Delete only a child of the explicitly selected scratch directory."""
+    resolved = path.resolve()
+    parent = root.resolve()
+    if resolved == parent or not resolved.is_relative_to(parent):
+        raise EvalError(f"refusing to remove path outside scratch directory: {resolved}")
+    shutil.rmtree(resolved)
 
 
 async def run_combo(
@@ -356,6 +415,7 @@ async def run_combo(
         ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"),
     )
     protected_hashes = snapshot_protected(task, workspace)
+    initial_files = snapshot_workspace(workspace)
     options = load_script(task.script_path)
     budget = Budget(
         max_rounds=task.max_rounds,
@@ -397,6 +457,8 @@ async def run_combo(
         result = await runtime.run_turn(task.prompt)
         attempts = 1
         passed, failures = check_acceptance(task, workspace, protected_hashes)
+        failures.extend(check_allowed_paths(task, initial_files, workspace))
+        passed = passed and not failures
         if result.exit_reason is not ExitReason.COMPLETED:
             passed = False
             failures.append(f"agent stopped before completion: {result.exit_reason.value}")
@@ -410,11 +472,19 @@ async def run_combo(
                 result = await runtime.run_turn(build_continuation_message(failures))
                 attempts += 1
                 passed, failures = check_acceptance(task, workspace, protected_hashes)
+                failures.extend(check_allowed_paths(task, initial_files, workspace))
+                passed = passed and not failures
                 if result.exit_reason is not ExitReason.COMPLETED:
                     passed = False
                     failures.append(f"agent stopped before completion: {result.exit_reason.value}")
                 if passed:
                     break
+        hidden_pass = None
+        if task.require_hidden:
+            hidden_pass, hidden_detail = await check_hidden(task.id, workspace)
+            if not hidden_pass:
+                passed = False
+                failures.append(f"[hidden] host-side acceptance failed: {hidden_detail[-500:]}")
         seconds = time.monotonic() - started
         usage = runtime.usage
         compact_events = [event for event in store.get_events(result.session_id)
@@ -430,6 +500,7 @@ async def run_combo(
             output_tokens=usage.output_tokens,
             seconds=seconds,
             error=None if passed else "; ".join(failures),
+            hidden_pass=hidden_pass,
             compactions=len(compact_events),
             estimated_context_reduction=sum(
                 max(0, int(event.data.get("tokens_before", 0))
@@ -439,7 +510,7 @@ async def run_combo(
     finally:
         store.close()
         if cleanup_dir is not None:
-            shutil.rmtree(cleanup_dir, ignore_errors=True)
+            _safe_rmtree(cleanup_dir, Path(tempfile.gettempdir()))
 
 
 # ---------------------------------------------------------------------------

@@ -128,7 +128,7 @@ def test_read_symlink_escape(tmp_path):
     assert "outside workspace" in (outcome.error or "")
 
 
-def test_read_junction_escape(tmp_path):
+def test_read_junction_escape(tmp_path, monkeypatch):
     # Junctions need no special privileges on Windows, so this exercises the
     # reparse-point escape that the symlink test usually has to skip.
     if sys.platform != "win32":
@@ -147,6 +147,18 @@ def test_read_junction_escape(tmp_path):
     outcome = run(ReadTool(), {"path": "jlink/secret.txt"}, ctx)
     assert outcome.success is False
     assert "outside workspace" in (outcome.error or "")
+    from minicode.core.paths import is_link_or_junction
+    from minicode.goals.checker import workspace_fingerprint
+    from minicode.tools.search import GrepTool
+    import shutil
+
+    assert is_link_or_junction(link)
+    assert "jlink" not in run(LsTool(), {"path": ".", "recursive": True}, ctx).output
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert "secret" not in run(GrepTool(), {"pattern": "secret"}, ctx).output
+    fingerprint = workspace_fingerprint(tmp_path)
+    (outside / "secret.txt").write_text("changed-secret", encoding="utf-8")
+    assert workspace_fingerprint(tmp_path) == fingerprint
 
 
 def test_read_invalid_arguments(tmp_path):

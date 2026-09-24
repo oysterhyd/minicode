@@ -1,0 +1,17 @@
+id: counter_retry
+title: 错误修复后验收失败再续跑
+prompt: |
+  increment 应返回下一个整数，当前测试失败。请只修改 counter.py，
+  不得修改测试，并在结束前运行测试确认。
+allowed_paths: [counter.py]
+protected_paths: [test_counter.py]
+items:
+  - id: tests-pass
+    type: command
+    command: python -m pytest test_counter.py -q
+  - id: tests-unchanged
+    type: protected
+    path: test_counter.py
+budget: {max_rounds: 12, max_tokens: 80000, max_seconds: 120}
+max_fix_attempts: 2
+script: script.json

@@ -3,7 +3,7 @@
 本文按 2026-09-22 的代码核对，描述模块划分、一次 run 的事件流与关键执行语义。
 [plan.md](../plan.md) 是原始设计目标；后续优化见 [探索与优化方案](optimization-design.md)。
 交互界面以中文为主，部分工具错误为英文。共享模型位于 `core/models.py`，运行时也直接依赖
-工具、存储与 Goal 实现；目前没有插件加载器或独立的多代理调度层。
+工具、存储与 Goal 实现；本地 Plugin 已加载，任务图通过模型工具接入，但没有写入型多代理调度层。
 
 ## 1. 模块图
 
@@ -73,13 +73,13 @@ SESSION_START                          # 首个 run_turn 时创建会话行
 
 ## 3. 关键语义
 
-**权限门**。当前顺序为「记录 TOOL_CALL_START → 查找工具 → 对原始参数执行权限判定/审批
-→ `BaseTool.run` 用 Pydantic 校验参数 → 执行」。因此参数错误可能先触发审批；原方案中的
-“校验最终参数后审批”尚未实现。
+**权限门**。当前顺序为「记录 TOOL_CALL_START → 查找工具 → 按 schema 校验并规范化参数
+→ 对规范化参数执行强制权限判定/审批 → 执行」。无效参数不触发审批；MCP 按发现的 JSON Schema
+校验，内置工具按 Pydantic 模型校验。
 `ModePolicy` 按三态权限模式判定：default 下只读工具（read / ls / grep）ALLOW、
 edit / write / bash ASK、未配置工具默认 DENY；accept_edits 额外自动允许文件编辑；
 bypass 全部 ALLOW。`/permissions` 命令可在运行时切换模式并同步到状态栏
-（`--yes` 初始采用 bypass）。ASK 时审批处理器拿到的是调用的**原始参数**（`ApprovalRequest.arguments`），
+（`--yes` 初始采用 bypass）。ASK 时审批处理器拿到的是调用的**规范化参数**（`ApprovalRequest.arguments`），
 CLI 用 Rich `Confirm` 展示工具名与摘要；拒绝则以错误 tool_result 回填模型，工具不执行。
 参数变化即视为新调用，重新过权限门。
 
@@ -132,13 +132,13 @@ P1 服务主要由 `cli.py` 的 `_build_services` / `_attach_compactor` 装配�
 runtime/loop.py      P1 钩子：压缩 / Goal 门 / 后台投递 / 恢复 / artifact 转存
 context/             estimate（保守 token 估算）、compact（归档→压缩→摘要）
 goals/               spec（验收 YAML）、checker（指纹/快照/检查）、evidence（证据账本）
-tasks/               background（已接入）、taskstore（独立模块，尚未接入主循环）
+tasks/               background（已接入）、taskstore（会话任务图，经工具使用）
 tools/command.py     bash 增加 background 参数
 storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（当前数据库 schema v4）
 reports/             render_session_html：单文件离线 HTML 报告
 ui/                  Textual 全屏 TUI（minicode tui）
 providers/           commandcode.py + zcode_config.py：OpenAI 兼容默认适配器
-evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
+evals/               20 任务离线评测集 + 真实模型重复评测（独立验收）
 ```
 
 ### 5.2 上下文压缩与归档
@@ -204,9 +204,10 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
   被终止的任务记录 `BACKGROUND_JOB_LOST` 并向用户和模型投递，之后才发出 `SESSION_END`。
 ### 5.6 评测与报告
 
-- `evals/`：20 个本地任务（repo fixture + task.yaml + FakeProvider 修复脚本），runner
-  （`minicode eval`）在干净副本上运行，b0 是基础循环；b1 与 b0 相同，尚未接入压缩；
-  b2 在 runner 外层验收失败后续跑，没有装配运行时 Goal 门。结果为 JSON + Markdown。
+- `evals/`：20 个本地任务（repo fixture + task.yaml + FakeProvider 修复脚本），离线 runner
+  （`minicode eval`）在干净副本上运行；b1 接入压缩，b2 在 runner 外层验收失败后续跑。
+  `run_real_eval.py` 使用 CommandCode 在干净副本上重复运行 B0/B2；B2 装配运行时 Goal 门，
+  两组都由 runner 独立检查验收命令、受保护文件和允许修改范围。每次运行保留 SQLite trace。
   FakeProvider 的 usage 来自脚本/默认值，不度量真实模型能力、缓存或 token 节省；恢复等边界另由 tests 覆盖。
 - `minicode report <id> --format html`：单文件 HTML（零外链、可离线打开），时间线、
   工具记录与 diff、验收证据表、用量；所有动态文本经 HTML 转义。
@@ -224,8 +225,8 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
 | 分层上下文压缩 + 输出归档与分页回读 | `context/`、`storage/artifacts.py`、`tools/artifacts.py`、`loop._maybe_spill/_compact_if_needed` |
 | 会话恢复及未确认副作用处理 | `loop.resume/_settle_recovery`、`cli.py`（`resume` 命令） |
 | Goal 验收器 + 失败续跑 + 证据绑定 | `goals/`、`loop._goal_gate`、`--acceptance` 装配 |
-| 后台命令；独立的任务依赖存储 | `tasks/background.py` 已接入；`tasks/taskstore.py` 尚未接入 Runtime；`tools/command.py`、`loop._deliver_finished_jobs` |
-| 评测集、基线、失败分析 | `evals/`（20 任务；run_eval.py 的 b1 目前等同 b0） |
+| 后台命令；任务依赖存储 | `tasks/background.py`、`tasks/taskstore.py`、`tools/tasks.py`、`tools/command.py`、`loop._deliver_finished_jobs` |
+| 评测集、基线、失败分析 | `evals/`（离线 b0/b1/b2 与真实模型 B0/B2 重复运行） |
 | 可离线查看的 HTML 执行报告 | `reports/html.py`、`cli.py`（`report --format html`） |
 | 类 Claude Code TUI | `ui/`（Textual App + Pilot 测试） |
 
@@ -252,4 +253,12 @@ evals/               20 任务离线评测集 + b0/b1/b2 标签（b1=b0）
   本地插件 manifest 校验版本、启停、来源指纹和可选锁文件；插件 Skills 与只读子助手采用命名空间。
   MCP 使用官方 SDK 的 stdio client，发现分页后注册 `mcp__server__tool`，工具调用仍经过默认审批、
   事件记录与归档；断连与超时作为工具失败返回，不自动重放。独立子任务最多两个并行；显式
-  累计 token 上限下串行执行。长期记忆、远程 MCP 与写入型子任务尚未提供。
+  累计 token 上限下串行执行。持久任务图通过 `task_create/list/claim/complete` 工具接入，
+  `memory_list` 只读访问用户显式保存的项目事实；远程 MCP 与写入型子任务尚未提供。
+
+## 7. 固定 review workflow
+
+`workflow/review.py` 把 Git 快照、宿主检查命令和只读模型审查按固定顺序记录在原子更新的
+`journal.json` 中。检查命令开始后若进程退出，下一次运行将其标记为 `unknown`，不会静默重试；
+用户核实后可显式重试。模型审查仅注册 `read`、`ls`、`grep`、`read_artifact`，自身的 SQLite
+会话可续跑。工作区内容指纹变化时阻止沿用旧 journal。该 workflow 不提供任意节点编排或写入型代理。

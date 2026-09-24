@@ -76,7 +76,8 @@ class ToolRegistry:
                 self.discovery_errors.append(f"MCP close: {exc}")
 
 
-def default_registry(*, skills=None, delegation: bool = False,
+def default_registry(*, skills=None, delegation: bool = False, tasks: bool = False,
+                     memory: bool = False,
                      agent_kinds: list[str] | None = None) -> ToolRegistry:
     """Registry preloaded with the built-in tools.
 
@@ -103,4 +104,13 @@ def default_registry(*, skills=None, delegation: bool = False,
         from minicode.tools.extensions import DelegateTool
 
         registry.register(DelegateTool(agent_kinds))
+    if tasks:
+        from minicode.tools.tasks import TaskClaimTool, TaskCompleteTool, TaskCreateTool, TaskListTool
+
+        for tool in (TaskCreateTool(), TaskListTool(), TaskClaimTool(), TaskCompleteTool()):
+            registry.register(tool)
+    if memory:
+        from minicode.tools.memory import MemoryListTool
+
+        registry.register(MemoryListTool())
     return registry

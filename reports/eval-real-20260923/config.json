@@ -1,0 +1,139 @@
+{
+  "model": "deepseek/deepseek-v4.1-flash",
+  "provider": "commandcode",
+  "temperature": null,
+  "seed": null,
+  "concurrency": 4,
+  "repeats": 3,
+  "schedule": "grouped",
+  "baselines": [
+    "b0",
+    "b2"
+  ],
+  "tasks": [
+    "cache_ttl",
+    "comparison_reversed",
+    "dedup_logic",
+    "dict_key_typo",
+    "division_guard",
+    "empty_list_bounds",
+    "fib_seed",
+    "float_rounding",
+    "loop_off_by_one",
+    "min_max_reversed",
+    "missing_return",
+    "mutable_default",
+    "pagination_bounds",
+    "queue_fifo",
+    "regex_mismatch",
+    "slugify_unicode",
+    "sort_key",
+    "string_format",
+    "unit_conversion",
+    "weekday_math"
+  ],
+  "permission": "auto_allow",
+  "task_budgets": {
+    "cache_ttl": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "comparison_reversed": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "dedup_logic": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "dict_key_typo": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "division_guard": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "empty_list_bounds": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "fib_seed": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "float_rounding": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "loop_off_by_one": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "min_max_reversed": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "missing_return": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "mutable_default": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "pagination_bounds": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "queue_fifo": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "regex_mismatch": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "slugify_unicode": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "sort_key": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "string_format": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "unit_conversion": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    },
+    "weekday_math": {
+      "max_rounds": 10,
+      "max_tokens": 80000,
+      "max_seconds": 120.0
+    }
+  },
+  "git_revision": "94941373e8670850ca5eae05b6f6dbd37b07eab9"
+}

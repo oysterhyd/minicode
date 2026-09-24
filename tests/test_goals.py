@@ -244,7 +244,6 @@ def test_fingerprint_ignores_skip_dirs(tmp_path):
         ".venv",
         "venv",
         "node_modules",
-        ".minicode",
         ".pytest_cache",
         ".ruff_cache",
     ):
@@ -252,6 +251,25 @@ def test_fingerprint_ignores_skip_dirs(tmp_path):
         directory.mkdir()
         (directory / "junk.bin").write_bytes(b"\x00\x01" * 128)
     assert workspace_fingerprint(tmp_path) == fp_before
+
+    config = tmp_path / ".minicode" / "plugins"
+    config.mkdir(parents=True)
+    (config / "plugin.json").write_text("{}", encoding="utf-8")
+    assert workspace_fingerprint(tmp_path) != fp_before
+
+
+def test_fingerprint_does_not_read_external_symlink(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("first", encoding="utf-8")
+    try:
+        (workspace / "link.txt").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    before = workspace_fingerprint(workspace)
+    outside.write_text("changed", encoding="utf-8")
+    assert workspace_fingerprint(workspace) == before
 
 
 def test_fingerprint_includes_content_after_first_2mb(tmp_path):

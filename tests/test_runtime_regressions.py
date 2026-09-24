@@ -64,7 +64,8 @@ def test_builtin_services_expose_session_artifact_readback(env):
     services = _build_services(setup, store, Console(), True)
     assert set(services.registry.names()) == {
         "read", "write", "edit", "bash", "ls", "grep", "read_artifact",
-        "skills_list", "skill_load", "skill_unload", "skill_resource", "delegate",
+            "skills_list", "skill_load", "skill_unload", "skill_resource", "delegate",
+            "task_create", "task_list", "task_claim", "task_complete", "memory_list",
     }
     runtime = runtime_for(env, artifact_store=services.artifact_store)
     assert "read_artifact" in runtime._system_prompt
@@ -163,6 +164,7 @@ def test_deadline_cancels_stream_and_closes_provider(env):
     start = time.monotonic()
     result = asyncio.run(runtime.run_turn("go"))
     assert result.exit_reason == ExitReason.TIME_BUDGET
+    assert runtime.usage.available is False
     assert time.monotonic() - start < 2
     assert closed == [True]
 
@@ -187,6 +189,7 @@ def test_deadline_stops_running_tool_and_never_starts_next_write(env, monkeypatc
     result = asyncio.run(runtime.run_turn("go"))
     assert result.exit_reason == ExitReason.TIME_BUDGET
     assert cancelled == [True]
+    assert runtime.usage.available is True
     assert not (ws / "late.txt").exists()
     starts = [e.data["name"] for e in store.get_events(result.session_id) if e.type == EventType.TOOL_CALL_START]
     assert starts == ["read"]

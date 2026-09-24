@@ -69,7 +69,8 @@ class PermissionPolicy(Protocol):
 
 
 #: Tools that only read workspace state: always safe to auto-allow.
-_READ_TOOLS = frozenset({"read", "ls", "grep", "read_artifact", "skills_list", "skill_load", "skill_unload", "skill_resource", "delegate"})
+_READ_TOOLS = frozenset({"read", "ls", "grep", "read_artifact", "skills_list", "skill_load", "skill_unload", "skill_resource", "delegate", "task_list", "memory_list"})
+_METADATA_TOOLS = frozenset({"task_create", "task_claim", "task_complete"})
 #: Tools that mutate files; ``bash`` is the escape hatch and never auto-allowed.
 _EDIT_TOOLS = frozenset({"edit", "write"})
 
@@ -78,6 +79,8 @@ def _rule_decision(tool_name: str) -> PolicyDecision:
     """Built-in per-tool behavior: reads ALLOW, writes/shell ASK, rest DENY."""
     if tool_name in _READ_TOOLS:
         return PolicyDecision(behavior=PolicyBehavior.ALLOW, reason=f"read-only tool: {tool_name}")
+    if tool_name in _METADATA_TOOLS:
+        return PolicyDecision(behavior=PolicyBehavior.ALLOW, reason=f"session task metadata: {tool_name}")
     if tool_name in _EDIT_TOOLS:
         return PolicyDecision(
             behavior=PolicyBehavior.ASK, reason=f"file mutation tool: {tool_name}"
