@@ -1,250 +1,202 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { AnimatePresence, MotionConfig, motion } from 'motion/react'
-import { ArrowUp, AtSign, CircleAlert, Cpu, ListPlus, Plus, Search, Shield, Square, SquarePen, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { AnimatePresence, LayoutGroup, MotionConfig } from 'motion/react'
 import { Sidebar } from './components/Sidebar'
-import { SessionFeed } from './components/SessionFeed'
-import { SettingsPanel, type SettingsTab } from './components/SettingsPanel'
-import { WorkPanel } from './components/WorkPanel'
+import { TitleBar } from './components/TitleBar'
+import { SessionFeed } from './components/feed/SessionFeed'
+import { Welcome } from './components/feed/Welcome'
+import { Composer } from './components/composer/Composer'
+import { WorkPanel } from './components/work/WorkPanel'
+import { SettingsPanel, type SettingsTab } from './components/settings/SettingsPanel'
 import { CommandPalette } from './components/CommandPalette'
-import { RunStatus } from './components/RunStatus'
-import { SelectMenu } from './components/SelectMenu'
-import { ContextMeter } from './components/ContextMeter'
-import type { AgentState, Capabilities, DesktopEvent, SlashResult } from './types'
-import { useConversations } from './hooks/useConversations'
+import { ShortcutsDialog } from './components/Shortcuts'
+import { ConfirmDialog } from './components/ui/Modal'
+import { ErrorBoundary } from './components/ui/ErrorBoundary'
+import { useToast } from './components/ui/Toast'
+import { Splitter } from './components/ui/Splitter'
+import type { AgentState, Capabilities, McpDiscovery, Session, SlashResult } from './types'
+import { useConversations, type Signal } from './hooks/useConversations'
+import { rememberPrompt, usePreferences, useSystemDark } from './lib/prefs'
 
-type McpDiscovery = { servers: Array<{ server: string; protocol: string | null; server_version: string | null; error: string | null }>; tools: string[] }
-type Suggestion = { value: string; detail: string; kind: 'command' | 'value' }
-
-function savedPreference(key: string) { try { return localStorage.getItem(`minicode.${key}`) } catch { return null } }
-function savePreference(key: string, value: string) { try { localStorage.setItem(`minicode.${key}`, value) } catch { /* Preferences are optional. */ } }
+const clean = (error: unknown) => String(error).replace(/^Error: /, '')
 
 export default function App() {
-  const { workspace, sessions, sessionId, models, commands, agentState, capabilities, items, trace, changes, tasks, files,
-    draft, busy, loading, queue, error, activeKey, views, startedAt, setAgentState, setCapabilities, setDraft, setItems, setError,
-    setBusy, removeQueued, refresh, loadCapabilities, request, openSession, sendNow, newSession: createSession } = useConversations()
+  const [prefs, setPref] = usePreferences()
+  const systemDark = useSystemDark()
+  const theme = prefs.theme === 'system' ? systemDark ? 'dark' : 'light' : prefs.theme
+  const toast = useToast()
+  const signalRef = useRef<(signal: Signal) => void>(() => {})
+  const c = useConversations(signal => signalRef.current(signal))
+  const { workspace, sessions, sessionId, items, busy, loading, error, activeKey, views, agentState } = c
   const [discoveries, setDiscoveries] = useState<Record<string, McpDiscovery | null>>({})
-  const mcpDiscovery = discoveries[activeKey] || null
-  function setMcpDiscovery(value: McpDiscovery | null) { setDiscoveries(previous => ({ ...previous, [activeKey]: value })) }
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
-  const [leftCollapsed, setLeftCollapsed] = useState(() => savedPreference('left-collapsed') === 'true')
-  const [rightCollapsed, setRightCollapsed] = useState(() => savedPreference('right-collapsed') === 'true')
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = savedPreference('theme')
-    return saved === 'light' || saved === 'dark' ? saved : window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-  })
-  const [commandOpen, setCommandOpen] = useState(false)
-  const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
-  const [mentionIndex, setMentionIndex] = useState(0)
-  const [mentionOpen, setMentionOpen] = useState(false)
-  const [modelMenuOpen, setModelMenuOpen] = useState(false)
-  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false)
-  const [slashIndex, setSlashIndex] = useState(0)
+  const [settings, setSettings] = useState<SettingsTab | null>(null)
+  const [dialog, setDialog] = useState<'commands' | 'shortcuts' | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<Session | null>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
     void window.desktop.request('setAppearance', { theme }).catch(() => {})
   }, [theme])
-  useEffect(() => { savePreference('left-collapsed', String(leftCollapsed)) }, [leftCollapsed])
-  useEffect(() => { savePreference('right-collapsed', String(rightCollapsed)) }, [rightCollapsed])
-  useEffect(() => {
-    const media = window.matchMedia('(prefers-color-scheme: dark)')
-    const update = () => { if (!savedPreference('theme')) setTheme(media.matches ? 'dark' : 'light') }
-    media.addEventListener('change', update)
-    return () => media.removeEventListener('change', update)
-  }, [])
-  function resizeComposer() {
-    const input = textarea.current
-    if (input) { input.style.height = 'auto'; input.style.height = `${Math.min(190, Math.max(76, input.scrollHeight))}px` }
-  }
-  useLayoutEffect(resizeComposer, [draft, items.length === 0, leftCollapsed, rightCollapsed])
-  useEffect(() => {
-    window.addEventListener('resize', resizeComposer)
-    return () => window.removeEventListener('resize', resizeComposer)
-  }, [])
-  function toggleTheme() { setTheme(value => { const next = value === 'dark' ? 'light' : 'dark'; savePreference('theme', next); return next }) }
-  function showSettings() { setSettingsOpen(true); setSettingsTab('general'); if (workspace) loadCapabilities() }
-  function suggestPrompt(text: string) { setDraft(text); textarea.current?.focus() }
-  function handleAction(action: () => Promise<unknown>) { void action().catch(e => setError(String(e))) }
+  useEffect(() => { document.documentElement.style.setProperty('--ui-scale', String(prefs.fontScale)) }, [prefs.fontScale])
 
-  async function chooseWorkspace() { const root = await window.desktop.chooseWorkspace(); if (root) await createSession(root) }
-  async function newSession() { await createSession(); requestAnimationFrame(() => textarea.current?.focus()) }
+  function focusComposer() { requestAnimationFrame(() => textarea.current?.focus()) }
+  function act(action: () => Promise<unknown>, failure = '操作失败') { void action().catch(e => toast({ tone: 'error', title: failure, detail: clean(e) })) }
+  function notify(title: string, body: string, targetSession: string | null) {
+    if (prefs.notifications && !document.hasFocus()) void window.desktop.request('notify', { title, body, sessionId: targetSession }).catch(() => {})
+  }
+  signalRef.current = signal => {
+    if (signal.type === 'notification_click') {
+      const session = sessions.find(item => item.session_id === signal.sessionId)
+      if (session) act(() => c.openSession(session))
+      return
+    }
+    const background = signal.key !== activeKey
+    const show = () => c.activateKey(signal.key)
+    if (signal.type === 'approval') {
+      notify('MiniCode 需要你的批准', `${signal.title} · ${signal.tool}`, signal.sessionId)
+      if (background) toast({ tone: 'info', title: '后台任务等待审批', detail: signal.title, action: { label: '查看', run: show } })
+      return
+    }
+    if (signal.reason === 'cancelled') return
+    notify(signal.ok ? '任务已完成' : '任务已结束', signal.title, signal.sessionId)
+    if (background) toast({ tone: signal.ok ? 'success' : 'error', title: signal.ok ? '后台任务已完成' : '后台任务未完成', detail: signal.title, action: { label: '查看', run: show } })
+  }
+
+  const toggleTheme = () => setPref('theme', theme === 'dark' ? 'light' : 'dark')
+  const toggleLeft = () => setPref('leftCollapsed', value => !value)
+  const toggleRight = () => setPref('rightCollapsed', value => !value)
+  function showSettings(tab: SettingsTab = 'general') { setDialog(null); setSettings(tab); if (workspace) void c.loadCapabilities() }
+  async function chooseWorkspace() { const root = await window.desktop.chooseWorkspace(); if (root) { await c.newSession(root); focusComposer() } }
+  async function newSession() { await c.newSession(); focusComposer() }
+  function insertMention(path: string) { c.setDraft(value => `${value}${value && !value.endsWith(' ') ? ' ' : ''}@${path} `); focusComposer() }
 
   async function updateState(method: string, params: Record<string, unknown>) {
-    try { setAgentState(await request<AgentState>(method, params)); setError('') }
-    catch (e) { setError(String(e)) }
+    try { c.setAgentState(await c.request<AgentState>(method, params)); c.setError('') }
+    catch (e) { toast({ tone: 'error', title: '设置未生效', detail: clean(e) }) }
   }
-  const changeModel = (value: string) => updateState('setModel', { model: value })
-  const changeEffort = (value: string) => updateState('setEffort', { effort: value })
-  const changePermission = (value: string) => updateState('setPermissionMode', { mode: value })
-  const changeBudget = (value: AgentState['budget']) => updateState('setBudget', value)
-  const changeAcceptance = (path: string) => updateState('setAcceptance', { path })
-  async function changeSkill(name: string, active: boolean) {
-    if (!workspace) return
-    try {
-      await request('setSkillActive', { name, active, workspace, sessionId })
-      loadCapabilities(); setError('')
-    } catch (e) { setError(String(e)) }
-  }
-  async function changePlugin(name: string, enabled: boolean) {
-    if (!workspace) return
-    try { setCapabilities(await request<Capabilities>('setPluginEnabled', { name, enabled, workspace })); setMcpDiscovery(null); setError('') }
-    catch (e) { setError(String(e)) }
-  }
-  async function refreshMcp() {
-    if (!workspace) return
-    try { setMcpDiscovery(await request<McpDiscovery>('refreshMcp', { workspace })); setError('') }
-    catch (e) { setError(String(e)) }
-  }
+  const setMcp = (value: McpDiscovery | null) => setDiscoveries(previous => ({ ...previous, [activeKey]: value }))
 
   async function executeSlash(text: string) {
-    if (busy) { setError('当前回合结束后再执行命令'); return }
+    if (busy && !/^\/(help|\?)\b/.test(text)) { toast({ tone: 'info', title: '当前回合结束后再执行命令' }); return }
     try {
-      const result = await request<SlashResult>('runSlash', { text, workspace, sessionId: sessionId })
-      if (result.state) setAgentState(result.state)
+      const result = await c.request<SlashResult>('runSlash', { text, workspace, sessionId })
+      if (result.state) c.setAgentState(result.state)
       if (result.action === 'new') await newSession()
-      if (result.action === 'clear') setItems([])
-      if (result.action === 'exit') { await request('closeWindow'); return }
+      if (result.action === 'clear') c.setItems([])
+      if (result.action === 'exit') { await c.request('closeWindow'); return }
       if (result.action === 'resume' && result.sessionId) {
         const selected = sessions.find(session => session.session_id === result.sessionId)
-        if (selected) await openSession(selected)
+        if (selected) await c.openSession(selected)
       }
-      if (result.action === 'continue') setBusy(true)
-      if (result.action === 'skills') { setSettingsTab('skills'); setSettingsOpen(true) }
-      if (result.action === 'model' || result.action === 'effort' || result.action === 'permissions' || result.action === 'sessions') {
-        setDraft(result.action === 'sessions' ? '/resume ' : `/${result.action} `); setSlashIndex(0); textarea.current?.focus()
-      }
-      if (result.message && result.action !== 'new' && result.action !== 'clear') setItems(previous => [...previous, { id: `system-${Date.now()}`, kind: 'notice', text: result.message }])
-      setError('')
-    } catch (e) { setError(String(e)) }
+      if (result.action === 'continue') c.setBusy(true)
+      if (result.action === 'skills') showSettings('skills')
+      if (['model', 'effort', 'permissions', 'sessions'].includes(result.action || '')) { c.setDraft(result.action === 'sessions' ? '/resume ' : `/${result.action} `); focusComposer() }
+      if (result.message && result.action !== 'new' && result.action !== 'clear') c.setItems(previous => [...previous, { id: `system-${Date.now()}`, kind: 'notice', text: result.message }])
+      c.setError('')
+    } catch (e) { c.setError(clean(e)) }
   }
-
-  function submit() {
-    const text = draft.trim()
-    if (!text || loading) return
-    setDraft(''); setMentionOpen(false)
-    if (text.startsWith('/')) { void executeSlash(text); return }
-    void sendNow(text)
-    requestAnimationFrame(() => textarea.current?.focus())
+  function submit(text: string) { rememberPrompt(text); c.setDraft(''); void c.sendNow(text); focusComposer() }
+  async function decide(approvalId: string, granted: boolean, remember = false) {
+    try {
+      await c.request('resolveApproval', { approvalId, granted, ...(remember && granted ? { remember: 'session' } : {}) })
+      if (remember) void c.request<AgentState>('getState').then(c.setAgentState).catch(() => {})
+      focusComposer()
+    } catch (e) { toast({ tone: 'error', title: '审批未送达', detail: clean(e) }) }
   }
-
-  async function decide(approvalId: string, granted: boolean) {
-    try { await request('resolveApproval', { approvalId, granted }) }
-    catch (e) { setError(String(e)) }
+  const stop = () => act(() => c.request('cancelTurn'), '无法停止任务')
+  function switchSession(offset: number) {
+    const index = sessions.findIndex(session => session.session_id === sessionId)
+    const next = sessions[(index + offset + sessions.length) % sessions.length]
+    if (next) act(() => c.openSession(next))
   }
-
-  const mention = draft.match(/@([\w./-]*)$/)?.[1]
-  const fileSuggestions = !suggestionsDismissed && mentionOpen && mention !== undefined && !draft.startsWith('/') ? files.filter(file => file.toLowerCase().includes(mention.toLowerCase())).slice(0, 7) : []
-  function insertFile(file: string) { setDraft(value => value.replace(/@[\w./-]*$/, `@${file} `)); setMentionOpen(false); textarea.current?.focus() }
-
-  let slashOptions: Suggestion[] = []
-  if (!suggestionsDismissed && draft.startsWith('/')) {
-    const verb = draft.split(/\s/, 1)[0].toLowerCase()
-    const hasSpace = draft.includes(' ')
-    const query = hasSpace ? draft.slice(draft.indexOf(' ') + 1).toLowerCase() : ''
-    const submenu = hasSpace || ['/model', '/effort', '/permissions', '/resume', '/skill'].includes(verb) && draft === verb
-    if (submenu && ['/model', '/effort', '/permissions', '/resume', '/skill'].includes(verb)) {
-      const values = verb === '/model' ? models.map(item => ({ value: item.id, detail: item.available ? item.provider : '未配置' })) :
-        verb === '/effort' ? ['off', 'low', 'medium', 'high', 'xhigh', 'max'].map(value => ({ value, detail: 'reasoning effort' })) :
-        verb === '/permissions' ? ['default', 'accept_edits', 'bypass'].map(value => ({ value, detail: 'permission mode' })) :
-        verb === '/resume' ? sessions.slice(0, 20).map(item => ({ value: item.session_id.slice(0, 8), detail: item.title })) :
-        capabilities?.skills.map(item => ({ value: item.name, detail: item.description })) || []
-      slashOptions = values.filter(item => item.value.toLowerCase().includes(query)).slice(0, 8).map(item => ({ ...item, kind: 'value' }))
-    } else {
-      slashOptions = commands.filter(command => command.name.startsWith(verb)).slice(0, 8).map(command => ({ value: command.name, detail: command.summary, kind: 'command' }))
+  const keyHandler = useRef<(event: KeyboardEvent) => void>(() => {})
+  keyHandler.current = event => {
+    if (event.defaultPrevented) return
+    const modifier = event.ctrlKey || event.metaKey
+    if (!modifier) return
+    const key = event.key.toLowerCase()
+    if (key === 'k') { event.preventDefault(); setSettings(null); setDialog(value => value === 'commands' ? null : 'commands'); return }
+    if (settings || dialog || pendingDelete) return
+    if (key === 'n') { event.preventDefault(); act(newSession) }
+    else if (key === 'l' && event.shiftKey) { event.preventDefault(); toggleTheme() }
+    else if (key === 'l' && !busy) { event.preventDefault(); c.setItems([]) }
+    else if (key === ',' || key === 'i') { event.preventDefault(); showSettings() }
+    else if (key === '/' || key === '?') { event.preventDefault(); setDialog('shortcuts') }
+    else if (key === 'b') { event.preventDefault(); if (event.shiftKey) toggleRight(); else toggleLeft() }
+    else if (key === 'f' && event.shiftKey) { event.preventDefault(); setPref('leftCollapsed', false); setTimeout(() => window.dispatchEvent(new Event('minicode:focus-search')), 30) }
+    else if (key === '.' && busy) { event.preventDefault(); stop() }
+    else if ((event.code === 'BracketLeft' || event.code === 'BracketRight') && event.shiftKey) { event.preventDefault(); switchSession(event.code === 'BracketLeft' ? -1 : 1) }
+    else if (/^[1-4]$/.test(key) && !event.shiftKey) {
+      event.preventDefault(); setPref('rightCollapsed', false)
+      window.dispatchEvent(new CustomEvent('minicode:work-tab', { detail: ['changes', 'files', 'terminal', 'tasks'][Number(key) - 1] }))
     }
   }
-  const optionIndex = Math.min(slashIndex, Math.max(0, slashOptions.length - 1))
-  function chooseSlash(option: Suggestion) {
-    if (option.kind === 'command' && ['/model', '/effort', '/permissions', '/resume', '/skill'].includes(option.value)) {
-      setDraft(option.value + ' '); setSlashIndex(0); textarea.current?.focus(); return
-    }
-    const command = option.kind === 'value' ? `${draft.split(/\s/, 1)[0]} ${option.value}` : option.value
-    setDraft(''); void executeSlash(command)
-  }
-
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return
-      const modifier = event.ctrlKey || event.metaKey
-      if (modifier && event.key.toLowerCase() === 'k') { event.preventDefault(); setSettingsOpen(false); setCommandOpen(value => !value); return }
-      if (settingsOpen || commandOpen) return
-      if (modifier && event.key.toLowerCase() === 'n') { event.preventDefault(); handleAction(newSession) }
-      if (modifier && event.key.toLowerCase() === 'l' && !busy) { event.preventDefault(); setItems([]) }
-      if (modifier && ['i', ','].includes(event.key.toLowerCase())) { event.preventDefault(); showSettings() }
-      if (modifier && event.key.toLowerCase() === 'b') { event.preventDefault(); if (event.shiftKey) setRightCollapsed(value => !value); else setLeftCollapsed(value => !value) }
-      if (modifier && event.key === '.' && busy) { event.preventDefault(); handleAction(() => request('cancelTurn')) }
-    }
+    const onKey = (event: KeyboardEvent) => keyHandler.current(event)
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  })
+  }, [])
 
-  const title = sessions.find(session => session.session_id === sessionId)?.title || items.find(item => item.kind === 'user')?.text || '新建任务'
-  const supportsEffort = models.find(model => model.id === agentState.model)?.supportsEffort ?? false
+  const title = sessions.find(session => session.session_id === sessionId)?.title || items.find(item => item.kind === 'user')?.text?.split('\n')[0] || '新建任务'
   const awaitingApproval = items.some(item => Boolean(item.approvalId))
-  const fileIndex = Math.min(mentionIndex, Math.max(0, fileSuggestions.length - 1))
-  const stop = () => handleAction(() => request('cancelTurn'))
-  const composer = <div className="composer-area">
-        <AnimatePresence initial={false}>{error && <motion.div className="error-banner" role="alert" initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}><CircleAlert size={16} /><span>{error}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError('')}><X size={14} /></button></motion.div>}</AnimatePresence>
-        <AnimatePresence>{busy && <motion.div className="run-status-wrapper" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}><RunStatus key={activeKey} startedAt={startedAt} approval={awaitingApproval} onStop={stop} /></motion.div>}</AnimatePresence>
-        {queue.length > 0 && <div className="queue-list" aria-label="排队消息"><div className="section-label">等待执行 · {queue.length}</div><AnimatePresence initial={false}>{queue.map((text, index) => <motion.div className="queue-item" key={`${index}-${text}`} initial={{ opacity: 0, x: -5 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }}><ListPlus size={14} /><span title={text}>{text}</span><button className="icon-button" aria-label={`取消排队消息 ${index + 1}`} onClick={() => removeQueued(index)}><X size={13} /></button></motion.div>)}</AnimatePresence></div>}
-        <motion.div layoutId="task-composer" transition={{ type: "spring", stiffness: 350, damping: 35 }} className={`composer ${busy ? 'composer-busy' : ''}`}>
-          {fileSuggestions.length > 0 && <div className="mention-popover" id="file-suggestions" role="listbox" aria-label="引用本地文件"><div className="section-label">引用本地文件<small>↑↓ 选择 · Tab 插入</small></div>{fileSuggestions.map((file, index) => <button key={file} id={`file-option-${index}`} role="option" aria-selected={index === fileIndex} className={index === fileIndex ? 'slash-option-active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => insertFile(file)}><AtSign size={14} /><span className="truncate">{file}</span></button>)}</div>}
-          {slashOptions.length > 0 && <div className="slash-popover" id="slash-suggestions" role="listbox" aria-label="命令建议"><div className="section-label">快捷命令<small>↑↓ 选择 · Enter 执行</small></div>{slashOptions.map((option, index) => <button key={option.value} id={`slash-option-${index}`} role="option" aria-selected={index === optionIndex} className={index === optionIndex ? 'slash-option-active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => chooseSlash(option)}><span className="font-mono text-accent">{option.value}</span><span className="truncate text-xs text-subtle">{option.detail}</span></button>)}</div>}
-          <textarea ref={textarea} value={draft} onChange={event => { setDraft(event.target.value); setMentionOpen(true); setSuggestionsDismissed(false); setSlashIndex(0); setMentionIndex(0) }}
-            onKeyDown={event => {
-              if (event.nativeEvent.isComposing || event.keyCode === 229) return
-              if (fileSuggestions.length > 0 && ['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); setMentionIndex(value => (value + (event.key === 'ArrowDown' ? 1 : -1) + fileSuggestions.length) % fileSuggestions.length); return }
-              if (fileSuggestions.length > 0 && ['Tab', 'Enter'].includes(event.key) && !event.shiftKey) { event.preventDefault(); insertFile(fileSuggestions[fileIndex]); return }
-              if (slashOptions.length > 0 && ['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); setSlashIndex(value => (value + (event.key === 'ArrowDown' ? 1 : -1) + slashOptions.length) % slashOptions.length); return }
-              if (slashOptions.length > 0 && ['Tab', 'Enter'].includes(event.key) && !event.shiftKey) { event.preventDefault(); chooseSlash(slashOptions[optionIndex]); return }
-              if (event.key === 'Escape') { setModelMenuOpen(false); setPermissionMenuOpen(false); setMentionOpen(false); setSuggestionsDismissed(true); return }
-              if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (workspace || draft.startsWith('/')) submit() }
-            }} placeholder={workspace ? '描述任务，或输入 / 查看命令、@ 引用文件…' : '先打开工作区，再描述你想完成的任务…'} rows={2} aria-label="任务输入"
-            aria-controls={fileSuggestions.length ? 'file-suggestions' : slashOptions.length ? 'slash-suggestions' : undefined} aria-activedescendant={fileSuggestions.length ? `file-option-${fileIndex}` : slashOptions.length ? `slash-option-${optionIndex}` : undefined} />
-          <div className="composer-toolbar">
-            <button className="composer-icon" title="引用文件" aria-label="引用文件" disabled={!workspace} onClick={() => { setDraft(value => value + (value && !value.endsWith(' ') ? ' @' : '@')); setMentionOpen(true); setSuggestionsDismissed(false); setMentionIndex(0); textarea.current?.focus() }}><Plus size={18} /></button>
-            <span className="toolbar-divider" />
-            <SelectMenu label="切换模型" value={agentState.model} icon={<Cpu size={14} />} open={modelMenuOpen} onOpen={open => { setModelMenuOpen(open); setPermissionMenuOpen(false) }} onSelect={changeModel}
-              options={models.map(option => ({ value: option.id, label: option.id === 'fake' ? '离线演示' : option.id, detail: option.available ? option.provider : '尚未配置', disabled: !option.available && option.id !== agentState.model }))}
-              secondary={{ label: '思考强度', value: agentState.effort, onSelect: changeEffort, hint: supportsEffort ? undefined : '当前模型不支持',
-                options: [['off', '关闭'], ['low', '低'], ['medium', '中'], ['high', '高'], ['xhigh', '很高'], ['max', '最高']].map(([value, label]) => ({ value, label, disabled: !supportsEffort })) }} />
-            <SelectMenu label="权限模式" value={agentState.permissionMode} icon={<Shield size={13} />} open={permissionMenuOpen} onOpen={open => { setPermissionMenuOpen(open); setModelMenuOpen(false) }} onSelect={changePermission}
-              options={[{ value: 'default', label: '逐项确认', detail: '写入与命令执行前请求批准' }, { value: 'accept_edits', label: '自动编辑', detail: '文件编辑自动批准，命令仍需确认' }, { value: 'bypass', label: '全部允许', detail: '自动批准所有工具操作' }]} />
-            <div className="composer-send"><ContextMeter used={agentState.contextTokens} windowSize={agentState.contextWindow} breakdown={agentState.contextBreakdown || { system: 0, tools: 0, messages: 0 }}
-              onOpen={() => { void request<AgentState>('getState').then(setAgentState).catch(e => setError(String(e))) }} />
-              <button className={`send-button ${busy && !draft.trim() ? 'send-stop' : ''}`} onClick={busy && !draft.trim() ? stop : submit} disabled={loading || (!busy && (!draft.trim() || (!workspace && !draft.startsWith('/'))))} aria-label={busy ? draft.trim() ? '加入队列' : '停止任务' : '发送任务'} title={busy ? draft.trim() ? '加入队列' : '停止任务 · Ctrl .' : '发送任务'}>{busy ? draft.trim() ? <ListPlus size={18} /> : <Square size={13} fill="currentColor" /> : <ArrowUp size={19} />}</button>
-            </div>
-          </div>
-        </motion.div>
+  const running: Record<string, { approval: boolean }> = {}
+  for (const view of Object.values(views)) if (view.busy && view.sessionId) running[view.sessionId] = { approval: view.items.some(item => Boolean(item.approvalId)) }
+  const unread = Object.values(views).filter(view => view.unread && view.sessionId).map(view => view.sessionId!)
+  const home = items.length === 0
+  const composer = <Composer textarea={textarea} draft={c.draft} setDraft={c.setDraft} workspace={workspace} busy={busy} loading={loading}
+    awaitingApproval={awaitingApproval} startedAt={c.startedAt} error={error} onDismissError={() => c.setError('')} queue={c.queue} onRemoveQueued={c.removeQueued}
+    state={agentState} models={c.models} commands={c.commands} sessions={sessions} capabilities={c.capabilities} files={c.files} sendKey={prefs.sendKey} home={home}
+    onSubmit={submit} onStop={stop} onSlash={text => void executeSlash(text)}
+    onModel={value => void updateState('setModel', { model: value })} onEffort={value => void updateState('setEffort', { effort: value })}
+    onPermission={value => void updateState('setPermissionMode', { mode: value })}
+    onRefreshState={() => { void c.request<AgentState>('getState').then(c.setAgentState).catch(() => {}) }} onCompact={() => void executeSlash('/compact')} />
+
+  return <MotionConfig reducedMotion="user"><LayoutGroup>
+    <div className="app-frame">
+      <TitleBar workspace={workspace} title={title} status={awaitingApproval ? 'waiting' : loading ? 'loading' : busy ? 'running' : workspace ? 'idle' : 'none'}
+        leftCollapsed={prefs.leftCollapsed} rightCollapsed={prefs.rightCollapsed} onLeft={toggleLeft} onRight={toggleRight} onSearch={() => setDialog('commands')} onNew={() => act(newSession)} />
+      <div className={`app-shell ${prefs.leftCollapsed ? 'left-collapsed' : ''} ${prefs.rightCollapsed ? 'right-collapsed' : ''}`}
+        style={{ '--sidebar-width': `${prefs.sidebarWidth}px`, '--work-width': `${prefs.workWidth}px` } as React.CSSProperties}>
+        <Sidebar workspace={workspace} sessions={sessions} activeSession={sessionId} running={running} unread={unread} theme={prefs.theme}
+          collapsed={prefs.leftCollapsed} onToggle={toggleLeft} onTheme={toggleTheme} onSettings={() => showSettings()}
+          onChoose={() => act(chooseWorkspace)} onNew={() => act(newSession)} onWorkspace={root => act(() => c.newSession(root))} onSession={session => act(() => c.openSession(session), '无法打开任务')}
+          onRename={(session, name) => act(async () => { await c.renameSession(session.session_id, name); toast({ tone: 'success', title: '已重命名' }) }, '重命名失败')}
+          onPin={session => act(() => c.pinSession(session.session_id, !session.pinned))} onDelete={setPendingDelete} />
+        {!prefs.leftCollapsed && <Splitter label="调整侧栏宽度" value={prefs.sidebarWidth} min={220} max={400} onChange={value => setPref('sidebarWidth', value)} />}
+        <main className={`main-panel ${home ? 'is-empty' : 'has-conversation'}`}>
+          <ErrorBoundary label="对话区域出现问题">
+            {home ? <Welcome workspace={workspace} sessions={sessions} onChoose={() => act(chooseWorkspace)} onPrompt={text => { c.setDraft(text); focusComposer() }}
+              onSession={session => act(() => c.openSession(session))}>{composer}</Welcome>
+              : <><SessionFeed key={activeKey} sessionId={sessionId} clientKey={activeKey} items={items} busy={busy} expandTools={prefs.expandTools} onDecide={decide}
+                onEdit={text => { c.setDraft(text); focusComposer() }} onRetry={text => submit(text)} />{composer}</>}
+          </ErrorBoundary>
+        </main>
+        {!prefs.rightCollapsed && <Splitter label="调整工作台宽度" value={prefs.workWidth} min={300} max={720} invert onChange={value => setPref('workWidth', value)} />}
+        <ErrorBoundary label="工作台出现问题" compact>
+          <WorkPanel workspace={workspace} changes={c.changes} files={c.files} items={items} tasks={c.tasks} state={agentState} refresh={c.refresh}
+            collapsed={prefs.rightCollapsed} onToggle={toggleRight} onMention={insertMention} />
+        </ErrorBoundary>
       </div>
-  return <MotionConfig reducedMotion="user"><div className="window-titlebar"><span>MiniCode</span><span className="window-titlebar-project">{workspace ? workspace.split(/[\\/]/).pop() : 'Desktop'}</span></div>
-  <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightCollapsed ? 'right-collapsed' : ''}`}>
-    <Sidebar workspace={workspace} sessions={sessions} activeSession={sessionId} runningSessions={Object.values(views).filter(view => view.busy && view.sessionId).map(view => ({ id: view.sessionId!, approval: view.items.some(item => Boolean(item.approvalId)) }))} unreadSessions={Object.values(views).filter(view => view.unread && view.sessionId).map(view => view.sessionId!)} theme={theme} onTheme={toggleTheme}
-      collapsed={leftCollapsed} onToggle={() => setLeftCollapsed(value => !value)} onSettings={showSettings}
-      onChoose={() => handleAction(chooseWorkspace)} onNew={() => handleAction(newSession)} onWorkspace={root => handleAction(() => createSession(root))} onSession={session => handleAction(() => openSession(session))} />
-    <main className={`main-panel ${items.length ? "has-conversation" : "is-empty"}`}>
-      <header className="main-header">
-        <div className="main-heading"><span className="section-label">{sessionId ? '任务' : '工作空间'}</span><h2 title={title}>{title}</h2></div>
-        <div className="header-actions"><span className={`connection-status ${busy ? 'status-running' : ''} ${awaitingApproval ? 'status-waiting' : ''}`}><i />{awaitingApproval ? '等待审批' : loading ? '载入中' : busy ? '运行中' : workspace ? '就绪' : '未选择工作区'}</span>
-          <button className="icon-button" title="快捷操作 · Ctrl K" aria-label="打开快捷操作" onClick={() => setCommandOpen(true)}><Search size={16} /></button>
-          <button className="icon-button" title="新建任务 · Ctrl N" aria-label="新建任务" onClick={() => handleAction(newSession)}><SquarePen size={17} /></button>
-        </div>
-      </header>
-      <SessionFeed key={activeKey} sessionId={sessionId} clientKey={activeKey} items={items} busy={busy} workspace={workspace} onChoose={() => handleAction(chooseWorkspace)} onPrompt={suggestPrompt} onDecide={decide}>{items.length === 0 ? composer : null}</SessionFeed>
-      {items.length > 0 && composer}
-    </main>
-    <WorkPanel workspace={workspace} changes={changes} files={files} items={items} tasks={tasks} state={agentState} trace={trace.filter(Boolean) as NonNullable<DesktopEvent['item']>[]} refresh={refresh}
-      collapsed={rightCollapsed} onToggle={() => setRightCollapsed(value => !value)} />
-  </div>
-  <AnimatePresence mode="wait">
-    {settingsOpen && <SettingsPanel key="settings" tab={settingsTab} setTab={setSettingsTab} onClose={() => setSettingsOpen(false)}
-      models={models} state={agentState} capabilities={capabilities} mcpDiscovery={mcpDiscovery} trace={trace.filter(Boolean) as NonNullable<DesktopEvent['item']>[]} error={error}
-      onModel={changeModel} onEffort={changeEffort} onPermission={changePermission} onBudget={changeBudget} onAcceptance={changeAcceptance}
-      onChooseAcceptance={() => window.desktop.chooseAcceptanceFile()} onSkill={changeSkill}
-      onPlugin={changePlugin} onRefreshMcp={refreshMcp} onLockPlugins={async () => { if (workspace) { try { await request('lockPlugins', { workspace }); loadCapabilities(); setError('') } catch (e) { setError(String(e)) } } }}
-      onUseAgent={kind => { setDraft(value => `${value ? `${value.trimEnd()}\n` : ''}请使用 ${kind} 子助手调查并报告证据。`); setSettingsOpen(false); textarea.current?.focus() }} />}
-    {commandOpen && <CommandPalette key="commands" sessions={sessions} onClose={() => setCommandOpen(false)} onNew={() => handleAction(newSession)} onChoose={() => handleAction(chooseWorkspace)} onSettings={showSettings} onLeft={() => setLeftCollapsed(value => !value)} onRight={() => setRightCollapsed(value => !value)} onTheme={toggleTheme} onSession={session => handleAction(() => openSession(session))} />}
-  </AnimatePresence></MotionConfig>
+    </div>
+    <AnimatePresence>
+      {settings && <SettingsPanel key="settings" tab={settings} setTab={setSettings} onClose={() => setSettings(null)} prefs={prefs} setPref={setPref}
+        models={c.models} state={agentState} capabilities={c.capabilities} mcpDiscovery={discoveries[activeKey] || null} trace={c.trace} error={error} busy={busy}
+        onModel={value => void updateState('setModel', { model: value })} onEffort={value => void updateState('setEffort', { effort: value })}
+        onPermission={value => void updateState('setPermissionMode', { mode: value })} onBudget={value => void updateState('setBudget', value)}
+        onAcceptance={path => void updateState('setAcceptance', { path })} onChooseAcceptance={() => window.desktop.chooseAcceptanceFile()}
+        onClearAlwaysAllow={() => void updateState('clearAlwaysAllow', {})}
+        onSkill={(name, active) => act(async () => { await c.request('setSkillActive', { name, active, workspace, sessionId }); await c.loadCapabilities() }, '技能切换失败')}
+        onPlugin={(name, enabled) => act(async () => { c.setCapabilities(await c.request<Capabilities>('setPluginEnabled', { name, enabled, workspace })); setMcp(null) }, '插件切换失败')}
+        onRefreshMcp={async () => { try { setMcp(await c.request<McpDiscovery>('refreshMcp', { workspace })) } catch (e) { toast({ tone: 'error', title: 'MCP 发现失败', detail: clean(e) }) } }}
+        onLockPlugins={() => act(async () => { await c.request('lockPlugins', { workspace }); await c.loadCapabilities(); toast({ tone: 'success', title: '插件锁定已更新' }) }, '更新锁定失败')}
+        onUseAgent={kind => { c.setDraft(value => `${value ? `${value.trimEnd()}\n` : ''}请使用 ${kind} 子助手调查并报告证据。`); setSettings(null); focusComposer() }} />}
+      {dialog === 'commands' && <CommandPalette key="commands" sessions={sessions} files={c.files} onClose={() => setDialog(null)} onNew={() => act(newSession)} onChoose={() => act(chooseWorkspace)}
+        onSettings={() => showSettings()} onShortcuts={() => setDialog('shortcuts')} onLeft={toggleLeft} onRight={toggleRight} onTheme={toggleTheme}
+        onSession={session => act(() => c.openSession(session))} onFile={insertMention} />}
+      {dialog === 'shortcuts' && <ShortcutsDialog key="shortcuts" onClose={() => setDialog(null)} />}
+      {pendingDelete && <ConfirmDialog key="delete" title="删除任务？" confirmLabel="删除" danger onClose={() => setPendingDelete(null)}
+        detail={<>“{pendingDelete.title}”的对话记录、运行事件和归档输出将被永久删除，工作区中的文件不受影响。</>}
+        onConfirm={() => act(async () => { await c.deleteSession(pendingDelete.session_id); toast({ tone: 'success', title: '任务已删除' }) }, '删除失败')} />}
+    </AnimatePresence>
+  </LayoutGroup></MotionConfig>
 }

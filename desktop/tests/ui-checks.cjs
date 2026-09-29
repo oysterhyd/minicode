@@ -1,25 +1,37 @@
 async (page) => {
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await page.evaluate(() => { localStorage.setItem('minicode.theme','dark'); localStorage.setItem('minicode.left-collapsed','false'); localStorage.setItem('minicode.right-collapsed','false'); });
+  await page.emulateMedia({ reducedMotion: 'no-preference', colorScheme: 'dark' });
+  await page.evaluate(() => { localStorage.clear(); localStorage.setItem('minicode.preferences.v2', JSON.stringify({ theme: 'dark' })); });
   await page.reload();
   const results = [];
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   const check = (condition, label) => { if (!condition) throw new Error(label); results.push(label); };
+  const requested = (method, test = () => true) => page.evaluate(([m, t]) => window.__requests.some(r => r.method === m && new Function('r', `return (${t})(r)`)(r)), [method, test.toString()]);
+  const shot = name => page.screenshot({ path: `output/playwright/${name}.png`, animations: 'disabled' });
   const input = page.getByRole('textbox', { name: '任务输入' });
+  await input.waitFor();
+
+  // Home
   await page.getByRole('button', { name: '了解这个项目 梳理结构、技术栈与运行方式' }).click();
   check((await input.inputValue()).includes('目录结构'), 'Starter inserts an editable prompt');
   await input.press('Escape');
   check((await input.inputValue()).includes('目录结构'), 'Escape preserves draft');
-  await input.fill('@App');
+  await input.fill('请看 @Side');
   await page.getByRole('listbox', { name: '引用本地文件' }).waitFor();
   await input.press('Tab');
-  check((await input.inputValue()).includes('@desktop/src/App.tsx '), 'Keyboard file mention completion');
+  check((await input.inputValue()).includes('@desktop/src/components/Sidebar.tsx '), 'Fuzzy file mention completes with keyboard');
   await input.fill('/');
   await page.getByRole('listbox', { name: '命令建议' }).waitFor();
   await input.press('Escape');
   check(await input.inputValue() === '/', 'Escape dismisses slash menu without erasing input');
+  await input.fill('/mo');
+  await input.press('Enter');
+  check(await input.inputValue() === '/model ', 'Slash command with values opens its submenu');
+  await page.getByRole('option', { name: /deepseek/ }).waitFor();
   await input.fill('');
+  await shot('home-dark');
+
+  // Command palette & settings
   await page.keyboard.press('Control+k');
   const command = page.getByRole('combobox', { name: '搜索操作和任务' });
   await command.fill('设置');
@@ -28,14 +40,21 @@ async (page) => {
   await settings.waitFor();
   await settings.getByRole('button', { name: '技能', exact: true }).click();
   await settings.getByText('当前工作区没有发现 Skills。').waitFor();
-  await page.screenshot({ path: 'output/playwright/settings-dark.png', animations: 'disabled' });
+  await settings.getByRole('button', { name: '通用', exact: true }).click();
+  await settings.getByRole('radio', { name: '浅色' }).click();
+  check(await page.locator('html').getAttribute('data-theme') === 'light', 'Settings switch the theme');
+  await settings.getByRole('radio', { name: '深色' }).click();
+  await settings.getByRole('button', { name: '关于', exact: true }).click();
+  await settings.getByText('44.2.0').waitFor();
+  check(true, 'About tab shows runtime versions');
+  await shot('settings-dark');
   await page.keyboard.press('Escape');
   await settings.waitFor({ state: 'hidden' });
   check(true, 'Command palette opens settings; Escape closes modal');
-  await page.getByRole('button', { name: '设置 Ctrl ,' }).click();
+  await page.getByRole('button', { name: /^设置 (Ctrl|⌘) ,$/ }).click();
   await settings.waitFor();
-  const buttons = settings.locator('button:not(:disabled),input:not(:disabled),select:not(:disabled)');
-  await buttons.last().focus();
+  const focusables = settings.locator('button:not(:disabled),input:not(:disabled)');
+  await focusables.last().focus();
   await page.keyboard.press('Tab');
   check(await settings.evaluate(el => el.contains(document.activeElement)), 'Modal traps forward focus');
   await page.getByRole('button', { name: '关闭设置' }).focus();
@@ -43,7 +62,13 @@ async (page) => {
   check(await settings.evaluate(el => el.contains(document.activeElement)), 'Modal traps backward focus');
   await page.keyboard.press('Escape');
   await settings.waitFor({ state: 'hidden' });
-  check(await page.getByRole('button', { name: '设置 Ctrl ,' }).evaluate(el => el === document.activeElement), 'Modal restores invoking focus');
+  check(await page.getByRole('button', { name: /^设置 (Ctrl|⌘) ,$/ }).evaluate(el => el === document.activeElement), 'Modal restores invoking focus');
+  await page.keyboard.press('Control+/');
+  await page.getByRole('dialog', { name: '键盘快捷键' }).waitFor();
+  await page.keyboard.press('Escape');
+  check(true, 'Shortcut reference opens with Ctrl /');
+
+  // Composer menus
   await page.getByRole('button', { name: '切换模型', exact: true }).click();
   await page.getByRole('menu', { name: '切换模型' }).waitFor();
   check(await page.getByRole('menuitemradio', { name: /claude-sonnet/ }).isDisabled(), 'Unconfigured models are disabled');
@@ -51,72 +76,118 @@ async (page) => {
   await page.getByRole('menuitemradio', { name: /deepseek\/deepseek-v4.1-flash/ }).click();
   await page.getByRole('button', { name: '切换模型', exact: true }).click();
   await page.getByRole('menuitemradio', { name: '思考强度 高' }).click();
-  check(await page.evaluate(() => window.__requests.some(r => r.method === 'setEffort' && r.params.effort === 'high')), 'Model menu updates reasoning effort');
+  check(await requested('setEffort', r => r.params.effort === 'high'), 'Model menu updates reasoning effort');
   await page.getByRole('button', { name: '上下文窗口详情' }).click();
   const context = page.getByRole('region', { name: '上下文窗口详情' });
   await context.waitFor();
-  check(await page.evaluate(() => window.__requests.some(r => r.method === 'getState')), 'Context meter refreshes current usage');
-  check(await context.getByText('系统提示词').isVisible() && await context.getByText('工具定义').isVisible() && await context.getByText('对话消息').isVisible(), 'Context meter shows a breakdown');
+  check(await context.getByText('系统提示词').isVisible() && await context.getByText('工具定义').isVisible(), 'Context meter shows a breakdown');
   await page.keyboard.press('Escape');
   await context.waitFor({ state: 'hidden' });
-  check(await page.locator('.composer-footer').count() === 0 && await page.getByRole('button', { name: '快捷操作 Ctrl K' }).count() === 0, 'Composer hint and sidebar quick action are removed');
   await page.getByRole('button', { name: '权限模式', exact: true }).click();
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
   check((await page.getByRole('button', { name: '权限模式', exact: true }).textContent()).includes('自动编辑'), 'Permission menu supports keyboard selection');
+  // Work panel
   await page.getByRole('tab', { name: '文件', exact: true }).click();
+  await page.getByRole('treeitem', { name: /desktop/ }).first().click();
+  check(await page.getByRole('treeitem', { name: /src/ }).count() > 0, 'File tree expands folders');
   await page.getByRole('textbox', { name: '搜索文件' }).fill('WorkPanel');
-  check(await page.locator('.file-row').count() === 1, 'File search filters actual project paths');
-  await page.locator('.file-row').click();
+  check(await page.locator('.file-results .file-row').count() === 1, 'File search filters actual project paths');
+  await page.locator('.file-results .file-row').click();
   await page.locator('.file-preview').waitFor();
   check((await page.locator('.file-preview').textContent()).includes('export default'), 'File preview loads content');
+  check(await page.locator('.file-preview .hljs-keyword').count() > 0, 'File preview is syntax highlighted');
   await page.getByRole('button', { name: '返回文件列表' }).click();
   await page.getByRole('tab', { name: /改动/ }).click();
+  check((await page.locator('.work-section-label .diff-stat').textContent()).includes('+57'), 'Changes list totals line statistics');
   await page.getByRole('button', { name: 'App.tsx desktop/src M', exact: true }).click();
   await page.locator('.diff-add').first().waitFor();
   check(await page.locator('.diff-remove').count() > 0, 'Diff distinguishes additions and deletions');
-  await page.getByRole('button', { name: /^审查工作区的未提交改动/ }).click();
+  await page.getByRole('button', { name: '暂存此文件' }).click();
+  await page.getByText('已暂存', { exact: true }).first().waitFor();
+  check(await requested('confirmDiff'), 'Staging a file reports success');
+  await page.getByRole('button', { name: '返回改动列表' }).click();
+
+  // History conversation
+  await page.locator('.sidebar .session-main', { hasText: '审查工作区的未提交改动' }).click();
   await page.getByRole('heading', { name: '审查结果' }).waitFor();
-  check(await page.locator('.message-code code').count() === 1, 'Assistant Markdown renders code blocks');
-  await page.screenshot({ path: 'output/playwright/conversation-dark.png', animations: 'disabled' });
-  await page.getByRole('button', { name: '切换主题' }).click();
+  check(await page.locator('.code-block code').count() === 1, 'Assistant Markdown renders code blocks');
+  check(await page.locator('.code-block .hljs-keyword').count() > 0, 'Code blocks are syntax highlighted');
+  check(await page.locator('.message-markdown table').count() === 1, 'GFM tables render');
+  const group = page.locator('.tool-group-header');
+  check((await group.textContent()).includes('已执行 4 个操作'), 'Consecutive tool calls collapse into one group');
+  await group.click();
+  await page.locator('.tool-row').filter({ hasText: '编辑' }).click();
+  await page.locator('.tool-detail .diff-add').first().waitFor();
+  check(true, 'Edit tool step shows an inline diff');
+  check((await page.locator('.tool-row').filter({ hasText: '运行' }).textContent()).includes('3.5s'), 'Tool steps show their duration');
+  await page.getByRole('tab', { name: /任务/ }).click();
+  await page.getByText('整理结论').waitFor();
+  check(true, 'Task tab shows session progress');
+  await shot('conversation-dark');
+  await page.getByRole('button', { name: '切换主题' }).last().click();
   check(await page.locator('html').getAttribute('data-theme') === 'light', 'Theme switches to light');
-  check(await page.evaluate(() => {
-    const colors = ['.sidebar', '.main-panel', '.work-panel'].map(selector => getComputedStyle(document.querySelector(selector)).backgroundColor);
-    return new Set(colors).size === 1;
-  }), 'All three panes share the same theme background');
-  await page.screenshot({ path: 'output/playwright/conversation-light.png', animations: 'disabled' });
+  await shot('conversation-light');
+
+  // Session management
+  await page.getByRole('button', { name: '排查终端输出的刷新问题 更多操作' }).click();
+  await page.getByRole('menuitem', { name: '重命名' }).click();
+  const rename = page.getByRole('textbox', { name: '重命名任务' });
+  await rename.fill('终端刷新问题');
+  await rename.press('Enter');
+  await page.locator('.sidebar .session-main', { hasText: '终端刷新问题' }).waitFor();
+  check(await requested('renameSession', r => r.params.title === '终端刷新问题'), 'Sessions can be renamed inline');
+  await page.getByRole('button', { name: '终端刷新问题 更多操作' }).click();
+  await page.getByRole('menuitem', { name: '置顶' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.sidebar-section .session-row').length === 2);
+  check(true, 'Sessions can be pinned');
+  await page.getByRole('button', { name: '终端刷新问题 更多操作' }).click();
+  await page.getByRole('menuitem', { name: '删除任务' }).click();
+  await page.getByRole('dialog', { name: '删除任务？' }).getByRole('button', { name: '删除' }).click();
+  await page.locator('.sidebar .session-main', { hasText: '终端刷新问题' }).waitFor({ state: 'detached' });
+  check(await requested('deleteSession'), 'Sessions can be deleted after confirmation');
+  await page.getByRole('textbox', { name: '搜索任务' }).fill('事件流');
+  check(await page.locator('.sidebar .session-row').count() === 1, 'Sidebar search filters tasks');
+  await page.getByRole('textbox', { name: '搜索任务' }).fill('');
+
+  // Layout
   await page.keyboard.press('Control+b');
-  await page.getByRole('button', { name: '展开侧栏' }).waitFor();
+  await page.getByRole('button', { name: '展开侧栏' }).first().waitFor();
   await page.keyboard.press('Control+Shift+b');
-  await page.getByRole('button', { name: '展开工作区' }).waitFor();
+  await page.getByRole('button', { name: '展开工作区' }).first().waitFor();
   check(true, 'Both panels collapse through keyboard shortcuts');
   await page.keyboard.press('Control+b');
   await page.keyboard.press('Control+Shift+b');
-  await page.getByRole('button', { name: '新建任务', exact: true }).click();
+  const splitter = page.getByRole('separator', { name: '调整工作台宽度' });
+  const before = (await page.locator('.work-panel').boundingBox()).width;
+  const handle = await splitter.boundingBox();
+  await page.mouse.move(handle.x + 4, handle.y + 200); await page.mouse.down(); await page.mouse.move(handle.x - 80, handle.y + 200, { steps: 4 }); await page.mouse.up();
+  check((await page.locator('.work-panel').boundingBox()).width > before + 40, 'Work panel can be resized by dragging');
+  await page.getByRole('button', { name: '新建任务', exact: true }).first().click();
   for (const size of [{ width: 1030, height: 680 }, { width: 1280, height: 800 }, { width: 1920, height: 1080 }]) {
     await page.setViewportSize(size);
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `No page overflow at ${size.width}x${size.height}`);
     const send = await page.getByRole('button', { name: '发送任务' }).boundingBox();
     check(send.x >= 0 && send.x + send.width <= size.width && send.y + send.height <= size.height, `Composer remains usable at ${size.width}x${size.height}`);
-    if (size.width === 1030) check((await input.boundingBox()).height < 150, 'Composer height adapts to compact window');
-    if (size.width === 1030) await page.screenshot({ path: 'output/playwright/compact-light.png', animations: 'disabled' });
+    if (size.width === 1030) await shot('compact-light');
   }
   await page.setViewportSize({ width: 1500, height: 940 });
-  await page.getByRole('button', { name: '切换主题' }).click();
-  await page.screenshot({ path: 'output/playwright/home-dark.png', animations: 'disabled' });
+
+  // Running a task
   await input.fill('测试运行与队列');
   await input.press('Enter');
   await page.getByText('正在处理任务', { exact: true }).waitFor();
   await input.fill('稍后检查测试');
   await page.getByRole('button', { name: '加入队列' }).click();
-  await page.getByRole('button', { name: '取消排队消息 1' }).waitFor();
   await page.getByRole('button', { name: '取消排队消息 1' }).click();
   check(await page.locator('.queue-item').count() === 0, 'Queued messages can be removed');
-  await page.evaluate(() => {
-    window.__emit({ event: 'text_delta', sessionId: 'test-run', text: '### 流式响应\n\n' + Array.from({length: 40}, (_, i) => `段落 ${i + 1}：正在检查工作区的事件与界面状态。`).join('\n\n') });
-  });
-  await page.locator('.message-markdown.is-streaming').getByText(/### 流式响应/).waitFor();
+  await page.evaluate(() => window.__emit({ event: 'agent_event', sessionId: 'test-run', item: { seq: 1, type: 'tool_call_start', timestamp: new Date().toISOString(), data: { call_id: 'live-1', name: 'grep', arguments: { pattern: 'useState' } } } }));
+  await page.locator('.tool-running').waitFor();
+  check((await page.locator('.tool-running').textContent()).includes('正在搜索'), 'Running tool shows a live status');
+  await page.evaluate(() => window.__emit({ event: 'agent_event', sessionId: 'test-run', item: { seq: 2, type: 'tool_call_result', timestamp: new Date().toISOString(), data: { call_id: 'live-1', success: true, output_preview: 'a.ts:1: useState' } } }));
+  await page.evaluate(() => window.__emit({ event: 'text_delta', sessionId: 'test-run', text: '### 流式响应\n\n' + Array.from({ length: 40 }, (_, i) => `段落 ${i + 1}：正在检查工作区的事件与界面状态。`).join('\n\n') }));
+  await page.locator('.message-markdown.is-streaming h3').getByText('流式响应').waitFor();
+  check(true, 'Streaming text renders as Markdown');
   await page.locator('.session-feed').evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll', { bubbles: true })); });
   await page.getByRole('button', { name: '回到最新' }).waitFor();
   await page.evaluate(() => window.__emit({ event: 'text_delta', sessionId: 'test-run', text: '\n\n新的内容继续到达。' }));
@@ -124,15 +195,17 @@ async (page) => {
   check(await page.locator('.session-feed').evaluate(el => el.scrollTop < 10), 'Streaming does not steal scroll position');
   await page.getByRole('button', { name: '回到最新' }).click();
   await page.evaluate(() => window.__emit({ event: 'approval', sessionId: 'test-run', approvalId: 'test-approval', request: { tool_name: 'bash', arguments: { command: 'npm run build' } } }));
-  await page.getByRole('button', { name: '批准执行' }).waitFor();
-  await page.screenshot({ path: 'output/playwright/running-approval.png', animations: 'disabled' });
-  await page.getByRole('button', { name: '批准执行' }).click();
-  check(await page.evaluate(() => window.__requests.some(r => r.method === 'resolveApproval' && r.params.granted)), 'Approval invokes existing IPC');
+  await page.getByRole('button', { name: /批准执行/ }).waitFor();
+  check(await page.locator('.connection-status').textContent() === '等待审批', 'Title bar reflects pending approval');
+  await shot('running-approval');
+  await page.getByRole('button', { name: /本会话始终允许/ }).click();
+  check(await requested('resolveApproval', r => r.params.granted && r.params.remember === 'session'), 'Approval can allow a tool for the session');
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  check(await page.locator('.connection-status i').evaluate(el => getComputedStyle(el).animationName === 'none'), 'Reduced motion disables continuous status animation');
+  check(await page.locator('.connection-status i').evaluate(el => Number.parseFloat(getComputedStyle(el).animationDuration) < 0.01), 'Reduced motion disables continuous status animation');
   await page.getByRole('button', { name: '停止任务', exact: true }).last().click();
   await page.getByRole('button', { name: '发送任务' }).waitFor();
+  await page.locator('.turn-summary').waitFor();
+  check((await page.locator('.turn-summary').textContent()).includes('已停止'), 'Finished turn shows a summary');
   check(errors.length === 0, 'No runtime page errors during interaction checks');
-  await page.evaluate(value => { window.__uiCheckResults = value; }, { passed: results.length, results, errors });
   return { passed: results.length, results, errors };
 }

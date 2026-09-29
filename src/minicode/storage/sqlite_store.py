@@ -189,6 +189,14 @@ class SqliteStore:
                 session_id TEXT PRIMARY KEY,
                 state TEXT NOT NULL
             );
+
+            -- Desktop-only presentation data (custom title, pin). Additive:
+            -- older code ignores the table, so SCHEMA_VERSION stays put.
+            CREATE TABLE IF NOT EXISTS session_meta (
+                session_id TEXT PRIMARY KEY,
+                title      TEXT,
+                pinned     INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
         # v3 -> v4: keep cumulative cache usage and whether the provider
@@ -370,6 +378,54 @@ class SqliteStore:
                     titles[row["session_id"]] = str(block["text"]).strip().splitlines()[0][:72]
                     break
         return titles
+
+    def set_session_title(self, session_id: str, title: str | None) -> None:
+        """Store a custom sidebar title; ``None`` or blank restores the default."""
+        value = title.strip() if title else None
+        with self.transaction() as conn:
+            self._require_session(conn, session_id)
+            conn.execute(
+                "INSERT INTO session_meta (session_id, title) VALUES (?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET title = excluded.title",
+                (session_id, value or None),
+            )
+
+    def set_session_pinned(self, session_id: str, pinned: bool) -> None:
+        with self.transaction() as conn:
+            self._require_session(conn, session_id)
+            conn.execute(
+                "INSERT INTO session_meta (session_id, pinned) VALUES (?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET pinned = excluded.pinned",
+                (session_id, int(bool(pinned))),
+            )
+
+    def session_meta(self) -> dict[str, dict[str, Any]]:
+        rows = self._conn.execute("SELECT session_id, title, pinned FROM session_meta").fetchall()
+        return {row["session_id"]: {"title": row["title"], "pinned": bool(row["pinned"])}
+                for row in rows}
+
+    def last_activity(self) -> dict[str, str]:
+        """Latest event timestamp per session (sessions without events are absent)."""
+        rows = self._conn.execute(
+            "SELECT session_id, MAX(timestamp) AS latest FROM events GROUP BY session_id"
+        ).fetchall()
+        return {row["session_id"]: row["latest"] for row in rows if row["latest"]}
+
+    def delete_session(self, session_id: str) -> None:
+        """Remove a session and every row that belongs to it, atomically.
+
+        Artifact *files* live outside the database; callers owning an
+        :class:`ArtifactStore` remove that directory themselves.
+        """
+        with self.transaction() as conn:
+            self._require_session(conn, session_id)
+            tables = {row["name"] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+            # `tasks` is created lazily by TaskStore, so it may not exist yet.
+            for table in ("messages", "events", "artifacts", "session_goals",
+                          "session_meta", "tasks", "sessions"):
+                if table in tables:
+                    conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
 
     @staticmethod
     def _summary(row: sqlite3.Row) -> SessionSummary:

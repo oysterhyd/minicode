@@ -23,47 +23,65 @@ npm run dev
 
 真实模型沿用底层已有的 `COMMANDCODE_API_KEY` / 本机 ZCode 配置或 `ANTHROPIC_API_KEY`。未配置时可选择 `fake` 查看离线交互，但它不执行真实编码任务。`read` 等只读工具直接执行，`edit`、`write`、`bash` 在工作台中逐项请求批准。
 
-输入框使用 `@` 从工作区文件列表补全路径；运行期间发送的提示词会按顺序排队。模型菜单可同时调整思考强度，点击上下文百分比可查看系统提示词、工具定义和对话消息的估算用量。左右栏可收拢且分别滚动，中间输入框固定在底部。右栏提供 Git 改动 Diff、文件预览、Agent 终端输出、当前会话的 TODO 和真实用量摘要。Diff 的“暂存并确认”会对所选文件执行 `git add`。
+## 对话与审批
 
-桌面端读取与 TUI 共用的 `/` 命令目录，支持 `/help`、`/model`、`/effort`、`/permissions`、`/clear`、`/new`、`/compact`、`/skill`、`/sessions`、`/resume`、`/continue` 和 `/exit`。输入 `/` 可用方向键、Tab 和 Enter 选择命令。输入框下方的模型与权限按钮会直接更新当前 Agent 运行状态。
+- 回复按 Markdown 流式渲染，代码块带语法高亮、语言标签与复制按钮，支持 GFM 表格和任务列表。
+- 连续工具调用折叠为“已执行 N 个操作”分组；每一步显示状态、目标和耗时。`edit` 显示内联 Diff，`write` 显示高亮预览，`bash` 以终端样式显示命令与输出。
+- 审批卡片展示命令、Diff 或写入内容，可“批准执行”(`Y`)、“本会话始终允许”(`A`) 或“拒绝”(`N`)。始终允许的工具只在当前会话内自动批准，可在设置 › 权限中撤销。
+- 每回合结束显示用时和操作数；最后一条消息可复制、编辑重发或重新生成。
+- 输入框：`/` 命令、`@` 文件模糊补全、拖拽文件引用、空输入框中 ↑/↓ 浏览历史；运行中发送的内容自动排队。模型、思考强度、权限模式和上下文用量环都在输入框工具栏上。
 
-设置提供模型、推理预算、权限模式、回合/Token/时长预算、YAML 验收文件、Skills 激活/停用、MCP 发现、项目插件启用/停用及锁定、只读子助手目录和运行记录。验收文件需在新会话开始前设置。Agent 注册了与 CLI/TUI 相同的 Skills、MCP、任务、记忆、背景命令及 `delegate` 工具。启用或停用插件会更新工作区 `.minicode/plugins` 中对应的 `plugin.json` 和 `.minicode/plugins.lock.json`，下一回合重载工具。
+## 任务与工作台
 
-## 界面与交互
+- 侧栏按置顶和工作空间分组，支持搜索、重命名（双击或右键）、置顶和删除（需确认；删除对话记录、事件与归档输出，不影响工作区文件）。运行中、等待审批、有新结果的任务各有标记。
+- 工作台包含改动（行数统计、全部暂存、单文件暂存/取消暂存）、文件（文件树、高亮预览、在文件夹中显示、`@` 引用）、终端记录和任务进度与会话用量。
+- 左右面板可拖拽调整宽度（双击恢复默认，也可用方向键），宽度与收拢状态保存在本机。
+- 窗口不在前台时，任务完成或需要审批会发出系统通知；点击通知跳回对应任务。后台任务完成时显示可跳转的提示。
 
-三栏界面统一使用暖白/石墨灰主题与陶土橙强调色。使用本机 Segoe UI / 微软雅黑及 Cascadia Code 字体，无远程字体请求。首次跟随系统主题，手动主题与侧栏收拢状态保存在本机。首页输入区紧邻任务入口，任务开始后移至底部；回复支持 Markdown、代码块与复制，流式输出在向上阅读时停止自动滚动。
+## 设置
 
-- `Ctrl K`：搜索操作与最近任务。
-- `Ctrl N`：新建任务；`Ctrl ,` / `Ctrl I`：设置。
-- `Ctrl B` / `Ctrl Shift B`：收拢左右面板。
-- `Ctrl .`：停止当前任务，`Ctrl C` 保留复制行为。
-- 输入 `/` 或 `@` 后使用方向键、Tab、Enter 选择；Esc 关闭建议并保留草稿。
-- 运行中可追加排队消息，也可逐项取消。权限审批、文件读取和暂存提供状态反馈。
-- 每个会话都有自己独立的 Agent 运行实例，任务运行期间可以自由切换会话；后台会话的进度、审批和结果保持在原会话中，侧栏用图标标出运行中与等待审批的会话。
+通用（主题：跟随系统/浅色/深色、界面缩放、发送方式、默认展开工具详情、系统通知）、模型与预算（模型、思考强度、回合/Token/时长预算、YAML 验收文件）、权限、技能、MCP 服务、插件、子助手、快捷键、运行记录和关于。验收文件需在新会话开始前设置；插件切换会更新 `.minicode/plugins` 与锁文件，下一回合重载工具。
 
-动效覆盖选中项、工作台标签、弹窗进入/退出、任务输入区位置变化和运行状态；遵循系统“减少动态效果”偏好。弹窗管理焦点与键盘循环，工作台标签支持左右方向键。
+桌面端读取与 TUI 共用的 `/` 命令目录：`/help`、`/model`、`/effort`、`/permissions`、`/clear`、`/new`、`/compact`、`/skill`、`/sessions`、`/resume`、`/continue`、`/exit`。
 
-## UI 回归检查
+## 快捷键
 
-在 `desktop` 目录运行 `npm test` 可检查主进程关闭时序，包括窗口销毁后的迟到消息、桥接退出、待处理 IPC 请求清理和重复退出。
+- `Ctrl K` 搜索操作、任务与文件；`Ctrl N` 新建任务；`Ctrl ,` 设置；`Ctrl /` 快捷键列表。
+- `Ctrl B` / `Ctrl Shift B` 收拢左右面板；`Ctrl 1-4` 切换工作台标签；`Ctrl Shift F` 搜索任务。
+- `Ctrl .` 停止任务；`Ctrl Shift [` / `]` 切换上/下一个任务；`Ctrl Shift L` 切换深浅主题；`Ctrl L` 清空当前视图。
 
-先启动 `npm run dev`，然后在仓库根目录执行以下命令。检查通过测试专用 IPC 数据运行，不调用真实模型或修改项目文件。
+动效遵循系统“减少动态效果”偏好。弹窗管理焦点与键盘循环；所有图标按钮都有无障碍标签和悬停提示。
+
+## 安全与发布
+
+- 渲染进程开启 `sandbox`、`contextIsolation`，关闭 `nodeIntegration`；只通过 preload 暴露受限 API。
+- 生产构建注入 CSP（仅允许本地脚本）；外部链接仅允许 http/https/mailto 并交给系统浏览器；阻止离开应用页面的导航。
+- 文件预览、暂存、打开等操作都校验路径在工作区内。
+- 单实例运行；窗口位置、尺寸与最大化状态会被记住。
+
+## 测试
+
+在 `desktop` 目录运行 `npm test`，检查主进程关闭时序、Git 行数统计解析、最近工作区与外部链接过滤。Python 桥接的会话管理与始终允许逻辑见仓库根目录 `tests/test_desktop_bridge_sessions.py`。
+
+UI 回归检查：先启动 `npm run dev`（或 `npx vite --port <端口>`），然后执行以下命令。检查使用测试专用 IPC 数据，不调用真实模型，也不修改项目文件。fixture 会沿用已打开页面的端口。
 
 ```powershell
-npx --yes --package @playwright/cli playwright-cli -s=minicode-ui open about:blank
+npx --yes --package @playwright/cli playwright-cli -s=minicode-ui open http://127.0.0.1:5173
 npx --yes --package @playwright/cli playwright-cli -s=minicode-ui run-code --filename desktop/tests/ui-fixture.cjs
 npx --yes --package @playwright/cli playwright-cli -s=minicode-ui run-code --filename desktop/tests/ui-checks.cjs
 ```
 
-检查覆盖深浅主题、1030×680 / 1280×800 / 1920×1080 窗口、命令面板、键盘补全、焦点管理、文件搜索与预览、队列、审批和流式滚动。截图保存在 `output/playwright/`，该目录不提交到仓库。
+请使用无头浏览器运行：有界面的 Chrome 会占用 `Ctrl Shift B`（书签栏），Electron 中没有这个问题。截图保存在 `output/playwright/`，该目录不提交。
 
 ## 目录
 
 ```text
 desktop/
-  electron/main.cjs       Electron 窗口、IPC、文件与 Git 操作
-  electron/preload.cjs    受限渲染进程 API
-  bridge.py               Python Agent 双向 NDJSON 事件桥
-  src/                    React 三栏组件与样式
-  package.json            开发、构建、启动脚本
+  electron/main.cjs        Electron 窗口、IPC、文件、Git 与系统集成
+  electron/git-utils.cjs   可单测的 Git 解析与链接过滤
+  electron/preload.cjs     受限渲染进程 API
+  bridge.py                Python Agent 双向 NDJSON 事件桥
+  src/components/          标题栏、侧栏、对话流、输入框、工作台、设置与通用 UI
+  src/hooks, src/lib       会话状态、偏好、格式化、Diff 与语法高亮
+  src/styles/              设计令牌与分区样式
 ```

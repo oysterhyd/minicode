@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -42,6 +43,24 @@ def provider_for(model: str, effort: str = "off"):
                                reasoning_effort=None if effort == "off" else effort)
 
 
+def session_list(store: SqliteStore) -> list[dict]:
+    """Sidebar rows: stored summaries plus title, pin and last activity."""
+    titles = store.first_user_texts()
+    meta = store.session_meta()
+    activity = store.last_activity()
+    rows = []
+    for summary in store.list_sessions():
+        info = meta.get(summary.session_id, {})
+        custom = info.get("title")
+        rows.append(summary.model_dump() | {
+            "title": custom or titles.get(summary.session_id, "新建任务"),
+            "custom_title": bool(custom),
+            "pinned": bool(info.get("pinned")),
+            "updated_at": activity.get(summary.session_id, summary.created_at),
+        })
+    return rows
+
+
 class Bridge:
     def __init__(self, store: SqliteStore | None = None) -> None:
         self.store = store if store is not None else SqliteStore()
@@ -54,6 +73,11 @@ class Bridge:
         self.runtime: AgentRuntime | None = None
         self.run_task: asyncio.Task | None = None
         self.approvals: dict[str, asyncio.Future] = {}
+        #: Tool name behind each pending approval, for "always allow" answers.
+        self.approval_tools: dict[str, str] = {}
+        #: Tools the user allowed for the rest of this conversation. Never
+        #: copied to another conversation and cleared when a new one starts.
+        self.always_allow: set[str] = set()
         self.approval_seq = 0
         self.policy = ModePolicy()
         self.model = DEFAULT_MODEL if discover_commandcode() else "claude-sonnet-4-5" if os.environ.get("ANTHROPIC_API_KEY") else "fake"
@@ -70,9 +94,7 @@ class Bridge:
         return bool(self.run_task and not self.run_task.done())
 
     def sessions(self):
-        titles = self.store.first_user_texts()
-        return [summary.model_dump() | {"title": titles.get(summary.session_id, "新建任务")}
-                for summary in self.store.list_sessions()]
+        return session_list(self.store)
 
     async def discard_runtime(self) -> None:
         previous = self.runtime
@@ -128,16 +150,22 @@ class Bridge:
             self.emit({"event": "agent_event", "sessionId": self.runtime.session_id, "item": event.model_dump(mode="json")})
 
         async def on_approval(request: ApprovalRequest) -> ApprovalDecision:
+            if request.tool_name in self.always_allow:
+                self.emit({"event": "approval_auto", "sessionId": self.runtime.session_id,
+                           "request": request.model_dump()})
+                return ApprovalDecision(granted=True)
             self.approval_seq += 1
             approval_id = f"{self.runtime.session_id}:{self.approval_seq}"
             future = asyncio.get_running_loop().create_future()
             self.approvals[approval_id] = future
+            self.approval_tools[approval_id] = request.tool_name
             self.emit({"event": "approval", "sessionId": self.runtime.session_id,
                   "approvalId": approval_id, "request": request.model_dump()})
             try:
                 granted = await future
             finally:
                 self.approvals.pop(approval_id, None)
+                self.approval_tools.pop(approval_id, None)
             return ApprovalDecision(granted=granted)
 
         arguments = dict(
@@ -241,7 +269,8 @@ class Bridge:
                 "contextWindow": runtime.context_window if runtime else lookup_model(self.model).context_window,
                 "usage": runtime.usage.model_dump() if runtime else None,
                 "budget": (runtime._budget if runtime else self.budget).model_dump(),
-                "acceptance": str(self.acceptance) if self.acceptance else ""}
+                "acceptance": str(self.acceptance) if self.acceptance else "",
+                "alwaysAllow": sorted(self.always_allow)}
 
     def capabilities(self, workspace: Path):
         plugins = PluginCatalog(workspace, check_lock=False)
@@ -259,6 +288,9 @@ class Bridge:
     async def ensure_runtime(self, workspace: Path, session_id: str | None, model: str | None = None):
         chosen = model or (self.store.get_session(session_id).model if session_id else self.model)
         if self.runtime is None or self.runtime.session_id != session_id or self.runtime.workspace != workspace:
+            if self.runtime is not None and self.runtime.session_id not in (None, session_id):
+                # "Always allow" belongs to one conversation, not to this Bridge.
+                self.always_allow.clear()
             await self.create_runtime(workspace, chosen, session_id)
 
     async def change_model(self, model: str):
@@ -291,6 +323,7 @@ class Bridge:
             return {"action": "clear", "message": "已清屏，会话上下文保留。"}
         if verb == "/new":
             await self.discard_runtime()
+            self.always_allow.clear()
             return {"action": "new", "message": "已开启新会话。"}
         if verb == "/sessions":
             return {"message": "\n".join(f"{s['session_id'][:8]} · {s['title']} · {s['status']}" for s in self.sessions()[:20]) or "暂无会话。"}
@@ -406,6 +439,7 @@ class Bridge:
             if self.busy():
                 raise ValueError("当前任务仍在运行")
             await self.discard_runtime()
+            self.always_allow.clear()
             return self.state()
         if method == "getCapabilities":
             return self.capabilities(Path(params["workspace"]).resolve())
@@ -518,11 +552,18 @@ class Bridge:
             await asyncio.sleep(0)
             return {"sessionId": self.runtime.session_id}
         if method == "resolveApproval":
-            future = self.approvals.get(params["approvalId"])
+            approval_id = params["approvalId"]
+            future = self.approvals.get(approval_id)
             if future is None or future.done():
                 return False
-            future.set_result(bool(params["granted"]))
+            granted = bool(params["granted"])
+            if granted and params.get("remember") == "session" and approval_id in self.approval_tools:
+                self.always_allow.add(self.approval_tools[approval_id])
+            future.set_result(granted)
             return True
+        if method == "clearAlwaysAllow":
+            self.always_allow.clear()
+            return self.state()
         raise ValueError(f"未知请求：{method}")
 
 
@@ -570,7 +611,49 @@ class BridgeRouter:
                     del self.clients[key]
             await context.discard_runtime()
 
+    def _require_stored(self, session_id) -> str:
+        if not session_id or self.store.get_session(session_id) is None:
+            raise ValueError("找不到会话")
+        return session_id
+
+    async def delete_session(self, session_id: str) -> None:
+        contexts = set(self.clients.values()) | set(self.sessions.values())
+        owners = [c for c in contexts if c.runtime is not None and c.runtime.session_id == session_id]
+        if self.sessions.get(session_id) is not None:
+            owners.append(self.sessions[session_id])
+        if any(owner.busy() for owner in owners):
+            raise ValueError("任务运行中，无法删除会话")
+        for owner in set(owners):
+            await owner.discard_runtime()
+            for key, value in list(self.clients.items()):
+                if value is owner:
+                    del self.clients[key]
+            for key, value in list(self.sessions.items()):
+                if value is owner:
+                    del self.sessions[key]
+                    if key in self.recent:
+                        self.recent.remove(key)
+        self.sessions.pop(session_id, None)
+        if session_id in self.recent:
+            self.recent.remove(session_id)
+        self.store.delete_session(session_id)
+        shutil.rmtree(ArtifactStore(self.store)._session_dir(session_id), ignore_errors=True)
+
     async def handle(self, method: str, params: dict):
+        # Sidebar management works on stored rows and must not create or
+        # rebind a conversation's Bridge.
+        if method == "renameSession":
+            session_id = self._require_stored(params.get("sessionId"))
+            title = str(params.get("title") or "").strip()[:120]
+            self.store.set_session_title(session_id, title or None)
+            return session_list(self.store)
+        if method == "pinSession":
+            session_id = self._require_stored(params.get("sessionId"))
+            self.store.set_session_pinned(session_id, bool(params.get("pinned")))
+            return session_list(self.store)
+        if method == "deleteSession":
+            await self.delete_session(self._require_stored(params.get("sessionId")))
+            return session_list(self.store)
         client_key = params.get("clientKey") or "default"
         session_id = params.get("sessionId")
         context = self.sessions.get(session_id) if session_id else None

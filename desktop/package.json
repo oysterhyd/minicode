@@ -4,12 +4,13 @@
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
-    "test": "node --test tests/main-lifecycle.test.cjs",
+    "test": "node --test tests/main-lifecycle.test.cjs tests/git-utils.test.cjs tests/git-changes.test.cjs",
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
     "build": "tsc --noEmit && vite build",
     "start": "npm run build && electron ."
   },
   "dependencies": {
+    "lowlight": "3.3.0",
     "lucide-react": "^0.468.0",
     "motion": "^13.4.2",
     "react": "^19.0.0",
