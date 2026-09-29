@@ -42,6 +42,7 @@ from minicode.cli import (
     _provider_for_model,
     _prepare_resume,
     _resolve_session_id,
+    _session_list_lines,
     _status_label,
     _success_brief,
     _tool_args_summary,
@@ -275,8 +276,13 @@ class StreamedReply(Static):
             self._pending.clear()
             self.update(self._rendered)
 
-    def finish(self) -> None:
+    def finish(self, final_text: str | None = None) -> None:
         self.flush()
+        if final_text is not None and final_text != self.plain_text:
+            self._chunks = [final_text]
+            if not final_text:
+                self.remove()
+                return
         if self.plain_text:
             self.update(Markdown(self.plain_text))
 
@@ -671,6 +677,7 @@ class MiniCodeApp(App[None]):
         self._activity_label = "就绪"
         self._activity_widget: Static | None = None
         self._activity_timer: Any = None
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._inspector_events: deque[Event] = deque(maxlen=200)
         self._inspector_open = False
         self._inspector_context_tokens = 0
@@ -817,18 +824,13 @@ class MiniCodeApp(App[None]):
         return policy.mode if isinstance(policy, ModePolicy) else None
 
     @staticmethod
-    def _fmt_tokens(value: int) -> str:
-        """Compact token count: 1M / 200k / 950 (no trailing ``.0``)."""
-        return format_tokens(value)
-
-    @classmethod
-    def _context_bar(cls, used: int, window: int) -> str:
+    def _context_bar(used: int, window: int) -> str:
         """``ctx 12k/1M ██░░░░░░ 1.2%`` — load of the active context window."""
         pct = used / window if window > 0 else 0.0
         cells = 8
         filled = min(cells, round(pct * cells))
         bar = "█" * filled + "░" * (cells - filled)
-        return f"ctx {cls._fmt_tokens(used)}/{cls._fmt_tokens(window)} {bar} {pct:.1%}"
+        return f"ctx {format_tokens(used)}/{format_tokens(window)} {bar} {pct:.1%}"
 
     def _stats_text(self) -> Text:
         runtime = self._runtime
@@ -850,8 +852,8 @@ class MiniCodeApp(App[None]):
         line.append(" · ")
         if self.size.width < 140:
             line.append(
-                f"ctx {self._fmt_tokens(self._inspector_context_tokens)}/"
-                f"{self._fmt_tokens(runtime.context_window)}"
+                f"ctx {format_tokens(self._inspector_context_tokens)}/"
+                f"{format_tokens(runtime.context_window)}"
             )
             line.append(f" · token {format_tokens(usage.total_tokens)}")
             line.append(f" · 缓存本轮{latest_cache}/累计{total_cache}")
@@ -911,10 +913,12 @@ class MiniCodeApp(App[None]):
             self._refresh_status("接收回复")
         self._current_reply.append(delta)
 
-    def _end_streaming(self) -> None:
+    def _end_streaming(self, final_text: str | None = None) -> None:
         """Freeze the current streaming bubble (next deltas open a new one)."""
         if self._current_reply is not None:
-            self._current_reply.finish()
+            self._current_reply.finish(final_text)
+        elif final_text:
+            self._mount(Static(Markdown(final_text), classes="msg-assistant"))
         self._current_reply = None
 
     async def _on_event(self, event: Event) -> None:
@@ -963,7 +967,7 @@ class MiniCodeApp(App[None]):
             self._refresh_status("等待审批")
             return
         if etype is EventType.ASSISTANT_MESSAGE:
-            self._end_streaming()
+            self._end_streaming(str(event.data.get("text") or ""))
             self._refresh_stats()
             return
         if etype is EventType.SESSION_END:
@@ -1177,7 +1181,7 @@ class MiniCodeApp(App[None]):
         return text
 
     def _refresh_inspector(self) -> None:
-        if self.is_mounted:
+        if self.is_mounted and self._inspector_open and self.size.width >= 120:
             self.query_one("#inspector-body", Static).update(self._inspector_text())
 
     def action_toggle_inspector(self) -> None:
@@ -1203,6 +1207,9 @@ class MiniCodeApp(App[None]):
         if self._activity_timer is not None:
             self._activity_timer.stop()
         self._activity_widget = None
+        if self._cleanup_tasks:
+            await asyncio.gather(*self._cleanup_tasks, return_exceptions=True)
+        await self._services.background_manager.cancel_all()
         close = getattr(self._setup.provider, "aclose", None)
         if close is not None:
             await close()
@@ -1311,7 +1318,7 @@ class MiniCodeApp(App[None]):
                 entries.append(
                     SubmenuItem(
                         value=info.name,
-                        detail=f"上下文 {self._fmt_tokens(info.context_window)}",
+                        detail=f"上下文 {format_tokens(info.context_window)}",
                         badges=tuple(badges),
                     )
                 )
@@ -1415,7 +1422,7 @@ class MiniCodeApp(App[None]):
             cmd = self._submenu_cmd
             self.slash_close()
             _set_text_caret_end(prompt, "")
-            self._apply_submenu_choice(cmd, entry.value)
+            self._handle_slash(f"{cmd} {entry.value}")
             return
         cmd = self._root_items[self._slash_index]
         if cmd.name in SUBMENU_COMMANDS:
@@ -1427,17 +1434,6 @@ class MiniCodeApp(App[None]):
         _set_text_caret_end(prompt, cmd.name)
         self.slash_close()
         self.post_message(PromptArea.Submitted(cmd.name, prompt))
-
-    def _apply_submenu_choice(self, cmd: str, value: str) -> None:
-        """Apply the option picked in *cmd*'s submenu (one entry per command)."""
-        if cmd == "/model":
-            self._switch_model(value)
-        elif cmd == "/effort":
-            self._apply_effort(value)
-        elif cmd == "/permissions":
-            self._cmd_permissions(value)
-        elif cmd == "/resume":
-            self._cmd_resume(value)
 
     def slash_back(self) -> None:
         """Esc / Backspace: submenu -> root list -> closed."""
@@ -1523,6 +1519,16 @@ class MiniCodeApp(App[None]):
 
     def _cmd_new(self) -> None:
         """彻底重置上下文：重建 runtime，下一条消息开启全新会话。"""
+        from minicode.tasks.background import BackgroundManager
+
+        previous_jobs = self._services.background_manager
+        self._services.background_manager = BackgroundManager()
+        # This app already owns the event loop; cancel the old session's jobs
+        # there while the new runtime receives an isolated manager.
+        cleanup = asyncio.create_task(previous_jobs.cancel_all())
+        self._cleanup_tasks.add(cleanup)
+        cleanup.add_done_callback(self._cleanup_tasks.discard)
+        self._queued_turns.clear()
         self._clear_log()
         self._build_runtime()
         self._inspector_events.clear()
@@ -1656,18 +1662,7 @@ class MiniCodeApp(App[None]):
         if not sessions:
             self._add_line(Text("暂无会话记录。"), "msg-system")
             return
-        lines = ["会话列表（最新在前）："]
-        for session in sessions[:20]:
-            lines.append(
-                f"  {session.session_id[:8]}"
-                f"  {_status_label(session.status, session.exit_reason)}"
-                f"  · 轮数 {session.rounds}"
-                f"  · Token {format_tokens(session.input_tokens + session.output_tokens)}"
-                f"  · {session.provider}/{session.model}"
-                f"  · {session.workspace}"
-                f"  · {_format_timestamp(session.created_at)}"
-            )
-        self._add_line(Text("\n".join(lines)), "msg-system")
+        self._add_line(Text("\n".join(["会话列表（最新在前）：", *_session_list_lines(sessions)])), "msg-system")
 
     def _cmd_resume(self, arg: str) -> None:
         if not arg:
@@ -1715,9 +1710,15 @@ class MiniCodeApp(App[None]):
         services.evidence_ledger = runtime._evidence_ledger
         setup.workspace = runtime.workspace
         previous_provider = self._setup.provider
+        previous_jobs = self._services.background_manager
+        cleanup = asyncio.create_task(previous_jobs.cancel_all())
+        self._cleanup_tasks.add(cleanup)
+        cleanup.add_done_callback(self._cleanup_tasks.discard)
+        self._queued_turns.clear()
         self._setup = setup
         self._services = services
         self._runtime = runtime
+        self._clear_log()
         self._inspector_events = deque(self._store.get_events(resolved), maxlen=200)
         self._inspector_context_tokens = runtime.context_tokens_used()
         self._refresh_inspector()
@@ -1726,7 +1727,6 @@ class MiniCodeApp(App[None]):
             if close is not None:
                 asyncio.create_task(close())
         self.sub_title = f"{setup.workspace} · {setup.provider_name}/{setup.model_label}"
-        self._cards.clear()
         self._add_line(
             Text(
                 f"已恢复会话 {resolved[:8]}"

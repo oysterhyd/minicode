@@ -23,7 +23,7 @@ npm run dev
 
 真实模型沿用底层已有的 `COMMANDCODE_API_KEY` / 本机 ZCode 配置或 `ANTHROPIC_API_KEY`。未配置时可选择 `fake` 查看离线交互，但它不执行真实编码任务。`read` 等只读工具直接执行，`edit`、`write`、`bash` 在工作台中逐项请求批准。
 
-输入框使用 `@` 从工作区文件列表补全路径；运行期间发送的提示词会按顺序排队。左右栏可收拢且分别滚动，中间输入框固定在底部。右栏提供 Git 改动 Diff、文件预览、Agent 终端输出、当前会话的 TODO 和真实用量摘要。Diff 的“暂存并确认”会对所选文件执行 `git add`。
+输入框使用 `@` 从工作区文件列表补全路径；运行期间发送的提示词会按顺序排队。模型菜单可同时调整思考强度，点击上下文百分比可查看系统提示词、工具定义和对话消息的估算用量。左右栏可收拢且分别滚动，中间输入框固定在底部。右栏提供 Git 改动 Diff、文件预览、Agent 终端输出、当前会话的 TODO 和真实用量摘要。Diff 的“暂存并确认”会对所选文件执行 `git add`。
 
 桌面端读取与 TUI 共用的 `/` 命令目录，支持 `/help`、`/model`、`/effort`、`/permissions`、`/clear`、`/new`、`/compact`、`/skill`、`/sessions`、`/resume`、`/continue` 和 `/exit`。输入 `/` 可用方向键、Tab 和 Enter 选择命令。输入框下方的模型与权限按钮会直接更新当前 Agent 运行状态。
 

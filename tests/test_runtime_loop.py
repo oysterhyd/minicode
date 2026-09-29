@@ -566,10 +566,16 @@ def test_set_model_swaps_provider_and_updates_session(harness_factory, tmp_path)
 def test_context_tokens_used_grows_with_messages(harness_factory):
     harness = harness_factory(FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="回复")])))
     runtime = harness.runtime
-    assert runtime.context_tokens_used() >= 0
+    before = runtime.context_token_breakdown()
+    assert before["system"] > 0
+    assert before["tools"] > 0
+    assert before["messages"] == 0
+    assert runtime.context_tokens_used() == sum(before.values())
     asyncio.run(runtime.run_turn("一句用户输入"))
     # The user message plus the assistant reply now sit in the context.
-    assert runtime.context_tokens_used() > 0
+    after = runtime.context_token_breakdown()
+    assert after["messages"] > before["messages"]
+    assert runtime.context_tokens_used() == sum(after.values())
 
 
 def test_runtime_usage_includes_cache_read_tokens(harness_factory):

@@ -6,7 +6,7 @@ import type { Session } from '../types'
 type Props = {
   workspace: string | null; sessions: Session[]; activeSession: string | null; collapsed: boolean; theme: 'light' | 'dark'
   runningSessions: { id: string; approval: boolean }[]; unreadSessions: string[]
-  onToggle: () => void; onTheme: () => void; onSearch: () => void; onSettings: () => void; onChoose: () => void; onNew: () => void
+  onToggle: () => void; onTheme: () => void; onSettings: () => void; onChoose: () => void; onNew: () => void
   onWorkspace: (workspace: string) => void; onSession: (session: Session) => void
 }
 
@@ -26,13 +26,11 @@ export function Sidebar(props: Props) {
     <img className="rail-brand" src="./app-mark.svg" alt="MiniCode" />
     <button className="rail-button" onClick={props.onToggle} title="展开侧栏 · Ctrl B" aria-label="展开侧栏"><PanelLeftOpen size={18} /></button>
     <button className="rail-button" onClick={props.onNew} title="新建任务" aria-label="新建任务"><Plus size={18} /></button>
-    <button className="rail-button" onClick={props.onSearch} title="快捷操作 · Ctrl K" aria-label="快捷操作"><Search size={17} /></button>
     <div className="rail-bottom"><button className="rail-button" onClick={props.onTheme} aria-label="切换主题"><ThemeIcon size={17} /></button><button className="rail-button" onClick={props.onSettings} title="设置" aria-label="设置"><Settings2 size={17} /></button></div>
   </aside>
   return <aside className="sidebar">
     <header className="sidebar-brand"><img className="brand-mark" src="./app-mark.svg" alt="" /><span>MiniCode</span><button className="icon-button" onClick={props.onToggle} title="收拢侧栏 · Ctrl B" aria-label="收拢侧栏"><PanelLeftClose size={17} /></button></header>
-    <div className="sidebar-actions"><button className="new-task-button" onClick={props.onNew}><Plus size={17} />新建任务<kbd>Ctrl N</kbd></button>
-      <button className="nav-row" onClick={props.onSearch}><Search size={16} />快捷操作<kbd>Ctrl K</kbd></button></div>
+    <div className="sidebar-actions"><button className="new-task-button" onClick={props.onNew}><Plus size={17} />新建任务<kbd>Ctrl N</kbd></button></div>
     <div className="sidebar-section-heading"><span>工作空间</span><button className="icon-button" onClick={props.onChoose} title="打开本地目录" aria-label="打开本地目录"><Plus size={15} /></button></div>
     <div className="scrollbar sidebar-projects">
       {!groups.length && <button className="workspace-empty" onClick={props.onChoose}><FolderOpen size={23} /><strong>打开你的项目</strong><span>选择本地目录，开始第一个任务</span></button>}

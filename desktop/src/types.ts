@@ -8,8 +8,8 @@ export type Session = {
   created_at: string
 }
 
-export type Model = { id: string; provider: string; available: boolean }
-export type AgentState = { model: string; effort: string; permissionMode: string; sessionId: string | null; taskPending: boolean; rounds: number; contextTokens: number; contextWindow: number; usage: { input_tokens: number; output_tokens: number } | null; budget: { max_rounds: number; max_total_tokens: number; max_seconds: number }; acceptance: string }
+export type Model = { id: string; provider: string; available: boolean; supportsEffort: boolean }
+export type AgentState = { model: string; effort: string; permissionMode: string; sessionId: string | null; taskPending: boolean; rounds: number; contextTokens: number; contextWindow: number; contextBreakdown: { system: number; tools: number; messages: number }; usage: { input_tokens: number; output_tokens: number } | null; budget: { max_rounds: number; max_total_tokens: number; max_seconds: number }; acceptance: string }
 export type Command = { name: string; usage: string; summary: string }
 export type Capabilities = {
   skills: Array<{ name: string; description: string; origin: string; active: boolean }>

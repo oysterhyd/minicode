@@ -84,7 +84,8 @@ export function SessionFeed({ items, busy, sessionId, clientKey, workspace, onCh
         if (item.kind === 'thinking') return busy && !items.some(other => other.pending || other.approvalId) ? <div key={item.id} className="activity-row"><span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>正在思考</div> : null
         if (item.kind === 'user') return <div key={item.id} className="flex justify-end"><div className="user-bubble whitespace-pre-wrap break-words">{item.text}</div></div>
         return <div key={item.id} className="assistant-turn"><div className="assistant-label"><img src="./app-mark.svg" alt="" />MiniCode{item.pending && <span className="streaming-label">正在生成</span>}</div><div className={`message-markdown ${item.pending ? 'is-streaming' : ''}`}>
-          <Suspense fallback={<div className="whitespace-pre-wrap">{item.text}</div>}><MessageContent text={item.text || ''} /></Suspense>
+          {item.pending ? <div className="whitespace-pre-wrap break-words">{item.text}</div> :
+            <Suspense fallback={<div className="whitespace-pre-wrap">{item.text}</div>}><MessageContent text={item.text || ''} /></Suspense>}
         </div>{!item.pending && <div className="message-actions"><CopyButton text={item.text || ''} label="复制回复" /></div>}</div>
       })}
       {busy && !items.some(item => item.pending || item.approvalId || item.kind === 'thinking') && <div className="activity-row"><span className="thinking-dots" aria-hidden="true"><i /><i /><i /></span>任务处理中</div>}

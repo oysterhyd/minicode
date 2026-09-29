@@ -322,11 +322,6 @@ kbd {
   border: 1px solid #ffffff35;
   border-radius: 4px;
 }
-.sidebar-actions .nav-row {
-  margin-top: 10px;
-  border: 1px solid var(--line);
-  min-height: 39px;
-}
 .nav-row {
   display: flex;
   width: 100%;
@@ -775,9 +770,79 @@ kbd {
   margin-left: auto;
   padding-left: 5px;
 }
+.context-meter-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
 .context-meter {
+  min-width: 29px;
+  min-height: 29px;
+  padding: 4px;
+  border-radius: 5px;
   font: 11px var(--font-mono);
   color: var(--muted);
+}
+.context-meter:hover,
+.context-meter[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.context-detail {
+  position: absolute;
+  z-index: 25;
+  right: -50px;
+  bottom: calc(100% + 12px);
+  width: min(350px, calc(100vw - 70px));
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--surface-panel);
+  box-shadow: 0 12px 32px #0003;
+  color: var(--secondary);
+  font-size: 13px;
+}
+.context-detail-heading,
+.context-detail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.context-detail-heading {
+  margin-bottom: 13px;
+  font-size: 14px;
+}
+.context-detail-heading strong,
+.context-detail-row strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.context-detail-track {
+  display: flex;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--surface-hover);
+}
+.context-detail-track span {
+  min-width: 0;
+  height: 100%;
+}
+.context-detail-system { background: #aeb8bf; }
+.context-detail-tools { background: #a986ed; }
+.context-detail-messages { background: #5799e8; }
+.context-detail-list { margin-top: 15px; }
+.context-detail-row { min-height: 32px; }
+.context-detail-row > span:nth-child(2) { flex: 1; }
+.context-detail-key {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+}
+.context-detail-note {
+  margin: 11px 0 0;
+  color: var(--muted);
+  font-size: 11px;
 }
 .send-button {
   display: grid;
@@ -806,30 +871,6 @@ kbd {
   color: var(--text);
   border: 1px solid var(--line-strong);
 }
-.composer-footer {
-  display: flex;
-  max-width: 850px;
-  justify-content: space-between;
-  align-items: center;
-  margin: 11px auto 0;
-  color: var(--muted);
-  font-size: 11px;
-}
-.composer-footer > span {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.composer-footer kbd {
-  font-size: 10px;
-}
-.footer-separator {
-  display: inline-block;
-  height: 9px;
-  width: 1px;
-  background: var(--line-strong);
-  margin: 0 5px;
-}
 .composer-menu,
 .mention-popover,
 .slash-popover {
@@ -844,8 +885,10 @@ kbd {
 .composer-menu {
   bottom: calc(100% + 12px);
   left: 0;
-  width: 260px;
+  width: 285px;
   max-width: calc(100vw - 50px);
+  max-height: min(360px, calc(100dvh - 155px));
+  overflow-y: auto;
 }
 .composer-menu .section-label {
   padding: 8px 9px;
@@ -876,6 +919,43 @@ kbd {
 }
 .composer-menu button > svg {
   color: var(--accent);
+}
+.composer-menu-with-secondary > button {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+.composer-menu-with-secondary > button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-menu-with-secondary > button small {
+  display: none;
+}
+.composer-menu-divider {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--line);
+}
+.composer-menu-subheading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.composer-menu-subheading small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+.composer-menu-secondary-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+}
+.composer-menu-secondary-options button {
+  padding: 7px 6px;
+  font-size: 12px;
 }
 .mention-popover,
 .slash-popover {
@@ -2147,12 +2227,6 @@ kbd {
     padding-left: 17px;
     padding-right: 17px;
   }
-  .composer-footer > span:last-child {
-    font-size: 10px;
-  }
-  .context-meter {
-    display: none;
-  }
 }
 @media (max-width: 900px) {
   .app-shell {
@@ -2193,9 +2267,6 @@ kbd {
   }
   .composer-toolbar {
     gap: 1px;
-  }
-  .composer-footer > span:last-child {
-    display: none;
   }
   .session-feed {
     padding: 24px;
@@ -2245,6 +2316,9 @@ kbd {
   }
 }
 @media (max-height: 760px) {
+  .is-empty .composer-menu {
+    max-height: 275px;
+  }
   .welcome {
     padding: 4px 0 12px;
   }

@@ -60,10 +60,13 @@ _OUTPUT_PREVIEW_CHARS = 500
 #: Tool output limits for generic tools; individual tools page before this.
 _SPILL_LIMITS = ToolLimits()
 
-#: Tool names that are safe to re-execute while resuming an interrupted
-#: session: they only read, so re-running them cannot duplicate side effects.
-_READ_ONLY_TOOLS = frozenset({"read", "ls", "grep", "read_artifact", "skills_list", "skill_load", "skill_unload", "skill_resource"})
-_REPLAY_SAFE_TOOLS = _READ_ONLY_TOOLS | {"delegate"}
+#: Calls that may overlap and be retried after a transient tool error.
+_READ_ONLY_TOOLS = frozenset({"read", "ls", "grep", "read_artifact", "skills_list", "skill_resource"})
+# Skill activation changes the system prompt and records session events. Keep
+# those calls in model order, even though they do not modify workspace files.
+# Interrupted unloads with a recorded state transition are settled from the
+# event log below; other calls can be retried under the current policy.
+_REPLAY_SAFE_TOOLS = _READ_ONLY_TOOLS | {"skill_load", "skill_unload", "delegate"}
 _MAX_PARALLEL_READS = 4
 
 
@@ -279,14 +282,22 @@ class AgentRuntime:
         Uses the same conservative estimator as compaction, so the status
         bar's context-window load matches when compaction would trigger.
         """
+        return sum(self.context_token_breakdown().values())
+
+    def context_token_breakdown(self) -> dict[str, int]:
+        """Estimated system, tool and conversation shares of the current prompt."""
         from minicode.context.estimate import estimate_messages_tokens
 
-        return int(estimate_messages_tokens(
-            self._system_prompt,
-            self._messages,
-            self._registry.specs(),
-            reserve_output_tokens=0,
-        ) * getattr(self._provider, "prompt_scale", 1.0))
+        specs = self._registry.specs()
+        system = estimate_messages_tokens(self._system_prompt, [], reserve_output_tokens=0)
+        tools = estimate_messages_tokens(None, [], specs, reserve_output_tokens=0)
+        messages = estimate_messages_tokens(None, self._messages, reserve_output_tokens=0)
+        scale = getattr(self._provider, "prompt_scale", 1.0)
+        total = int((system + tools + messages) * scale)
+        scaled_system = int(system * scale)
+        scaled_tools = int(tools * scale)
+        return {"system": scaled_system, "tools": scaled_tools,
+                "messages": total - scaled_system - scaled_tools}
 
     def _refresh_system_prompt(self) -> None:
         sections = [self._base_system_prompt]
@@ -531,14 +542,8 @@ class AgentRuntime:
                         {
                             "text": response.text,
                             "tool_calls": [call.name for call in response.tool_calls],
-                            "usage": {
-                                "input_tokens": response.usage.input_tokens,
-                                "output_tokens": response.usage.output_tokens,
-                                "cache_read_tokens": response.usage.cache_read_tokens,
-                                "cache_write_tokens": response.usage.cache_write_tokens,
-                                "available": response.usage.available,
-                                "total_tokens": response.usage.total_tokens,
-                            },
+                            "usage": {**response.usage.model_dump(),
+                                      "total_tokens": response.usage.total_tokens},
                             "stop_reason": response.stop_reason.value,
                         },
                     )
@@ -589,8 +594,8 @@ class AgentRuntime:
                         index = 0
                         while index < len(calls):
                             self._check_deadline()
-                            if (calls[index].name == "delegate"
-                                    and self._budget.max_total_tokens <= 0):
+                            name = calls[index].name
+                            if name == "delegate" and self._budget.max_total_tokens <= 0:
                                 # Only independent child tasks overlap. With an
                                 # explicit token cap, serial execution avoids
                                 # two in-flight requests spending one balance.
@@ -606,53 +611,38 @@ class AgentRuntime:
                                         break
                                     keys.add(key)
                                     batch.append(candidate)
-                                tasks = [asyncio.create_task(
-                                    self._execute_tool_call(recorder, call, session_id)
-                                ) for call in batch]
-                                try:
-                                    tool_results.extend(await asyncio.gather(*tasks))
-                                except BaseException:
-                                    for task in tasks:
-                                        task.cancel()
-                                    await asyncio.gather(*tasks, return_exceptions=True)
-                                    tool_results.extend(task.result() for task in tasks if
-                                                        task.done() and not task.cancelled() and
-                                                        task.exception() is None)
-                                    raise
-                                index += len(batch)
-                                continue
-                            if calls[index].name not in _READ_ONLY_TOOLS:
+                            elif name in _READ_ONLY_TOOLS:
+                                # A write/unknown call is a barrier. Only
+                                # adjacent built-in reads may overlap.
+                                batch = []
+                                while (index + len(batch) < len(calls)
+                                       and calls[index + len(batch)].name in _READ_ONLY_TOOLS
+                                       and len(batch) < _MAX_PARALLEL_READS):
+                                    batch.append(calls[index + len(batch)])
+                            else:
                                 tool_results.append(
                                     await self._execute_tool_call(recorder, calls[index], session_id)
                                 )
                                 index += 1
                                 continue
-                            end = index
-                            while end < len(calls) and calls[end].name in _READ_ONLY_TOOLS:
-                                end += 1
-                            # A write/unknown call is a barrier. Only adjacent
-                            # built-in reads may overlap, and the provider sees
-                            # their results in its original call order.
-                            for start in range(index, end, _MAX_PARALLEL_READS):
-                                batch = calls[start:min(start + _MAX_PARALLEL_READS, end)]
-                                tasks = [
-                                    asyncio.create_task(self._execute_tool_call(recorder, call, session_id))
-                                    for call in batch
-                                ]
-                                try:
-                                    tool_results.extend(await asyncio.gather(*tasks))
-                                except BaseException:
-                                    for task in tasks:
-                                        task.cancel()
-                                    await asyncio.gather(*tasks, return_exceptions=True)
-                                    # Completed results must be durable even when
-                                    # cancellation interrupts the batch.
-                                    tool_results.extend(task.result() for task in tasks if
-                                                        task.done() and not task.cancelled() and
-                                                        task.exception() is None)
-                                    raise
+                            tasks = [asyncio.create_task(
+                                self._execute_tool_call(recorder, call, session_id)
+                            ) for call in batch]
+                            try:
+                                tool_results.extend(await asyncio.gather(*tasks))
+                            except BaseException:
+                                for task in tasks:
+                                    task.cancel()
+                                await asyncio.gather(*tasks, return_exceptions=True)
+                                # Keep completed results durable if cancellation
+                                # interrupted the batch.
+                                tool_results.extend(task.result() for task in tasks if
+                                                    task.done() and not task.cancelled() and
+                                                    task.exception() is None)
+                                raise
+                            index += len(batch)
+                            if name in _READ_ONLY_TOOLS:
                                 self._check_deadline()
-                            index = end
                     finally:
                         if tool_results:
                             self._append_message(
@@ -960,8 +950,33 @@ class AgentRuntime:
         if not pending:
             return
 
+        history = (self._store.get_events(self.session_id)
+                   if any(call.name == "skill_unload" for call in pending) else [])
         results: list[ToolResultBlock] = []
         for call in pending:
+            if call.name == "skill_unload":
+                started = max((event.seq for event in history
+                               if event.type is EventType.TOOL_CALL_START
+                               and event.data.get("call_id") == call.id), default=-1)
+                next_call = min((event.seq for event in history
+                                 if event.type is EventType.TOOL_CALL_START
+                                 and event.seq > started), default=float("inf"))
+                if started >= 0 and any(started < event.seq < next_call
+                       and event.type is EventType.SKILL_DEACTIVATED
+                       and event.data.get("name") == call.input.get("name")
+                       for event in history):
+                    # The state transition was durable before the tool result.
+                    # Replaying the unload would fail because it is already off.
+                    output = f"已停用技能 {call.input['name']}"
+                    await recorder.emit(EventType.TOOL_CALL_RESULT, {
+                        "call_id": call.id, "name": call.name, "success": True,
+                        "output_preview": output, "output_detail": output,
+                        "recovered": True,
+                    })
+                    results.append(ToolResultBlock(
+                        tool_use_id=call.id, content=output, is_error=False,
+                    ))
+                    continue
             if call.name in _REPLAY_SAFE_TOOLS:
                 # Re-check the *current* policy; permissions may have changed
                 # since the original call was interrupted.
@@ -1817,12 +1832,6 @@ class AgentRuntime:
             "exit_reason": exit_reason.value,
             "status": "paused" if self._task_pending else "completed",
             "rounds": self._rounds,
-            "total_usage": {
-                "input_tokens": self._usage.input_tokens,
-                "output_tokens": self._usage.output_tokens,
-                "cache_read_tokens": self._usage.cache_read_tokens,
-                "cache_write_tokens": self._usage.cache_write_tokens,
-                "available": self._usage.available,
-                "total_tokens": self._usage.total_tokens,
-            },
+            "total_usage": {**self._usage.model_dump(),
+                            "total_tokens": self._usage.total_tokens},
         }

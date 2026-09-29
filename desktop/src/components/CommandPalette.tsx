@@ -3,9 +3,9 @@ import { ArrowUpRight, FolderOpen, Moon, PanelLeft, PanelRight, Search, Settings
 import { Modal } from './Modal'
 import type { Session } from '../types'
 
-export function CommandPalette({ sessions, onClose, onNew, onChoose, onSettings, onLeft, onRight, onTheme, onSession, busy }: {
+export function CommandPalette({ sessions, onClose, onNew, onChoose, onSettings, onLeft, onRight, onTheme, onSession }: {
   sessions: Session[]; onClose: () => void; onNew: () => void; onChoose: () => void; onSettings: () => void;
-  onLeft: () => void; onRight: () => void; onTheme: () => void; onSession: (session: Session) => void; busy: boolean
+  onLeft: () => void; onRight: () => void; onTheme: () => void; onSession: (session: Session) => void
 }) {
   const [query, setQuery] = useState('')
   const [index, setIndex] = useState(0)
@@ -17,7 +17,7 @@ export function CommandPalette({ sessions, onClose, onNew, onChoose, onSettings,
     { id: 'right', label: '切换工作台', hint: 'Ctrl Shift B', icon: PanelRight, run: onRight },
     { id: 'theme', label: '切换深浅主题', hint: '外观', icon: Moon, run: onTheme },
     ...sessions.map(session => ({ id: session.session_id, label: session.title, hint: session.workspace.split(/[\\/]/).pop() || '', icon: ArrowUpRight, run: () => onSession(session) })),
-  ].filter(action => !('disabled' in action && action.disabled) && `${action.label} ${action.hint}`.toLowerCase().includes(query.toLowerCase()))
+  ].filter(action => `${action.label} ${action.hint}`.toLowerCase().includes(query.toLowerCase()))
   const selected = Math.min(index, Math.max(0, actions.length - 1))
   const run = (action: typeof actions[number]) => { onClose(); action.run() }
   return <Modal label="快捷操作" className="command-dialog" onClose={onClose}>

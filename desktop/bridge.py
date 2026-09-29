@@ -60,10 +60,7 @@ class Bridge:
         self.effort = "off"
         self.budget = Budget()
         self.acceptance: Path | None = None
-        self.plugins: PluginCatalog | None = None
-        self.skills: SkillCatalog | None = None
         self.registry = None
-        self.artifacts: ArtifactStore | None = None
 
     def emit(self, message: dict) -> None:
         emit(message | {"clientKey": self.event_key or self.client_key})
@@ -84,9 +81,16 @@ class Bridge:
         self.runtime = None
         registry = self.registry
         self.registry = None
-        if registry is not None:
-            await registry.aclose()
-        await self.discard_provider(previous.provider)
+        background = getattr(previous, "_background_manager", None)
+        try:
+            if background is not None:
+                await background.cancel_all()
+        finally:
+            try:
+                if registry is not None:
+                    await registry.aclose()
+            finally:
+                await self.discard_provider(previous.provider)
 
     async def discard_provider(self, provider: object | None = None) -> None:
         """Close a provider's HTTP client, if it has one.
@@ -161,10 +165,7 @@ class Bridge:
             self.runtime = AgentRuntime(**arguments)
         _attach_compactor(self.runtime, artifacts)
         self.model = model
-        self.plugins = plugins
-        self.skills = skills
         self.registry = registry
-        self.artifacts = artifacts
 
     async def run_prompt(self, text: str | None):
         message = None
@@ -228,13 +229,15 @@ class Bridge:
 
     def state(self):
         runtime = self.runtime
+        breakdown = runtime.context_token_breakdown() if runtime else {"system": 0, "tools": 0, "messages": 0}
         return {"model": runtime.model if runtime else self.model,
                 "effort": getattr(runtime.provider, "reasoning_effort", None) or "off" if runtime else self.effort,
                 "permissionMode": self.policy.mode.value,
                 "sessionId": runtime.session_id if runtime else None,
                 "taskPending": runtime.task_pending if runtime else False,
                 "rounds": runtime.rounds if runtime else 0,
-                "contextTokens": runtime.context_tokens_used() if runtime else 0,
+                "contextTokens": sum(breakdown.values()),
+                "contextBreakdown": breakdown,
                 "contextWindow": runtime.context_window if runtime else lookup_model(self.model).context_window,
                 "usage": runtime.usage.model_dump() if runtime else None,
                 "budget": (runtime._budget if runtime else self.budget).model_dump(),
@@ -259,7 +262,7 @@ class Bridge:
             await self.create_runtime(workspace, chosen, session_id)
 
     async def change_model(self, model: str):
-        if self.run_task and not self.run_task.done():
+        if self.busy():
             raise ValueError("当前回合结束后才能切换模型")
         if model != "fake" and model not in MODEL_CATALOG:
             raise ValueError(f"未知模型：{model}")
@@ -278,7 +281,7 @@ class Bridge:
     async def execute_slash(self, text: str, workspace: Path | None, session_id: str | None):
         verb, _, raw_arg = text.partition(" ")
         verb, arg = verb.lower(), raw_arg.strip()
-        if self.run_task and not self.run_task.done() and verb not in {"/help", "/?"}:
+        if self.busy() and verb not in {"/help", "/?"}:
             raise ValueError("当前回合结束后才能执行命令")
         if verb in {"/help", "/?"}:
             return {"message": "可用命令：\n" + "\n".join(format_command_lines())}
@@ -330,7 +333,7 @@ class Bridge:
         if verb == "/continue":
             if not self.runtime.task_pending:
                 raise ValueError("当前没有暂停的任务")
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前任务仍在运行")
             self.event_key = self.client_key
             self.run_task = asyncio.create_task(self.run_prompt(None))
@@ -353,9 +356,9 @@ class Bridge:
             commandcode = discover_commandcode() is not None
             anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
             return {"sessions": self.sessions(), "models": [
-                {"id": info.name, "provider": info.provider,
+                {"id": info.name, "provider": info.provider, "supportsEffort": info.supports_effort,
                  "available": commandcode if info.provider == "commandcode" else anthropic}
-                for info in MODEL_CATALOG.values()] + [{"id": "fake", "provider": "offline", "available": True}],
+                for info in MODEL_CATALOG.values()] + [{"id": "fake", "provider": "offline", "available": True, "supportsEffort": False}],
                 "defaultModel": self.model,
                 "commands": [{"name": cmd.name, "usage": cmd.usage, "summary": cmd.summary} for cmd in SLASH_COMMANDS],
                 "state": self.state()}
@@ -380,7 +383,7 @@ class Bridge:
             page, total, has_more = result
             return {"text": page, "total": total, "hasMore": has_more}
         if method == "selectSession":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 if self.runtime and self.runtime.session_id == params["sessionId"]:
                     return self.state()
                 raise ValueError("不能替换正在运行的会话")
@@ -390,9 +393,17 @@ class Bridge:
             await self.ensure_runtime(Path(summary.workspace).resolve(), summary.session_id, summary.model)
             return self.state()
         if method == "getState":
+            session_id = params.get("sessionId")
+            if session_id and (self.runtime is None or self.runtime.session_id != session_id):
+                if self.busy():
+                    raise ValueError("当前任务仍在运行")
+                summary = self.store.get_session(session_id)
+                if summary is None:
+                    raise ValueError("找不到会话")
+                await self.ensure_runtime(Path(summary.workspace).resolve(), session_id, summary.model)
             return self.state()
         if method == "resetSession":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前任务仍在运行")
             await self.discard_runtime()
             return self.state()
@@ -401,7 +412,7 @@ class Bridge:
         if method == "setModel":
             return await self.change_model(params["model"])
         if method == "setEffort":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前回合结束后才能调整推理预算")
             level = parse_effort(params["effort"])
             if level is None:
@@ -413,7 +424,7 @@ class Bridge:
             self.effort = level
             return self.state()
         if method == "setPermissionMode":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前回合结束后才能切换权限模式")
             mode = parse_permission_mode(params["mode"])
             if mode is None:
@@ -421,7 +432,7 @@ class Bridge:
             self.policy.set_mode(mode)
             return self.state()
         if method == "setBudget":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前回合结束后才能调整预算")
             self.budget = Budget(max_rounds=int(params["max_rounds"]),
                                  max_total_tokens=int(params["max_total_tokens"]),
@@ -430,7 +441,7 @@ class Bridge:
                 self.runtime._budget = self.budget
             return self.state()
         if method == "setAcceptance":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前回合结束后才能调整验收文件")
             if self.runtime and self.runtime.session_id:
                 raise ValueError("请先使用 /new 开始新会话，再设置验收文件")
@@ -442,13 +453,13 @@ class Bridge:
             await self.discard_runtime()
             return self.state()
         if method == "setSkillActive":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前回合结束后才能管理 Skills")
             workspace = Path(params["workspace"]).resolve()
             await self.ensure_runtime(workspace, params.get("sessionId"))
             return self.runtime.activate_skill(params["name"]).split("\n", 1)[0] if params["active"] else self.runtime.deactivate_skill(params["name"])
         if method == "setPluginEnabled":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前回合结束后才能修改插件")
             workspace = Path(params["workspace"]).resolve()
             catalog = PluginCatalog(workspace, check_lock=False)
@@ -460,12 +471,12 @@ class Bridge:
             await self.discard_runtime()
             return self.capabilities(workspace)
         if method == "lockPlugins":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前回合结束后才能更新插件锁")
             workspace = Path(params["workspace"]).resolve()
             return str(PluginCatalog(workspace, check_lock=False).write_lock())
         if method == "refreshMcp":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前回合结束后才能重新发现 MCP")
             workspace = Path(params["workspace"]).resolve()
             catalog = PluginCatalog(workspace)
@@ -481,11 +492,11 @@ class Bridge:
             root = Path(params["workspace"]).resolve() if params.get("workspace") else None
             return await self.execute_slash(params["text"], root, params.get("sessionId"))
         if method == "cancelTurn":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 self.run_task.cancel()
             return True
         if method == "sendPrompt":
-            if self.run_task and not self.run_task.done():
+            if self.busy():
                 raise ValueError("当前任务仍在运行")
             text = params["text"].strip()
             if not text:
@@ -545,12 +556,13 @@ class BridgeRouter:
         app session. Resuming a released conversation goes through the normal
         ``resume`` path, so nothing is lost from the store.
         """
-        while len([key for key in self.recent if key in self.sessions]) > self.IDLE_LIMIT:
-            stale = next(key for key in self.recent if key in self.sessions)
+        while len(self.sessions) > self.IDLE_LIMIT:
+            stale = next((key for key in self.recent
+                          if key in self.sessions and not self.sessions[key].busy()), None)
+            if stale is None:
+                break  # All excess contexts are active; retry on a later request.
             self.recent.remove(stale)
             context = self.sessions.pop(stale)
-            if context.busy():
-                continue
             if any(other is context for other in self.sessions.values()):
                 continue  # another conversation still uses this runtime
             for key, value in list(self.clients.items()):
@@ -570,6 +582,8 @@ class BridgeRouter:
             # legitimate switch with 不能替换正在运行的会话, so drop the entry —
             # and any client key still pointing at it, which is equally stale.
             del self.sessions[session_id]
+            if session_id in self.recent:
+                self.recent.remove(session_id)
             if self.clients.get(client_key) is context:
                 del self.clients[client_key]
             context = None
@@ -583,8 +597,6 @@ class BridgeRouter:
                 context.effort = source.effort
                 context.budget = source.budget.model_copy()
                 context.policy.set_mode(source.policy.mode)
-            if session_id:
-                self.sessions[session_id] = context
         # Remember which Bridge serves this UI view key. This must also run when
         # the Bridge was found through its session id: switching views is
         # exactly the case where the new key has to learn its conversation.
@@ -603,9 +615,15 @@ class BridgeRouter:
                    for item in contexts):
                 raise ValueError("该工作区的任务结束后才能修改插件")
         result = await context.handle(method, params)
-        if context.runtime and context.runtime.session_id:
-            self.sessions[context.runtime.session_id] = context
-            self._touch(context.runtime.session_id)
+        current_session = context.runtime.session_id if context.runtime else None
+        for old_session, owner in list(self.sessions.items()):
+            if owner is context and old_session != current_session:
+                del self.sessions[old_session]
+                if old_session in self.recent:
+                    self.recent.remove(old_session)
+        if current_session:
+            self.sessions[current_session] = context
+            self._touch(current_session)
         await self._evict_idle()
         return result
 

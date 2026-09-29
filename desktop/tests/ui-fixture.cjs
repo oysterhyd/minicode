@@ -1,13 +1,13 @@
 async (page) => {
   await page.addInitScript(() => {
-    let state = { model: 'fake', effort: 'off', permissionMode: 'default', sessionId: null, taskPending: false, rounds: 0, contextTokens: 0, contextWindow: 200000, usage: null, budget: { max_rounds: 0, max_total_tokens: 0, max_seconds: 0 }, acceptance: '' };
+    let state = { model: 'fake', effort: 'off', permissionMode: 'default', sessionId: null, taskPending: false, rounds: 0, contextTokens: 0, contextWindow: 200000, contextBreakdown: { system: 0, tools: 0, messages: 0 }, usage: null, budget: { max_rounds: 0, max_total_tokens: 0, max_seconds: 0 }, acceptance: '' };
     const workspace = 'D:\\miniclaudecode';
     const sessions = [
       { session_id: 'audit', title: '审查工作区的未提交改动', workspace, status: 'completed', created_at: new Date().toISOString() },
       { session_id: 'bridge', title: '完善 Agent 事件流与任务进度', workspace, status: 'completed', created_at: new Date(Date.now() - 86400000).toISOString() },
       { session_id: 'terminal', title: '排查终端输出的刷新问题', workspace, status: 'paused', created_at: new Date(Date.now() - 172800000).toISOString() },
     ];
-    const models = [{ id: 'fake', provider: 'offline', available: true }, { id: 'claude-sonnet-4-6', provider: 'anthropic', available: false }];
+    const models = [{ id: 'fake', provider: 'offline', available: true, supportsEffort: false }, { id: 'deepseek/deepseek-v4.1-flash', provider: 'commandcode', available: true, supportsEffort: true }, { id: 'claude-sonnet-4-6', provider: 'anthropic', available: false, supportsEffort: false }];
     const commands = [{ name: '/help', summary: '查看命令' }, { name: '/model', summary: '切换模型' }, { name: '/new', summary: '新建任务' }, { name: '/clear', summary: '清空视图' }];
     let listener = () => {};
     window.__emit = event => listener(event);
@@ -26,6 +26,7 @@ async (page) => {
         if (method === 'getCapabilities') return { skills: [], plugins: [], mcp: [], agents: ['explore', 'review'] };
         if (method === 'listTasks') return [];
         if (method === 'setModel') state = { ...state, model: params.model };
+        if (method === 'setEffort') state = { ...state, effort: params.effort };
         if (method === 'setPermissionMode') state = { ...state, permissionMode: params.mode };
         if (method === 'selectSession') state = { ...state, sessionId: params.sessionId };
         if (method === 'resetSession') state = { ...state, sessionId: null };

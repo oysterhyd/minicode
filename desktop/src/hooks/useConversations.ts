@@ -3,7 +3,7 @@ import type { AgentEvent, AgentState, Capabilities, Change, Command, DesktopEven
 import { historyItems } from '../types'
 
 export const initialState: AgentState = { model: 'fake', effort: 'off', permissionMode: 'default', sessionId: null,
-  taskPending: false, rounds: 0, contextTokens: 0, contextWindow: 200000, usage: null,
+  taskPending: false, rounds: 0, contextTokens: 0, contextWindow: 200000, contextBreakdown: { system: 0, tools: 0, messages: 0 }, usage: null,
   budget: { max_rounds: 0, max_total_tokens: 0, max_seconds: 0 }, acceptance: '' }
 type View = {
   sessionId: string | null; workspace: string | null; agentState: AgentState; items: FeedItem[]; trace: AgentEvent[];
@@ -11,7 +11,7 @@ type View = {
   busy: boolean; loading: boolean; loaded: boolean; error: string; startedAt: number | null; unread: boolean;
 }
 const emptyView = (workspace: string | null = null, state = initialState): View => ({ sessionId: null, workspace,
-  agentState: { ...state, sessionId: null, usage: null, rounds: 0, contextTokens: 0, taskPending: false, acceptance: '' },
+  agentState: { ...state, sessionId: null, usage: null, rounds: 0, contextTokens: 0, contextBreakdown: { system: 0, tools: 0, messages: 0 }, taskPending: false, acceptance: '' },
   items: [], trace: [], tasks: [], changes: [], files: [], capabilities: null, draft: '', queue: [], busy: false,
   loading: false, loaded: false, error: '', startedAt: null, unread: false })
 
@@ -29,7 +29,6 @@ export function useConversations() {
   const progressTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const versions = useRef(new Map<string, number>())
   const sessionVersion = useRef(0)
-  const sendRef = useRef<(text: string, key: string) => Promise<void>>(async () => {})
   const mounted = useRef(true)
 
   function update(key: string, change: Partial<View> | ((view: View) => View)) {
@@ -95,8 +94,10 @@ export function useConversations() {
         busy: /exited|不可用|无效消息/.test(event.error || '') ? false : view.busy })))
       return
     }
-    const key = Object.keys(viewsRef.current).find(id => event.sessionId && viewsRef.current[id].sessionId === event.sessionId)
-      || (event.clientKey && viewsRef.current[event.clientKey] ? event.clientKey : undefined)
+    const clientView = event.clientKey && viewsRef.current[event.clientKey]
+    const key = clientView && (!event.sessionId || !clientView.sessionId || clientView.sessionId === event.sessionId)
+      ? event.clientKey
+      : Object.keys(viewsRef.current).find(id => event.sessionId && viewsRef.current[id].sessionId === event.sessionId)
     if (!key) return
     if (event.sessionId && !viewsRef.current[key].sessionId) update(key, { sessionId: event.sessionId })
     const setItems = field(key, 'items')
@@ -118,7 +119,7 @@ export function useConversations() {
       const next = viewsRef.current[key].queue[0]
       if (next) {
         update(key, view => ({ ...view, queue: view.queue.slice(1) }))
-        queueMicrotask(() => void sendRef.current(next, key))
+        queueMicrotask(() => void sendNow(next, key))
       }
       return
     }
@@ -234,7 +235,6 @@ export function useConversations() {
       void refresh(key)
     } catch (error) { update(key, { error: String(error), busy: false }) }
   }
-  sendRef.current = sendNow
   const view = views[activeKey]
   return { ...view, activeKey, views, sessions, models, commands, openSession, newSession, sendNow,
     request: <T = unknown>(method: string, params: Record<string, unknown> = {}) => requestFor<T>(activeKey, method, params),

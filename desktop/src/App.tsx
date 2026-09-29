@@ -8,7 +8,8 @@ import { WorkPanel } from './components/WorkPanel'
 import { CommandPalette } from './components/CommandPalette'
 import { RunStatus } from './components/RunStatus'
 import { SelectMenu } from './components/SelectMenu'
-import type { AgentState, Capabilities, Change, Command, DesktopEvent, FeedItem, Model, Session, SessionDetail, SessionTask, SlashResult } from './types'
+import { ContextMeter } from './components/ContextMeter'
+import type { AgentState, Capabilities, DesktopEvent, SlashResult } from './types'
 import { useConversations } from './hooks/useConversations'
 
 type McpDiscovery = { servers: Array<{ server: string; protocol: string | null; server_version: string | null; error: string | null }>; tools: string[] }
@@ -67,31 +68,18 @@ export default function App() {
   function suggestPrompt(text: string) { setDraft(text); textarea.current?.focus() }
   function handleAction(action: () => Promise<unknown>) { void action().catch(e => setError(String(e))) }
 
-  function applyState(state: AgentState) { setAgentState(state) }
-  async function bindWorkspace(root: string) { await createSession(root) }
-  async function chooseWorkspace() { const root = await window.desktop.chooseWorkspace(); if (root) await bindWorkspace(root) }
+  async function chooseWorkspace() { const root = await window.desktop.chooseWorkspace(); if (root) await createSession(root) }
   async function newSession() { await createSession(); requestAnimationFrame(() => textarea.current?.focus()) }
 
-  async function changeModel(value: string) {
-    try { applyState(await request<AgentState>('setModel', { model: value })); setModelMenuOpen(false); setError('') }
+  async function updateState(method: string, params: Record<string, unknown>) {
+    try { setAgentState(await request<AgentState>(method, params)); setError('') }
     catch (e) { setError(String(e)) }
   }
-  async function changeEffort(value: string) {
-    try { applyState(await request<AgentState>('setEffort', { effort: value })); setError('') }
-    catch (e) { setError(String(e)) }
-  }
-  async function changePermission(value: string) {
-    try { applyState(await request<AgentState>('setPermissionMode', { mode: value })); setPermissionMenuOpen(false); setError('') }
-    catch (e) { setError(String(e)) }
-  }
-  async function changeBudget(value: AgentState['budget']) {
-    try { applyState(await request<AgentState>('setBudget', value)); setError('') }
-    catch (e) { setError(String(e)) }
-  }
-  async function changeAcceptance(path: string) {
-    try { applyState(await request<AgentState>('setAcceptance', { path })); setError('') }
-    catch (e) { setError(String(e)) }
-  }
+  const changeModel = (value: string) => updateState('setModel', { model: value })
+  const changeEffort = (value: string) => updateState('setEffort', { effort: value })
+  const changePermission = (value: string) => updateState('setPermissionMode', { mode: value })
+  const changeBudget = (value: AgentState['budget']) => updateState('setBudget', value)
+  const changeAcceptance = (path: string) => updateState('setAcceptance', { path })
   async function changeSkill(name: string, active: boolean) {
     if (!workspace) return
     try {
@@ -114,7 +102,7 @@ export default function App() {
     if (busy) { setError('当前回合结束后再执行命令'); return }
     try {
       const result = await request<SlashResult>('runSlash', { text, workspace, sessionId: sessionId })
-      if (result.state) applyState(result.state)
+      if (result.state) setAgentState(result.state)
       if (result.action === 'new') await newSession()
       if (result.action === 'clear') setItems([])
       if (result.action === 'exit') { await request('closeWindow'); return }
@@ -193,7 +181,7 @@ export default function App() {
   })
 
   const title = sessions.find(session => session.session_id === sessionId)?.title || items.find(item => item.kind === 'user')?.text || '新建任务'
-  const contextPercent = Math.min(100, Math.round(100 * agentState.contextTokens / Math.max(1, agentState.contextWindow)))
+  const supportsEffort = models.find(model => model.id === agentState.model)?.supportsEffort ?? false
   const awaitingApproval = items.some(item => Boolean(item.approvalId))
   const fileIndex = Math.min(mentionIndex, Math.max(0, fileSuggestions.length - 1))
   const stop = () => handleAction(() => request('cancelTurn'))
@@ -219,21 +207,23 @@ export default function App() {
             <button className="composer-icon" title="引用文件" aria-label="引用文件" disabled={!workspace} onClick={() => { setDraft(value => value + (value && !value.endsWith(' ') ? ' @' : '@')); setMentionOpen(true); setSuggestionsDismissed(false); setMentionIndex(0); textarea.current?.focus() }}><Plus size={18} /></button>
             <span className="toolbar-divider" />
             <SelectMenu label="切换模型" value={agentState.model} icon={<Cpu size={14} />} open={modelMenuOpen} onOpen={open => { setModelMenuOpen(open); setPermissionMenuOpen(false) }} onSelect={changeModel}
-              options={models.map(option => ({ value: option.id, label: option.id === 'fake' ? '离线演示' : option.id, detail: option.available ? option.provider : '尚未配置', disabled: !option.available && option.id !== agentState.model }))} />
+              options={models.map(option => ({ value: option.id, label: option.id === 'fake' ? '离线演示' : option.id, detail: option.available ? option.provider : '尚未配置', disabled: !option.available && option.id !== agentState.model }))}
+              secondary={{ label: '思考强度', value: agentState.effort, onSelect: changeEffort, hint: supportsEffort ? undefined : '当前模型不支持',
+                options: [['off', '关闭'], ['low', '低'], ['medium', '中'], ['high', '高'], ['xhigh', '很高'], ['max', '最高']].map(([value, label]) => ({ value, label, disabled: !supportsEffort })) }} />
             <SelectMenu label="权限模式" value={agentState.permissionMode} icon={<Shield size={13} />} open={permissionMenuOpen} onOpen={open => { setPermissionMenuOpen(open); setModelMenuOpen(false) }} onSelect={changePermission}
               options={[{ value: 'default', label: '逐项确认', detail: '写入与命令执行前请求批准' }, { value: 'accept_edits', label: '自动编辑', detail: '文件编辑自动批准，命令仍需确认' }, { value: 'bypass', label: '全部允许', detail: '自动批准所有工具操作' }]} />
-            <div className="composer-send"><span className="context-meter" title={`上下文 ${agentState.contextTokens.toLocaleString()} / ${agentState.contextWindow.toLocaleString()} tokens`}>{contextPercent}%</span>
+            <div className="composer-send"><ContextMeter used={agentState.contextTokens} windowSize={agentState.contextWindow} breakdown={agentState.contextBreakdown || { system: 0, tools: 0, messages: 0 }}
+              onOpen={() => { void request<AgentState>('getState').then(setAgentState).catch(e => setError(String(e))) }} />
               <button className={`send-button ${busy && !draft.trim() ? 'send-stop' : ''}`} onClick={busy && !draft.trim() ? stop : submit} disabled={loading || (!busy && (!draft.trim() || (!workspace && !draft.startsWith('/'))))} aria-label={busy ? draft.trim() ? '加入队列' : '停止任务' : '发送任务'} title={busy ? draft.trim() ? '加入队列' : '停止任务 · Ctrl .' : '发送任务'}>{busy ? draft.trim() ? <ListPlus size={18} /> : <Square size={13} fill="currentColor" /> : <ArrowUp size={19} />}</button>
             </div>
           </div>
         </motion.div>
-        <div className="composer-footer"><span><kbd>Enter</kbd> {busy ? '加入队列' : '发送'}<span className="footer-separator" /><kbd>Shift Enter</kbd> 换行</span><span>{agentState.model === 'fake' ? '离线演示模式' : '在你的本地工作区运行'}</span></div>
       </div>
   return <MotionConfig reducedMotion="user"><div className="window-titlebar"><span>MiniCode</span><span className="window-titlebar-project">{workspace ? workspace.split(/[\\/]/).pop() : 'Desktop'}</span></div>
   <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightCollapsed ? 'right-collapsed' : ''}`}>
-    <Sidebar workspace={workspace} sessions={sessions} activeSession={sessionId} runningSessions={Object.values(views).filter(view => view.busy && view.sessionId).map(view => ({ id: view.sessionId!, approval: view.items.some(item => Boolean(item.approvalId)) }))} unreadSessions={Object.values(views).filter(view => view.unread && view.sessionId).map(view => view.sessionId!)} theme={theme} onTheme={toggleTheme} onSearch={() => setCommandOpen(true)}
+    <Sidebar workspace={workspace} sessions={sessions} activeSession={sessionId} runningSessions={Object.values(views).filter(view => view.busy && view.sessionId).map(view => ({ id: view.sessionId!, approval: view.items.some(item => Boolean(item.approvalId)) }))} unreadSessions={Object.values(views).filter(view => view.unread && view.sessionId).map(view => view.sessionId!)} theme={theme} onTheme={toggleTheme}
       collapsed={leftCollapsed} onToggle={() => setLeftCollapsed(value => !value)} onSettings={showSettings}
-      onChoose={() => handleAction(chooseWorkspace)} onNew={() => handleAction(newSession)} onWorkspace={root => handleAction(() => bindWorkspace(root))} onSession={session => handleAction(() => openSession(session))} />
+      onChoose={() => handleAction(chooseWorkspace)} onNew={() => handleAction(newSession)} onWorkspace={root => handleAction(() => createSession(root))} onSession={session => handleAction(() => openSession(session))} />
     <main className={`main-panel ${items.length ? "has-conversation" : "is-empty"}`}>
       <header className="main-header">
         <div className="main-heading"><span className="section-label">{sessionId ? '任务' : '工作空间'}</span><h2 title={title}>{title}</h2></div>
@@ -255,6 +245,6 @@ export default function App() {
       onChooseAcceptance={() => window.desktop.chooseAcceptanceFile()} onSkill={changeSkill}
       onPlugin={changePlugin} onRefreshMcp={refreshMcp} onLockPlugins={async () => { if (workspace) { try { await request('lockPlugins', { workspace }); loadCapabilities(); setError('') } catch (e) { setError(String(e)) } } }}
       onUseAgent={kind => { setDraft(value => `${value ? `${value.trimEnd()}\n` : ''}请使用 ${kind} 子助手调查并报告证据。`); setSettingsOpen(false); textarea.current?.focus() }} />}
-    {commandOpen && <CommandPalette key="commands" sessions={sessions} busy={busy} onClose={() => setCommandOpen(false)} onNew={() => handleAction(newSession)} onChoose={() => handleAction(chooseWorkspace)} onSettings={showSettings} onLeft={() => setLeftCollapsed(value => !value)} onRight={() => setRightCollapsed(value => !value)} onTheme={toggleTheme} onSession={session => handleAction(() => openSession(session))} />}
+    {commandOpen && <CommandPalette key="commands" sessions={sessions} onClose={() => setCommandOpen(false)} onNew={() => handleAction(newSession)} onChoose={() => handleAction(chooseWorkspace)} onSettings={showSettings} onLeft={() => setLeftCollapsed(value => !value)} onRight={() => setRightCollapsed(value => !value)} onTheme={toggleTheme} onSession={session => handleAction(() => openSession(session))} />}
   </AnimatePresence></MotionConfig>
 }

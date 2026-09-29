@@ -5,12 +5,18 @@ const path = require('node:path')
 const readline = require('node:readline')
 
 const projectRoot = path.resolve(__dirname, '../..')
+if (process.platform === 'win32') app.setAppUserModelId('com.minicode.desktop')
 let window
 let bridge
 let nextId = 1
 let workspace = null
 let quitting = false
 const pending = new Map()
+
+function rejectPending(error) {
+  for (const request of pending.values()) request.reject(error)
+  pending.clear()
+}
 
 function sendDesktopEvent(event) {
   // A BrowserWindow can still be referenced after its native window is gone.
@@ -159,8 +165,7 @@ function startBridge() {
       }
     }
     catch (error) {
-      for (const request of pending.values()) request.reject(new Error(`Agent bridge 返回了无效消息: ${error}`))
-      pending.clear()
+      rejectPending(new Error(`Agent bridge 返回了无效消息: ${error}`))
       sendDesktopEvent({ event: 'bridge_error', error: 'Agent bridge 返回了无效消息' })
       return
     }
@@ -175,13 +180,11 @@ function startBridge() {
   })
   bridge.stderr.on('data', (chunk) => sendDesktopEvent({ event: 'bridge_error', error: chunk.toString() }))
   bridge.on('exit', (code) => {
-    for (const request of pending.values()) request.reject(new Error(`Agent bridge exited (${code})`))
-    pending.clear()
+    rejectPending(new Error(`Agent bridge exited (${code})`))
     sendDesktopEvent({ event: 'bridge_error', error: `Agent bridge exited (${code})` })
   })
   bridge.on('error', (error) => {
-    for (const request of pending.values()) request.reject(error)
-    pending.clear()
+    rejectPending(error)
     sendDesktopEvent({ event: 'bridge_error', error: String(error) })
   })
 }
@@ -243,6 +246,7 @@ app.whenReady().then(() => {
   })
   window = new BrowserWindow({
     width: 1500, height: 940, minWidth: 1030, minHeight: 680,
+    icon: path.join(__dirname, 'app-icon.ico'),
     backgroundColor: '#111111',
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: '#191a1c', symbolColor: '#e9edeb', height: 32 },
@@ -258,7 +262,6 @@ app.on('window-all-closed', () => app.quit())
 app.on('before-quit', () => {
   if (quitting) return
   quitting = true
-  for (const request of pending.values()) request.reject(new Error('应用正在关闭'))
-  pending.clear()
+  rejectPending(new Error('应用正在关闭'))
   bridge?.kill()
 })

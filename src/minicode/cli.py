@@ -455,11 +455,22 @@ class _StreamPrinter:
     def __init__(self, console: Console) -> None:
         self._console = console
         self._line_open = False
+        self._chunks: list[str] = []
 
     def write_delta(self, delta: str) -> None:
         # markup=False: model text must never be interpreted as rich markup.
+        self._chunks.append(delta)
         self._console.print(delta, end="", markup=False, highlight=False)
         self._line_open = True
+
+    def finish(self, final_text: str) -> None:
+        streamed = "".join(self._chunks)
+        self._chunks.clear()
+        self.end_line()
+        if final_text and final_text != streamed:
+            # The final response is authoritative; some providers emit only a
+            # terminal response or omit a fragment from their delta stream.
+            self._console.print(final_text, markup=False, highlight=False)
 
     def end_line(self) -> None:
         if self._line_open:
@@ -638,7 +649,9 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
         printer.write_delta(delta)
 
     async def on_event(event: Event) -> None:
-        if event.type is EventType.TOOL_CALL_START:
+        if event.type is EventType.ASSISTANT_MESSAGE:
+            printer.finish(str(event.data.get("text") or ""))
+        elif event.type is EventType.TOOL_CALL_START:
             printer.end_line()
             _print_tool_start(console, event.data)
         elif event.type is EventType.TOOL_CALL_RESULT:
@@ -1050,6 +1063,11 @@ class _ChatRepl:
 
     def _cmd_new(self) -> None:
         """Reset the conversation: the next message starts a brand-new session."""
+        from minicode.tasks.background import BackgroundManager
+
+        # The prior asyncio.run has cancelled its watcher tasks. Do not carry
+        # their terminal notifications into the new conversation.
+        self.services.background_manager = BackgroundManager()
         self.runtime = _new_runtime(self.setup, self.store, self.services)
         self.console.print(
             "[green]已重置对话上下文，新会话将在下一条消息时创建。[/]"
@@ -1072,8 +1090,12 @@ class _ChatRepl:
                 f"[yellow]未知模型 {arg}；可选：{'、'.join(MODEL_CATALOG)}[/]"
             )
             return
-        provider = self._provider_for(MODEL_CATALOG[arg])
-        if provider is None:
+        try:
+            provider = _provider_for_model(
+                arg, carry_effort_from=self.runtime.provider
+            )
+        except (ProviderRequestError, RuntimeError) as exc:
+            self.console.print(f"[red]无法切换 provider：{exc}[/]")
             return
         info = MODEL_CATALOG[arg]
         old = self.runtime.model
@@ -1088,16 +1110,6 @@ class _ChatRepl:
             f"[green]已切换模型[/] {old} → {info.name}"
             f"（上下文 {format_tokens(info.context_window)} token）"
         )
-
-    def _provider_for(self, info: Any) -> Provider | None:
-        """Build a provider for a catalog entry, surfacing failures inline."""
-        try:
-            return _provider_for_model(
-                info.name, carry_effort_from=self.runtime.provider
-            )
-        except (ProviderRequestError, RuntimeError) as exc:
-            self.console.print(f"[red]无法切换 provider：{exc}[/]")
-            return None
 
     def _cmd_effort(self, arg: str) -> None:
         provider = self.runtime.provider
@@ -1153,18 +1165,7 @@ class _ChatRepl:
         if not sessions:
             self.console.print("暂无会话记录。")
             return
-        lines = ["会话列表（最新在前）："]
-        for session in sessions[:20]:
-            lines.append(
-                f"  {session.session_id[:8]}"
-                f"  {_status_label(session.status, session.exit_reason)}"
-                f"  · 轮数 {session.rounds}"
-                f"  · Token {format_tokens(session.input_tokens + session.output_tokens)}"
-                f"  · {session.provider}/{session.model}"
-                f"  · {session.workspace}"
-                f"  · {_format_timestamp(session.created_at)}"
-            )
-        self.console.print("\n".join(lines))
+        self.console.print("\n".join(["会话列表（最新在前）：", *_session_list_lines(sessions)]))
 
 
 @app.command()

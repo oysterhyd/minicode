@@ -21,11 +21,13 @@ async function launch() {
   app.whenReady = () => Promise.resolve()
   app.getPath = () => '/unused-test-profile'
   app.quit = () => app.emit('before-quit')
+  app.setAppUserModelId = id => { app.userModelId = id }
   let window
   class BrowserWindow extends EventEmitter {
-    constructor() {
+    constructor(options) {
       super()
       window = this
+      this.options = options
       this.destroyed = false
       this.contents = {
         destroyed: false,
@@ -59,6 +61,12 @@ async function launch() {
   await Promise.resolve()
   return { app, window, bridge, lines, messages, request: method => handlers.get('desktop:request')({}, method, {}) }
 }
+
+test('uses the MiniCode icon for the Windows taskbar', async () => {
+  const { app, window } = await launch()
+  if (process.platform === 'win32') assert.equal(app.userModelId, 'com.minicode.desktop')
+  assert.match(window.options.icon, /app-icon\.ico$/)
+})
 
 test('forwards bridge output and unexpected exit while the window is alive', async () => {
   const { bridge, lines, messages } = await launch()

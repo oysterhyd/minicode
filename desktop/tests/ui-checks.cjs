@@ -47,7 +47,19 @@ async (page) => {
   await page.getByRole('button', { name: '切换模型', exact: true }).click();
   await page.getByRole('menu', { name: '切换模型' }).waitFor();
   check(await page.getByRole('menuitemradio', { name: /claude-sonnet/ }).isDisabled(), 'Unconfigured models are disabled');
+  check(await page.getByRole('menuitemradio', { name: '思考强度 高' }).isDisabled(), 'Unsupported model disables effort choices');
+  await page.getByRole('menuitemradio', { name: /deepseek\/deepseek-v4.1-flash/ }).click();
+  await page.getByRole('button', { name: '切换模型', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: '思考强度 高' }).click();
+  check(await page.evaluate(() => window.__requests.some(r => r.method === 'setEffort' && r.params.effort === 'high')), 'Model menu updates reasoning effort');
+  await page.getByRole('button', { name: '上下文窗口详情' }).click();
+  const context = page.getByRole('region', { name: '上下文窗口详情' });
+  await context.waitFor();
+  check(await page.evaluate(() => window.__requests.some(r => r.method === 'getState')), 'Context meter refreshes current usage');
+  check(await context.getByText('系统提示词').isVisible() && await context.getByText('工具定义').isVisible() && await context.getByText('对话消息').isVisible(), 'Context meter shows a breakdown');
   await page.keyboard.press('Escape');
+  await context.waitFor({ state: 'hidden' });
+  check(await page.locator('.composer-footer').count() === 0 && await page.getByRole('button', { name: '快捷操作 Ctrl K' }).count() === 0, 'Composer hint and sidebar quick action are removed');
   await page.getByRole('button', { name: '权限模式', exact: true }).click();
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
@@ -104,11 +116,11 @@ async (page) => {
   await page.evaluate(() => {
     window.__emit({ event: 'text_delta', sessionId: 'test-run', text: '### 流式响应\n\n' + Array.from({length: 40}, (_, i) => `段落 ${i + 1}：正在检查工作区的事件与界面状态。`).join('\n\n') });
   });
-  await page.getByRole('heading', { name: '流式响应' }).waitFor();
+  await page.locator('.message-markdown.is-streaming').getByText(/### 流式响应/).waitFor();
   await page.locator('.session-feed').evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll', { bubbles: true })); });
   await page.getByRole('button', { name: '回到最新' }).waitFor();
   await page.evaluate(() => window.__emit({ event: 'text_delta', sessionId: 'test-run', text: '\n\n新的内容继续到达。' }));
-  await page.getByText('新的内容继续到达。', { exact: true }).waitFor();
+  await page.locator('.message-markdown.is-streaming').getByText(/新的内容继续到达。/).waitFor();
   check(await page.locator('.session-feed').evaluate(el => el.scrollTop < 10), 'Streaming does not steal scroll position');
   await page.getByRole('button', { name: '回到最新' }).click();
   await page.evaluate(() => window.__emit({ event: 'approval', sessionId: 'test-run', approvalId: 'test-approval', request: { tool_name: 'bash', arguments: { command: 'npm run build' } } }));
