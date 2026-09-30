@@ -248,14 +248,20 @@ def test_run_command_timeout_clamped_to_limit(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_decode_shell_output_uses_the_system_code_page():
+@pytest.mark.parametrize('encoding,text', [
+    ('utf-8', '演示会**实际修改**工作区内的文件'),
+    ('cp936', '演示会**实际修改**工作区内的文件'),
+    ('cp1252', 'café déjà vu'),
+])
+def test_decode_shell_output_uses_the_system_code_page(monkeypatch, encoding, text):
     """Bytes in the shell's own code page survive decoding on any platform."""
-    text = "演示会**实际修改**工作区内的文件"
-    raw = text.encode(locale.getpreferredencoding(False))
+    monkeypatch.setattr(locale, 'getpreferredencoding', lambda _setlocale=False: encoding)
+    raw = text.encode(encoding)
     assert decode_shell_output(raw) == text
 
 
-def test_decode_shell_output_prefers_utf8_then_falls_back():
+def test_decode_shell_output_prefers_utf8_then_falls_back(monkeypatch):
+    monkeypatch.setattr(locale, 'getpreferredencoding', lambda _setlocale=False: 'utf-8')
     assert decode_shell_output("中文 ok".encode("utf-8")) == "中文 ok"
     # Undecodable bytes degrade to replacement characters, never to an error.
     assert "\ufffd" in decode_shell_output(b"\xff\xfe\x00bad")

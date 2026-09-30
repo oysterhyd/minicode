@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 $root = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $PSScriptRoot '.stage'
 $cache = Join-Path $PSScriptRoot '.cache'
+$originalPath = $env:PATH
 function Run([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Program failed ($LASTEXITCODE)" }
@@ -38,6 +39,9 @@ try {
     }
     if ((Get-FileHash $gitZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '064b440ff870ed5198527e8f3a92cdf5bd2fd0fedf5e718af95e3fdaddeff718') { throw 'MinGit checksum mismatch' }
     Expand-Archive -LiteralPath $gitZip -DestinationPath "$stage/runtime/git"
+    # Acceptance commands such as `python -m pytest` must use the same Python
+    # as the packaged hosts, including on runners with another Python installed.
+    $env:PATH = "$stage/runtime/python;$stage/runtime/python/Scripts;$stage/runtime/git/cmd;$originalPath"
     Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", '--source', '--history', $root)
     Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", "$stage/runtime")
     if (-not $SkipTests) {
@@ -53,4 +57,4 @@ try {
     $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $($installer.Name)" | Set-Content "$PSScriptRoot/dist/SHA256SUMS.txt" -Encoding ascii
     Write-Host "Installer verified: $($installer.FullName)"
-} finally { Pop-Location }
+} finally { $env:PATH = $originalPath; Pop-Location }
