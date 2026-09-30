@@ -77,7 +77,7 @@ export default function App() {
   const setMcp = (value: McpDiscovery | null) => setDiscoveries(previous => ({ ...previous, [activeKey]: value }))
 
   async function executeSlash(text: string) {
-    if (busy && !/^\/(help|\?)\b/.test(text)) { toast({ tone: 'info', title: '当前回合结束后再执行命令' }); return }
+    if (busy && !/^\/(help|\?|model|effort|permissions|skill)(?:\s|$)/.test(text)) { toast({ tone: 'info', title: '当前回合结束后再执行命令' }); return }
     try {
       const result = await c.request<SlashResult>('runSlash', { text, workspace, sessionId })
       if (result.state) c.setAgentState(result.state)
@@ -180,7 +180,7 @@ export default function App() {
     </div>
     <AnimatePresence>
       {settings && <SettingsPanel key="settings" tab={settings} setTab={setSettings} onClose={() => setSettings(null)} prefs={prefs} setPref={setPref}
-        models={c.models} state={agentState} capabilities={c.capabilities} mcpDiscovery={discoveries[activeKey] || null} trace={c.trace} error={error} busy={busy}
+        request={c.request} onConfigurationChanged={c.refreshConfiguration} models={c.models} state={agentState} capabilities={c.capabilities} mcpDiscovery={discoveries[activeKey] || null} trace={c.trace} error={error} busy={busy}
         onModel={value => void updateState('setModel', { model: value })} onEffort={value => void updateState('setEffort', { effort: value })}
         onPermission={value => void updateState('setPermissionMode', { mode: value })} onBudget={value => void updateState('setBudget', value)}
         onAcceptance={path => void updateState('setAcceptance', { path })} onChooseAcceptance={() => window.desktop.chooseAcceptanceFile()}

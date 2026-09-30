@@ -256,7 +256,7 @@ class AgentRuntime:
         """Prompt-token capacity of the active model (catalog lookup)."""
         from minicode.core.catalog import lookup_model
 
-        return lookup_model(self._model).context_window
+        return getattr(self._provider, "context_window", lookup_model(self._model).context_window)
 
     def prompt_budget_tokens(self) -> int:
         """Compaction trigger, reserving 16,384 tokens for the next answer."""
@@ -361,7 +361,7 @@ class AgentRuntime:
     def _validate_provider(provider: Provider, provider_name: str, model: str) -> None:
         if provider.name != provider_name:
             raise ValueError("provider instance does not match provider_name")
-        if getattr(provider, "model", model) != model:
+        if getattr(provider, "configuration_id", getattr(provider, "model", model)) != model:
             raise ValueError("provider instance does not match model")
 
     def _check_deadline(self) -> None:
@@ -479,6 +479,9 @@ class AgentRuntime:
                 context_rejections = 0
                 truncations = 0
                 while True:
+                    before_round = getattr(self, "before_round", None)
+                    if before_round is not None:
+                        await before_round()
                     self._check_deadline()
                     if checker.tokens_exceeded(self._budget_ledger.usage):
                         return await self._finalize(
@@ -545,6 +548,7 @@ class AgentRuntime:
                             "usage": {**response.usage.model_dump(),
                                       "total_tokens": response.usage.total_tokens},
                             "stop_reason": response.stop_reason.value,
+                            "request_seconds": getattr(self, "_request_seconds", 0.0),
                         },
                     )
                     self._persist_counters()
@@ -1016,6 +1020,7 @@ class AgentRuntime:
         ``asyncio.CancelledError`` is deliberately not caught here.
         """
         for attempt in range(3):
+            request_started = time.monotonic()
             saw_text = False
             try:
                 async with aclosing(self._provider.stream(
@@ -1029,6 +1034,7 @@ class AgentRuntime:
                             if self._on_text_delta is not None:
                                 await self._on_text_delta(event.text)
                         else:
+                            self._request_seconds = time.monotonic() - request_started
                             return event.response, None, None, None
                 raise ProviderError("provider stream ended without a final response")
             except (ProviderAuthError, ProviderRequestError) as exc:
@@ -1233,7 +1239,13 @@ class AgentRuntime:
 
         agent_source = None
         agent_instructions = ""
-        if kind not in {"explore", "review"}:
+        definition = self._registry.agent_definitions.get(kind)
+        if definition is not None and not definition["enabled"]:
+            return ToolOutcome.failure(f"subagent is disabled: {kind}")
+        if definition is not None:
+            agent_instructions = definition["instructions"]
+            agent_source = {"agent": kind, "origin": "builtin" if definition.get("builtin") else "user"}
+        elif kind not in {"explore", "review"}:
             catalog = self._registry.plugin_catalog
             if catalog is None:
                 return ToolOutcome.failure(f"unknown read-only subagent kind: {kind}")
@@ -1250,8 +1262,17 @@ class AgentRuntime:
             return ToolOutcome.failure("parent token budget is exhausted")
 
         child_registry = ToolRegistry()
-        for tool in (ReadTool(), LsTool(), GrepTool(), ReadArtifactTool()):
-            child_registry.register(tool)
+        if definition is not None:
+            names = (self._registry.names() if definition.get("inheritTools") else definition["tools"])
+            for name in names:
+                if name == "delegate" or name.startswith("task_"):
+                    continue
+                tool = self._registry.get(name)
+                if tool is not None:
+                    child_registry.register(tool)
+        else:
+            for tool in (ReadTool(), LsTool(), GrepTool(), ReadArtifactTool()):
+                child_registry.register(tool)
         async def on_child_event(event: Any) -> None:
             if event.type is EventType.SESSION_START:
                 await EventRecorder(self._store, self.session_id, self._on_event).emit(
@@ -1268,8 +1289,8 @@ class AgentRuntime:
         )
         child_prompt = (
             build_system_prompt(str(self._workspace.resolve()), child_registry.names())
-            + "\n\n你是只读子助手。只能调查与审查，不得执行 shell 或修改文件。"
-            "最终只输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、"
+            + ("\n\n你是子助手。只使用配置的工具，遵守父会话权限。" if definition is not None else "\n\n你是只读子助手。只能调查与审查，不得执行 shell 或修改文件。")
+            + "最终只输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、"
             "evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。"
             "不得编造证据。\n父任务要求：\n" + requirements
             + ("\n插件子助手指令：\n" + agent_instructions if agent_instructions else "")
@@ -1288,7 +1309,8 @@ class AgentRuntime:
                     break
             common = dict(
                 provider=self._provider, registry=child_registry, store=self._store,
-                policy=DefaultPolicy(), workspace=self._workspace,
+                policy=self._policy if definition is not None else DefaultPolicy(), workspace=self._workspace,
+                approval_handler=self._approval_handler if definition is not None else None,
                 provider_name=self._provider_name, model=self._model,
                 budget=self._budget, artifact_store=self._artifact_store,
                 project_instructions=ProjectInstructions(self._workspace),
@@ -1299,6 +1321,10 @@ class AgentRuntime:
                      if isinstance(paused_id, str) else AgentRuntime(**common))
             self._child_sessions[key] = child
         else:
+            child.set_model(provider=self._provider, provider_name=self._provider_name, model=self._model)
+            child._registry = child_registry
+            child._base_system_prompt = child_prompt
+            child._refresh_system_prompt()
             child._shared_budget = self._budget_ledger
             child._budget_ledger = self._budget_ledger
         if self._artifact_store is not None:

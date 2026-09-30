@@ -90,3 +90,30 @@
 .usage-grid div { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-main); }
 .usage-grid small { color: var(--text-3); font-size: .72rem; }
 .usage-grid strong { font-size: 1.05rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.session-usage { padding-bottom: 16px; }
+.usage-composition, .usage-cache-track { display: flex; height: 6px; background: var(--bg-active); overflow: hidden; border-radius: 99px; margin: 10px 0; }
+.usage-input { background: var(--accent); }
+.usage-output { background: var(--success); }
+.usage-cached { background: var(--text-3); }
+.usage-unknown { background: var(--bg-active); height: 2px; }
+.usage-cache-track > span { background: var(--text-3); }
+.usage-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0; font-size: .75rem; color: var(--text-3); }
+.usage-facts b { color: var(--text-2); font-weight: 550; }
+.usage-chart-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: space-between; margin: 18px 0 10px; font-size: .74rem; color: var(--text-3); }
+.usage-chart-heading strong { color: var(--text-2); font-weight: 550; }
+.usage-dot { display: inline-block; width: 7px; height: 7px; margin-left: 5px; border-radius: 2px; }
+.usage-bars { display: flex; gap: 4px; height: 96px; }
+.usage-bar-column { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+.usage-bar { height: 76px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; border-radius: 3px; }
+.usage-bar span { display: block; flex: none; min-height: 0; }
+.usage-bar-column small { font-size: 10px; text-align: center; color: var(--text-3); overflow: hidden; }
+.usage-speed-chart { display: block; width: 100%; height: 72px; overflow: visible; }
+.usage-speed-chart line { stroke: var(--border); }
+.usage-speed-chart polyline { stroke: var(--accent); stroke-width: 2; }
+.usage-speed-chart circle { fill: var(--accent); }
+.usage-note { color: var(--text-3); font-size: .72rem; line-height: 1.6; margin-top: 12px; }
+.usage-table { margin-top: 12px; font-size: .72rem; color: var(--text-2); }
+.usage-table summary { cursor: pointer; }
+.usage-table > div { overflow: auto; max-height: 240px; margin-top: 8px; }
+.usage-table table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.usage-table th, .usage-table td { padding: 6px 4px; text-align: right; border-bottom: 1px solid var(--border-subtle); }

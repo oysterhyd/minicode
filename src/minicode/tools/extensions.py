@@ -91,9 +91,11 @@ class DelegateTool(BaseTool):
     )
     args_model = DelegateArgs
 
-    def __init__(self, agent_kinds: list[str] | None = None):
-        self.allowed_kinds = {"explore", "review", *(agent_kinds or [])}
-        self.description += " Available kinds: " + ", ".join(sorted(self.allowed_kinds))
+    def __init__(self, agent_kinds: list[str] | None = None, *, include_builtins: bool = True, descriptions: dict[str, str] | None = None):
+        self.allowed_kinds = set(agent_kinds or []) | ({"explore", "review"} if include_builtins else set())
+        self.description = "Delegate a bounded task to an assistant with its configured tools and the parent permission policy. Available kinds: " + ", ".join(sorted(self.allowed_kinds))
+        if descriptions:
+            self.description += "\n" + "\n".join(f"{name}: {description}" for name, description in descriptions.items())
 
     async def execute(self, args: DelegateArgs, ctx: ToolContext) -> ToolOutcome:
         if args.kind not in self.allowed_kinds:

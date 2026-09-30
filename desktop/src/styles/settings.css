@@ -68,3 +68,24 @@
 .shortcut-grid h3 { margin: 10px 0 6px; color: var(--text-3); font-size: .76rem; font-weight: 600; }
 .shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; border-bottom: 1px solid var(--border-subtle); font-size: .85rem; }
 .shortcut-keys { display: flex; gap: 3px; flex: none; }
+.service-fields { margin: 8px 0 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.field-wide { grid-column: 1 / -1; }
+.service-model-columns { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 14px; margin: 12px 0; }
+.service-model-columns > div { min-width: 0; padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-panel); }
+.service-model-columns h4, .settings-section h4 { margin: 6px 0 12px; font-size: .85rem; }
+.discovered-models { max-height: 350px; overflow: auto; margin-top: 8px; }
+.model-check { display: flex; align-items: center; gap: 8px; padding: 7px 0; color: var(--text-2); font-size: .8rem; }
+.model-check code { overflow-wrap: anywhere; }
+.model-check input { flex: none; accent-color: var(--accent); }
+.tool-chip.model-check { padding: 4px 9px; }
+.configured-model { margin-bottom: 8px; padding: 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.configured-model summary { display: flex; justify-content: space-between; gap: 8px; cursor: pointer; font-size: .8rem; }
+.configured-model summary code { overflow-wrap: anywhere; }
+.configured-model summary span { flex: none; color: var(--text-3); }
+.configured-model .field-grid { margin-top: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.agent-instructions { margin-top: 16px; }
+.agent-instructions textarea { font-family: var(--font-mono); resize: vertical; min-height: 180px; }
+.agent-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 5px; max-width: 165px; }
+.agent-row, .list-row:has(.inline-confirm) { position: relative; flex-wrap: wrap; }
+.inline-confirm { display: flex; width: 100%; align-items: center; justify-content: flex-end; gap: 8px; color: var(--text-2); font-size: .8rem; }
+@media (max-width: 850px) { .service-model-columns { grid-template-columns: minmax(0, 1fr); } .settings-nav { width: 160px; } .settings-content { padding-inline: 18px; } }

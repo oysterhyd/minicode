@@ -41,6 +41,7 @@ class AnthropicProvider:
         *,
         model: str,
         api_key: str | None = None,
+        base_url: str | None = None,
         client: Any | None = None,
         max_tokens: int = 4096,
     ) -> None:
@@ -52,7 +53,7 @@ class AnthropicProvider:
             # api_key=None lets the SDK resolve credentials from the environment.
             import anthropic
 
-            self._client: Any = anthropic.AsyncAnthropic(api_key=api_key)
+            self._client: Any = anthropic.AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
         else:
             self._client = client  # injected (tests / custom transports)
 

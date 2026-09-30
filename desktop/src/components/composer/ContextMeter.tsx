@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { compactNumber } from '../../lib/format'
+import type { Statistics, Usage } from '../../types'
+import { tpsLabel } from '../work/SessionUsage'
 
 type Breakdown = { system: number; tools: number; messages: number }
 const parts: Array<{ key: keyof Breakdown; label: string }> = [
@@ -8,8 +10,8 @@ const parts: Array<{ key: keyof Breakdown; label: string }> = [
 ]
 const approximate = (value: number) => value > 0 ? `~${compactNumber(value)}` : '0'
 
-export function ContextMeter({ used, windowSize, breakdown, usage, onOpen, onCompact }: {
-  used: number; windowSize: number; breakdown: Breakdown; usage: { input_tokens: number; output_tokens: number } | null
+export function ContextMeter({ used, windowSize, breakdown, usage, statistics, onOpen, onCompact }: {
+  used: number; windowSize: number; breakdown: Breakdown; usage: Usage | null; statistics?: Statistics
   onOpen: () => void; onCompact?: () => void
 }) {
   const [open, setOpen] = useState(false)
@@ -18,6 +20,7 @@ export function ContextMeter({ used, windowSize, breakdown, usage, onOpen, onCom
   const ratio = Math.min(1, used / Math.max(1, windowSize))
   const percent = Math.round(ratio * 100)
   const level = percent >= 85 ? 'danger' : percent >= 65 ? 'warning' : 'normal'
+  const hit = usage && usage.available !== false && usage.input_tokens > 0 ? Math.min(100, 100 * (usage.cache_read_tokens || 0) / usage.input_tokens) : null
   useEffect(() => {
     if (!open) return
     const onPointerDown = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
@@ -45,8 +48,8 @@ export function ContextMeter({ used, windowSize, breakdown, usage, onOpen, onCom
       <div className="context-detail-list">{parts.map(part => <div key={part.key} className="context-detail-row">
         <span className={`context-key context-part-${part.key}`} /><span>{part.label}</span><strong>{approximate(breakdown[part.key])}</strong>
       </div>)}</div>
-      {usage && <div className="context-usage"><span>本会话累计</span><strong>↑ {compactNumber(usage.input_tokens)}　↓ {compactNumber(usage.output_tokens)}</strong></div>}
-      <p className="context-detail-note">按当前提示词估算，实际用量可能不同。{percent >= 65 ? '接近上限时会自动压缩较早的内容。' : ''}</p>
+      {usage && <div className="context-usage"><span>本会话累计</span><strong>{usage.available === false ? '未报告' : `↑ ${compactNumber(usage.input_tokens)}　↓ ${compactNumber(usage.output_tokens)}`}</strong></div>}
+      <div className="context-performance"><div><small>缓存命中率</small><strong>{hit == null ? '未报告' : `${hit.toFixed(1)}%`}</strong></div><div><small>最近输出 TPS</small><strong>{tpsLabel(statistics?.lastTps)}</strong></div><div><small>缓存读取 / 写入</small><strong>{usage?.available === false || !usage ? '未报告' : `${compactNumber(usage.cache_read_tokens || 0)} / ${compactNumber(usage.cache_write_tokens || 0)}`}</strong></div><div><small>会话平均 TPS</small><strong>{tpsLabel(statistics?.tps)}</strong></div></div>
       {onCompact && percent >= 40 && <button className="button button-ghost button-small context-compact" onClick={() => { setOpen(false); onCompact() }}>立即压缩上下文</button>}
     </motion.div>}</AnimatePresence>
   </div>

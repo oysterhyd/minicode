@@ -22,6 +22,7 @@ class ToolRegistry:
         self._mcp: list[McpConnector] = []
         self._mcp_tool_names: set[str] = set()
         self.plugin_catalog: PluginCatalog | None = None
+        self.agent_definitions: dict[str, dict] = {}
         self.discovery_errors: list[str] = []
 
     def register(self, tool: BaseTool) -> None:
@@ -33,6 +34,16 @@ class ToolRegistry:
 
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
+
+    def set_agents(self, definitions: list[dict], plugin_names: list[str]) -> None:
+        from minicode.tools.extensions import DelegateTool
+        self.agent_definitions = {a["name"]: a for a in definitions}
+        self._tools["delegate"] = DelegateTool(
+            [a["name"] for a in definitions if a["enabled"]] + plugin_names,
+            include_builtins=False,
+            descriptions={a["name"]: a["description"] for a in definitions if a["enabled"]},
+        )
+        self._specs_cache = None
 
     def specs(self) -> list[ToolSpec]:
         if self._specs_cache is None:

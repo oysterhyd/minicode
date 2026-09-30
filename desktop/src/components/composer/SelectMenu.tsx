@@ -31,7 +31,7 @@ export function SelectMenu({ label, icon, value, options, secondary, open, onOpe
     buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (forward ? 1 : -1) + buttons.length) % buttons.length]?.focus()
   }}>
     <button ref={trigger} className={`composer-chip ${open ? 'is-open' : ''}`} aria-label={label} aria-haspopup="menu" aria-expanded={open} data-tip={open ? undefined : tip || label} onClick={() => onOpen(!open)}>
-      {icon}<span className="truncate">{current?.label || value}</span>
+      {icon}<span className="truncate">{current?.label || value || label}</span>
       {secondary && secondary.value !== 'off' && <span className="chip-sub">{secondary.options.find(option => option.value === secondary.value)?.label}</span>}
       <ChevronDown size={12} className={`chip-chevron ${open ? 'is-open' : ''}`} />
     </button>

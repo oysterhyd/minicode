@@ -7,7 +7,9 @@ import json
 import os
 import shutil
 import sys
+import httpx
 from pathlib import Path
+from configuration import DesktopConfiguration
 
 from minicode.cli import _attach_compactor
 from minicode.context.extensions import ProjectInstructions, SkillCatalog
@@ -17,9 +19,10 @@ from minicode.goals import AcceptanceSpec, EvidenceLedger, GoalChecker, Protecte
 from minicode.plugins import PluginCatalog
 from minicode.providers.anthropic_provider import AnthropicProvider
 from minicode.providers.commandcode import CommandCodeProvider
-from minicode.providers.fake import FakeProvider, FakeProviderOptions, FakeTurn
+from minicode.providers.fake import FakeProvider
 from minicode.providers.zcode_config import discover_commandcode
 from minicode.runtime.loop import AgentRuntime
+from minicode.runtime.prompt import build_system_prompt
 from minicode.security.policy import ModePolicy, PermissionMode, parse_permission_mode
 from minicode.slash import SLASH_COMMANDS, format_command_lines
 from minicode.storage import SqliteStore
@@ -35,7 +38,8 @@ def emit(message: dict) -> None:
 
 def provider_for(model: str, effort: str = "off"):
     if model == "fake":
-        return FakeProvider(FakeProviderOptions(turns=[FakeTurn(text="离线演示已连接。请选择已配置的模型来执行真实编码任务。")]))
+        # Keep old demo transcripts readable. This adapter is never listed in settings.
+        return FakeProvider()
     info = lookup_model(model)
     if info.provider == "anthropic":
         return AnthropicProvider(model=model, max_tokens=info.max_output_tokens or 4096)
@@ -80,11 +84,76 @@ class Bridge:
         self.always_allow: set[str] = set()
         self.approval_seq = 0
         self.policy = ModePolicy()
-        self.model = DEFAULT_MODEL if discover_commandcode() else "claude-sonnet-4-5" if os.environ.get("ANTHROPIC_API_KEY") else "fake"
+        self.configuration = DesktopConfiguration()
+        configured = self.configuration.models()
+        self.model = self.configuration.read().get("defaultModel") or next((m["id"] for m in configured if m["available"]), configured[0]["id"] if configured else "")
         self.effort = "off"
         self.budget = Budget()
         self.acceptance: Path | None = None
         self.registry = None
+        self.pending_model = False
+        self.registry_dirty = False
+
+    def make_provider(self, model):
+        configured = self.configuration.find_model(model)
+        if configured is None:
+            return provider_for(model, self.effort)
+        service, info = configured
+        if not service["enabled"]:
+            raise ValueError("请先启用该 AI 服务")
+        # Original services can continue using environment credentials.
+        if model in MODEL_CATALOG and service.get("builtin") and not service.get("apiKey") and service["apiStyle"] == ("anthropic" if service["id"] == "anthropic" else "openai"):
+            provider = provider_for(model, self.effort)
+            if hasattr(provider, "base_url"):
+                provider.base_url = service["baseUrl"]
+            elif isinstance(provider, AnthropicProvider):
+                provider._client.base_url = service["baseUrl"]
+            provider.max_tokens = info["maxOutputTokens"]
+            if hasattr(provider, "reasoning_effort") and not info["supportsEffort"]:
+                provider.reasoning_effort = None
+        else:
+            url, key = self.configuration.credentials(service)
+            if not service["enabled"] or not key:
+                raise ValueError("请启用服务并配置 API 密钥")
+            if service["apiStyle"] == "anthropic":
+                provider = AnthropicProvider(model=info["modelId"], api_key=key, base_url=url, max_tokens=info["maxOutputTokens"])
+            else:
+                provider = CommandCodeProvider(model=info["modelId"], base_url=url, api_key=key, max_tokens=info["maxOutputTokens"],
+                                               reasoning_effort=self.effort if info["supportsEffort"] and self.effort != "off" else None)
+        provider.configuration_id = model
+        provider.context_window = info["contextWindow"]
+        return provider
+
+    async def apply_pending_model(self):
+        if not self.pending_model:
+            return
+        provider = self.make_provider(self.model)
+        previous = self.runtime.provider
+        self.runtime.set_model(provider=provider, provider_name=provider.name, model=self.model)
+        self.pending_model = False
+        await self.discard_provider(previous)
+
+    async def before_round(self):
+        await self.apply_pending_model()
+        self.registry.set_agents(self.configuration.agents(), self.registry.plugin_catalog.agent_names())
+        self.runtime._refresh_system_prompt()
+
+    def statistics(self):
+        events = self.store.get_events(self.runtime.session_id) if self.runtime and self.runtime.session_id else []
+        samples = []
+        for event in events:
+            if event.type.value != "assistant_message":
+                continue
+            usage = event.data.get("usage", {})
+            seconds = event.data.get("request_seconds")
+            samples.append({"round": len(samples) + 1, "input": usage.get("input_tokens", 0), "output": usage.get("output_tokens", 0),
+                            "cached": usage.get("cache_read_tokens", 0), "available": usage.get("available", True),
+                            "seconds": seconds, "tps": usage.get("output_tokens", 0) / seconds if seconds and usage.get("available", True) else None})
+        measured = [s for s in samples if s["seconds"] and s["available"]]
+        seconds = sum(s["seconds"] for s in measured)
+        return {"toolCalls": sum(e.type.value == "tool_call_start" for e in events), "requests": len(samples),
+                "modelSeconds": seconds, "tps": sum(s["output"] for s in measured) / seconds if seconds else None,
+                "lastTps": samples[-1]["tps"] if samples else None, "samples": samples[-32:]}
 
     def emit(self, message: dict) -> None:
         emit(message | {"clientKey": self.event_key or self.client_key})
@@ -124,20 +193,25 @@ class Bridge:
         if close is not None:
             await close()
 
-    async def create_runtime(self, workspace: Path, model: str, session_id: str | None):
-        await self.discard_runtime()
-        provider = provider_for(model, self.effort)
+    def build_registry(self, workspace: Path):
         plugins = PluginCatalog(workspace)
         skills = SkillCatalog(workspace, plugin_roots=plugins.skill_roots())
         registry = default_registry(skills=skills, delegation=True, tasks=True, memory=True,
                                     agent_kinds=plugins.agent_names())
         registry.plugin_catalog = plugins
+        registry.set_agents(self.configuration.agents(), plugins.agent_names())
         for server in plugins.servers():
             registry.add_mcp_server(server)
+        return registry, skills
+
+    async def create_runtime(self, workspace: Path, model: str, session_id: str | None):
+        await self.discard_runtime()
+        provider = self.make_provider(model)
+        registry, skills = self.build_registry(workspace)
         artifacts = ArtifactStore(self.store)
         goal_checker = None
         evidence_ledger = None
-        if self.acceptance is not None:
+        if self.acceptance is not None and session_id is None:
             spec = AcceptanceSpec.from_yaml(self.acceptance)
             protected_paths = [item.path for item in spec.items if item.type == "protected"]
             goal_checker = GoalChecker(spec, workspace, protected_snapshot=ProtectedSnapshot(workspace, protected_paths))
@@ -174,7 +248,7 @@ class Bridge:
             store=self.store,
             policy=self.policy,
             workspace=workspace,
-            provider_name="fake" if model == "fake" else lookup_model(model).provider,
+            provider_name=provider.name,
             model=model,
             budget=self.budget,
             approval_handler=on_approval,
@@ -194,6 +268,9 @@ class Bridge:
         _attach_compactor(self.runtime, artifacts)
         self.model = model
         self.registry = registry
+        self.runtime.before_round = self.before_round
+        self.registry_dirty = False
+        self.pending_model = False
 
     async def run_prompt(self, text: str | None):
         message = None
@@ -258,8 +335,10 @@ class Bridge:
     def state(self):
         runtime = self.runtime
         breakdown = runtime.context_token_breakdown() if runtime else {"system": 0, "tools": 0, "messages": 0}
-        return {"model": runtime.model if runtime else self.model,
-                "effort": getattr(runtime.provider, "reasoning_effort", None) or "off" if runtime else self.effort,
+        return {"model": self.model,
+                "activeModel": runtime.model if runtime else self.model,
+                "pendingSettings": self.pending_model or self.registry_dirty,
+                "effort": self.effort,
                 "permissionMode": self.policy.mode.value,
                 "sessionId": runtime.session_id if runtime else None,
                 "taskPending": runtime.task_pending if runtime else False,
@@ -268,7 +347,8 @@ class Bridge:
                 "contextBreakdown": breakdown,
                 "contextWindow": runtime.context_window if runtime else lookup_model(self.model).context_window,
                 "usage": runtime.usage.model_dump() if runtime else None,
-                "budget": (runtime._budget if runtime else self.budget).model_dump(),
+                "statistics": self.statistics(),
+                "budget": self.budget.model_dump(),
                 "acceptance": str(self.acceptance) if self.acceptance else "",
                 "alwaysAllow": sorted(self.always_allow)}
 
@@ -283,7 +363,8 @@ class Bridge:
                              "skills": bool(p.skill_root), "agents": bool(p.agent_root),
                              "servers": [s.name for s in p.servers]} for p in plugins.plugins.values()],
                 "mcp": [{"name": s.name, "plugin": s.plugin} for s in plugins.servers()],
-                "agents": ["explore", "review", *plugins.agent_names()]}
+                "agents": [a["name"] for a in self.configuration.agents() if a["enabled"]] + plugins.agent_names(),
+                "agentDefinitions": self.configuration.agents()}
 
     async def ensure_runtime(self, workspace: Path, session_id: str | None, model: str | None = None):
         chosen = model or (self.store.get_session(session_id).model if session_id else self.model)
@@ -292,28 +373,45 @@ class Bridge:
                 # "Always allow" belongs to one conversation, not to this Bridge.
                 self.always_allow.clear()
             await self.create_runtime(workspace, chosen, session_id)
+        elif self.registry_dirty and not self.busy():
+            registry, skills = self.build_registry(workspace)
+            await self.registry.aclose()
+            self.registry = self.runtime._registry = registry
+            self.runtime._skills = skills
+            for name in list(self.runtime._active_skills):
+                if name not in skills.skills:
+                    self.runtime.deactivate_skill(name)
+            self.runtime._base_system_prompt = build_system_prompt(str(workspace), registry.names())
+            self.runtime._refresh_system_prompt()
+            self.registry_dirty = False
 
     async def change_model(self, model: str):
-        if self.busy():
-            raise ValueError("当前回合结束后才能切换模型")
-        if model != "fake" and model not in MODEL_CATALOG:
+        if model != "fake" and model not in MODEL_CATALOG and self.configuration.find_model(model) is None:
             raise ValueError(f"未知模型：{model}")
-        provider = provider_for(model, self.effort)
+        provider = self.make_provider(model)
+        self.model = model
+        if self.busy():
+            await self.discard_provider(provider)
+            self.pending_model = True
+            return self.state()
         if self.runtime:
             previous = self.runtime.provider
             self.runtime.set_model(provider=provider,
-                                   provider_name="fake" if model == "fake" else lookup_model(model).provider,
+                                   provider_name=provider.name,
                                    model=model)
             close = getattr(previous, "aclose", None)
             if close is not None:
                 await close()
+        else:
+            await self.discard_provider(provider)
         self.model = model
+        self.pending_model = False
         return self.state()
 
     async def execute_slash(self, text: str, workspace: Path | None, session_id: str | None):
         verb, _, raw_arg = text.partition(" ")
         verb, arg = verb.lower(), raw_arg.strip()
-        if self.busy() and verb not in {"/help", "/?"}:
+        if self.busy() and verb not in {"/help", "/?", "/model", "/effort", "/permissions", "/skill"}:
             raise ValueError("当前回合结束后才能执行命令")
         if verb in {"/help", "/?"}:
             return {"message": "可用命令：\n" + "\n".join(format_command_lines())}
@@ -347,8 +445,7 @@ class Bridge:
                 raise ValueError(f"可选档位：{', '.join(EFFORT_LEVELS)}")
             if not hasattr(self.runtime.provider, "reasoning_effort"):
                 raise ValueError("当前模型不支持 reasoning effort")
-            self.effort = level
-            self.runtime.provider.reasoning_effort = None if level == "off" else level
+            await self.handle("setEffort", {"effort": level})
             return {"state": self.state(), "message": f"Reasoning effort: {level}"}
         if verb == "/permissions":
             if not arg:
@@ -369,6 +466,7 @@ class Bridge:
             if self.busy():
                 raise ValueError("当前任务仍在运行")
             self.event_key = self.client_key
+            self.runtime._budget = self.budget
             self.run_task = asyncio.create_task(self.run_prompt(None))
             return {"action": "continue", "state": self.state()}
         if verb == "/compact":
@@ -385,13 +483,69 @@ class Bridge:
         raise ValueError(f"未知命令：{verb}")
 
     async def handle(self, method: str, params: dict):
+        if method == "getConfiguration":
+            return self.configuration.public()
+        if method == "listModels":
+            return self.configuration.models()
+        if method == "saveService":
+            return self.configuration.save_service(params["service"])
+        if method == "deleteService":
+            data = self.configuration.read()
+            data["services"] = [s for s in data["services"] if s["id"] != params["id"]]
+            if not any(self.configuration.model_key(s, m) == data.get("defaultModel") for s in data["services"] for m in s["models"]):
+                data["defaultModel"] = ""
+            self.configuration.write(data)
+            return self.configuration.public()
+        if method == "setDefaultModel":
+            if params["model"] and not any(m["id"] == params["model"] and m["available"] for m in self.configuration.models()):
+                raise ValueError("请先配置并启用该模型的服务")
+            data = self.configuration.read()
+            data["defaultModel"] = params["model"]
+            self.configuration.write(data)
+            return self.configuration.public()
+        if method in {"fetchServiceModels", "testServiceConnection"}:
+            draft = params["service"]
+            existing = next((s for s in self.configuration.read()["services"] if s["id"] == draft.get("id")), {})
+            service = {**existing, **draft, "apiKey": draft.get("apiKey") or existing.get("apiKey", "")}
+            url, key = self.configuration.credentials(service)
+            if not key:
+                raise ValueError("请填写 API 密钥")
+            from urllib.parse import urlparse
+            if urlparse(url).scheme not in {"http", "https"}:
+                raise ValueError("接口地址必须是 HTTP(S) URL")
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01"} if service["apiStyle"] == "anthropic" else {"Authorization": f"Bearer {key}"}
+            endpoint = url.rstrip("/") + ("/v1/models" if service["apiStyle"] == "anthropic" and not url.rstrip("/").endswith("/v1") else "/models")
+            async with httpx.AsyncClient(timeout=20) as client:
+                try:
+                    response = await client.get(endpoint, headers=headers)
+                    response.raise_for_status()
+                    payload = response.json()
+                except (httpx.HTTPError, ValueError) as exc:
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    raise ValueError(f"连接失败（HTTP {status}）" if status else "连接失败，请检查地址、网络和接口格式") from None
+            models = [dict(modelId=m["id"], name=m.get("display_name") or m["id"], contextWindow=200000, maxOutputTokens=8192, supportsEffort=False)
+                      for m in payload.get("data", []) if isinstance(m, dict) and isinstance(m.get("id"), str)]
+            return {"models": models, "message": f"已连接，发现 {len(models)} 个模型"}
+        if method == "saveAgent":
+            return self.configuration.save_agent(params["agent"])
+        if method == "setAgentEnabled":
+            data = self.configuration.read()
+            name = params["name"]
+            if name not in {a["name"] for a in self.configuration.agents()}:
+                raise ValueError("找不到子助手")
+            disabled = set(data.get("disabledAgents", []))
+            disabled.discard(name) if params["enabled"] else disabled.add(name)
+            data["disabledAgents"] = sorted(disabled)
+            self.configuration.write(data)
+            return self.configuration.agents()
+        if method == "deleteAgent":
+            data = self.configuration.read()
+            data["agents"] = [a for a in data["agents"] if a["name"] != params["name"]]
+            data["disabledAgents"] = [n for n in data.get("disabledAgents", []) if n != params["name"]]
+            self.configuration.write(data)
+            return self.configuration.agents()
         if method == "initialize":
-            commandcode = discover_commandcode() is not None
-            anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
-            return {"sessions": self.sessions(), "models": [
-                {"id": info.name, "provider": info.provider, "supportsEffort": info.supports_effort,
-                 "available": commandcode if info.provider == "commandcode" else anthropic}
-                for info in MODEL_CATALOG.values()] + [{"id": "fake", "provider": "offline", "available": True, "supportsEffort": False}],
+            return {"sessions": self.sessions(), "models": self.configuration.models(),
                 "defaultModel": self.model,
                 "commands": [{"name": cmd.name, "usage": cmd.usage, "summary": cmd.summary} for cmd in SLASH_COMMANDS],
                 "state": self.state()}
@@ -446,55 +600,44 @@ class Bridge:
         if method == "setModel":
             return await self.change_model(params["model"])
         if method == "setEffort":
-            if self.busy():
-                raise ValueError("当前回合结束后才能调整推理预算")
             level = parse_effort(params["effort"])
             if level is None:
                 raise ValueError("无效 reasoning effort")
-            if self.runtime:
+            if self.runtime and not self.busy():
                 if not hasattr(self.runtime.provider, "reasoning_effort"):
                     raise ValueError("当前模型不支持 reasoning effort")
                 self.runtime.provider.reasoning_effort = None if level == "off" else level
             self.effort = level
+            if self.busy():
+                self.pending_model = True
             return self.state()
         if method == "setPermissionMode":
-            if self.busy():
-                raise ValueError("当前回合结束后才能切换权限模式")
             mode = parse_permission_mode(params["mode"])
             if mode is None:
                 raise ValueError("无效权限模式")
             self.policy.set_mode(mode)
             return self.state()
         if method == "setBudget":
-            if self.busy():
-                raise ValueError("当前回合结束后才能调整预算")
             self.budget = Budget(max_rounds=int(params["max_rounds"]),
                                  max_total_tokens=int(params["max_total_tokens"]),
                                  max_seconds=float(params["max_seconds"]))
-            if self.runtime:
+            if self.runtime and not self.busy():
                 self.runtime._budget = self.budget
             return self.state()
         if method == "setAcceptance":
-            if self.busy():
-                raise ValueError("当前回合结束后才能调整验收文件")
-            if self.runtime and self.runtime.session_id:
-                raise ValueError("请先使用 /new 开始新会话，再设置验收文件")
             chosen = params.get("path", "").strip()
             path = Path(chosen).resolve() if chosen else None
             if path:
                 AcceptanceSpec.from_yaml(path)
             self.acceptance = path
-            await self.discard_runtime()
+            if not self.busy() and not (self.runtime and self.runtime.session_id):
+                await self.discard_runtime()
             return self.state()
         if method == "setSkillActive":
-            if self.busy():
-                raise ValueError("当前回合结束后才能管理 Skills")
             workspace = Path(params["workspace"]).resolve()
             await self.ensure_runtime(workspace, params.get("sessionId"))
             return self.runtime.activate_skill(params["name"]).split("\n", 1)[0] if params["active"] else self.runtime.deactivate_skill(params["name"])
         if method == "setPluginEnabled":
-            if self.busy():
-                raise ValueError("当前回合结束后才能修改插件")
             workspace = Path(params["workspace"]).resolve()
             catalog = PluginCatalog(workspace, check_lock=False)
             plugin = catalog.plugins[params["name"]]
@@ -502,16 +645,12 @@ class Bridge:
             manifest["enabled"] = bool(params["enabled"])
             plugin.path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             PluginCatalog(workspace, check_lock=False).write_lock()
-            await self.discard_runtime()
+            self.registry_dirty = True
             return self.capabilities(workspace)
         if method == "lockPlugins":
-            if self.busy():
-                raise ValueError("当前回合结束后才能更新插件锁")
             workspace = Path(params["workspace"]).resolve()
             return str(PluginCatalog(workspace, check_lock=False).write_lock())
         if method == "refreshMcp":
-            if self.busy():
-                raise ValueError("当前回合结束后才能重新发现 MCP")
             workspace = Path(params["workspace"]).resolve()
             catalog = PluginCatalog(workspace)
             registry = default_registry()
@@ -544,9 +683,12 @@ class Bridge:
                 if saved is None or Path(saved.workspace).resolve() != workspace:
                     raise ValueError("会话不属于当前工作区")
             model = params.get("model") or self.model
+            if model != "fake" and not any(m["id"] == model and m["available"] for m in self.configuration.models()):
+                raise ValueError("请在设置中配置、启用并选择一个可用的 AI 模型")
             await self.ensure_runtime(workspace, session_id, model)
             if self.runtime.model != model:
                 await self.change_model(model)
+            self.runtime._budget = self.budget
             self.event_key = self.client_key
             self.run_task = asyncio.create_task(self.run_prompt(text))
             await asyncio.sleep(0)
@@ -676,9 +818,10 @@ class BridgeRouter:
             context = Bridge(self.store)
             source = self.clients.get(params.get("sourceClientKey"))
             if source is not None:
-                context.model = source.model
+                context.model = context.configuration.read().get("defaultModel") or (source.model if any(m["id"] == source.model and m["available"] for m in context.configuration.models()) else context.model)
                 context.effort = source.effort
                 context.budget = source.budget.model_copy()
+                context.acceptance = source.acceptance
                 context.policy.set_mode(source.policy.mode)
         # Remember which Bridge serves this UI view key. This must also run when
         # the Bridge was found through its session id: switching views is
@@ -689,15 +832,20 @@ class BridgeRouter:
         # clientKey) cannot retag its event stream into another view.
         if not context.busy():
             context.client_key = client_key
+        result = await context.handle(method, params)
         if method in {"setPluginEnabled", "lockPlugins"}:
             root = Path(params["workspace"]).resolve()
-            # Scan both maps: a Bridge can be reachable only through `sessions`
-            # once its client key has been rebound.
-            contexts = set(self.clients.values()) | set(self.sessions.values())
-            if any(item.runtime and item.runtime.workspace == root and item.busy()
-                   for item in contexts):
-                raise ValueError("该工作区的任务结束后才能修改插件")
-        result = await context.handle(method, params)
+            for item in set(self.clients.values()) | set(self.sessions.values()):
+                if item.runtime and item.runtime.workspace == root:
+                    item.registry_dirty = True
+        if method in {"saveService", "deleteService"}:
+            changed_id = params.get("id") or params.get("service", {}).get("id")
+            for item in set(self.clients.values()) | set(self.sessions.values()):
+                selected = item.configuration.find_model(item.model)
+                if item.runtime is None and not any(m["id"] == item.model and m["available"] for m in item.configuration.models()):
+                    item.model = item.configuration.read().get("defaultModel") or next((m["id"] for m in item.configuration.models() if m["available"]), item.model)
+                if selected is not None and selected[0]["id"] == changed_id and selected[0]["enabled"] and item.configuration.credentials(selected[0])[1] and item.runtime:
+                    item.pending_model = True
         current_session = context.runtime.session_id if context.runtime else None
         for old_session, owner in list(self.sessions.items()):
             if owner is context and old_session != current_session:

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type SetStateAction } from 'react'
 import type { AgentEvent, AgentState, Capabilities, Change, Command, DesktopEvent, FeedItem, Model, Session, SessionDetail, SessionTask } from '../types'
 import { historyItems } from '../types'
 
-export const initialState: AgentState = { model: 'fake', effort: 'off', permissionMode: 'default', sessionId: null,
+export const initialState: AgentState = { model: '', effort: 'off', permissionMode: 'default', sessionId: null,
   taskPending: false, rounds: 0, contextTokens: 0, contextWindow: 200000, contextBreakdown: { system: 0, tools: 0, messages: 0 }, usage: null,
   budget: { max_rounds: 0, max_total_tokens: 0, max_seconds: 0 }, acceptance: '', alwaysAllow: [] }
 export type View = {
@@ -11,7 +11,7 @@ export type View = {
   busy: boolean; loading: boolean; loaded: boolean; error: string; startedAt: number | null; unread: boolean;
 }
 const emptyView = (workspace: string | null = null, state = initialState): View => ({ sessionId: null, workspace,
-  agentState: { ...state, sessionId: null, usage: null, rounds: 0, contextTokens: 0, contextBreakdown: { system: 0, tools: 0, messages: 0 }, taskPending: false, acceptance: '', alwaysAllow: [] },
+  agentState: { ...state, sessionId: null, usage: null, statistics: undefined, rounds: 0, contextTokens: 0, contextBreakdown: { system: 0, tools: 0, messages: 0 }, taskPending: false, acceptance: '', alwaysAllow: [] },
   items: [], trace: [], tasks: [], changes: [], files: [], capabilities: null, draft: '', queue: [], busy: false,
   loading: false, loaded: false, error: '', startedAt: null, unread: false })
 
@@ -84,6 +84,13 @@ export function useConversations(onSignal?: (signal: Signal) => void) {
       refreshSessions(), refreshProgress(key).catch(error => fail(key, error)),
       requestFor<string[]>(key, 'listFiles').then(files => update(key, { files })).catch(error => fail(key, error)),
     ])
+  }
+  async function refreshConfiguration() {
+    const key = activeRef.current
+    setModels(await requestFor<Model[]>(key, 'listModels'))
+    await loadCapabilities(key)
+    const agentState = await requestFor<AgentState>(key, 'getState')
+    update(key, { agentState })
   }
   async function loadCapabilities(key = activeRef.current) {
     if (!viewsRef.current[key]?.workspace) return
@@ -179,6 +186,9 @@ export function useConversations(onSignal?: (signal: Signal) => void) {
       flush(key)
       setItems(items => [...items.filter(item => item.kind !== 'thinking'), { id: `thinking-${seq}`, kind: 'thinking', text: '正在思考', startedAt: eventTime(timestamp) }])
       update(key, view => ({ ...view, agentState: { ...view.agentState, rounds: Number(data.round || view.agentState.rounds) } }))
+    }
+    if (type === 'assistant_message' || type === 'subagent_result' || type === 'context_compacted') {
+      void requestFor<AgentState>(key, 'getState').then(agentState => update(key, { agentState })).catch(error => fail(key, error))
     }
     if (type === 'assistant_message') {
       flush(key)
@@ -322,7 +332,7 @@ export function useConversations(onSignal?: (signal: Signal) => void) {
 
   const view = views[activeKey]
   return { ...view, activeKey, views, sessions, models, commands, openSession, newSession, sendNow,
-    renameSession, pinSession, deleteSession, activateKey, refreshSessions,
+    renameSession, pinSession, deleteSession, activateKey, refreshSessions, refreshConfiguration,
     request: <T = unknown>(method: string, params: Record<string, unknown> = {}) => requestFor<T>(activeKey, method, params),
     refresh: () => refresh(activeKey), loadCapabilities: () => loadCapabilities(activeKey),
     setAgentState: field(activeKey, 'agentState'), setDraft: field(activeKey, 'draft'), setItems: field(activeKey, 'items'),

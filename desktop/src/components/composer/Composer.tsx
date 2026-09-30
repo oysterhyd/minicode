@@ -145,13 +145,13 @@ export function Composer(props: Props) {
           setDraft(next); setCaret(next.length); setDismissed(false); setActive(0); textarea.current?.focus()
         }}><AtSign size={16} /></button>
         <SelectMenu label="切换模型" tip="模型与思考强度" value={props.state.model} icon={<Cpu size={13} />} open={menu === 'model'} onOpen={open => setMenu(open ? 'model' : null)} onSelect={props.onModel}
-          options={props.models.map(option => ({ value: option.id, label: option.id === 'fake' ? '离线演示' : option.id, detail: option.available ? option.provider : '尚未配置', disabled: !option.available && option.id !== props.state.model }))}
+          options={props.models.map(option => ({ value: option.id, label: option.name || option.id, detail: option.available ? option.provider : '尚未配置', disabled: !option.available && option.id !== props.state.model }))}
           secondary={{ label: '思考强度', value: props.state.effort, onSelect: props.onEffort, hint: supportsEffort ? undefined : '当前模型不支持',
             options: effortOptions.map(([value, label]) => ({ value, label, disabled: !supportsEffort })) }} />
         <SelectMenu label="权限模式" value={props.state.permissionMode} icon={<PermissionIcon size={13} />} open={menu === 'permission'} onOpen={open => setMenu(open ? 'permission' : null)} onSelect={props.onPermission} options={permissionOptions} />
         <span className="toolbar-spacer" />
         <ContextMeter used={props.state.contextTokens} windowSize={props.state.contextWindow} breakdown={props.state.contextBreakdown || { system: 0, tools: 0, messages: 0 }}
-          usage={props.state.usage} onOpen={props.onRefreshState} onCompact={props.state.sessionId && !props.busy ? props.onCompact : undefined} />
+          usage={props.state.usage} statistics={props.state.statistics} onOpen={props.onRefreshState} onCompact={props.state.sessionId && !props.busy ? props.onCompact : undefined} />
         <motion.button whileTap={{ scale: .92 }} className={`send-button ${stopping ? 'is-stop' : ''} ${canSend || stopping ? 'is-ready' : ''}`}
           onClick={stopping ? props.onStop : submit} disabled={!stopping && !canSend}
           aria-label={props.busy ? draft.trim() ? '加入队列' : '停止任务' : '发送任务'}

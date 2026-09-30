@@ -78,6 +78,7 @@ def _build_payload(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     reasoning_effort: str | None = None,
     prompt_scale: float = 1.0,
+    context_window: int | None = None,
 ) -> dict[str, Any]:
     """Serialize the normalized conversation into an OpenAI-compatible
     request body.
@@ -139,7 +140,7 @@ def _build_payload(
     prompt_estimate = int(estimate_messages_tokens(
         system, messages, tools, reserve_output_tokens=0
     ) * prompt_scale)
-    window = lookup_model(model).context_window
+    window = context_window or lookup_model(model).context_window
     available_output = max(1, window - prompt_estimate - 1024)
     payload: dict[str, Any] = {
         "model": model,
@@ -348,6 +349,7 @@ class CommandCodeProvider:
             max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
             prompt_scale=self.prompt_scale,
+            context_window=getattr(self, "context_window", None),
         )
         estimated_input = estimate_messages_tokens(system, messages, tools,
                                                    reserve_output_tokens=0)

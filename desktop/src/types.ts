@@ -11,11 +11,18 @@ export type Session = {
   custom_title?: boolean
 }
 
-export type Model = { id: string; provider: string; available: boolean; supportsEffort: boolean }
+export type Model = { id: string; name?: string; modelId?: string; serviceId?: string; provider: string; available: boolean; supportsEffort: boolean }
+export type ServiceModel = { modelId: string; name: string; contextWindow: number; maxOutputTokens: number; supportsEffort: boolean }
+export type AIService = { id: string; name: string; baseUrl: string; apiStyle: 'openai' | 'anthropic'; apiKey: string; hasApiKey?: boolean; enabled: boolean; builtin?: boolean; models: ServiceModel[] }
+export type AgentDefinition = { name: string; label: string; description: string; instructions: string; tools: string[]; inheritTools: boolean; builtin?: boolean; enabled: boolean }
+export type Configuration = { services: AIService[]; agents: AgentDefinition[]; defaultModel: string }
+export type Usage = { input_tokens: number; output_tokens: number; cache_read_tokens?: number; cache_write_tokens?: number; available?: boolean }
+export type UsageSample = { round: number; input: number; output: number; cached: number; available: boolean; seconds: number | null; tps: number | null }
+export type Statistics = { toolCalls: number; requests: number; modelSeconds: number; tps: number | null; lastTps: number | null; samples: UsageSample[] }
 export type AgentState = {
   model: string; effort: string; permissionMode: string; sessionId: string | null; taskPending: boolean; rounds: number
   contextTokens: number; contextWindow: number; contextBreakdown: { system: number; tools: number; messages: number }
-  usage: { input_tokens: number; output_tokens: number } | null
+  usage: Usage | null; statistics?: Statistics; activeModel?: string; pendingSettings?: boolean
   budget: { max_rounds: number; max_total_tokens: number; max_seconds: number }; acceptance: string; alwaysAllow?: string[]
 }
 export type Command = { name: string; usage: string; summary: string }
@@ -24,6 +31,7 @@ export type Capabilities = {
   plugins: Array<{ name: string; version: string; enabled: boolean; digest: string; path: string; skills: boolean; agents: boolean; servers: string[] }>
   mcp: Array<{ name: string; plugin: string }>
   agents: string[]
+  agentDefinitions?: AgentDefinition[]
 }
 export type McpDiscovery = { servers: Array<{ server: string; protocol: string | null; server_version: string | null; error: string | null }>; tools: string[] }
 export type SlashResult = { action?: string; message?: string; sessionId?: string; state?: AgentState }

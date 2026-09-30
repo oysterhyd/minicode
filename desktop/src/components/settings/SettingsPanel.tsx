@@ -7,12 +7,15 @@ import type { Preferences } from '../../lib/prefs'
 import { effortOptions, permissionOptions } from '../composer/Composer'
 import { Empty, Row, Section, Segmented, Toggle } from './Controls'
 import { ShortcutList } from '../Shortcuts'
+import { ModelConfiguration } from './ModelConfiguration'
+import { AgentConfiguration } from './AgentConfiguration'
 
 export type SettingsTab = 'general' | 'model' | 'permissions' | 'skills' | 'mcp' | 'plugins' | 'subagents' | 'shortcuts' | 'inspector' | 'about'
 type Props = {
   tab: SettingsTab; setTab: (tab: SettingsTab) => void; onClose: () => void
   prefs: Preferences; setPref: <K extends keyof Preferences>(key: K, value: Preferences[K]) => void
   models: Model[]; state: AgentState; capabilities: Capabilities | null; mcpDiscovery: McpDiscovery | null; trace: AgentEvent[]; error: string; busy: boolean
+  request: <T>(method: string, params?: Record<string, unknown>) => Promise<T>; onConfigurationChanged: () => Promise<void>
   onModel: (model: string) => void; onEffort: (effort: string) => void; onPermission: (mode: string) => void
   onBudget: (budget: AgentState['budget']) => void; onAcceptance: (path: string) => void; onChooseAcceptance: () => Promise<string | null>
   onSkill: (name: string, active: boolean) => void; onPlugin: (name: string, enabled: boolean) => void; onLockPlugins: () => void
@@ -48,7 +51,7 @@ export function SettingsPanel(props: Props) {
       <header className="settings-header"><h2>{tabs.find(([id]) => id === props.tab)?.[2]}</h2>
         <button className="icon-button" onClick={props.onClose} aria-label="关闭设置" data-tip="关闭" data-shortcut="Esc"><X size={17} /></button></header>
       {props.error && <div className="settings-error" role="alert">{props.error}</div>}
-      {props.busy && ['model', 'permissions', 'skills', 'plugins', 'mcp'].includes(props.tab) && <div className="settings-hint">当前任务运行中，部分设置需等待本回合结束后才能修改。</div>}
+      {props.busy && ['model', 'permissions', 'skills', 'plugins', 'mcp'].includes(props.tab) && <div className="settings-hint">设置可随时修改。模型与思考强度在下一次请求生效；预算、插件与 MCP 在下一回合生效；验收配置用于新会话。</div>}
       <motion.div key={props.tab} className="settings-content scrollbar" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .18, ease: [.2, .8, .2, 1] }}>
         {props.tab === 'general' && <>
           <Section title="外观">
@@ -65,22 +68,17 @@ export function SettingsPanel(props: Props) {
           </Section>
         </>}
         {props.tab === 'model' && <>
-          <Section title="模型" description="切换当前会话使用的模型，下一次模型请求立即生效。">
-            <div className="model-list">{props.models.map(model => <button key={model.id} className={`choice-card ${props.state.model === model.id ? 'is-active' : ''}`} aria-pressed={props.state.model === model.id}
-              disabled={props.busy || (!model.available && model.id !== props.state.model)} onClick={() => props.onModel(model.id)}>
-              <strong>{model.id === 'fake' ? '离线演示' : model.id}</strong><small>{model.available ? model.provider : '尚未配置'}{model.supportsEffort ? ' · 支持思考强度' : ''}</small>
-            </button>)}</div>
-          </Section>
+          <ModelConfiguration models={props.models} selected={props.state.model} request={props.request} onChanged={props.onConfigurationChanged} onModel={props.onModel} />
           <Section title="思考强度" description={supportsEffort ? '控制模型用于分析复杂问题的推理预算。' : '当前模型不支持调整思考强度。'}>
             <Segmented label="思考强度" value={props.state.effort} onChange={value => supportsEffort && props.onEffort(value)} options={effortOptions as Array<[string, string]>} />
           </Section>
           <Section title="运行预算" description="限制单次任务的资源上限。0 表示不限制，下一回合生效。">
             <div className="field-grid">{([['max_rounds', '轮次上限'], ['max_total_tokens', 'Token 上限'], ['max_seconds', '时长（秒）']] as const).map(([key, label]) => <label key={key} className="field-label">{label}
               <input className="field" type="number" min="0" step={key === 'max_seconds' ? '0.1' : '1'} value={budget[key]} onChange={event => setBudget(previous => ({ ...previous, [key]: Number(event.target.value) }))} /></label>)}</div>
-            <div className="field-actions"><button className="button button-primary button-small" disabled={!budgetDirty || props.busy} onClick={() => props.onBudget(budget)}>应用预算</button>
+            <div className="field-actions"><button className="button button-primary button-small" disabled={!budgetDirty} onClick={() => props.onBudget(budget)}>应用预算</button>
               {budgetDirty && <button className="button button-ghost button-small" onClick={() => setBudget(props.state.budget)}>还原</button>}</div>
           </Section>
-          <Section title="验收标准" description="选择 YAML 验收配置，任务完成时自动检查结果。需在新会话开始前设置。">
+          <Section title="验收标准" description="选择 YAML 验收配置，任务完成时自动检查结果。保存后用于下一个新会话。">
             <div className="field-inline"><input aria-label="验收文件路径" className="field" value={acceptance} onChange={event => setAcceptance(event.target.value)} placeholder="选择 acceptance.yaml" />
               <button className="button button-ghost button-small" onClick={async () => { const path = await props.onChooseAcceptance(); if (path) setAcceptance(path) }}>选择文件</button></div>
             <div className="field-actions"><button className="button button-primary button-small" onClick={() => props.onAcceptance(acceptance)}>应用</button>
@@ -90,7 +88,7 @@ export function SettingsPanel(props: Props) {
         {props.tab === 'permissions' && <>
           <Section title="工具权限" description="选择文件编辑与终端命令的批准方式。只读工具始终直接执行。">
             <div className="choice-stack">{permissionOptions.map(option => <button key={option.value} className={`choice-card ${props.state.permissionMode === option.value ? 'is-active' : ''} ${option.value === 'bypass' ? 'is-risky' : ''}`}
-              aria-pressed={props.state.permissionMode === option.value} disabled={props.busy} onClick={() => props.onPermission(option.value)}>
+              aria-pressed={props.state.permissionMode === option.value} onClick={() => props.onPermission(option.value)}>
               <strong>{option.label}</strong><small>{option.detail}</small></button>)}</div>
           </Section>
           <Section title="本会话始终允许" description="在审批卡片中选择“本会话始终允许”的工具，会在当前会话内自动批准。"
@@ -122,12 +120,9 @@ export function SettingsPanel(props: Props) {
             <Toggle label={`${plugin.enabled ? '停用' : '启用'} ${plugin.name}`} checked={plugin.enabled} onChange={value => props.onPlugin(plugin.name, value)} />
           </div>) : <Empty>当前工作区没有本地插件。</Empty>}
         </Section>}
-        {props.tab === 'subagents' && <Section title="只读子助手" description="Agent 可通过 delegate 工具调用这些子助手，它们只能读取、搜索和审查工作区。">
-          {(props.capabilities?.agents || ['explore', 'review']).map(kind => <div className="list-row" key={kind}>
-            <div className="list-row-text"><strong>{kind}</strong><p>{kind === 'explore' ? '调查项目结构和实现' : kind === 'review' ? '审查代码与问题' : '插件提供的子助手'}</p></div>
-            <button className="button button-ghost button-small" onClick={() => props.onUseAgent(kind)}>添加到任务</button>
-          </div>)}
-        </Section>}
+        {props.tab === 'subagents' && <><AgentConfiguration request={props.request} onChanged={props.onConfigurationChanged} onUse={props.onUseAgent} />
+          {props.capabilities?.agents.some(name => name.startsWith('plugin:')) && <Section title="插件子助手">{props.capabilities.agents.filter(name => name.startsWith('plugin:')).map(name => <div className="list-row" key={name}><div className="list-row-text"><strong>{name}</strong><p>由已启用插件提供，在插件设置中管理。</p></div><button className="button button-ghost button-small" onClick={() => props.onUseAgent(name)}>添加到任务</button></div>)}</Section>}
+        </>}
         {props.tab === 'shortcuts' && <ShortcutList />}
         {props.tab === 'inspector' && <Section title="会话运行记录" description={`会话 ${props.state.sessionId?.slice(0, 8) || '尚未开始'} · ${props.state.rounds} 轮 · 上下文 ${props.state.contextTokens.toLocaleString()} tokens`}>
           <input className="field" aria-label="筛选事件" placeholder="按事件类型筛选…" value={traceQuery} onChange={event => setTraceQuery(event.target.value)} />

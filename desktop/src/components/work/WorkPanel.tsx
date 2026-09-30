@@ -6,6 +6,7 @@ import { basename, dirname, duration, modKey } from '../../lib/format'
 import { DiffStat } from '../DiffView'
 import { FileIcon, FileTree } from './FileTree'
 import { Preview, type PreviewTarget } from './Preview'
+import { SessionUsage } from './SessionUsage'
 import { useToast } from '../ui/Toast'
 
 type Tab = 'changes' | 'files' | 'terminal' | 'tasks'
@@ -122,13 +123,7 @@ export function WorkPanel({ workspace, changes, files, items, tasks, state, refr
               <span className="task-title" title={task.title}>{task.title}</span>
               <small>{{ pending: '待处理', ready: '已就绪', running: '进行中', done: '完成', failed: '失败' }[task.status]}</small>
             </div>) : <div className="work-empty"><ListTodo size={22} /><strong>还没有任务清单</strong><p>Agent 拆分复杂任务后，进度会显示在这里。</p></div>}
-            <div className="work-section-label work-usage-label"><span>会话用量</span></div>
-            <div className="usage-grid">
-              <div><small>输入</small><strong>{(state.usage?.input_tokens || 0).toLocaleString()}</strong></div>
-              <div><small>输出</small><strong>{(state.usage?.output_tokens || 0).toLocaleString()}</strong></div>
-              <div><small>轮次</small><strong>{state.rounds}</strong></div>
-              <div><small>工具调用</small><strong>{items.filter(item => item.kind === 'tool').length}</strong></div>
-            </div>
+            <SessionUsage state={state} />
           </div>}
       </motion.div></AnimatePresence>
     </div>
