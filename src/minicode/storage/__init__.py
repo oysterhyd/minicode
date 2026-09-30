@@ -8,6 +8,7 @@ the file-backed :class:`ArtifactStore` and the default database location.
 from __future__ import annotations
 
 from minicode.storage.artifacts import ArtifactRef, ArtifactStore
+from minicode.storage.ownership import SessionBusyError
 from minicode.storage.sqlite_store import (
     DEFAULT_DB_PATH,
     SCHEMA_VERSION,
@@ -24,4 +25,5 @@ __all__ = [
     "SessionStore",
     "SessionSummary",
     "SqliteStore",
+    "SessionBusyError",
 ]

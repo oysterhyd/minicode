@@ -1,5 +1,11 @@
 # CLI 发布核验（2026-09-24）
 
+v1.0.0 的 Windows Desktop + CLI 集成发行另见
+[发行说明](../release/README.md)与[安装包核验](../release/VERIFICATION.md)。
+下文保留原 CLI 阶段的历史记录与评测限制。
+
+2026-09-30 核心重构的执行契约、schema v5 迁移、desktop v2 协议和新增验证见 [Harness 重构审计](harness-hardening.md)。本次 Windows 回归为 Python 562 通过 / 3 跳过、Electron 27 通过，构建及仓库外 wheel 安装评测通过；真实模型效果仍以文中的历史评测记录为依据。
+
 本页按 [原方案](../plan.md) 的 M0–M6 和完成定义记录证据。用户明确排除了桌面端应用与 WebUI；P2 的多 worker worktree 和固定 workflow 是二选一，本轮选择了后者。以下状态只针对可信本地仓库的 CLI，不把审批门称为 OS 沙箱。
 
 | 要求 | 当前证据 | 状态 |

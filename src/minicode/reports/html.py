@@ -87,6 +87,7 @@ _EVENT_META: dict[EventType, tuple[str, str]] = {
     EventType.SUBAGENT_START: ("子任务启动", "bg"),
     EventType.SUBAGENT_RESULT: ("子任务结果", "bg"),
     EventType.MCP_DISCOVERY: ("MCP 发现", "bg"),
+    EventType.PROVIDER_RETRY: ("模型请求重试", "warn"),
 }
 
 # ---------------------------------------------------------------------------

@@ -1,16 +1,21 @@
 # minicode（Mini Claude Code）
 
+**Windows 安装版 v1.0.0**：CLI 与 Desktop 已集成打包，内置 Python、Git 与依赖。
+从 [GitHub Releases](https://github.com/oysterhyd/minicode/releases/latest) 下载安装包；
+安装后在设置中填写自己的 AI 服务凭据即可使用。使用和构建说明见
+[集成发行项目](release/README.md)。
+
 一个面向本地代码仓库的轻量级 CLI Coding Agent：用户给出任务描述，它通过工具调用检索代码、
 修改文件、运行测试，在权限与资源预算内迭代，并留下可审查的 diff、命令退出码和执行记录。
-定位是**一个具备可靠执行语义的最小 Agent Harness**——模型决定如何解决任务，Runtime 负责
+定位是**CLI、TUI 与 desktop 共用的本地 Agent Harness**——模型决定如何解决任务，Runtime 负责
 执行协议、权限、预算、取消与持久化；不将调用模型包装成模型训练能力，也不宣称完整复刻商业
 Claude Code。
 
-**当前状态（2026-09-24 核对）**：P0 最小闭环——单轮任务、交互会话、基础工具、权限审批、
+**当前状态（2026-09-30 核对）**：核心已按单会话所有权、原子检查点、工具能力声明、扩展生命周期与并发宿主协议重构；迁移、验收契约与能力边界见 [Harness 重构审计](docs/harness-hardening.md)。P0 最小闭环——单轮任务、交互会话、基础工具、权限审批、
 预算与取消、SQLite 会话持久化与执行报告——已实现。P1 已接入分层上下文压缩与输出归档、
 会话恢复与未知副作用处理、Goal 验收器与证据绑定、后台命令、20 任务离线评测集、HTML
 执行报告和 Textual 全屏 TUI。压缩及归档仍有边界限制，见下方说明。
-优化方案 A–D 已接入：项目指令、按需加载的 Skills、单层只读子任务、stdio MCP 与本地 Plugins。
+优化方案 A–D 已接入：项目指令、按需加载的 Skills、单层可配置子助手、stdio MCP 与本地 Plugins。
 持久任务图已通过 `task_create` / `task_list` / `task_claim` / `task_complete` 接入模型工具；
 项目长期记忆由用户显式维护，Agent 只能用 `memory_list` 读取。
 
@@ -68,13 +73,13 @@ Windows + Python 3.12 可用 [已验证依赖快照](requirements-windows-py312.
 
 ### 模型 provider
 
-`--provider auto`（默认）按以下顺序选择，无需 Anthropic key：
+`--provider auto`（默认）优先采用共享配置的默认模型；可显式用 `--model <服务ID::模型ID>` 选择 desktop 中配置的自定义服务。未设置默认模型时按以下顺序选择：
 
 1. `commandcode`——OpenAI 兼容网关（默认模型 `deepseek/deepseek-v4.1-flash`）。凭证来源：
    环境变量 `COMMANDCODE_API_KEY`（可选 `COMMANDCODE_BASE_URL`），或自动发现本机
    ZCode 安装的 provider 配置（`~/.zcode/v2/provider_config.json` 中的 "Command Code"）。
 2. `anthropic`——设置了 `ANTHROPIC_API_KEY` 时可用。
-3. `fake`——确定性脚本回放，离线演示与测试用。
+3. 其他已启用且有凭据的配置服务。没有可用服务时报告配置错误。`fake` 仅在显式 `--provider fake` 或 `--script` 时用于确定性测试与示例回放。
 
 ### 无密钥演示（FakeProvider 一键重放修复过程）
 
@@ -117,7 +122,7 @@ export ANTHROPIC_API_KEY=sk-ant-...        # Windows: set ANTHROPIC_API_KEY=...
 minicode run "修复分页越界错误，并运行测试验证" --workspace examples/pagination --provider anthropic
 ```
 
-未指定模型时，`--provider auto` 按 commandcode → anthropic → fake 的可用性顺序选择；
+未指定模型时，`--provider auto` 优先共享默认模型，再按 commandcode → anthropic → 其他已配置服务的可用性顺序选择；
 显式选择 Anthropic 时使用上例的 `--provider anthropic`。
 不使用 `--yes` 时，`edit` / `write` / `bash` 会在每次执行前请求确认（y/N）。
 
@@ -203,7 +208,7 @@ minicode run "修复分页越界错误，并运行测试验证" --workspace exam
   浏览旧记录时保留滚动位置；运行中可编辑并排队下一条输入。前台命令显示最近日志；`Ctrl+I`
   在宽屏打开任务检查侧栏，在窄屏打开覆盖面板，展示用量、改动、验收和子任务。
 - **项目指令与 Skills**：根目录 `AGENTS.md` 启动时加载；子目录 `AGENTS.md` 在首次访问对应范围时加载并要求重试该次工具调用。会话记录来源路径与内容哈希；变更后恢复会提示冲突。扫描项目 `.minicode/skills/<name>/SKILL.md` 和用户 `~/.minicode/skills/<name>/SKILL.md` 的元数据，`/skill` 列出、`/skill <name>` 激活、`/skill off <name>` 停用；模型也可用 `skills_list`、`skill_load`、`skill_unload`、`skill_resource`。技能正文只在激活时加载，资源读取限于注册目录，脚本执行仍走普通 `bash` 审批。
-- **只读子任务**：模型可用 `delegate` 请求 `explore`、`review` 或本地插件定义的子助手；子会话只注册 `read`、`ls`、`grep`、`read_artifact`，不注册 shell 或写入工具。同一模型响应中的独立子任务最多两个并行；设置显式累计 token 上限时串行执行。子任务与父会话共享预算与取消；暂停后保留原会话，重复委派同一任务时续跑。父会话记录子会话 ID、用量和结果，返回摘要、发现、经工具记录验证的文件引用与未解决项。
+- **可配置子任务**：CLI 与 desktop 共用内置模板和个人子助手。自定义子助手按所选工具或继承的父工具运行，遵守父权限与审批；插件子助手继续只注册 `read`、`ls`、`grep`、`read_artifact`。写入型子助手在父会话内按序执行。同一模型响应中的独立子任务最多两个并行；设置显式累计 token 上限时串行执行。子任务与父会话共享预算与取消；暂停后保留原会话，重复委派同一任务时续跑。父会话记录子会话 ID、用量和结果，返回摘要、发现、经工具记录验证的文件引用与未解决项。
 - **MCP 与 Plugins**：项目目录 `.minicode/plugins/<name>/plugin.json` 描述插件版本、启停、Skills、只读子助手和本地 stdio MCP server。工具经官方 Python SDK 发现并注册为 `mcp__<server>__<tool>`；调用沿用权限审批、事件、预算和完整输出归档，服务端只读注解不会自动免审批。`minicode plugins list` 查看来源与指纹，`minicode plugins lock` 生成 `.minicode/plugins.lock.json` 锁定版本和内容。复制 `examples/mcp_docs` 到 `.minicode/plugins/docs` 可试运行本地文档 server；将 `enabled` 设为 `false` 可停用插件，修改后重新生成锁文件。
 - **任务图与记忆**：任务依赖、认领与完成持久保存在会话数据库；依赖未完成时不能认领，完成任务时核对 owner。模型可维护任务板，但任务板不自动调度写入型 worker。`minicode memory add "事实" --source "来源" --scope src` 显式保存项目事实；可列出、修订、删除，模型只有只读的 `memory_list` 工具。记忆与会话压缩摘要分别存储。
 - **固定 review workflow**：`minicode workflow review` 保存 Git 快照、执行指定检查命令、再启动只读模型审查；每步前后写入 journal。中断时若检查命令状态未知，续跑不会自动重做，核实后需显式使用 `--retry-unknown`；模型审查会从持久会话续跑。

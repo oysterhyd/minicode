@@ -24,6 +24,7 @@ from minicode.core.models import ToolOutcome
 from minicode.core.paths import is_link_or_junction
 from minicode.tools.base import (
     BaseTool,
+    READ_EXECUTION,
     ToolContext,
     bounded_output,
     resolve_or_fail,
@@ -176,6 +177,7 @@ class ReadArgs(BaseModel):
 
 
 class ReadTool(BaseTool):
+    execution = READ_EXECUTION
     name = "read"
     description = (
         "Read a bounded page of any-size UTF-8 file with line numbers. "
@@ -270,6 +272,7 @@ class LsArgs(BaseModel):
 
 
 class LsTool(BaseTool):
+    execution = READ_EXECUTION
     name = "ls"
     description = (
         "List up to 500 entries in one directory (50 KiB UTF-8 maximum). "

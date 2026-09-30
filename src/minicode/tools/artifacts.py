@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext, utf8_prefix
+from minicode.tools.base import BaseTool, ToolContext, utf8_prefix, READ_EXECUTION
 
 
 class ReadArtifactArgs(BaseModel):
@@ -15,6 +15,7 @@ class ReadArtifactArgs(BaseModel):
 
 
 class ReadArtifactTool(BaseTool):
+    execution = READ_EXECUTION
     """Read a bounded page from an artifact owned by the current session."""
 
     name = "read_artifact"

@@ -33,7 +33,6 @@ import typer
 from pydantic import ValidationError
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm
 from rich.table import Table
 from rich.text import Text
 
@@ -66,6 +65,9 @@ from minicode.providers import (
     ProviderRequestError,
 )
 from minicode.runtime import AgentRuntime
+from minicode.runtime.services import attach_compactor as _attach_compactor, workspace_services
+from minicode.runtime.host import console_input, console_confirm, interruptible
+from minicode.providers.factory import model_catalog
 from minicode.security import (
     PERMISSION_MODE_LABELS,
     ModePolicy,
@@ -266,8 +268,13 @@ def _provider_for_model(
     ``RuntimeError`` (missing ``ANTHROPIC_API_KEY``); callers surface the
     message.
     """
-    info = MODEL_CATALOG[name]
+    from minicode.configuration import HarnessConfiguration
+    from minicode.providers.factory import configured_provider
+    configuration = HarnessConfiguration()
     effort = getattr(carry_effort_from, "reasoning_effort", None)
+    if configuration.find_model(name) is not None:
+        return configured_provider(name, configuration=configuration, effort=effort)
+    info = MODEL_CATALOG[name]
     if info.provider == "commandcode":
         from minicode.providers.commandcode import CommandCodeProvider
 
@@ -298,7 +305,28 @@ def _build_provider(
     choice too: ``--model z.ai/glm-5.3-flash`` routes through the
     commandcode gateway even under ``--provider auto``.
     """
+    if provider_choice is ProviderChoice.auto and script is not None:
+        provider_choice = ProviderChoice.fake
+    if model is not None and provider_choice in {ProviderChoice.commandcode, ProviderChoice.anthropic}:
+        from minicode.configuration import HarnessConfiguration
+        from minicode.providers.factory import configured_provider
+        configuration = HarnessConfiguration()
+        configured = configuration.find_model(model)
+        expected_style = "anthropic" if provider_choice is ProviderChoice.anthropic else "openai"
+        if configured is not None and configured[0]["apiStyle"] == expected_style:
+            adapter = configured_provider(model, configuration=configuration)
+            return adapter, adapter.name, model
     if provider_choice is ProviderChoice.auto:
+        from minicode.configuration import HarnessConfiguration
+        from minicode.providers.factory import configured_provider
+        configuration = HarnessConfiguration()
+        chosen = model or configuration.read().get("defaultModel")
+        if chosen and configuration.find_model(chosen) is not None:
+            try:
+                adapter = configured_provider(chosen, configuration=configuration)
+                return adapter, adapter.name, chosen
+            except (ProviderRequestError, ImportError) as exc:
+                _fail(str(exc))
         if model is not None and lookup_model(model).provider != "anthropic":
             provider_choice = ProviderChoice.commandcode
         else:
@@ -308,9 +336,16 @@ def _build_provider(
                 else (
                     ProviderChoice.anthropic
                     if os.environ.get("ANTHROPIC_API_KEY")
-                    else ProviderChoice.fake
+                    else None
                 )
             )
+        if provider_choice is None:
+            available = [m for m in configuration.models() if m["available"]]
+            if not available:
+                _fail("未配置可用的 AI 服务。请先在设置中添加服务，或设置 provider 的 API 密钥。")
+            chosen = available[0]["id"]
+            adapter = configured_provider(chosen, configuration=configuration)
+            return adapter, adapter.name, chosen
 
     if provider_choice is ProviderChoice.commandcode:
         try:
@@ -535,10 +570,8 @@ def _print_tool_result(console: Console, data: dict[str, Any]) -> None:
 def _make_interactive_approval(console: Console) -> ApprovalHandler:
     """Rich-interactive approval prompt used when ``--yes`` is absent.
 
-    ``Confirm.ask`` blocks synchronously on stdin. minicode runs a single event loop
-    in the main thread and nothing else needs it while the user answers, so
-    briefly blocking inside this async callback is the simplest correct
-    behavior. On EOF (non-interactive stdin) we deny instead of crashing.
+    Terminal input is asynchronous so deadlines, cancellation and background
+    commands keep progressing while the user answers. EOF denies the request.
     """
 
     async def handler(request: ApprovalRequest) -> ApprovalDecision:
@@ -546,11 +579,11 @@ def _make_interactive_approval(console: Console) -> ApprovalHandler:
             request.summary
         ))
         try:
-            granted = Confirm.ask(
-                f"允许 {request.tool_name}？", default=False, console=console
-            )
+            granted = await console_confirm(console, f"允许 {request.tool_name}？")
         except EOFError:
             granted = False
+        except KeyboardInterrupt:
+            raise asyncio.CancelledError() from None
         return ApprovalDecision(granted=granted)
 
     return handler
@@ -660,17 +693,11 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
         else:
             _print_p1_event(console, event)
 
-    from minicode.context.extensions import ProjectInstructions, SkillCatalog
-    from minicode.plugins import PluginCatalog
-
-    project_instructions = ProjectInstructions(setup.workspace)
-    plugins = PluginCatalog(setup.workspace)
-    skills = SkillCatalog(setup.workspace, plugin_roots=plugins.skill_roots())
-    registry = default_registry(skills=skills, delegation=True, tasks=True, memory=True,
-                                agent_kinds=plugins.agent_names())
-    registry.plugin_catalog = plugins
-    for server in plugins.servers():
-        registry.add_mcp_server(server)
+    workspace_bundle = workspace_services(setup.workspace)
+    project_instructions = workspace_bundle.instructions
+    plugins = workspace_bundle.plugins
+    skills = workspace_bundle.skills
+    registry = workspace_bundle.registry
     policy: PermissionPolicy
     approval_handler: ApprovalHandler | None
     if yes:
@@ -706,31 +733,6 @@ def _build_services(setup: _Setup, store: SqliteStore, console: Console, yes: bo
     )
 
 
-def _attach_compactor(runtime: Any, artifact_store: Any) -> None:
-    """Attach the context compactor with artifact spill bound to the live
-    session. The session id only exists after the first ``run_turn``
-    (compaction runs strictly inside turns), so the closure reads it lazily
-    off the runtime.
-
-    The hard window and the provider's actual response budget are re-read on
-    every check so a mid-session ``/model`` switch is honoured. The session's
-    cumulative token budget is deliberately unrelated to this calculation.
-    """
-    from minicode.context.compact import CompactConfig, ContextCompactor
-
-    def spill(kind: str, content: str) -> str:
-        session_id = runtime.session_id
-        assert session_id is not None
-        return artifact_store.spill(session_id, kind, content).artifact_id
-
-    runtime._compactor = ContextCompactor(
-        # Static fallback only; the callbacks are what actually decide.
-        CompactConfig(max_context_tokens=max(runtime.context_window, 1)),
-        spill_fn=spill,
-        context_tokens_fn=lambda: runtime.context_window,
-        output_tokens_fn=runtime.effective_max_output_tokens,
-        estimate_scale_fn=lambda: getattr(runtime.provider, "prompt_scale", 1.0),
-    )
 def _new_runtime(setup: _Setup, store: SqliteStore, services: Any) -> Any:
     """Build a fresh AgentRuntime from an already-assembled services bundle."""
     runtime = AgentRuntime(
@@ -778,6 +780,12 @@ def _print_p1_event(console: Console, event: Event) -> None:
         if error:
             console.print(Text(f"  ◆ {error}", style="yellow"))
         return
+    if event.type is EventType.PROVIDER_RETRY:
+        console.print(Text(
+            f"  ◆ 模型请求暂时失败，{event.data.get('delay_s', 0)} 秒后重试"
+            f"（第 {event.data.get('next_attempt', 2)} 次）。", style="yellow"
+        ))
+        return
     if event.type is EventType.SUBAGENT_START:
         console.print(Text(
             f"  ◌ {event.data.get('kind')} 子任务已开始 · "
@@ -815,34 +823,23 @@ def _print_p1_event(console: Console, event: Event) -> None:
         return
 
 
+async def _run_one_turn_async(runtime: AgentRuntime, user_message: str | None) -> RunResult:
+    try:
+        return (await runtime.run_turn(user_message) if user_message is not None
+                else await runtime.continue_turn())
+    except asyncio.CancelledError:
+        typer.secho("已被用户取消，会话状态已保存。", fg=typer.colors.YELLOW)
+        raise
+
+
 def _run_one_turn(runtime: AgentRuntime, user_message: str | None) -> RunResult:
-    """Run one turn under ``asyncio.run`` with Ctrl+C wired to cancellation.
-
-    When the user hits Ctrl+C, asyncio.run cancels the main task; the runtime
-    finalizes the session as ``cancelled`` in its own CancelledError handler
-    (persistence happens there), the inner guard prints a note and re-raises,
-    and the resulting KeyboardInterrupt surfaces to the caller.
-    """
-
-    async def _guarded() -> RunResult:
+    """One-shot host: close resources before asyncio.run closes its loop."""
+    async def guarded():
         try:
-            result = (
-                await runtime.run_turn(user_message)
-                if user_message is not None else await runtime.continue_turn()
-            )
-            return result
-        except asyncio.CancelledError:
-            typer.secho("已被用户取消，会话状态已保存。", fg=typer.colors.YELLOW)
-            raise
+            return await _run_one_turn_async(runtime, user_message)
         finally:
-            try:
-                close = getattr(runtime.provider, "aclose", None)
-                if close is not None:
-                    await close()
-            finally:
-                await runtime._registry.aclose()
-
-    return asyncio.run(_guarded())
+            await runtime.aclose()
+    return asyncio.run(guarded())
 
 
 # ---------------------------------------------------------------------------
@@ -954,6 +951,15 @@ class _ChatRepl:
     # -- loop -----------------------------------------------------------------
 
     def loop(self) -> None:
+        asyncio.run(self._loop_async())
+
+    async def _loop_async(self) -> None:
+        try:
+            await self._conversation()
+        finally:
+            await self.runtime.aclose()
+
+    async def _conversation(self) -> None:
         print_banner(
             self.console,
             provider_label=self.setup.provider_name,
@@ -964,7 +970,7 @@ class _ChatRepl:
         self.console.print()
         while True:
             try:
-                user_input = self.console.input("[bold cyan]你 >[/] ")
+                user_input = await console_input(self.console, "[bold cyan]你 >[/] ")
             except EOFError:  # Ctrl+D
                 self.console.print()
                 break
@@ -978,11 +984,14 @@ class _ChatRepl:
             if text in {"exit", "quit"}:
                 break
             if text.startswith("/"):
-                if not self._handle_slash(text):
-                    break
+                try:
+                    if not await self._handle_slash(text):
+                        break
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    self.console.print()
                 continue
             try:
-                result = _run_one_turn(self.runtime, text)
+                result = await interruptible(_run_one_turn_async(self.runtime, text))
             except asyncio.CancelledError:  # pragma: no cover - defensive
                 continue
             except KeyboardInterrupt:
@@ -995,7 +1004,7 @@ class _ChatRepl:
 
     # -- slash commands -------------------------------------------------------
 
-    def _handle_slash(self, text: str) -> bool:
+    async def _handle_slash(self, text: str) -> bool:
         """Dispatch one slash command; False means the REPL should exit."""
         verb, _, arg = text.partition(" ")
         verb = verb.lower()
@@ -1007,9 +1016,16 @@ class _ChatRepl:
         elif verb == "/clear":
             self._cmd_clear()
         elif verb == "/new":
+            await self.services.background_manager.cancel_all()
+            await self.services.registry.aclose()
             self._cmd_new()
         elif verb == "/model":
+            previous = self.runtime.provider
             self._cmd_model(arg)
+            if previous is not self.runtime.provider:
+                close = getattr(previous, "aclose", None)
+                if close is not None:
+                    await close()
         elif verb == "/effort":
             self._cmd_effort(arg)
         elif verb == "/permissions":
@@ -1030,11 +1046,15 @@ class _ChatRepl:
             if not self.runtime.task_pending:
                 self.console.print(Text("当前没有暂停的任务。", style="yellow"))
             else:
-                result = _run_one_turn(self.runtime, None)
+                result = await interruptible(_run_one_turn_async(self.runtime, None))
                 _print_turn_summary(self.console, result)
                 _print_diff_summary(self.console, self.store, result.session_id)
         elif verb == "/compact":
-            self.console.print(Text("/compact 需要全屏界面，请使用 minicode tui。", style="yellow"))
+            try:
+                changed = await self.runtime.compact_context()
+                self.console.print("上下文已压缩。" if changed else "上下文未超过阈值，无需压缩。")
+            except ValueError as exc:
+                self.console.print(Text(str(exc), style="yellow"))
         elif verb == "/resume":
             self.console.print(
                 Text("请退出后使用 minicode resume <会话ID> 恢复会话。", style="yellow")
@@ -1065,8 +1085,7 @@ class _ChatRepl:
         """Reset the conversation: the next message starts a brand-new session."""
         from minicode.tasks.background import BackgroundManager
 
-        # The prior asyncio.run has cancelled its watcher tasks. Do not carry
-        # their terminal notifications into the new conversation.
+        # Each conversation receives its own background-job manager.
         self.services.background_manager = BackgroundManager()
         self.runtime = _new_runtime(self.setup, self.store, self.services)
         self.console.print(
@@ -1074,9 +1093,10 @@ class _ChatRepl:
         )
 
     def _cmd_model(self, arg: str) -> None:
+        catalog = model_catalog()
         if not arg:
             lines = ["可用模型："]
-            for info in MODEL_CATALOG.values():
+            for info in catalog.values():
                 mark = " ← 当前" if info.name == self.runtime.model else ""
                 effort = " · 支持推理预算" if info.supports_effort else ""
                 lines.append(
@@ -1085,9 +1105,9 @@ class _ChatRepl:
             lines.append("用法: /model <名称>")
             self.console.print("\n".join(lines))
             return
-        if arg not in MODEL_CATALOG:
+        if arg not in catalog:
             self.console.print(
-                f"[yellow]未知模型 {arg}；可选：{'、'.join(MODEL_CATALOG)}[/]"
+                f"[yellow]未知模型 {arg}；可选：{'、'.join(catalog)}[/]"
             )
             return
         try:
@@ -1097,7 +1117,7 @@ class _ChatRepl:
         except (ProviderRequestError, RuntimeError) as exc:
             self.console.print(f"[red]无法切换 provider：{exc}[/]")
             return
-        info = MODEL_CATALOG[arg]
+        info = catalog[arg]
         old = self.runtime.model
         # Keep /new consistent with the switched model.
         self.setup.provider = provider
@@ -1252,7 +1272,7 @@ def _make_resumed_runtime(
     except ValueError as exc:
         _fail(str(exc))
     _attach_compactor(runtime, services.artifact_store)
-    setup.budget = runtime._budget
+    setup.budget = runtime.budget
     return runtime
 
 

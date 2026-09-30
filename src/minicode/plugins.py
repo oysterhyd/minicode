@@ -22,9 +22,12 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 _MAX_MANIFEST = 64_000
 _MAX_PLUGIN_BYTES = 16_000_000
+_MAX_PLUGIN_FILES = 10_000
 
 
 def _fingerprint(root: Path) -> str:
+    if not root.is_dir() or is_link_or_junction(root):
+        raise ValueError(f"plugin directory is missing or is a link or junction: {root}")
     digest = hashlib.sha256()
     total = 0
     files: list[Path] = []
@@ -45,6 +48,8 @@ def _fingerprint(root: Path) -> str:
             if is_link_or_junction(path):
                 raise ValueError(f"plugin contains a link or junction: {path}")
             files.append(path)
+            if len(files) > _MAX_PLUGIN_FILES:
+                raise ValueError(f"plugin has too many files: {root}")
     for path in sorted(files):
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         with path.open("rb") as stream:
@@ -104,6 +109,8 @@ class PluginCatalog:
         self.lock_path = self.workspace / ".minicode" / "plugins.lock.json"
         self.plugins: dict[str, Plugin] = {}
         self._agents: dict[str, Path] = {}
+        if os.path.lexists(self.root.parent) and is_link_or_junction(self.root.parent):
+            raise ValueError(f"plugin configuration directory is a link or junction: {self.root.parent}")
         server_names: set[str] = set()
         if self.root.is_dir():
             if is_link_or_junction(self.root) or is_link_or_junction(self.root.parent):
@@ -112,12 +119,15 @@ class PluginCatalog:
                 root = path.parent.resolve()
                 if is_link_or_junction(path) or is_link_or_junction(path.parent) or not root.is_relative_to(self.root.resolve()):
                     raise ValueError(f"plugin path is not trusted: {path}")
-                data = path.read_bytes()
-                if len(data) > _MAX_MANIFEST:
+                if path.stat().st_size > _MAX_MANIFEST:
                     raise ValueError(f"plugin manifest is too large: {path}")
+                data = path.read_bytes()
                 raw = json.loads(data)
                 if not isinstance(raw, dict):
                     raise ValueError(f"plugin manifest must be an object: {path}")
+                unknown = set(raw) - {"name", "version", "minicode_version", "enabled", "skills", "agents", "mcp_servers", "description"}
+                if unknown:
+                    raise ValueError(f"unknown plugin fields: {', '.join(sorted(unknown))}")
                 name, version = raw.get("name"), raw.get("version")
                 if not isinstance(name, str) or not _NAME.fullmatch(name) or name != root.name:
                     raise ValueError(f"invalid plugin name: {path}")
@@ -140,6 +150,8 @@ class PluginCatalog:
                 for server in server_configs:
                     if not isinstance(server, dict):
                         raise ValueError(f"invalid MCP server in plugin {name}")
+                    if set(server) - {"name", "command", "args", "timeout_s"}:
+                        raise ValueError(f"unknown MCP server fields in plugin {name}")
                     server_name = server.get("name")
                     command = server.get("command")
                     args = server.get("args", [])
@@ -200,11 +212,33 @@ class PluginCatalog:
             ) as stream:
                 temporary = Path(stream.name)
                 stream.write(json.dumps(self.lock_data(), indent=2) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(temporary, self.lock_path)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
         return self.lock_path
+
+    def set_enabled(self, name: str, enabled: bool) -> Path:
+        """Publish a complete manifest, then rebuild the reviewed content lock."""
+        plugin = self.plugins[name]
+        manifest = json.loads(plugin.path.read_text(encoding="utf-8"))
+        manifest["enabled"] = enabled
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=plugin.path.parent,
+                                             prefix=".manifest-", suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump(manifest, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, plugin.path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return PluginCatalog(self.workspace, check_lock=False).write_lock()
 
     def skill_roots(self) -> list[tuple[str, Path]]:
         return [(f"plugin:{p.name}", p.skill_root) for p in self.plugins.values()

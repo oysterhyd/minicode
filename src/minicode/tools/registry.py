@@ -6,6 +6,8 @@ from __future__ import annotations
 from minicode.core.models import ToolSpec
 from minicode.tools.artifacts import ReadArtifactTool
 from minicode.tools.base import BaseTool
+from minicode.tools.base import ToolExecution
+from minicode.core.models import ToolUseBlock
 from minicode.tools.command import BashTool
 from minicode.tools.files import EditTool, LsTool, ReadTool, WriteTool
 from minicode.tools.search import GrepTool
@@ -24,20 +26,46 @@ class ToolRegistry:
         self.plugin_catalog: PluginCatalog | None = None
         self.agent_definitions: dict[str, dict] = {}
         self.discovery_errors: list[str] = []
+        self._prepared = False
+        self._prepare_lock = None
+        self._statuses: list[dict] = []
 
     def register(self, tool: BaseTool) -> None:
         """Add *tool*; duplicate names are a programming error."""
         if tool.name in self._tools:
             raise ValueError(f"tool already registered: {tool.name}")
+        execution = tool.execution
+        if execution.attempts < 1 or (execution.attempts > 1 and not execution.replay_safe):
+            raise ValueError("tool retries require an explicit replay-safe capability")
+        if execution.parallel_group not in {None, "read", "delegate"}:
+            raise ValueError("unknown tool concurrency group")
+        if execution.parallel_group == "read" and not execution.replay_safe:
+            raise ValueError("parallel reads require a replay-safe capability")
         self._tools[tool.name] = tool
         self._specs_cache = None
 
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
+    def execution_for(self, call: ToolUseBlock) -> ToolExecution:
+        tool = self.get(call.name)
+        if tool is None:
+            return ToolExecution()
+        if call.name == "delegate":
+            definition = self.agent_definitions.get(str(call.input.get("kind")))
+            if definition is not None:
+                names = self.names() if definition.get("inheritTools") else definition.get("tools", [])
+                # Two writable delegates may share a workspace. They are
+                # ordering barriers until the host provides isolated worktrees.
+                if any(self.get(name) is None or not self.get(name).execution.replay_safe
+                       for name in names if name != "delegate" and not name.startswith("task_")):
+                    return ToolExecution(timeout_s=None)
+        return tool.execution
+
     def set_agents(self, definitions: list[dict], plugin_names: list[str]) -> None:
         from minicode.tools.extensions import DelegateTool
-        self.agent_definitions = {a["name"]: a for a in definitions}
+        import copy
+        self.agent_definitions = {a["name"]: copy.deepcopy(a) for a in definitions}
         self._tools["delegate"] = DelegateTool(
             [a["name"] for a in definitions if a["enabled"]] + plugin_names,
             include_builtins=False,
@@ -48,15 +76,31 @@ class ToolRegistry:
     def specs(self) -> list[ToolSpec]:
         if self._specs_cache is None:
             self._specs_cache = [tool.spec() for tool in self._tools.values()]
-        return list(self._specs_cache)
+        return [spec.model_copy(deep=True) for spec in self._specs_cache]
 
     def names(self) -> list[str]:
         return list(self._tools)
 
     def add_mcp_server(self, config: McpServerConfig) -> None:
+        if self._prepared:
+            raise RuntimeError("cannot add an MCP server to a prepared registry")
+        if any(c.config.name == config.name for c in self._mcp):
+            raise ValueError(f"MCP server already registered: {config.name}")
         self._mcp.append(McpConnector(config))
 
     async def prepare(self) -> list[dict[str, str | None]]:
+        import asyncio
+        if self._prepared:
+            return [dict(status) for status in self._statuses]
+        if self._prepare_lock is None:
+            self._prepare_lock = asyncio.Lock()
+        async with self._prepare_lock:
+            if not self._prepared:
+                self._statuses = await self._prepare()
+                self._prepared = True
+            return [dict(status) for status in self._statuses]
+
+    async def _prepare(self) -> list[dict[str, str | None]]:
         """Connect and discover before provider schemas are assembled."""
         self.discovery_errors = []
         if self._mcp_tool_names:
@@ -99,6 +143,12 @@ class ToolRegistry:
                 await connector.aclose()
             except Exception as exc:
                 self.discovery_errors.append(f"MCP close: {exc}")
+        for name in self._mcp_tool_names:
+            self._tools.pop(name, None)
+        self._mcp_tool_names.clear()
+        self._prepared = False
+        self._prepare_lock = None
+        self._specs_cache = None
 
 
 def default_registry(*, skills=None, delegation: bool = False, tasks: bool = False,

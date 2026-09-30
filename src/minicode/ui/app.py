@@ -35,7 +35,6 @@ from textual.widgets import Button, Header, LoadingIndicator, Static, TextArea
 from minicode.banner import info_line
 from minicode.cli import (
     _Setup,
-    _attach_compactor,
     _build_services,
     _exit_label,
     _format_timestamp,
@@ -63,7 +62,9 @@ from minicode.core.models import (
     RunResult,
 )
 from minicode.providers import ProviderRequestError
+from minicode.providers.factory import model_catalog
 from minicode.runtime import AgentRuntime
+from minicode.runtime.services import attach_compactor as _attach_compactor
 from minicode.security import (
     PERMISSION_MODE_LABELS,
     ModePolicy,
@@ -451,12 +452,12 @@ class ModelPickerModal(ModalScreen[str | None]):
     def __init__(self, current: str) -> None:
         super().__init__()
         self._current = current
-        self._names: list[str] = list(MODEL_CATALOG)
+        self._names: list[str] = list(model_catalog())
 
     def compose(self) -> ComposeResult:
         body = Text()
         for name in self._names:
-            info = MODEL_CATALOG[name]
+            info = model_catalog()[name]
             mark = " ← 当前" if name == self._current else ""
             body.append(
                 f"{name}（上下文 {format_tokens(info.context_window)} token）{mark}\n",
@@ -553,6 +554,9 @@ def _p1_line(event: Event) -> Text:
         return Text(f"  ◆ 已加载项目指令 {data.get('path')}", style="dim")
     if event.type is EventType.MCP_DISCOVERY:
         return Text(f"  ◆ {data.get('error')}", style="yellow")
+    if event.type is EventType.PROVIDER_RETRY:
+        return Text(f"  ◆ 模型请求暂时失败，{data.get('delay_s', 0)} 秒后重试"
+                    f"（第 {data.get('next_attempt', 2)} 次）。", style="yellow")
     raise AssertionError(f"unhandled P1 event: {event.type}")
 
 
@@ -983,6 +987,7 @@ class MiniCodeApp(App[None]):
             EventType.SUBAGENT_RESULT,
             EventType.PROJECT_INSTRUCTIONS,
             EventType.MCP_DISCOVERY,
+            EventType.PROVIDER_RETRY,
         ):
             if etype is not EventType.MCP_DISCOVERY or event.data.get("error"):
                 self._end_streaming()
@@ -1001,15 +1006,10 @@ class MiniCodeApp(App[None]):
         self._end_streaming()
         self._set_busy(True, "等待模型响应")
         try:
-            try:
-                result = (
-                    await self._runtime.run_turn(text)
-                    if text is not None else await self._runtime.continue_turn()
-                )
-            finally:
-                # MCP's SDK exit stack must close in the same worker task
-                # that entered it during this turn.
-                await self._services.registry.aclose()
+            result = (
+                await self._runtime.run_turn(text)
+                if text is not None else await self._runtime.continue_turn()
+            )
         except asyncio.CancelledError:
             # The runtime already persisted the session as cancelled.
             self._end_streaming()
@@ -1209,10 +1209,7 @@ class MiniCodeApp(App[None]):
         self._activity_widget = None
         if self._cleanup_tasks:
             await asyncio.gather(*self._cleanup_tasks, return_exceptions=True)
-        await self._services.background_manager.cancel_all()
-        close = getattr(self._setup.provider, "aclose", None)
-        if close is not None:
-            await close()
+        await self._runtime.aclose()
 
     # -- slash autocomplete: cascading two-level menu -------------------------
 
@@ -1309,7 +1306,7 @@ class MiniCodeApp(App[None]):
         if cmd == "/model":
             current = self._runtime.model
             entries = []
-            for info in MODEL_CATALOG.values():
+            for info in model_catalog().values():
                 badges = []
                 if info.name == current:
                     badges.append("当前")
@@ -1553,9 +1550,9 @@ class MiniCodeApp(App[None]):
             self._switch_model(name)
 
     def _switch_model(self, name: str) -> None:
-        if name not in MODEL_CATALOG:
+        if name not in model_catalog():
             self._add_line(
-                Text(f"未知模型 {name}；可选：{'、'.join(MODEL_CATALOG)}", style="yellow"),
+                Text(f"未知模型 {name}；可选：{'、'.join(model_catalog())}", style="yellow"),
                 "msg-warn",
             )
             return
@@ -1564,7 +1561,7 @@ class MiniCodeApp(App[None]):
         except (ProviderRequestError, RuntimeError) as exc:
             self._add_line(Text(f"无法切换模型：{exc}", style="red"), "msg-warn")
             return
-        info = MODEL_CATALOG[name]
+        info = model_catalog()[name]
         old = self._runtime.model
         previous_provider = self._setup.provider
         # Keep /new consistent with the switched model.
@@ -1705,9 +1702,9 @@ class MiniCodeApp(App[None]):
             self._add_line(Text(f"恢复会话失败: {exc}", style="red"), "msg-warn")
             return
         _attach_compactor(runtime, services.artifact_store)
-        setup.budget = runtime._budget
-        services.goal_checker = runtime._goal_checker
-        services.evidence_ledger = runtime._evidence_ledger
+        setup.budget = runtime.budget
+        services.goal_checker = runtime.goal_checker
+        services.evidence_ledger = runtime.evidence_ledger
         setup.workspace = runtime.workspace
         previous_provider = self._setup.provider
         previous_jobs = self._services.background_manager
@@ -1741,15 +1738,15 @@ class MiniCodeApp(App[None]):
     def _cmd_compact(self) -> None:
         """Manually run one compaction pass over the live session context."""
         runtime = self._runtime
-        compactor = getattr(runtime, "_compactor", None)
+        compactor = runtime.compactor
         session_id = runtime.session_id
         if compactor is None or session_id is None:
             self._add_line(
                 Text("压缩器不可用（会话尚未开始）。", style="yellow"), "msg-warn"
             )
             return
-        system_prompt = getattr(runtime, "_system_prompt", "")
-        messages = getattr(runtime, "_messages", [])
+        system_prompt = runtime.system_prompt
+        messages = runtime.messages
         specs = self._services.registry.specs()
         if not compactor.needs_compaction(system_prompt, messages, specs):
             self._add_line(Text("上下文未超过阈值，无需压缩。"), "msg-system")
@@ -1759,8 +1756,7 @@ class MiniCodeApp(App[None]):
             self._add_line(Text("没有可压缩的内容。"), "msg-system")
             return
         stats = result.stats
-        runtime._messages = result.messages
-        self._store.replace_messages(session_id, result.messages)
+        runtime.replace_context(result.messages)
         self._add_line(
             Text(
                 f"上下文已压缩：估算 {format_tokens(stats.tokens_before)} → {format_tokens(stats.tokens_after)} token"

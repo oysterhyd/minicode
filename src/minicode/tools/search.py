@@ -8,13 +8,14 @@ import os
 import re
 import shutil
 import time
+import regex as bounded_regex
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
 from minicode.core.paths import is_link_or_junction
-from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail
+from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, READ_EXECUTION
 from minicode.tools.files import SKIP_DIRS
 
 _RG_TIMEOUT_S = 30.0
@@ -34,6 +35,7 @@ class GrepArgs(BaseModel):
 
 
 class GrepTool(BaseTool):
+    execution = READ_EXECUTION
     name = "grep"
     description = (
         "Search file contents in the workspace with a regular expression and "
@@ -197,6 +199,9 @@ class GrepTool(BaseTool):
         matches: list[str] = []
         skipped_large = 0
         deadline = time.monotonic() + _RG_TIMEOUT_S
+        # stdlib re cannot interrupt a single catastrophic backtracking match.
+        # The fallback must remain cancellable even without ripgrep installed.
+        matcher = bounded_regex.compile(regex.pattern, regex.flags)
         roots = os.walk(base) if base.is_dir() else [(str(base.parent), [], [base.name])]
         for dirpath, dirnames, filenames in roots:
             if time.monotonic() >= deadline:
@@ -229,7 +234,7 @@ class GrepTool(BaseTool):
                 for lineno, line in enumerate(text.splitlines(), start=1):
                     if time.monotonic() >= deadline:
                         raise TimeoutError("python search timed out")
-                    if regex.search(line) is None:
+                    if matcher.search(line, timeout=max(0.001, deadline - time.monotonic())) is None:
                         continue
                     clipped = line[:_MAX_LINE_CHARS]
                     suffix = "...[行已截断]" if len(line) > _MAX_LINE_CHARS else ""

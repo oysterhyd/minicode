@@ -1,0 +1,2 @@
+# Enables package installation inside the bundled Python, without a system Python.
+pip==26.2

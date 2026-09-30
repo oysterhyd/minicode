@@ -187,6 +187,12 @@ export function useConversations(onSignal?: (signal: Signal) => void) {
       setItems(items => [...items.filter(item => item.kind !== 'thinking'), { id: `thinking-${seq}`, kind: 'thinking', text: '正在思考', startedAt: eventTime(timestamp) }])
       update(key, view => ({ ...view, agentState: { ...view.agentState, rounds: Number(data.round || view.agentState.rounds) } }))
     }
+    if (type === 'provider_retry') {
+      setItems(items => [...items.filter(item => item.kind !== 'thinking'), {
+        id: `retry-${seq}`, kind: 'notice', tone: 'warning',
+        text: `模型请求暂时失败，${Number(data.delay_s || 0)} 秒后重试（第 ${Number(data.next_attempt || 2)} 次）。`,
+      }])
+    }
     if (type === 'assistant_message' || type === 'subagent_result' || type === 'context_compacted') {
       void requestFor<AgentState>(key, 'getState').then(agentState => update(key, { agentState })).catch(error => fail(key, error))
     }

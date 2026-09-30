@@ -48,3 +48,22 @@ ds-state.png
 /desktop/dist/
 /.playwright-cli/
 /output/playwright/
+
+# Release staging, downloaded tools, installers and publication audit
+/release/.cache/
+/release/.stage/
+/release/dist/
+/release/node_modules/
+/output/
+
+# Personal credentials/configuration must never be published
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+desktop-config.json
+provider_config.json
+.zcode/
+.claude/
+.codex/

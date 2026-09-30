@@ -42,7 +42,7 @@ from minicode.context.estimate import estimate_messages_tokens
 from minicode.core.catalog import lookup_model
 
 from .base import ResponseDone, StreamEvent, TextDelta
-from .errors import ProviderAuthError, ProviderError, ProviderRequestError
+from .errors import ProviderAuthError, ProviderError, ProviderRequestError, ProviderProtocolError
 from .zcode_config import DEFAULT_MODEL, discover_commandcode
 
 #: Per-request completion budget sent to the gateway.
@@ -314,7 +314,7 @@ class CommandCodeProvider:
         snippet = body[:300]
         if status_code in (401, 403):
             return ProviderAuthError(f"commandcode auth failed ({status_code}): {snippet}")
-        if status_code in (400, 422):
+        if 400 <= status_code < 500 and status_code not in (408, 429):
             return ProviderRequestError(
                 f"commandcode rejected the request ({status_code}): {snippet}"
             )
@@ -336,10 +336,9 @@ class CommandCodeProvider:
 
         SSE chunks are parsed line by line (``data:`` prefixed lines,
         terminated by ``data: [DONE]``); tool calls arrive as incremental
-        ``delta.tool_calls`` fragments aggregated by ``index``. If the
-        gateway ends the stream without a ``finish_reason``, the aggregated
-        response is still yielded (``stop_reason`` defaults to
-        ``END_TURN``) to tolerate gateway differences.
+        ``delta.tool_calls`` fragments aggregated by ``index``. A terminal
+        marker or finish reason is required; a truncated transport is never
+        mistaken for a complete response.
         """
         payload = _build_payload(
             model=self.model,
@@ -359,6 +358,7 @@ class CommandCodeProvider:
         tool_order: list[int] = []
         finish_reason: str | None = None
         usage = Usage(available=False)
+        terminated = False
 
         try:
             # The host closes the provider at the end of its event-loop life.
@@ -370,7 +370,14 @@ class CommandCodeProvider:
                 ) as response:
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", errors="replace")
-                        raise self._map_http_status(response.status_code, body)
+                        error = self._map_http_status(response.status_code, body.replace(self.api_key, "[redacted]"))
+                        try:
+                            retry_after = float(response.headers.get("retry-after", ""))
+                            if 0 <= retry_after <= 300:
+                                error.retry_after = retry_after
+                        except ValueError:
+                            pass
+                        raise error
 
                     async for line in response.aiter_lines():
                         line = line.strip()
@@ -378,11 +385,12 @@ class CommandCodeProvider:
                             continue  # blank lines, SSE comments, "event:" lines
                         data = line[len(_DATA_PREFIX) :].strip()
                         if data == _DONE_TOKEN:
+                            terminated = True
                             break
                         try:
                             chunk = json.loads(data)
                         except json.JSONDecodeError as exc:
-                            raise ProviderError(
+                            raise ProviderProtocolError(
                                 f"commandcode returned a malformed SSE chunk: {data[:200]!r}"
                             ) from exc
                         if not isinstance(chunk, dict):
@@ -438,6 +446,11 @@ class CommandCodeProvider:
             # asyncio.CancelledError is a BaseException and propagates untouched.
             raise ProviderError(f"commandcode stream failed: {exc}") from exc
 
+        if not terminated and finish_reason is None:
+            raise ProviderProtocolError("commandcode stream ended before a completion marker")
+        if finish_reason in {"content_filter", "refusal"}:
+            raise ProviderRequestError(f"provider declined the response: {finish_reason}")
+
         if usage.available and usage.input_tokens > 0 and estimated_input > 0:
             observed = min(3.0, max(0.5, usage.input_tokens / estimated_input))
             self.prompt_scale = (self.prompt_scale + observed) / 2
@@ -449,6 +462,8 @@ class CommandCodeProvider:
             blocks.append(TextBlock(text=text))
         for index in tool_order:
             buffer = tool_buffers[index]
+            if not buffer["id"] or not buffer["name"]:
+                raise ProviderProtocolError("tool call is missing its id or name")
             try:
                 parsed_input = json.loads(buffer["arguments"]) if buffer["arguments"] else {}
             except json.JSONDecodeError as exc:
@@ -463,7 +478,7 @@ class CommandCodeProvider:
                 )
             blocks.append(
                 ToolUseBlock(
-                    id=buffer["id"] or f"tool_call_{index}",
+                    id=buffer["id"],
                     name=buffer["name"],
                     input=parsed_input,
                 )

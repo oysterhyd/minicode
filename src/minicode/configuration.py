@@ -1,4 +1,4 @@
-"""Persistent desktop services and personal delegate definitions.
+"""Persistent harness services and personal delegate definitions shared by hosts.
 
 Secrets stay in the bridge; public drafts contain only hasApiKey.
 """
@@ -26,13 +26,19 @@ BUILTIN_AGENTS = [
 ]
 
 
-class DesktopConfiguration:
+class HarnessConfiguration:
     def __init__(self, path: Path | None = None):
         self.path = path or Path.home() / ".minicode" / "desktop-config.json"
 
     def read(self):
         if self.path.exists():
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            if self.path.stat().st_size > 4_000_000:
+                raise ValueError("harness configuration exceeds the size limit")
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if (not isinstance(data, dict) or not isinstance(data.get("services"), list)
+                    or not isinstance(data.get("agents"), list)):
+                raise ValueError("harness configuration must contain services and agents lists")
+            return data
         discovered = discover_commandcode()
         services = []
         for provider, label, url in [("commandcode", "CommandCode", discovered[0] if discovered else "https://api.commandcode.ai/provider/v1"), ("anthropic", "Anthropic", "https://api.anthropic.com")]:
@@ -51,6 +57,8 @@ class DesktopConfiguration:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent, delete=False) as stream:
                 temporary = Path(stream.name)
                 json.dump(data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(temporary, self.path)
         finally:
             if temporary:

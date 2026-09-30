@@ -7,7 +7,7 @@ import json
 from pydantic import BaseModel, Field
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext
+from minicode.tools.base import BaseTool, ToolContext, READ_EXECUTION
 
 
 class TaskCreateArgs(BaseModel):
@@ -49,6 +49,7 @@ class TaskCreateTool(BaseTool):
 
 
 class TaskListTool(BaseTool):
+    execution = READ_EXECUTION
     name = "task_list"
     description = "List durable tasks, dependencies, owners and statuses in this session."
     args_model = TaskListArgs

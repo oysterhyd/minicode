@@ -20,14 +20,15 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
 from pydantic import BaseModel
 
 from minicode.core.clock import utc_now
-from minicode.core.models import Event, EventType, Message
+from minicode.core.models import Event, EventType, Message, ToolResultBlock
+from minicode.storage.ownership import session_lock
 
 __all__ = [
     "DEFAULT_DB_PATH",
@@ -41,7 +42,7 @@ DEFAULT_DB_PATH = Path.home() / ".minicode" / "sessions.db"
 
 #: Layout version recorded in ``PRAGMA user_version``. Bump when the schema
 #: changes in a way older code cannot read.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SESSION_COLUMNS = (
     "session_id, created_at, workspace, provider, model, "
@@ -128,10 +129,16 @@ class SqliteStore:
     """
 
     def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
-        self._db_path = Path(db_path)
+        self._memory = str(db_path) == ":memory:"
+        self._db_path = Path(db_path) if self._memory else Path(db_path).resolve()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        self._conn = sqlite3.connect(":memory:" if self._memory else self._db_path)
         self._conn.row_factory = sqlite3.Row
+        self._savepoint_seq = 0
+        self._active_sessions: set[str] = set()
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA synchronous = FULL")
         self._init_schema()
 
     # -- lifecycle ---------------------------------------------------------
@@ -197,6 +204,16 @@ class SqliteStore:
                 title      TEXT,
                 pinned     INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Results are journaled before delivery to the next model request.
+            -- A crash after execution must retain the exact result, including
+            -- an artifact reference, even if the round's message is missing.
+            CREATE TABLE IF NOT EXISTS tool_results (
+                session_id TEXT NOT NULL,
+                call_id TEXT NOT NULL,
+                result TEXT NOT NULL,
+                PRIMARY KEY (session_id, call_id)
+            );
             """
         )
         # v3 -> v4: keep cumulative cache usage and whether the provider
@@ -226,6 +243,21 @@ class SqliteStore:
         """Close the underlying connection (tidy teardown in tests / CLI)."""
         self._conn.close()
 
+    @contextmanager
+    def activation(self, session_id: str):
+        """Nonblocking single-writer ownership shared by CLI and desktop."""
+        from minicode.storage.ownership import SessionBusyError
+        if session_id in self._active_sessions:
+            raise SessionBusyError(f"session already running: {session_id}")
+        guard = (nullcontext() if self._memory else
+                 session_lock(self._db_path.parent / f".{self._db_path.name}.locks", session_id))
+        with guard:
+            self._active_sessions.add(session_id)
+            try:
+                yield
+            finally:
+                self._active_sessions.discard(session_id)
+
     def __enter__(self) -> "SqliteStore":
         return self
 
@@ -237,13 +269,61 @@ class SqliteStore:
         """Write transaction: BEGIN IMMEDIATE up front, commit on success,
         full rollback on any error. The store's own writes and P1 modules
         (task store) share the single connection through this."""
-        self._conn.execute("BEGIN IMMEDIATE")
+        nested = self._conn.in_transaction
+        self._savepoint_seq += 1
+        savepoint = f"checkpoint_{self._savepoint_seq}"
+        self._conn.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
         try:
             yield self._conn
         except BaseException:
-            self._conn.rollback()
+            if nested:
+                self._conn.execute(f"ROLLBACK TO {savepoint}")
+                self._conn.execute(f"RELEASE {savepoint}")
+            else:
+                self._conn.rollback()
             raise
-        self._conn.commit()
+        if nested:
+            self._conn.execute(f"RELEASE {savepoint}")
+        else:
+            self._conn.commit()
+
+    def checkpoint(
+        self, session_id: str, type: EventType, data: dict[str, Any], *,
+        message: Message | None = None, result: ToolResultBlock | None = None,
+        counters: dict[str, Any] | None = None,
+    ) -> Event:
+        """Commit one transition before observers see it.
+
+        Assistant messages, usage and trace move together. Tool results use
+        a durable outbox so parallel execution can still deliver in model
+        order. Duplicate ids with conflicting outcomes are rejected.
+        """
+        with self.transaction() as conn:
+            self._require_session(conn, session_id)
+            if message is not None:
+                self.append_message(session_id, message)
+            if result is not None:
+                encoded = result.model_dump_json()
+                previous = conn.execute(
+                    "SELECT result FROM tool_results WHERE session_id = ? AND call_id = ?",
+                    (session_id, result.tool_use_id),
+                ).fetchone()
+                if previous is not None and previous["result"] != encoded:
+                    raise ValueError(f"conflicting tool result: {result.tool_use_id}")
+                conn.execute(
+                    "INSERT OR IGNORE INTO tool_results (session_id, call_id, result) VALUES (?, ?, ?)",
+                    (session_id, result.tool_use_id, encoded),
+                )
+            if counters:
+                self.update_session(session_id, **counters)
+            return self.append_event(session_id, type, data)
+
+    def get_tool_result(self, session_id: str, call_id: str) -> ToolResultBlock | None:
+        row = self._conn.execute(
+            "SELECT result FROM tool_results WHERE session_id = ? AND call_id = ?",
+            (session_id, call_id),
+        ).fetchone()
+        return ToolResultBlock.model_validate_json(row["result"]) if row else None
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -412,6 +492,12 @@ class SqliteStore:
         return {row["session_id"]: row["latest"] for row in rows if row["latest"]}
 
     def delete_session(self, session_id: str) -> None:
+        if self.get_session(session_id) is None:
+            raise ValueError(f"unknown session: {session_id}")
+        with self.activation(session_id):
+            self._delete_session(session_id)
+
+    def _delete_session(self, session_id: str) -> None:
         """Remove a session and every row that belongs to it, atomically.
 
         Artifact *files* live outside the database; callers owning an
@@ -423,7 +509,7 @@ class SqliteStore:
                 "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
             # `tasks` is created lazily by TaskStore, so it may not exist yet.
             for table in ("messages", "events", "artifacts", "session_goals",
-                          "session_meta", "tasks", "sessions"):
+                          "session_meta", "tool_results", "tasks", "sessions"):
                 if table in tables:
                     conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
 

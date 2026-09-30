@@ -20,6 +20,8 @@ export type Usage = { input_tokens: number; output_tokens: number; cache_read_to
 export type UsageSample = { round: number; input: number; output: number; cached: number; available: boolean; seconds: number | null; tps: number | null }
 export type Statistics = { toolCalls: number; requests: number; modelSeconds: number; tps: number | null; lastTps: number | null; samples: UsageSample[] }
 export type AgentState = {
+  protocolVersion?: number; runId?: string | null; running?: boolean
+  phase?: 'idle' | 'preparing' | 'model' | 'tools' | 'approval' | 'finishing' | 'paused'
   model: string; effort: string; permissionMode: string; sessionId: string | null; taskPending: boolean; rounds: number
   contextTokens: number; contextWindow: number; contextBreakdown: { system: number; tools: number; messages: number }
   usage: Usage | null; statistics?: Statistics; activeModel?: string; pendingSettings?: boolean

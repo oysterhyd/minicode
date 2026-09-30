@@ -9,9 +9,9 @@ import shutil
 import sys
 import httpx
 from pathlib import Path
-from configuration import DesktopConfiguration
+from minicode.configuration import HarnessConfiguration
 
-from minicode.cli import _attach_compactor
+from minicode.runtime.services import attach_compactor, workspace_services
 from minicode.context.extensions import ProjectInstructions, SkillCatalog
 from minicode.core.catalog import DEFAULT_MODEL, EFFORT_LEVELS, MODEL_CATALOG, lookup_model, parse_effort
 from minicode.core.models import ApprovalDecision, ApprovalRequest, Budget
@@ -22,6 +22,7 @@ from minicode.providers.commandcode import CommandCodeProvider
 from minicode.providers.fake import FakeProvider
 from minicode.providers.zcode_config import discover_commandcode
 from minicode.runtime.loop import AgentRuntime
+from minicode.runtime.protocol import RequestServer
 from minicode.runtime.prompt import build_system_prompt
 from minicode.security.policy import ModePolicy, PermissionMode, parse_permission_mode
 from minicode.slash import SLASH_COMMANDS, format_command_lines
@@ -84,7 +85,7 @@ class Bridge:
         self.always_allow: set[str] = set()
         self.approval_seq = 0
         self.policy = ModePolicy()
-        self.configuration = DesktopConfiguration()
+        self.configuration = HarnessConfiguration()
         configured = self.configuration.models()
         self.model = self.configuration.read().get("defaultModel") or next((m["id"] for m in configured if m["available"]), configured[0]["id"] if configured else "")
         self.effort = "off"
@@ -95,34 +96,9 @@ class Bridge:
         self.registry_dirty = False
 
     def make_provider(self, model):
-        configured = self.configuration.find_model(model)
-        if configured is None:
-            return provider_for(model, self.effort)
-        service, info = configured
-        if not service["enabled"]:
-            raise ValueError("请先启用该 AI 服务")
-        # Original services can continue using environment credentials.
-        if model in MODEL_CATALOG and service.get("builtin") and not service.get("apiKey") and service["apiStyle"] == ("anthropic" if service["id"] == "anthropic" else "openai"):
-            provider = provider_for(model, self.effort)
-            if hasattr(provider, "base_url"):
-                provider.base_url = service["baseUrl"]
-            elif isinstance(provider, AnthropicProvider):
-                provider._client.base_url = service["baseUrl"]
-            provider.max_tokens = info["maxOutputTokens"]
-            if hasattr(provider, "reasoning_effort") and not info["supportsEffort"]:
-                provider.reasoning_effort = None
-        else:
-            url, key = self.configuration.credentials(service)
-            if not service["enabled"] or not key:
-                raise ValueError("请启用服务并配置 API 密钥")
-            if service["apiStyle"] == "anthropic":
-                provider = AnthropicProvider(model=info["modelId"], api_key=key, base_url=url, max_tokens=info["maxOutputTokens"])
-            else:
-                provider = CommandCodeProvider(model=info["modelId"], base_url=url, api_key=key, max_tokens=info["maxOutputTokens"],
-                                               reasoning_effort=self.effort if info["supportsEffort"] and self.effort != "off" else None)
-        provider.configuration_id = model
-        provider.context_window = info["contextWindow"]
-        return provider
+        from minicode.providers.factory import configured_provider
+        return configured_provider(model, configuration=self.configuration,
+                                   effort=self.effort, fallback=provider_for)
 
     async def apply_pending_model(self):
         if not self.pending_model:
@@ -136,7 +112,7 @@ class Bridge:
     async def before_round(self):
         await self.apply_pending_model()
         self.registry.set_agents(self.configuration.agents(), self.registry.plugin_catalog.agent_names())
-        self.runtime._refresh_system_prompt()
+        self.runtime.refresh_tools()
 
     def statistics(self):
         events = self.store.get_events(self.runtime.session_id) if self.runtime and self.runtime.session_id else []
@@ -172,16 +148,7 @@ class Bridge:
         self.runtime = None
         registry = self.registry
         self.registry = None
-        background = getattr(previous, "_background_manager", None)
-        try:
-            if background is not None:
-                await background.cancel_all()
-        finally:
-            try:
-                if registry is not None:
-                    await registry.aclose()
-            finally:
-                await self.discard_provider(previous.provider)
+        await previous.aclose()
 
     async def discard_provider(self, provider: object | None = None) -> None:
         """Close a provider's HTTP client, if it has one.
@@ -194,15 +161,8 @@ class Bridge:
             await close()
 
     def build_registry(self, workspace: Path):
-        plugins = PluginCatalog(workspace)
-        skills = SkillCatalog(workspace, plugin_roots=plugins.skill_roots())
-        registry = default_registry(skills=skills, delegation=True, tasks=True, memory=True,
-                                    agent_kinds=plugins.agent_names())
-        registry.plugin_catalog = plugins
-        registry.set_agents(self.configuration.agents(), plugins.agent_names())
-        for server in plugins.servers():
-            registry.add_mcp_server(server)
-        return registry, skills
+        bundle = workspace_services(workspace, agents=self.configuration.agents())
+        return bundle.registry, bundle.skills
 
     async def create_runtime(self, workspace: Path, model: str, session_id: str | None):
         await self.discard_runtime()
@@ -265,7 +225,7 @@ class Bridge:
             self.runtime = AgentRuntime.resume(session_id=session_id, **arguments)
         else:
             self.runtime = AgentRuntime(**arguments)
-        _attach_compactor(self.runtime, artifacts)
+        attach_compactor(self.runtime, artifacts)
         self.model = model
         self.registry = registry
         self.runtime.before_round = self.before_round
@@ -284,33 +244,10 @@ class Bridge:
         except Exception as exc:
             message = {"event": "run_error", "sessionId": self.active_session_id(), "error": str(exc)}
         finally:
-            # Cleanup runs even when the turn was cancelled, and must survive a
-            # second Stop (Ctrl .): a CancelledError raised here used to skip
-            # emit(), so the frontend never saw run_done and the conversation
-            # stayed "running" forever. Shield it and remember the verdict.
-            cleanup_error = None
-            cleanup = asyncio.create_task(self._aclose_registry())
-            try:
-                cleanup_error = await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        continue
-                cleanup_error = cleanup.result()
-            except Exception as exc:  # noqa: BLE001 - surface, never mask, the verdict
-                cleanup_error = f"清理工具连接失败：{exc}"
             if message is None:
                 message = {"event": "run_error", "sessionId": self.active_session_id(),
-                           "error": cleanup_error or "运行结束但没有产生结果"}
-            elif cleanup_error and message["event"] == "run_done":
-                # A task that finished must not be reported as a failure. Keep
-                # the real verdict and record the cleanup problem alongside it.
-                message["result"] = {**message.get("result", {}), "cleanup_error": cleanup_error}
+                           "error": "运行结束但没有产生结果"}
             self.emit(message)
-            # The run is over: stop pinning events to its key so later requests
-            # from any other conversation cannot be attributed to it.
             self.event_key = None
 
     def active_session_id(self) -> str | None:
@@ -334,8 +271,13 @@ class Bridge:
 
     def state(self):
         runtime = self.runtime
-        breakdown = runtime.context_token_breakdown() if runtime else {"system": 0, "tools": 0, "messages": 0}
+        snapshot = runtime.snapshot() if runtime else None
+        breakdown = snapshot.context_breakdown if snapshot else {"system": 0, "tools": 0, "messages": 0}
         return {"model": self.model,
+                "protocolVersion": 2,
+                "runId": snapshot.run_id if snapshot else None,
+                "phase": snapshot.phase.value if snapshot else "idle",
+                "running": snapshot.running if snapshot else False,
                 "activeModel": runtime.model if runtime else self.model,
                 "pendingSettings": self.pending_model or self.registry_dirty,
                 "effort": self.effort,
@@ -355,7 +297,7 @@ class Bridge:
     def capabilities(self, workspace: Path):
         plugins = PluginCatalog(workspace, check_lock=False)
         skills = SkillCatalog(workspace, plugin_roots=plugins.skill_roots())
-        active = self.runtime._active_skills if self.runtime and self.runtime.workspace == workspace else {}
+        active = self.runtime.active_skills if self.runtime and self.runtime.workspace == workspace else {}
         return {"skills": [{"name": s.name, "description": s.description, "origin": s.origin,
                             "active": s.name in active} for s in skills.skills.values()],
                 "plugins": [{"name": p.name, "version": p.version, "enabled": p.enabled,
@@ -375,14 +317,8 @@ class Bridge:
             await self.create_runtime(workspace, chosen, session_id)
         elif self.registry_dirty and not self.busy():
             registry, skills = self.build_registry(workspace)
-            await self.registry.aclose()
-            self.registry = self.runtime._registry = registry
-            self.runtime._skills = skills
-            for name in list(self.runtime._active_skills):
-                if name not in skills.skills:
-                    self.runtime.deactivate_skill(name)
-            self.runtime._base_system_prompt = build_system_prompt(str(workspace), registry.names())
-            self.runtime._refresh_system_prompt()
+            await self.runtime.configure_extensions(registry, skills)
+            self.registry = registry
             self.registry_dirty = False
 
     async def change_model(self, model: str):
@@ -466,23 +402,20 @@ class Bridge:
             if self.busy():
                 raise ValueError("当前任务仍在运行")
             self.event_key = self.client_key
-            self.runtime._budget = self.budget
+            self.runtime.set_budget(self.budget)
             self.run_task = asyncio.create_task(self.run_prompt(None))
             return {"action": "continue", "state": self.state()}
         if verb == "/compact":
-            compactor = self.runtime._compactor
-            if self.runtime.session_id is None:
-                raise ValueError("会话尚未开始")
-            if not compactor.needs_compaction(self.runtime._system_prompt, self.runtime._messages, self.registry.specs()):
-                return {"message": "上下文未超过阈值，无需压缩。"}
-            result = compactor.compact(self.runtime._system_prompt, self.runtime._messages, self.registry.specs())
-            if result.changed:
-                self.runtime._messages = result.messages
-                self.store.replace_messages(self.runtime.session_id, result.messages)
-            return {"message": "上下文已压缩。" if result.changed else "没有可压缩的内容。", "state": self.state()}
+            changed = await self.runtime.compact_context()
+            return {"message": "上下文已压缩。" if changed else "上下文未超过阈值，无需压缩。", "state": self.state()}
         raise ValueError(f"未知命令：{verb}")
 
     async def handle(self, method: str, params: dict):
+        boolean_fields = {"resolveApproval": "granted", "setPluginEnabled": "enabled",
+                          "setAgentEnabled": "enabled", "setSkillActive": "active"}
+        field = boolean_fields.get(method)
+        if field is not None and not isinstance(params.get(field), bool):
+            raise ValueError(f"{field} must be a boolean")
         if method == "getConfiguration":
             return self.configuration.public()
         if method == "listModels":
@@ -622,7 +555,7 @@ class Bridge:
                                  max_total_tokens=int(params["max_total_tokens"]),
                                  max_seconds=float(params["max_seconds"]))
             if self.runtime and not self.busy():
-                self.runtime._budget = self.budget
+                self.runtime.set_budget(self.budget)
             return self.state()
         if method == "setAcceptance":
             chosen = params.get("path", "").strip()
@@ -640,11 +573,7 @@ class Bridge:
         if method == "setPluginEnabled":
             workspace = Path(params["workspace"]).resolve()
             catalog = PluginCatalog(workspace, check_lock=False)
-            plugin = catalog.plugins[params["name"]]
-            manifest = json.loads(plugin.path.read_text(encoding="utf-8"))
-            manifest["enabled"] = bool(params["enabled"])
-            plugin.path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            PluginCatalog(workspace, check_lock=False).write_lock()
+            catalog.set_enabled(params["name"], bool(params["enabled"]))
             self.registry_dirty = True
             return self.capabilities(workspace)
         if method == "lockPlugins":
@@ -688,7 +617,7 @@ class Bridge:
             await self.ensure_runtime(workspace, session_id, model)
             if self.runtime.model != model:
                 await self.change_model(model)
-            self.runtime._budget = self.budget
+            self.runtime.set_budget(self.budget)
             self.event_key = self.client_key
             self.run_task = asyncio.create_task(self.run_prompt(text))
             await asyncio.sleep(0)
@@ -723,6 +652,7 @@ class BridgeRouter:
         self.sessions: dict[str, Bridge] = {}
         #: Insertion-ordered recency of conversations, oldest first.
         self.recent: list[str] = []
+        self._routing_lock = asyncio.Lock()
 
     def _touch(self, session_id: str | None) -> None:
         if session_id and session_id in self.recent:
@@ -782,6 +712,20 @@ class BridgeRouter:
         shutil.rmtree(ArtifactStore(self.store)._session_dir(session_id), ignore_errors=True)
 
     async def handle(self, method: str, params: dict):
+        if not isinstance(method, str) or not isinstance(params, dict):
+            raise ValueError("method must be a string and params must be an object")
+        if method in {"cancelTurn", "resolveApproval"}:
+            context = self.sessions.get(params.get("sessionId")) or self.clients.get(params.get("clientKey") or "default")
+            if (params.get("sessionId") and context is not None and
+                    (context.runtime is None or context.runtime.session_id != params["sessionId"])):
+                return False
+            return await context.handle(method, params) if context else False
+        if method in {"fetchServiceModels", "testServiceConnection", "refreshMcp"}:
+            return await Bridge(self.store).handle(method, params)
+        async with self._routing_lock:
+            return await self._handle(method, params)
+
+    async def _handle(self, method: str, params: dict):
         # Sidebar management works on stored rows and must not create or
         # rebind a conversation's Bridge.
         if method == "renameSession":
@@ -870,21 +814,12 @@ class BridgeRouter:
 
 async def main():
     bridge = BridgeRouter()
+    server = RequestServer(bridge.handle, emit)
     try:
         while line := await asyncio.to_thread(sys.stdin.readline):
-            try:
-                request = json.loads(line)
-                request_id = request["id"]
-                method = request["method"]
-            except (json.JSONDecodeError, KeyError, TypeError) as exc:
-                emit({"event": "bridge_error", "error": f"无效请求: {exc}"})
-                continue
-            try:
-                result = await bridge.handle(method, request.get("params", {}))
-                emit({"id": request_id, "result": result})
-            except Exception as exc:
-                emit({"id": request_id, "error": str(exc)})
+            server.submit(line)
     finally:
+        await server.aclose()
         await bridge.aclose()
 
 

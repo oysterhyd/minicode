@@ -24,7 +24,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext, resolve_or_fail, tail_output
+from minicode.tools.base import BaseTool, ToolContext, ToolExecution, resolve_or_fail, tail_output
 
 #: Force the Windows shells to speak UTF-8 on the pipe. Without this,
 #: PowerShell writes its output in the console code page (cp936 on a Chinese
@@ -255,6 +255,8 @@ class BashArgs(BaseModel):
 
 
 class BashTool(BaseTool):
+    # The process runner owns timeout enforcement and process-tree teardown.
+    execution = ToolExecution(timeout_s=None)
     name = "bash"
     description = (
         "Run a shell command inside the workspace (PowerShell on Windows, "

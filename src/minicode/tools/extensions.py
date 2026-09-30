@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from minicode.context.extensions import SkillCatalog
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext
+from minicode.tools.base import BaseTool, ToolContext, READ_EXECUTION, STATE_EXECUTION, DELEGATE_EXECUTION
 
 
 class NoArgs(BaseModel):
@@ -22,6 +22,7 @@ class SkillResourceArgs(SkillNameArgs):
 
 
 class SkillsListTool(BaseTool):
+    execution = READ_EXECUTION
     name = "skills_list"
     description = "List available local skills by name and description. Skill bodies are not loaded."
     args_model = NoArgs
@@ -34,6 +35,7 @@ class SkillsListTool(BaseTool):
 
 
 class SkillLoadTool(BaseTool):
+    execution = STATE_EXECUTION
     name = "skill_load"
     description = "Activate a named skill and read its instructions. Activation does not grant tool permissions."
     args_model = SkillNameArgs
@@ -48,6 +50,7 @@ class SkillLoadTool(BaseTool):
 
 
 class SkillUnloadTool(BaseTool):
+    execution = STATE_EXECUTION
     name = "skill_unload"
     description = "Deactivate a previously loaded skill for this session."
     args_model = SkillNameArgs
@@ -62,6 +65,7 @@ class SkillUnloadTool(BaseTool):
 
 
 class SkillResourceTool(BaseTool):
+    execution = READ_EXECUTION
     name = "skill_resource"
     description = "Read a file inside a registered skill directory; scripts still require normal bash approval."
     args_model = SkillResourceArgs
@@ -83,6 +87,7 @@ class DelegateArgs(BaseModel):
 
 
 class DelegateTool(BaseTool):
+    execution = DELEGATE_EXECUTION
     name = "delegate"
     description = (
         "Delegate bounded repository exploration or review to a read-only assistant. "

@@ -29,6 +29,60 @@ class McpConnector:
         self._client: Client | None = None
         self.protocol_version: str | None = None
         self.server_version: str | None = None
+        self._owner: asyncio.Task | None = None
+        self._queue: asyncio.Queue | None = None
+        self._closing = False
+
+    async def _request(self, operation: str, *arguments):
+        """All SDK contexts enter and exit in one long-lived owning task."""
+        if self._closing:
+            raise RuntimeError("MCP connection is closing")
+        if self._owner is None or self._owner.done():
+            self._queue = asyncio.Queue(maxsize=32)
+            self._owner = asyncio.create_task(self._serve(), name=f"mcp:{self.config.name}")
+        future = asyncio.get_running_loop().create_future()
+        assert self._queue is not None
+        self._queue.put_nowait((operation, arguments, future))
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            future.cancel()
+            # Cancellation terminates the affected connection, never replays
+            # an external call, and waits for the server process to be reaped.
+            await self.aclose()
+            raise
+
+    async def _serve(self) -> None:
+        current = None
+        assert self._queue is not None
+        queue = self._queue
+        try:
+            while True:
+                operation, arguments, current = await queue.get()
+                if current.cancelled():
+                    continue
+                try:
+                    result = (await self._discover() if operation == "discover"
+                              else await self._call(*arguments))
+                except Exception as exc:
+                    if not current.done():
+                        current.set_exception(exc)
+                else:
+                    if not current.done():
+                        current.set_result(result)
+                current = None
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                await self._disconnect()
+            finally:
+                pending = [current] if current is not None else []
+                while not queue.empty():
+                    pending.append(queue.get_nowait()[2])
+                for future in pending:
+                    if not future.done():
+                        future.set_exception(RuntimeError("MCP connection closed during request"))
 
     async def _connect(self) -> Client:
         if self._client is not None:
@@ -53,6 +107,9 @@ class McpConnector:
         return client
 
     async def discover(self) -> list["McpTool"]:
+        return await self._request("discover")
+
+    async def _discover(self) -> list["McpTool"]:
         self.config.verify()
         client = await self._connect()
         cursor: str | None = None
@@ -85,6 +142,14 @@ class McpConnector:
 
     async def call(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         try:
+            return await self._request("call", name, arguments)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return ToolOutcome.failure(f"MCP server {self.config.name} disconnected or timed out: {exc}")
+
+    async def _call(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        try:
             self.config.verify()
             client = await self._connect()
             async with asyncio.timeout(self.config.timeout_s):
@@ -92,7 +157,7 @@ class McpConnector:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # connection failures are reported to the model
-            await self.aclose()
+            await self._disconnect()
             return ToolOutcome.failure(f"MCP server {self.config.name} disconnected or timed out: {exc}")
         parts: list[str] = []
         for block in result.content:
@@ -109,6 +174,26 @@ class McpConnector:
                 else ToolOutcome(output=output))
 
     async def aclose(self) -> None:
+        owner = self._owner
+        if owner is None:
+            return
+        if not self._closing and not owner.done():
+            self._closing = True
+            owner.cancel()
+        try:
+            # A second Stop cannot strand the task that owns SDK cancel scopes.
+            while not owner.done():
+                try:
+                    await asyncio.shield(owner)
+                except asyncio.CancelledError:
+                    continue
+            owner.result()
+        finally:
+            if self._owner is owner:
+                self._owner = None
+                self._closing = False
+
+    async def _disconnect(self) -> None:
         stack, self._stack = self._stack, None
         self._client = None
         if stack is not None:

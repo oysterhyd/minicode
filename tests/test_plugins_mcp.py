@@ -215,3 +215,48 @@ def test_stdio_mcp_disconnect_becomes_an_explainable_tool_failure(tmp_path):
             await registry.aclose()
 
     asyncio.run(run())
+
+
+def test_mcp_connection_can_be_used_and_closed_by_different_host_tasks(tmp_path):
+    workspace, _ = workspace_with_plugin(tmp_path)
+    registry = default_registry()
+    registry.add_mcp_server(PluginCatalog(workspace).servers()[0])
+    async def scenario():
+        first = await asyncio.create_task(registry.prepare())
+        assert first[0]["error"] is None
+        # Preparing again must retain the connection and schemas.
+        assert await asyncio.create_task(registry.prepare()) == first
+        result = await asyncio.create_task(registry.get("mcp__docs__list_documents").run(
+            {}, ToolContext(workspace=workspace)))
+        assert result.success and "guide.md" in result.output
+        await asyncio.gather(asyncio.create_task(registry.aclose()), asyncio.create_task(registry.aclose()))
+        assert registry.discovery_errors == []
+        assert not any(name.startswith("mcp__") for name in registry.names())
+        reopened = await asyncio.create_task(registry.prepare())
+        assert reopened[0]["error"] is None
+        await registry.aclose()
+    asyncio.run(scenario())
+
+
+def test_cancelling_mcp_call_reaps_owning_task_and_allows_reconnect(tmp_path):
+    workspace, plugin = workspace_with_plugin(tmp_path)
+    (plugin / "server.py").write_text(
+        "from mcp.server import MCPServer\nimport asyncio\n"
+        "mcp = MCPServer('slow')\n"
+        "@mcp.tool()\nasync def wait() -> str:\n"
+        "    await asyncio.sleep(60)\n    return 'late'\n"
+        "if __name__ == '__main__':\n    mcp.run()\n", encoding="utf-8")
+    registry = default_registry()
+    registry.add_mcp_server(PluginCatalog(workspace).servers()[0])
+    async def scenario():
+        await registry.prepare()
+        task = asyncio.create_task(registry.get("mcp__docs__wait").run({}, ToolContext(workspace=workspace)))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        await asyncio.create_task(registry.aclose())
+        assert registry.discovery_errors == []
+        assert (await registry.prepare())[0]["error"] is None
+        await registry.aclose()
+    asyncio.run(scenario())

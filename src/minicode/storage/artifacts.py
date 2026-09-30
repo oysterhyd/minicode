@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import locale
+import os
 import uuid
 from pathlib import Path
 from typing import BinaryIO
@@ -52,9 +53,17 @@ class ArtifactStore:
         session_dir.mkdir(parents=True, exist_ok=True)
         target = session_dir / f"{artifact_id}.txt"
         tmp = target.with_suffix(".tmp")
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(target)
-        self._store.record_artifact(session_id, artifact_id, kind, target.name)
+        try:
+            with tmp.open("w", encoding="utf-8") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            tmp.replace(target)
+            self._store.record_artifact(session_id, artifact_id, kind, target.name)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
+            raise
         return ArtifactRef(artifact_id=artifact_id, kind=kind, size=len(content))
 
     async def spill_binary_stream(
@@ -86,6 +95,8 @@ class ArtifactStore:
                 tail = decoder.decode(b"", final=True)
                 output.write(tail)
                 size += len(tail)
+                output.flush()
+                os.fsync(output.fileno())
             return size
 
         copy_task = asyncio.create_task(asyncio.to_thread(copy))

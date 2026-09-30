@@ -17,10 +17,11 @@ session-level finalize paths end a turn.
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
+from contextlib import nullcontext
 import json
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -40,14 +41,17 @@ from minicode.core.models import (
     ToolUseBlock,
     Usage,
 )
-from minicode.providers.base import Provider, TextDelta
-from minicode.providers.errors import ProviderAuthError, ProviderError, ProviderRequestError
+from minicode.providers.base import Provider
+from minicode.providers.errors import ProviderRequestError
 from minicode.runtime.budget import BudgetChecker, SharedBudgetLedger
 from minicode.runtime.events import EventCallback, EventRecorder
+from minicode.runtime.scheduling import ToolScheduler
+from minicode.runtime.state import RunPhase, RuntimeSnapshot
 from minicode.runtime.prompt import build_system_prompt
 from minicode.context.extensions import ProjectInstructions, SkillCatalog, Source
-from minicode.security.policy import PermissionPolicy, PolicyBehavior
+from minicode.security.policy import PermissionPolicy
 from minicode.storage import SessionStore
+from minicode.storage.ownership import SessionBusyError
 from minicode.tools.base import ToolContext, ToolLimits
 from minicode.tools.registry import ToolRegistry
 
@@ -59,16 +63,6 @@ _OUTPUT_PREVIEW_CHARS = 500
 
 #: Tool output limits for generic tools; individual tools page before this.
 _SPILL_LIMITS = ToolLimits()
-
-#: Calls that may overlap and be retried after a transient tool error.
-_READ_ONLY_TOOLS = frozenset({"read", "ls", "grep", "read_artifact", "skills_list", "skill_resource"})
-# Skill activation changes the system prompt and records session events. Keep
-# those calls in model order, even though they do not modify workspace files.
-# Interrupted unloads with a recorded state transition are settled from the
-# event log below; other calls can be retried under the current policy.
-_REPLAY_SAFE_TOOLS = _READ_ONLY_TOOLS | {"skill_load", "skill_unload", "delegate"}
-_MAX_PARALLEL_READS = 4
-
 
 class _DeadlineExceeded(TimeoutError):
     """The turn's deadline expired, including during synchronous work."""
@@ -205,18 +199,23 @@ class AgentRuntime:
         self._same_tool_rounds = 0
         self._last_exit_reason: ExitReason | None = None
         self._provider_in_flight = False
+        self._running = False
+        self._activation_guard = None
+        self.before_round: Callable[[], Awaitable[None]] | None = None
+        self._phase = RunPhase.IDLE
+        self._run_id: str | None = None
 
     # -- read-only state ----------------------------------------------------
 
     @property
     def usage(self) -> Usage:
         """Session-cumulative token usage."""
-        return self._usage
+        return self._usage.model_copy(deep=True)
 
     @property
     def last_model_usage(self) -> Usage | None:
         """Usage for the most recent model response, if one exists."""
-        return self._last_model_usage
+        return self._last_model_usage.model_copy(deep=True) if self._last_model_usage else None
 
     @property
     def task_pending(self) -> bool:
@@ -340,6 +339,107 @@ class AgentRuntime:
 
     # -- live configuration ---------------------------------------------------
 
+    @property
+    def budget(self) -> Budget:
+        return self._budget.model_copy(deep=True)
+
+    @property
+    def active_skills(self) -> dict[str, str]:
+        return dict(self._active_skills)
+
+    @property
+    def goal_checker(self):
+        return self._goal_checker
+
+    @property
+    def evidence_ledger(self):
+        return self._evidence_ledger
+
+    @property
+    def compactor(self):
+        return self._compactor
+
+    @property
+    def messages(self) -> list[Message]:
+        return [message.model_copy(deep=True) for message in self._messages]
+
+    @property
+    def system_prompt(self) -> str:
+        return self._system_prompt
+
+    def snapshot(self) -> RuntimeSnapshot:
+        return RuntimeSnapshot(
+            session_id=self.session_id, run_id=self._run_id, phase=self._phase,
+            running=self._running, task_pending=self._task_pending,
+            provider=self._provider_name, model=self._model, rounds=self._rounds,
+            usage=self._usage.model_copy(deep=True), budget=self.budget,
+            context_window=self.context_window, context_breakdown=self.context_token_breakdown(),
+            active_skills=self.active_skills,
+        )
+
+    def set_budget(self, budget: Budget) -> None:
+        if self._running:
+            raise SessionBusyError("budget changes apply at the next activation")
+        self._budget = budget.model_copy(deep=True)
+
+    def set_compactor(self, compactor) -> None:
+        if self._running:
+            raise SessionBusyError("cannot replace compactor during an activation")
+        self._compactor = compactor
+
+    def refresh_tools(self) -> None:
+        if self._provider_in_flight:
+            raise SessionBusyError("tool schemas change at request boundaries")
+        if self._auto_system_prompt:
+            self._base_system_prompt = build_system_prompt(str(self._workspace.resolve()), self._registry.names())
+        self._refresh_system_prompt()
+
+    async def configure_extensions(self, registry: ToolRegistry, skills: SkillCatalog) -> None:
+        if self._running:
+            raise SessionBusyError("cannot replace extensions during an activation")
+        await self._registry.aclose()
+        self._registry = registry
+        self._skills = skills
+        for name in list(self._active_skills):
+            if name not in skills.skills:
+                self.deactivate_skill(name)
+        self.refresh_tools()
+
+    def replace_context(self, messages: list[Message]) -> None:
+        if self._running:
+            raise SessionBusyError("cannot replace context during an activation")
+        if self.session_id is None:
+            raise ValueError("session has not started")
+        if self._find_dangling_calls(messages):
+            raise ValueError("replacement context contains unfinished tool calls")
+        copied = [message.model_copy(deep=True) for message in messages]
+        self._store.replace_messages(self.session_id, copied)
+        self._messages = copied
+
+    async def compact_context(self) -> bool:
+        if self._running:
+            raise SessionBusyError("cannot compact context during an activation")
+        if self.session_id is None or self._compactor is None:
+            raise ValueError("context compaction is unavailable")
+        recorder = EventRecorder(self._store, self.session_id, self._on_event)
+        before = self.context_tokens_used()
+        await self._compact_if_needed(recorder, self.session_id)
+        return self.context_tokens_used() != before
+
+    async def aclose(self) -> None:
+        """Release session resources before the host's event loop ends."""
+        if self._running:
+            raise SessionBusyError("cancel and await the activation before closing it")
+        try:
+            await self._cancel_background_jobs()
+        finally:
+            try:
+                await self._registry.aclose()
+            finally:
+                close = getattr(self._provider, "aclose", None)
+                if close is not None:
+                    await close()
+
     def set_model(
         self, *, provider: Provider, provider_name: str, model: str
     ) -> None:
@@ -351,6 +451,8 @@ class AgentRuntime:
         ``sessions list`` reflects reality.
         """
         self._validate_provider(provider, provider_name, model)
+        if self._provider_in_flight:
+            raise SessionBusyError("model changes apply at request boundaries")
         if self.session_id is not None:
             self._store.update_session(self.session_id, provider=provider_name, model=model)
         self._provider = provider
@@ -378,6 +480,24 @@ class AgentRuntime:
         return await self.run_turn(None)
 
     async def run_turn(self, user_message: str | None) -> RunResult:
+        """Activate the session once; rejected concurrent callers change nothing."""
+        if self._running:
+            raise SessionBusyError("this runtime already has an active turn")
+        self._running = True
+        self._run_id = uuid.uuid4().hex
+        self._phase = RunPhase.PREPARING
+        try:
+            return await self._run_turn(user_message)
+        finally:
+            if self._activation_guard is not None:
+                self._activation_guard.__exit__(None, None, None)
+                self._activation_guard = None
+            self._running = False
+            self._provider_in_flight = False
+            self._run_id = None
+            self._phase = RunPhase.PAUSED if self._task_pending else RunPhase.IDLE
+
+    async def _run_turn(self, user_message: str | None) -> RunResult:
         """Run one activation of a user task and return its durable outcome.
 
         On the first call the session row is created and ``SESSION_START``
@@ -411,6 +531,10 @@ class AgentRuntime:
             )
         session_id = self.session_id
         assert session_id is not None  # set directly above on the first turn
+        ownership = getattr(self._store, "activation", None)
+        guard = ownership(session_id) if ownership else nullcontext()
+        guard.__enter__()
+        self._activation_guard = guard
         recorder = EventRecorder(self._store, session_id, self._on_event)
         user_recorded = False
         if self._shared_budget is None:
@@ -422,12 +546,14 @@ class AgentRuntime:
         else:
             self._budget_ledger = self._shared_budget
         self._deadline = self._budget_ledger.deadline
+        deadline_scope = None
         try:
             if first_turn:
                 self._bind_goal_session()
-            async with asyncio.timeout(
+            deadline_scope = asyncio.timeout(
                 max(0, self._deadline - time.monotonic()) if self._deadline is not None else None
-            ):
+            )
+            async with deadline_scope:
                 if first_turn:
                     start_data = {
                         "workspace": str(self._workspace.resolve()),
@@ -476,6 +602,11 @@ class AgentRuntime:
                     user_recorded = True
                 self._store.update_session(session_id, status="running", exit_reason=None)
 
+                if user_message is None and self._has_unfinalized_answer():
+                    gated = await self._goal_gate(recorder, turn_started)
+                    if gated is not None:
+                        return gated
+
                 context_rejections = 0
                 truncations = 0
                 while True:
@@ -518,6 +649,7 @@ class AgentRuntime:
                     self._check_deadline()
                     self._pending_instruction_scopes.clear()
                     self._provider_in_flight = True
+                    self._phase = RunPhase.MODEL
                     response, failure, error, provider_exc = await self._stream_assistant_turn()
                     self._provider_in_flight = False
                     self._check_deadline()
@@ -534,24 +666,32 @@ class AgentRuntime:
                         )
                     context_rejections = 0
 
-                    self._append_message(
-                        session_id, Message(role="assistant", content=list(response.blocks))
-                    )
-                    self._usage = self._usage + response.usage
+                    assistant = Message(role="assistant", content=list(response.blocks))
+                    next_usage = self._usage + response.usage
+                    # There is no await between committing and mirroring the
+                    # transition. Observers always see the complete checkpoint.
+                    data = {
+                        "text": response.text,
+                        "tool_calls": [call.name for call in response.tool_calls],
+                        "usage": {**response.usage.model_dump(),
+                                  "total_tokens": response.usage.total_tokens},
+                        "stop_reason": response.stop_reason.value,
+                        "request_seconds": getattr(self, "_request_seconds", 0.0),
+                    }
+                    commit = getattr(self._store, "checkpoint", None)
+                    counters = self._counter_values(next_usage)
+                    if commit:
+                        event = commit(session_id, EventType.ASSISTANT_MESSAGE, data,
+                                       message=assistant, counters=counters)
+                        self._messages.append(assistant)
+                    else:
+                        self._append_message(session_id, assistant)
+                        self._store.update_session(session_id, **counters)
+                        event = self._store.append_event(session_id, EventType.ASSISTANT_MESSAGE, data)
+                    self._usage = next_usage
                     self._last_model_usage = response.usage
                     self._budget_ledger.add_usage(response.usage)
-                    await recorder.emit(
-                        EventType.ASSISTANT_MESSAGE,
-                        {
-                            "text": response.text,
-                            "tool_calls": [call.name for call in response.tool_calls],
-                            "usage": {**response.usage.model_dump(),
-                                      "total_tokens": response.usage.total_tokens},
-                            "stop_reason": response.stop_reason.value,
-                            "request_seconds": getattr(self, "_request_seconds", 0.0),
-                        },
-                    )
-                    self._persist_counters()
+                    await recorder.publish(event)
 
                     # Token budget fires before any tool of this round runs: side
                     # effects must not start once the budget is already blown.
@@ -593,60 +733,17 @@ class AgentRuntime:
                         continue
 
                     tool_results: list[ToolResultBlock] = []
+                    self._phase = RunPhase.TOOLS
                     try:
-                        calls = response.tool_calls
-                        index = 0
-                        while index < len(calls):
-                            self._check_deadline()
-                            name = calls[index].name
-                            if name == "delegate" and self._budget.max_total_tokens <= 0:
-                                # Only independent child tasks overlap. With an
-                                # explicit token cap, serial execution avoids
-                                # two in-flight requests spending one balance.
-                                batch: list[ToolUseBlock] = []
-                                keys: set[tuple[str, str]] = set()
-                                while (index + len(batch) < len(calls)
-                                       and calls[index + len(batch)].name == "delegate"
-                                       and len(batch) < 2):
-                                    candidate = calls[index + len(batch)]
-                                    key = (str(candidate.input.get("kind")),
-                                           str(candidate.input.get("task")))
-                                    if key in keys:
-                                        break
-                                    keys.add(key)
-                                    batch.append(candidate)
-                            elif name in _READ_ONLY_TOOLS:
-                                # A write/unknown call is a barrier. Only
-                                # adjacent built-in reads may overlap.
-                                batch = []
-                                while (index + len(batch) < len(calls)
-                                       and calls[index + len(batch)].name in _READ_ONLY_TOOLS
-                                       and len(batch) < _MAX_PARALLEL_READS):
-                                    batch.append(calls[index + len(batch)])
-                            else:
-                                tool_results.append(
-                                    await self._execute_tool_call(recorder, calls[index], session_id)
-                                )
-                                index += 1
-                                continue
-                            tasks = [asyncio.create_task(
-                                self._execute_tool_call(recorder, call, session_id)
-                            ) for call in batch]
-                            try:
-                                tool_results.extend(await asyncio.gather(*tasks))
-                            except BaseException:
-                                for task in tasks:
-                                    task.cancel()
-                                await asyncio.gather(*tasks, return_exceptions=True)
-                                # Keep completed results durable if cancellation
-                                # interrupted the batch.
-                                tool_results.extend(task.result() for task in tasks if
-                                                    task.done() and not task.cancelled() and
-                                                    task.exception() is None)
-                                raise
-                            index += len(batch)
-                            if name in _READ_ONLY_TOOLS:
-                                self._check_deadline()
+                        scheduler = ToolScheduler(
+                            self._registry,
+                            parallel_delegates=1 if self._budget.max_total_tokens > 0 else 2,
+                        )
+                        await scheduler.execute(
+                            response.tool_calls,
+                            lambda call: self._execute_tool_call(recorder, call, session_id),
+                            tool_results,
+                        )
                     finally:
                         if tool_results:
                             self._append_message(
@@ -662,7 +759,11 @@ class AgentRuntime:
                             recorder, ExitReason.STALLED, turn_started,
                             error="重复的工具调用没有产生新证据。",
                         )
-        except TimeoutError:
+        except TimeoutError as exc:
+            if (not isinstance(exc, _DeadlineExceeded)
+                    and (deadline_scope is None or not deadline_scope.expired())):
+                return await self._finalize(recorder, ExitReason.INTERNAL_ERROR, turn_started,
+                                            error=f"unexpected host timeout: {exc}")
             if self._provider_in_flight:
                 # The gateway may have billed a request without delivering
                 # usage. A reported zero would be misleading.
@@ -674,6 +775,9 @@ class AgentRuntime:
                 self._task_pending = True
             return await self._finalize(recorder, ExitReason.TIME_BUDGET, turn_started)
         except asyncio.CancelledError:
+            if user_message is not None and not user_recorded:
+                self._append_message(session_id, Message(role="user", content=[TextBlock(text=user_message)]))
+                self._task_pending = True
             if self._provider_in_flight:
                 self._usage = self._usage.model_copy(update={"available": False})
                 self._provider_in_flight = False
@@ -692,234 +796,23 @@ class AgentRuntime:
 
     # -- resuming ------------------------------------------------------------
 
+    def _has_unfinalized_answer(self) -> bool:
+        if not self._messages or self._messages[-1].role != "assistant":
+            return False
+        for event in reversed(self._store.get_events(self.session_id)):
+            if event.type is EventType.SESSION_END:
+                return False
+            if event.type is EventType.ASSISTANT_MESSAGE:
+                return (not event.data.get("tool_calls")
+                        and event.data.get("stop_reason") == StopReason.END_TURN.value)
+        return False
+
     @classmethod
-    def resume(
-        cls,
-        *,
-        store: SessionStore,
-        session_id: str,
-        provider: Provider,
-        registry: ToolRegistry,
-        policy: PermissionPolicy,
-        workspace: Path | None = None,
-        provider_name: str | None = None,
-        model: str | None = None,
-        budget: Budget | None = None,
-        approval_handler: ApprovalHandler | None = None,
-        on_text_delta: TextDeltaCallback | None = None,
-        on_event: EventCallback | None = None,
-        system_prompt: str | None = None,
-        compactor: Any | None = None,
-        goal_checker: Any | None = None,
-        evidence_ledger: Any | None = None,
-        background_manager: Any | None = None,
-        artifact_store: Any | None = None,
-        project_instructions: ProjectInstructions | None = None,
-        skills: SkillCatalog | None = None,
-        allow_delegation: bool = True,
-        shared_budget: SharedBudgetLedger | None = None,
-    ) -> "AgentRuntime":
-        """Continue a persisted session in a fresh process.
-
-        Loads the stored conversation, usage and round count, restores the
-        workspace/model from the session row (overridable) and marks tool
-        calls whose outcome was lost to an interruption; they are settled at
-        the start of the next :meth:`run_turn` (see :meth:`_settle_recovery`).
-        Raises ``ValueError`` for an unknown session or a missing workspace.
-        """
-        summary = store.get_session(session_id)
-        if summary is None:
-            raise ValueError(f"unknown session: {session_id}")
-        events = store.get_events(session_id)
-        start_event = next((event for event in events
-                            if event.type is EventType.SESSION_START), None)
-        saved_budget = start_event.data.get("budget") if start_event else None
-        effective_budget = budget if budget is not None else Budget()
-        if isinstance(saved_budget, dict):
-            try:
-                saved_cap = int(saved_budget.get("max_total_tokens", 0))
-            except (TypeError, ValueError):
-                saved_cap = 0
-            # A default zero in a resumed frontend must not silently remove
-            # an explicit spending cap. A negative cap is an explicit opt-out.
-            if saved_cap > 0 and effective_budget.max_total_tokens == 0:
-                effective_budget = effective_budget.model_copy(
-                    update={"max_total_tokens": saved_cap}
-                )
-        resolved_workspace = (Path(workspace) if workspace else Path(summary.workspace)).resolve()
-        if not resolved_workspace.is_dir():
-            raise ValueError(
-                f"workspace no longer exists: {resolved_workspace} (session {session_id})"
-            )
-        if project_instructions is None and (
-            (start_event and start_event.data.get("project_instructions"))
-            or any(e.type is EventType.PROJECT_INSTRUCTIONS for e in events)
-        ):
-            project_instructions = ProjectInstructions(resolved_workspace)
-        if skills is None and (
-            (start_event and start_event.data.get("active_skills"))
-            or any(e.type is EventType.SKILL_ACTIVATED for e in events)
-        ):
-            skills = SkillCatalog(resolved_workspace)
-
-        resolved_provider = provider_name or provider.name
-        resolved_model = model or getattr(provider, "model", summary.model)
-        cls._validate_provider(provider, resolved_provider, resolved_model)
-        runtime = cls(
-            provider=provider,
-            registry=registry,
-            store=store,
-            policy=policy,
-            workspace=resolved_workspace,
-            provider_name=resolved_provider,
-            model=resolved_model,
-            budget=effective_budget,
-            approval_handler=approval_handler,
-            on_text_delta=on_text_delta,
-            on_event=on_event,
-            system_prompt=system_prompt,
-            compactor=compactor,
-            goal_checker=goal_checker,
-            evidence_ledger=evidence_ledger,
-            background_manager=background_manager,
-            artifact_store=artifact_store,
-            project_instructions=project_instructions,
-            skills=skills,
-            allow_delegation=allow_delegation,
-            shared_budget=shared_budget,
-        )
-        if project_instructions is not None:
-            expected_sources = list(start_event.data.get("project_instructions", [])) if start_event else []
-            expected_sources.extend(event.data for event in events
-                                    if event.type is EventType.PROJECT_INSTRUCTIONS)
-            for saved in expected_sources:
-                path = Path(saved["path"])
-                if path != resolved_workspace / "AGENTS.md":
-                    relative = path.relative_to(resolved_workspace)
-                    project_instructions.discover(str(relative.parent / "_scope_probe"))
-                source = project_instructions.loaded.get(path)
-                if source is None or source.digest != saved["sha256"]:
-                    raise ValueError(f"project instructions changed since session start: {path}")
-            runtime._refresh_system_prompt()
-        active_skills = dict(start_event.data.get("active_skills", {})) if start_event else {}
-        for event in events:
-            if event.type is EventType.SKILL_ACTIVATED:
-                active_skills[str(event.data["name"])] = str(event.data["sha256"])
-            elif event.type is EventType.SKILL_DEACTIVATED:
-                active_skills.pop(str(event.data["name"]), None)
-        for name, digest in active_skills.items():
-            if skills is None or skills.load(name).digest != digest:
-                raise ValueError(f"activated skill changed since session start: {name}")
-            runtime.activate_skill(name)
-        runtime.session_id = session_id
-        runtime._messages = store.get_messages(session_id)
-        runtime._usage = Usage(
-            input_tokens=summary.input_tokens,
-            output_tokens=summary.output_tokens,
-            cache_read_tokens=summary.cache_read_tokens,
-            cache_write_tokens=summary.cache_write_tokens,
-            available=summary.usage_available,
-        )
-        runtime._rounds = summary.rounds
-        runtime._task_pending = bool(runtime._messages) and summary.status != ExitReason.COMPLETED.value
-        try:
-            runtime._last_exit_reason = ExitReason(summary.exit_reason) if summary.exit_reason else None
-        except ValueError:
-            runtime._last_exit_reason = None
-        runtime._pending_dangling = cls._find_dangling_calls(runtime._messages)
-        jobs: dict[str, dict[str, Any]] = {}
-        event_usage = Usage()
-        event_rounds = summary.rounds
-        completed_responses = 0
-        for event in events:
-            if event.type is EventType.BACKGROUND_JOB_STARTED:
-                jobs[event.data["job_id"]] = event.data
-            elif event.type in (EventType.BACKGROUND_JOB_COMPLETED, EventType.BACKGROUND_JOB_LOST):
-                jobs.pop(event.data["job_id"], None)
-            elif event.type is EventType.ROUND_START:
-                event_rounds = max(event_rounds, int(event.data.get("round", 0)))
-            elif event.type is EventType.ASSISTANT_MESSAGE:
-                completed_responses += 1
-                data = event.data.get("usage")
-                if isinstance(data, dict):
-                    response_usage = Usage(
-                        input_tokens=int(data.get("input_tokens", 0)),
-                        output_tokens=int(data.get("output_tokens", 0)),
-                        cache_read_tokens=int(data.get("cache_read_tokens", 0)),
-                        cache_write_tokens=int(data.get("cache_write_tokens", 0)),
-                        available=bool(data.get("available", False)),
-                    )
-                    event_usage += response_usage
-                    runtime._last_model_usage = response_usage
-            elif event.type is EventType.SUBAGENT_RESULT:
-                data = event.data.get("usage")
-                if isinstance(data, dict):
-                    event_usage += Usage(**data)
-        child_ids = {
-            str(event.data["child_session_id"])
-            for event in events if event.type is EventType.SUBAGENT_START
-            and event.data.get("child_session_id")
-        }
-        settled_children = {
-            str(event.data["child_session_id"])
-            for event in events if event.type is EventType.SUBAGENT_RESULT
-            and event.data.get("child_session_id")
-        }
-        for child_id in child_ids:
-            child_events = store.get_events(child_id)
-            child_responses = [event for event in child_events
-                               if event.type is EventType.ASSISTANT_MESSAGE]
-            completed_responses += len(child_responses)
-            if child_id not in settled_children:
-                for child_event in child_responses:
-                    data = child_event.data.get("usage")
-                    if isinstance(data, dict):
-                        event_usage += Usage(**data)
-        runtime._rounds = event_rounds
-        restore_progress = getattr(provider, "restore_progress", None)
-        resume_identity = getattr(provider, "resume_identity", None)
-        saved_identity = (start_event.data.get("provider_resume_identity")
-                          if start_event else None)
-        if (callable(restore_progress) and callable(resume_identity)
-                and saved_identity is not None
-                and resume_identity() == saved_identity):
-            ids = [
-                block.id
-                for message in runtime._messages for block in message.content
-                if isinstance(block, ToolUseBlock)
-            ]
-            ids.extend(
-                str(event.data.get("call_id", ""))
-                for event in events if event.type is EventType.TOOL_CALL_START
-            )
-            for child_id in child_ids:
-                ids.extend(
-                    str(event.data.get("call_id", ""))
-                    for event in store.get_events(child_id)
-                    if event.type is EventType.TOOL_CALL_START
-                )
-            fake_call_counter = max((
-                int(call_id.removeprefix("fake_tool_"))
-                for call_id in ids
-                if call_id.startswith("fake_tool_")
-                and call_id.removeprefix("fake_tool_").isdigit()
-            ), default=0)
-            restore_progress(completed_responses, fake_call_counter)
-        if event_usage.total_tokens > runtime._usage.total_tokens:
-            runtime._usage = event_usage
-        runtime._lost_jobs = list(jobs.values())
-        runtime._bind_goal_session(resuming=True)
-        store.update_session(
-            session_id, workspace=str(resolved_workspace),
-            provider=resolved_provider, model=resolved_model,
-            rounds=runtime._rounds,
-            input_tokens=runtime._usage.input_tokens,
-            output_tokens=runtime._usage.output_tokens,
-            cache_read_tokens=runtime._usage.cache_read_tokens,
-            cache_write_tokens=runtime._usage.cache_write_tokens,
-            usage_available=runtime._usage.available,
-        )
-        return runtime
+    def resume(cls, *, store: SessionStore, session_id: str, **options) -> "AgentRuntime":
+        ownership = getattr(store, "activation", None)
+        with ownership(session_id) if ownership else nullcontext():
+            from minicode.runtime.recovery import restore_runtime
+            return restore_runtime(cls, store=store, session_id=session_id, **options)
 
     @staticmethod
     def _find_dangling_calls(messages: list[Message]) -> list[ToolUseBlock]:
@@ -958,6 +851,11 @@ class AgentRuntime:
                    if any(call.name == "skill_unload" for call in pending) else [])
         results: list[ToolResultBlock] = []
         for call in pending:
+            lookup = getattr(self._store, "get_tool_result", None)
+            settled = lookup(self.session_id, call.id) if lookup else None
+            if settled is not None:
+                results.append(settled)
+                continue
             if call.name == "skill_unload":
                 started = max((event.seq for event in history
                                if event.type is EventType.TOOL_CALL_START
@@ -981,7 +879,8 @@ class AgentRuntime:
                         tool_use_id=call.id, content=output, is_error=False,
                     ))
                     continue
-            if call.name in _REPLAY_SAFE_TOOLS:
+            tool = self._registry.get(call.name)
+            if tool is not None and self._registry.execution_for(call).replay_safe:
                 # Re-check the *current* policy; permissions may have changed
                 # since the original call was interrupted.
                 results.append(await self._execute_tool_call(
@@ -1019,36 +918,19 @@ class AgentRuntime:
         assembled response, so the streamed text is taken from there.
         ``asyncio.CancelledError`` is deliberately not caught here.
         """
-        for attempt in range(3):
-            request_started = time.monotonic()
-            saw_text = False
-            try:
-                async with aclosing(self._provider.stream(
-                    system=self._system_prompt,
-                    messages=self._messages,
-                    tools=self._registry.specs(),
-                )) as stream:
-                    async for event in stream:
-                        if isinstance(event, TextDelta):
-                            saw_text = True
-                            if self._on_text_delta is not None:
-                                await self._on_text_delta(event.text)
-                        else:
-                            self._request_seconds = time.monotonic() - request_started
-                            return event.response, None, None, None
-                raise ProviderError("provider stream ended without a final response")
-            except (ProviderAuthError, ProviderRequestError) as exc:
-                self._usage = self._usage.model_copy(update={"available": False})
-                return None, ExitReason.PROVIDER_ERROR, str(exc), exc
-            except ProviderError as exc:
-                self._usage = self._usage.model_copy(update={"available": False})
-                if saw_text or attempt == 2:
-                    return None, ExitReason.PROVIDER_ERROR, str(exc), exc
-                await asyncio.sleep(min(2.0, 0.25 * (2 ** attempt)))
-            except Exception as exc:  # noqa: BLE001 - provider bugs are resumable
-                self._usage = self._usage.model_copy(update={"available": False})
-                return None, ExitReason.INTERNAL_ERROR, str(exc), exc
-        raise AssertionError("retry loop must return")
+        from minicode.runtime.streaming import stream_response
+        recorder = EventRecorder(self._store, self.session_id, self._on_event)
+        lookup = getattr(self._store, "get_tool_result", None)
+        result = await stream_response(
+            self._provider, system=self._system_prompt, messages=self._messages,
+            tools=self._registry.specs(), on_delta=self._on_text_delta,
+            on_retry=recorder.emit,
+            settled=lambda call_id: bool(lookup(self.session_id, call_id)) if lookup else False,
+        )
+        self._request_seconds = result.duration_s
+        if result.usage_uncertain:
+            self._usage = self._usage.model_copy(update={"available": False})
+        return result.response, result.failure, str(result.error) if result.error else None, result.error
 
     # -- tool execution -------------------------------------------------------
 
@@ -1063,6 +945,7 @@ class AgentRuntime:
         Oversized outputs are spilled to the artifact store (the model gets a
         preview plus an archive reference).
         """
+        self._check_deadline()
         started = time.monotonic()
         start_data = {"call_id": call.id, "name": call.name, "arguments": call.input}
         source = getattr(self._registry.get(call.name), "source", None)
@@ -1099,7 +982,7 @@ class AgentRuntime:
             result_data["recovered"] = True
         if source is not None:
             result_data["source"] = source
-        await recorder.emit(EventType.TOOL_CALL_RESULT, result_data)
+        await recorder.checkpoint(EventType.TOOL_CALL_RESULT, result_data, result=block)
         return block
 
     def _maybe_spill(
@@ -1135,15 +1018,18 @@ class AgentRuntime:
     ) -> ToolOutcome:
         """Resolve one tool call to an outcome: unknown-tool check, then the
         permission gate (DENY / ASK+approval / ALLOW), then execution."""
-        tool = self._registry.get(call.name)
-        if tool is None:
-            return ToolOutcome.failure(f"unknown tool: {call.name}")
+        from minicode.runtime.execution import execute_tool
+        return await execute_tool(
+            call, registry=self._registry, policy=self._policy,
+            approval_handler=self._approval_handler, approval_lock=self._approval_lock,
+            recorder=recorder, preflight=lambda call, args: self._tool_preflight(call, args, recorder),
+            context=lambda: self._tool_context(call, recorder),
+            check_deadline=self._check_deadline, approval_summary=self._approval_summary,
+            waiting=lambda active: setattr(self, "_phase", RunPhase.APPROVAL if active else RunPhase.TOOLS),
+        )
 
-        try:
-            validated_input = tool.validate_args(call.input)
-        except Exception as exc:  # invalid schemas/arguments are tool failures
-            return ToolOutcome.failure(f"invalid arguments for {call.name}: {exc}")
-
+    async def _tool_preflight(self, call: ToolUseBlock, validated_input: dict,
+                              recorder: EventRecorder) -> ToolOutcome | None:
         if self._project_instructions is not None and call.name in {"read", "ls", "grep", "edit", "write"}:
             target = validated_input.get("path")
             if isinstance(target, str):
@@ -1163,50 +1049,10 @@ class AgentRuntime:
                         })
                     return ToolOutcome.failure("已加载该目录的 AGENTS.md 指令。请按新指令重新调用工具。")
 
-        decision = await self._policy.check(call.name, validated_input)
-        if decision.behavior is PolicyBehavior.DENY:
-            reason = f": {decision.reason}" if decision.reason else ""
-            return ToolOutcome.failure(f"permission denied by policy{reason}")
+        return None
 
-        if decision.behavior is PolicyBehavior.ASK:
-            if self._approval_handler is None:
-                return ToolOutcome.failure(
-                    "approval required but no approval handler is configured"
-                )
-            # An overridden policy may ask even for a nominally read-only
-            # tool. Keep its dialogs sequential while the approved reads may
-            # still overlap afterwards.
-            async with self._approval_lock:
-                summary = self._approval_summary(call.name, validated_input)
-                await recorder.emit(
-                    EventType.APPROVAL_REQUEST,
-                    {"call_id": call.id, "tool_name": call.name, "summary": summary},
-                )
-                approved = await self._approval_handler(
-                    ApprovalRequest(tool_name=call.name, arguments=validated_input, summary=summary)
-                )
-                await recorder.emit(
-                    EventType.APPROVAL_DECISION,
-                    {
-                        "call_id": call.id,
-                        "tool_name": call.name,
-                        "granted": approved.granted,
-                        "reason": approved.reason,
-                    },
-                )
-            if not approved.granted:
-                reason = f": {approved.reason}" if approved.reason else ""
-                return ToolOutcome.failure(f"approval denied{reason}")
-
-        return await self._run_tool(
-            call.model_copy(update={"input": validated_input}), tool, recorder
-        )
-
-    async def _run_tool(self, call: ToolUseBlock, tool: Any,
-                        recorder: EventRecorder) -> ToolOutcome:
-        """Execute one approved tool call with the shared services attached."""
-        self._check_deadline()
-        context = ToolContext(
+    def _tool_context(self, call: ToolUseBlock, recorder: EventRecorder) -> ToolContext:
+        return ToolContext(
             workspace=self._workspace,
             artifact_store=self._artifact_store,
             background_manager=self._background_manager,
@@ -1220,209 +1066,10 @@ class AgentRuntime:
                 "call_id": call.id, "name": call.name, "output_preview": output[-1000:],
             })),
         )
-        for attempt in range(2):
-            try:
-                return await tool.run(call.input, context)
-            except Exception as exc:  # noqa: BLE001 - tool crash becomes a result
-                if call.name not in _READ_ONLY_TOOLS or attempt == 1:
-                    return ToolOutcome.failure(f"internal tool error: {exc}")
-                await asyncio.sleep(0.1)
-        raise AssertionError("tool retry loop must return")
 
     async def _delegate(self, kind: str, task: str) -> ToolOutcome:
-        """Run a read-only child under the parent's model and shared budget."""
-        from minicode.context.compact import CompactConfig, ContextCompactor
-        from minicode.security.policy import DefaultPolicy
-        from minicode.tools.artifacts import ReadArtifactTool
-        from minicode.tools.files import LsTool, ReadTool
-        from minicode.tools.search import GrepTool
-
-        agent_source = None
-        agent_instructions = ""
-        definition = self._registry.agent_definitions.get(kind)
-        if definition is not None and not definition["enabled"]:
-            return ToolOutcome.failure(f"subagent is disabled: {kind}")
-        if definition is not None:
-            agent_instructions = definition["instructions"]
-            agent_source = {"agent": kind, "origin": "builtin" if definition.get("builtin") else "user"}
-        elif kind not in {"explore", "review"}:
-            catalog = self._registry.plugin_catalog
-            if catalog is None:
-                return ToolOutcome.failure(f"unknown read-only subagent kind: {kind}")
-            try:
-                agent_instructions, agent_source = catalog.agent_instructions(kind)
-            except (ValueError, OSError, UnicodeError) as exc:
-                return ToolOutcome.failure(str(exc))
-
-        if self.session_id is None:
-            return ToolOutcome.failure("parent session has not started")
-        assert self._budget_ledger is not None
-        if (self._budget.max_total_tokens > 0
-                and self._budget_ledger.usage.total_tokens >= self._budget.max_total_tokens):
-            return ToolOutcome.failure("parent token budget is exhausted")
-
-        child_registry = ToolRegistry()
-        if definition is not None:
-            names = (self._registry.names() if definition.get("inheritTools") else definition["tools"])
-            for name in names:
-                if name == "delegate" or name.startswith("task_"):
-                    continue
-                tool = self._registry.get(name)
-                if tool is not None:
-                    child_registry.register(tool)
-        else:
-            for tool in (ReadTool(), LsTool(), GrepTool(), ReadArtifactTool()):
-                child_registry.register(tool)
-        async def on_child_event(event: Any) -> None:
-            if event.type is EventType.SESSION_START:
-                await EventRecorder(self._store, self.session_id, self._on_event).emit(
-                    EventType.SUBAGENT_START,
-                    {"kind": kind, "task": task, "child_session_id": child.session_id,
-                     "source": agent_source},
-                )
-
-        key = (kind, task)
-        child = self._child_sessions.get(key)
-        requirements = "\n".join(
-            block.text for message in self._messages[-12:] if message.role == "user"
-            for block in message.content if isinstance(block, TextBlock)
-        )
-        child_prompt = (
-            build_system_prompt(str(self._workspace.resolve()), child_registry.names())
-            + ("\n\n你是子助手。只使用配置的工具，遵守父会话权限。" if definition is not None else "\n\n你是只读子助手。只能调查与审查，不得执行 shell 或修改文件。")
-            + "最终只输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、"
-            "evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。"
-            "不得编造证据。\n父任务要求：\n" + requirements
-            + ("\n插件子助手指令：\n" + agent_instructions if agent_instructions else "")
-        )
-        if child is None:
-            paused_id = None
-            for event in reversed(self._store.get_events(self.session_id)):
-                if (event.type in {EventType.SUBAGENT_RESULT, EventType.SUBAGENT_START}
-                        and event.data.get("kind") == kind
-                        and event.data.get("task") == task):
-                    if event.data.get("exit_reason") in {
-                        ExitReason.MAX_ROUNDS.value, ExitReason.TIME_BUDGET.value,
-                        ExitReason.TOKEN_BUDGET.value,
-                    } or event.type is EventType.SUBAGENT_START:
-                        paused_id = event.data.get("child_session_id")
-                    break
-            common = dict(
-                provider=self._provider, registry=child_registry, store=self._store,
-                policy=self._policy if definition is not None else DefaultPolicy(), workspace=self._workspace,
-                approval_handler=self._approval_handler if definition is not None else None,
-                provider_name=self._provider_name, model=self._model,
-                budget=self._budget, artifact_store=self._artifact_store,
-                project_instructions=ProjectInstructions(self._workspace),
-                allow_delegation=False, on_event=on_child_event,
-                shared_budget=self._budget_ledger, system_prompt=child_prompt,
-            )
-            child = (AgentRuntime.resume(session_id=paused_id, **common)
-                     if isinstance(paused_id, str) else AgentRuntime(**common))
-            self._child_sessions[key] = child
-        else:
-            child.set_model(provider=self._provider, provider_name=self._provider_name, model=self._model)
-            child._registry = child_registry
-            child._base_system_prompt = child_prompt
-            child._refresh_system_prompt()
-            child._shared_budget = self._budget_ledger
-            child._budget_ledger = self._budget_ledger
-        if self._artifact_store is not None:
-            child._compactor = ContextCompactor(
-                CompactConfig(max_context_tokens=max(child.context_window, 1)),
-                spill_fn=lambda archive_kind, content: self._artifact_store.spill(
-                    child.session_id, archive_kind, content
-                ).artifact_id,
-                context_tokens_fn=lambda: child.context_window,
-                output_tokens_fn=child.effective_max_output_tokens,
-                estimate_scale_fn=lambda: getattr(child.provider, "prompt_scale", 1.0),
-            )
-        child_result: RunResult | None = None
-        child_usage_before = child.usage
-        try:
-            child_result = (await child.continue_turn() if child.session_id is not None
-                            else await child.run_turn(f"{kind}：{task}"))
-        finally:
-            delta = child.usage.model_copy(update={
-                "input_tokens": child.usage.input_tokens - child_usage_before.input_tokens,
-                "output_tokens": child.usage.output_tokens - child_usage_before.output_tokens,
-                "cache_read_tokens": child.usage.cache_read_tokens - child_usage_before.cache_read_tokens,
-                "cache_write_tokens": child.usage.cache_write_tokens - child_usage_before.cache_write_tokens,
-            })
-            self._usage = self._usage + delta
-            self._persist_counters()
-        if child_result.exit_reason is ExitReason.COMPLETED:
-            self._child_sessions.pop(key, None)
-        child_id = child.session_id
-        assert child_id is not None
-        events = self._store.get_events(child_id)
-        successful_calls = {
-            str(event.data.get("call_id")) for event in events
-            if event.type is EventType.TOOL_CALL_RESULT and event.data.get("success")
-        }
-        observed = {
-            str(event.data["arguments"]["path"])
-            for event in events if event.type is EventType.TOOL_CALL_START
-            and str(event.data.get("call_id")) in successful_calls
-            and event.data.get("name") in {"read", "ls", "grep"}
-            and isinstance(event.data.get("arguments", {}).get("path"), str)
-        }
-        final_text = ""
-        for message in reversed(child._messages):
-            if message.role == "assistant":
-                final_text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
-                break
-        structured = False
-        try:
-            payload = json.loads(final_text)
-            if not isinstance(payload, dict):
-                raise ValueError("child response is not an object")
-            if (not isinstance(payload.get("summary"), str)
-                    or any(not isinstance(payload.get(key), list)
-                           for key in ("findings", "evidence_refs", "unresolved"))):
-                raise ValueError("child response has an invalid schema")
-            summary = str(payload.get("summary", ""))
-            findings = [str(item) for item in payload.get("findings", [])]
-            unresolved = [str(item) for item in payload.get("unresolved", [])]
-            requested_refs = payload.get("evidence_refs", [])
-            if not isinstance(requested_refs, list):
-                requested_refs = []
-            structured = True
-        except (ValueError, TypeError, AttributeError):
-            summary, findings, requested_refs = final_text, [], []
-            unresolved = ["子助手未返回有效的结构化结果。"]
-        verified: list[str] = []
-        for ref in requested_refs:
-            if not isinstance(ref, str):
-                continue
-            path = ref.split(":", 1)[0]
-            resolved = (self._workspace / path).resolve()
-            if path in observed and resolved.is_relative_to(self._workspace.resolve()) and resolved.exists():
-                verified.append(ref)
-            else:
-                unresolved.append(f"未验证的证据引用：{ref}")
-        record = {
-            "kind": kind, "task": task, "child_session_id": child_id,
-            "exit_reason": child_result.exit_reason.value if child_result else "unknown",
-            "structured": structured,
-            "usage": child.usage.model_dump(), "evidence_refs": verified,
-            "source": agent_source,
-        }
-        await EventRecorder(self._store, self.session_id, self._on_event).emit(
-            EventType.SUBAGENT_RESULT, record
-        )
-        status = record["exit_reason"] if structured else "invalid_result"
-        result = {"summary": summary, "findings": findings,
-                  "evidence_refs": verified, "unresolved": unresolved,
-                  "child_session_id": child_id, "status": status}
-        completed = (child_result is not None and child_result.exit_reason is ExitReason.COMPLETED
-                     and structured)
-        if not completed:
-            result["unresolved"].append(f"子任务状态：{status}")
-        return ToolOutcome(
-            success=completed, output=json.dumps(result, ensure_ascii=False),
-            error=None if completed else f"子任务未完成：{status}",
-        )
+        from minicode.runtime.delegation import delegate
+        return await delegate(self, kind, task)
 
     @staticmethod
     def _approval_summary(name: str, arguments: dict[str, Any]) -> str:
@@ -1726,17 +1373,15 @@ class AgentRuntime:
         self._store.append_message(session_id, message)
         self._messages.append(message)
 
+    def _counter_values(self, usage: Usage | None = None) -> dict[str, Any]:
+        usage = usage if usage is not None else self._usage
+        return dict(rounds=self._rounds, input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens, cache_read_tokens=usage.cache_read_tokens,
+                    cache_write_tokens=usage.cache_write_tokens, usage_available=usage.available)
+
     def _persist_counters(self) -> None:
         assert self.session_id is not None
-        self._store.update_session(
-            self.session_id,
-            rounds=self._rounds,
-            input_tokens=self._usage.input_tokens,
-            output_tokens=self._usage.output_tokens,
-            cache_read_tokens=self._usage.cache_read_tokens,
-            cache_write_tokens=self._usage.cache_write_tokens,
-            usage_available=self._usage.available,
-        )
+        self._store.update_session(self.session_id, **self._counter_values())
 
     def _backfill_unexecuted_calls(
         self, session_id: str, calls: list[ToolUseBlock], reason: str
@@ -1775,15 +1420,12 @@ class AgentRuntime:
         build the :class:`RunResult` for this turn. Any still-running
         background jobs are cancelled so the session never leaks processes."""
         assert self.session_id is not None
+        self._phase = RunPhase.FINISHING
         if exit_reason not in (ExitReason.MAX_ROUNDS, ExitReason.TIME_BUDGET):
             await self._cancel_background_jobs()
         await self._deliver_finished_jobs(recorder, self.session_id)
         duration_s = time.monotonic() - turn_started
-        self._persist_session(exit_reason)
-        data = self._session_end_data(exit_reason)
-        if error is not None:
-            data["error"] = error
-        await recorder.emit(EventType.SESSION_END, data)
+        await self._finish_checkpoint(recorder, exit_reason, error=error)
         return RunResult(
             session_id=self.session_id,
             exit_reason=exit_reason,
@@ -1830,28 +1472,23 @@ class AgentRuntime:
         await self._cancel_background_jobs()
         try:
             await self._deliver_finished_jobs(recorder, self.session_id)
-            self._persist_session(ExitReason.CANCELLED)
-            await recorder.emit(
-                EventType.SESSION_END, self._session_end_data(ExitReason.CANCELLED)
-            )
+            await self._finish_checkpoint(recorder, ExitReason.CANCELLED)
         except Exception:  # noqa: BLE001 - finalization must not mask cancellation
             pass
 
-    def _persist_session(self, exit_reason: ExitReason) -> None:
-        assert self.session_id is not None
+    async def _finish_checkpoint(self, recorder: EventRecorder, exit_reason: ExitReason,
+                                 *, error: str | None = None) -> None:
+        pending = exit_reason is not ExitReason.COMPLETED
+        status = "paused" if pending else "completed"
+        data = {**self._session_end_data(exit_reason), "status": status, "run_id": self._run_id}
+        if error is not None:
+            data["error"] = error
+        event = recorder.commit(EventType.SESSION_END, data, counters={
+            **self._counter_values(), "status": status, "exit_reason": exit_reason.value,
+        })
         self._last_exit_reason = exit_reason
-        self._task_pending = exit_reason is not ExitReason.COMPLETED
-        self._store.update_session(
-            self.session_id,
-            status="paused" if self._task_pending else "completed",
-            exit_reason=exit_reason.value,
-            rounds=self._rounds,
-            input_tokens=self._usage.input_tokens,
-            output_tokens=self._usage.output_tokens,
-            cache_read_tokens=self._usage.cache_read_tokens,
-            cache_write_tokens=self._usage.cache_write_tokens,
-            usage_available=self._usage.available,
-        )
+        self._task_pending = pending
+        await recorder.publish(event)
 
     def _session_end_data(self, exit_reason: ExitReason) -> dict[str, Any]:
         return {

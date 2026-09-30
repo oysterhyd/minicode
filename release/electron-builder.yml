@@ -1,0 +1,44 @@
+appId: com.minicode.desktop
+productName: MiniCode
+electronVersion: 44.2.0
+directories:
+  app: .stage/app
+  output: dist
+  buildResources: ../desktop/electron
+files:
+  - package.json
+  - electron/**
+  - dist/**
+extraResources:
+  - from: .stage/runtime
+    to: runtime
+    filter:
+      - '**/*'
+      - '!**/__pycache__/**'
+      - '!**/*.pyc'
+extraFiles:
+  - from: minicode.cmd
+    to: minicode.cmd
+  - from: THIRD-PARTY-NOTICES.md
+    to: THIRD-PARTY-NOTICES.md
+asar: true
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: app-icon.ico
+  signExecutable: false
+nsis:
+  artifactName: MiniCode-Setup-${version}-win-x64.exe
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MiniCode
+  include: installer.nsh
+  license: ../LICENSE
+  runAfterFinish: false
+publish: null

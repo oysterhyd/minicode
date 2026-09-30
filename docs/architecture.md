@@ -1,9 +1,9 @@
-# minicode 当前架构（P0 与已接入的 P1）
+# minicode 当前架构
 
-本文按 2026-09-22 的代码核对，描述模块划分、一次 run 的事件流与关键执行语义。
+本文按 2026-09-30 的代码核对，描述模块划分、一次 run 的事件流与关键执行语义。核心重构的完整契约与迁移见 [Harness 重构审计](harness-hardening.md)。
 [plan.md](../plan.md) 是原始设计目标；后续优化见 [探索与优化方案](optimization-design.md)。
 交互界面以中文为主，部分工具错误为英文。共享模型位于 `core/models.py`，运行时也直接依赖
-工具、存储与 Goal 实现；本地 Plugin 已加载，任务图通过模型工具接入，但没有写入型多代理调度层。
+工具、存储与 Goal 实现；本地 Plugin 已加载，任务图通过模型工具接入，共享工作区的写入型子助手在父会话内按序执行。
 
 ## 1. 模块图
 
@@ -80,7 +80,7 @@ SESSION_START                          # 首个 run_turn 时创建会话行
 edit / write / bash ASK、未配置工具默认 DENY；accept_edits 额外自动允许文件编辑；
 bypass 全部 ALLOW。`/permissions` 命令可在运行时切换模式并同步到状态栏
 （`--yes` 初始采用 bypass）。ASK 时审批处理器拿到的是调用的**规范化参数**（`ApprovalRequest.arguments`），
-CLI 用 Rich `Confirm` 展示工具名与摘要；拒绝则以错误 tool_result 回填模型，工具不执行。
+CLI 在终端中用异步输入展示工具名与摘要，批处理输入使用 Rich `Confirm`；拒绝则以错误 tool_result 回填模型，工具不执行。
 参数变化即视为新调用，重新过权限门。
 
 **预算顺序**。`run_turn` 是可恢复的执行切片，内部可包含多个模型轮次。墙钟 deadline
@@ -97,10 +97,9 @@ token 预算在**助手响应已计入、但其工具尚未执行之前**检查�
 
 **取消**。Ctrl+C 时 asyncio.run 取消主任务；AgentRuntime 在 `CancelledError` 处理中
 **先**把会话落库为 `paused`、原因记为 `cancelled`（含 SESSION_END 事件），
-**再**向上传播取消。CLI 捕获 KeyboardInterrupt 映射为退出码 130。chat 模式下每轮独立
-`asyncio.run`，回合内 Ctrl+C 只取消当前轮并回到提示符。
+**再**向上传播取消。CLI 捕获 KeyboardInterrupt 映射为退出码 130。chat 模式下保持一个事件循环，回合内 Ctrl+C 只取消当前激活并回到提示符；等待终端输入时后台任务继续运行。
 
-**持久化与恢复边界**。消息与事件随流程写入，写事务内分配序号；轮数与用量逐轮更新，
+**持久化与恢复边界**。SQLite WAL/FULL 写事务内分配序号；助手消息、用量与事件原子提交；工具结果先进入持久 outbox，再按模型调用顺序交付。
 恢复时从事件补齐可能滞后的计数。暂停任务通过 `continue_turn` 无需重复输入；`resume` 可跨进程续跑。
 `report` 只展示已有记录，不执行工具。
 不能将压缩后的消息表或事件预览当作完整原始历史。
@@ -122,7 +121,7 @@ P0 演示闭环：`examples/pagination/`（带 bug 的仓库 + 失败测试）�
 
 ## 5. P1：可靠性能力（实际实现）
 
-P1 服务主要由 `cli.py` 的 `_build_services` / `_attach_compactor` 装配，Runtime 驱动
+工作区、模型与压缩服务由 `runtime/services.py` 与 `providers/factory.py` 统一装配，`cli.py` 的 `_build_services` 只添加宿主呈现与审批，Runtime 驱动
 压缩、验收、恢复及后台结果投递。部分接口采用鸭子类型，Goal 恢复与验收路径则直接导入
 `goals` 中的类型并作类型判断。
 
@@ -134,7 +133,7 @@ context/             estimate（保守 token 估算）、compact（归档→压�
 goals/               spec（验收 YAML）、checker（指纹/快照/检查）、evidence（证据账本）
 tasks/               background（已接入）、taskstore（会话任务图，经工具使用）
 tools/command.py     bash 增加 background 参数
-storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（当前数据库 schema v4）
+storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（当前数据库 schema v5，新增 tool_results）
 reports/             render_session_html：单文件离线 HTML 报告
 ui/                  Textual 全屏 TUI（minicode tui）
 providers/           commandcode.py + zcode_config.py：OpenAI 兼容默认适配器
@@ -190,7 +189,8 @@ evals/               20 任务离线评测集 + 真实模型重复评测（独�
 
 | 悬空调用类型 | 结算方式 |
 | --- | --- |
-| 只读（read / ls / grep / read_artifact） | 重新检查当前权限后执行，发出带 `recovered: true` 的新 START/RESULT 事件，结果回填原始 call id |
+| outbox 中已有结果 | 直接回填完整结果，不再次执行 |
+| 本地明确声明可重放的工具 | 重新检查当前权限后执行，发出带 `recovered: true` 的新 START/RESULT 事件，结果回填原始 call id |
 | 写 / Shell（edit / write / bash / 未知工具） | **不重放**：`SIDE_EFFECT_UNKNOWN` 事件 + 提示性 tool_result（"副作用状态未知，先核实再继续"） |
 
 已落库的结果永不重复执行；后台任务无进程可继承（一律不凭旧 PID 管理）。
@@ -223,7 +223,7 @@ evals/               20 任务离线评测集 + 真实模型重复评测（独�
 | plan.md §3 P1 能力 | 实现位置 |
 | --- | --- |
 | 分层上下文压缩 + 输出归档与分页回读 | `context/`、`storage/artifacts.py`、`tools/artifacts.py`、`loop._maybe_spill/_compact_if_needed` |
-| 会话恢复及未确认副作用处理 | `loop.resume/_settle_recovery`、`cli.py`（`resume` 命令） |
+| 会话恢复及未确认副作用处理 | `runtime/recovery.py` 与 `loop._settle_recovery`、`cli.py`（`resume` 命令） |
 | Goal 验收器 + 失败续跑 + 证据绑定 | `goals/`、`loop._goal_gate`、`--acceptance` 装配 |
 | 后台命令；任务依赖存储 | `tasks/background.py`、`tasks/taskstore.py`、`tools/tasks.py`、`tools/command.py`、`loop._deliver_finished_jobs` |
 | 评测集、基线、失败分析 | `evals/`（离线 b0/b1/b2 与真实模型 B0/B2 重复运行） |
@@ -238,7 +238,7 @@ evals/               20 任务离线评测集 + 真实模型重复评测（独�
   显式关闭，TUI 退出或切换模型时关闭旧 client。Anthropic 持有 SDK client。
 - 缓存统计：CommandCode 解析 `prompt_tokens_details.cached_tokens`；Anthropic 将普通输入、
   缓存创建和缓存读取合并到输入总数。`Usage` 单独记录 cache-read/cache-write 和 available；轮次事件、
-  SQLite schema v4 与 resume 保存并恢复这些累计值，缺失 usage 不再冒充真实的零。
+  SQLite schema v5 与 resume 保存并恢复这些累计值，缺失 usage 不再冒充真实的零。
 - Anthropic 请求没有设置 `cache_control`；兼容网关是否支持缓存、返回哪些 usage 字段，
   必须实际核验，不能由 API 格式兼容推断。
 - `_build_provider` 与 `_provider_for_model` 都把目录最大输出传给 provider；CommandCode 每次请求按
@@ -254,7 +254,7 @@ evals/               20 任务离线评测集 + 真实模型重复评测（独�
   MCP 使用官方 SDK 的 stdio client，发现分页后注册 `mcp__server__tool`，工具调用仍经过默认审批、
   事件记录与归档；断连与超时作为工具失败返回，不自动重放。独立子任务最多两个并行；显式
   累计 token 上限下串行执行。持久任务图通过 `task_create/list/claim/complete` 工具接入，
-  `memory_list` 只读访问用户显式保存的项目事实；远程 MCP 与写入型子任务尚未提供。
+  `memory_list` 只读访问用户显式保存的项目事实；远程 MCP 尚未提供；自定义子助手可以写入，但遵守父权限，并在共享工作区中串行执行。
 
 ## 7. 固定 review workflow
 

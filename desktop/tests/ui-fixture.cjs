@@ -51,7 +51,7 @@ async (page) => {
         if (method === 'changes') return [{ path: 'desktop/src/App.tsx', status: ' M', additions: 12, deletions: 3 }, { path: 'desktop/src/styles/index.css', status: '??', additions: 40, deletions: 0 }, { path: 'desktop/src/components/Sidebar.tsx', status: 'M ', additions: 5, deletions: 5 }];
         if (method === 'getCapabilities') return { skills: [], plugins: [], mcp: [], agents: ['explore', 'review'] };
         if (method === 'listTasks') return params.sessionId === 'audit' ? [{ task_id: 't1', title: '读取改动文件', status: 'done' }, { task_id: 't2', title: '运行构建', status: 'done' }, { task_id: 't3', title: '整理结论', status: 'running' }] : [];
-        if (method === 'getAppInfo') return { version: '0.1.0', electron: '44.2.0', chrome: '140', platform: 'win32' };
+        if (method === 'getAppInfo') return { version: '1.0.0', electron: '44.2.0', chrome: '140', platform: 'win32' };
         if (method === 'relativePath') return null;
         if (method === 'notify' || method === 'openExternal' || method === 'setAppearance' || method === 'stageAll' || method === 'confirmDiff' || method === 'unstageFile') return true;
         if (method === 'setModel') state = { ...state, model: params.model };

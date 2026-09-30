@@ -53,9 +53,25 @@ class AnthropicProvider:
             # api_key=None lets the SDK resolve credentials from the environment.
             import anthropic
 
-            self._client: Any = anthropic.AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
+            self._client: Any = anthropic.AsyncAnthropic(
+                api_key=api_key, max_retries=0, timeout=180.0,
+                **({"base_url": base_url} if base_url else {}),
+            )
         else:
             self._client = client  # injected (tests / custom transports)
+
+    async def aclose(self) -> None:
+        close = getattr(self._client, "close", None)
+        if close is not None:
+            await close()
+
+    @property
+    def base_url(self) -> str:
+        return str(self._client.base_url)
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        self._client.base_url = value
 
     # ------------------------------------------------------------------
     # Serialization: our block model -> Anthropic request dicts
@@ -178,6 +194,9 @@ class AnthropicProvider:
         except anthropic.BadRequestError as exc:
             raise ProviderRequestError(f"anthropic rejected the request: {exc}") from exc
         except anthropic.APIError as exc:
+            status = getattr(exc, "status_code", None)
+            if isinstance(status, int) and 400 <= status < 500 and status not in (408, 429):
+                raise ProviderRequestError(f"anthropic rejected the request (HTTP {status})") from exc
             raise ProviderError(f"anthropic API error: {exc}") from exc
 
         raw_stop = getattr(response, "stop_reason", None)

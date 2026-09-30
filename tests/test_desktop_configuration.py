@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "desktop"))
 import bridge as bridge_mod
-from configuration import DesktopConfiguration
+from minicode.configuration import HarnessConfiguration
 from minicode.core.models import Usage
 from minicode.providers.fake import FakeProvider, FakeProviderOptions, FakeToolCall, FakeTurn
 from minicode.storage import SqliteStore
@@ -16,9 +16,9 @@ from minicode.storage import SqliteStore
 
 @pytest.fixture
 def configuration(tmp_path, monkeypatch):
-    config = DesktopConfiguration(tmp_path / "desktop.json")
+    config = HarnessConfiguration(tmp_path / "desktop.json")
     config.write(dict(services=[], agents=[], disabledAgents=[], defaultModel=""))
-    monkeypatch.setattr(bridge_mod, "DesktopConfiguration", lambda: config)
+    monkeypatch.setattr(bridge_mod, "HarnessConfiguration", lambda: config)
     return config
 
 
@@ -35,7 +35,7 @@ def test_service_persistence_and_secret_redaction(configuration):
     draft["models"][0]["contextWindow"] = 500000
     configuration.save_service(draft)
     assert configuration.read()["services"][0]["apiKey"] == "test-private-key"
-    assert DesktopConfiguration(configuration.path).models()[0]["contextWindow"] == 500000
+    assert HarnessConfiguration(configuration.path).models()[0]["contextWindow"] == 500000
     configuration.save_service(service("Other"))
     assert len({m["id"] for m in configuration.models()}) == 2
     with pytest.raises(ValueError, match="输出上限"):

@@ -198,6 +198,7 @@ class EventType(str, enum.Enum):
     SUBAGENT_START = "subagent_start"
     SUBAGENT_RESULT = "subagent_result"
     MCP_DISCOVERY = "mcp_discovery"
+    PROVIDER_RETRY = "provider_retry"
 
 
 class Event(BaseModel):
@@ -240,9 +241,9 @@ class Budget(BaseModel):
     guards default to disabled.
     """
 
-    max_rounds: int = 0
+    max_rounds: int = Field(default=0, ge=0)
     max_total_tokens: int = 0
-    max_seconds: float = 0.0
+    max_seconds: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
 
 class RunResult(BaseModel):

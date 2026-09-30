@@ -5,10 +5,11 @@ const path = require('node:path')
 const readline = require('node:readline')
 const { setTimeout, clearTimeout } = require('node:timers')
 const utils = require(path.join(__dirname, 'git-utils.cjs'))
+const { bridgeLaunch } = require(path.join(__dirname, 'bundled-runtime.cjs'))
 
 const projectRoot = path.resolve(__dirname, '../..')
 const devServer = 'http://127.0.0.1:5173'
-const isDev = process.argv.includes('--dev')
+const isDev = !app.isPackaged && process.argv.includes('--dev')
 const APPEARANCE = {
   dark: { background: '#141416', symbol: '#e8e8ea' },
   light: { background: '#f5f5f3', symbol: '#1f1f22' },
@@ -26,6 +27,7 @@ let workspace = null
 let recent = []
 let quitting = false
 let settingsPath = null
+let toolEnvironment = process.env
 const pending = new Map()
 // Keep shown notifications referenced so their click handlers survive GC.
 const notifications = new Set()
@@ -70,7 +72,7 @@ function callBridge(method, params = {}) {
 
 function run(file, args, cwd) {
   return new Promise((resolve) => {
-    execFile(file, args, { cwd, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8', timeout: 30000, windowsHide: true }, (error, stdout, stderr) => {
+    execFile(file, args, { cwd, env: toolEnvironment, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8', timeout: 30000, windowsHide: true }, (error, stdout, stderr) => {
       resolve({ ok: !error, stdout, stderr, error: error ? error.message : '' })
     })
   })
@@ -310,11 +312,12 @@ function secureContents(contents) {
 }
 
 function startBridge() {
-  const venv = process.platform === 'win32' ? path.join(projectRoot, '.venv', 'Scripts', 'python.exe') : path.join(projectRoot, '.venv', 'bin', 'python')
-  const python = fs.existsSync(venv) ? venv : process.platform === 'win32' ? 'python' : 'python3'
-  bridge = spawn(python, ['-u', path.join(projectRoot, 'desktop', 'bridge.py')], {
-    cwd: projectRoot,
-    env: { ...process.env, PYTHONPATH: path.join(projectRoot, 'src'), PYTHONIOENCODING: 'utf-8' },
+  const launch = bridgeLaunch({ packaged: Boolean(app.isPackaged), resourcesPath: process.resourcesPath,
+    projectRoot, userData: app.getPath('userData') })
+  toolEnvironment = launch.env
+  bridge = spawn(launch.file, launch.args, {
+    cwd: launch.cwd,
+    env: launch.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   })

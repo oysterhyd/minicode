@@ -52,7 +52,8 @@ def project_version() -> str:
     try:
         return metadata.version("minicode")
     except metadata.PackageNotFoundError:  # running from a source checkout
-        return "0.1.0"
+        from minicode import __version__
+        return __version__
 
 
 def info_line(

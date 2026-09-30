@@ -7,7 +7,7 @@ import json
 from pydantic import BaseModel
 
 from minicode.core.models import ToolOutcome
-from minicode.tools.base import BaseTool, ToolContext
+from minicode.tools.base import BaseTool, ToolContext, READ_EXECUTION
 
 
 class MemoryListArgs(BaseModel):
@@ -15,6 +15,7 @@ class MemoryListArgs(BaseModel):
 
 
 class MemoryListTool(BaseTool):
+    execution = READ_EXECUTION
     name = "memory_list"
     description = "Recall user-saved stable project facts with their sources and scopes. Optional path filters relevant facts."
     args_model = MemoryListArgs

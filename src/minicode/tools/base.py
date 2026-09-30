@@ -13,6 +13,21 @@ from minicode.core.models import ToolOutcome, ToolSpec
 from minicode.core.paths import PathOutsideWorkspaceError, resolve_in_workspace
 
 
+@dataclass(frozen=True, slots=True)
+class ToolExecution:
+    """Trusted local metadata, never inferred from a remote tool's name."""
+
+    replay_safe: bool = False
+    parallel_group: str | None = None
+    attempts: int = 1
+    timeout_s: float | None = 300.0
+
+
+READ_EXECUTION = ToolExecution(replay_safe=True, parallel_group="read", attempts=2)
+STATE_EXECUTION = ToolExecution(replay_safe=True)
+DELEGATE_EXECUTION = ToolExecution(replay_safe=True, parallel_group="delegate", timeout_s=None)
+
+
 class ToolLimits(BaseModel):
     """Resource caps applied by every built-in tool."""
 
@@ -133,6 +148,7 @@ class BaseTool(ABC):
     name: ClassVar[str]
     description: ClassVar[str]
     requires_approval: ClassVar[bool] = False
+    execution: ClassVar[ToolExecution] = ToolExecution()
     args_model: ClassVar[type[BaseModel]]
 
     def spec(self) -> ToolSpec:
@@ -148,10 +164,13 @@ class BaseTool(ABC):
 
     def validate_args(self, raw_args: dict[str, Any]) -> dict[str, Any]:
         """Return the canonical arguments used for both approval and execution."""
-        unknown = set(raw_args) - set(self.args_model.model_fields)
+        accepted = set(self.args_model.model_fields)
+        accepted.update(field.alias for field in self.args_model.model_fields.values()
+                        if isinstance(field.alias, str))
+        unknown = set(raw_args) - accepted
         if unknown:
             raise ValueError(f"unknown argument fields: {', '.join(sorted(unknown))}")
-        return self.args_model.model_validate(raw_args).model_dump(exclude_none=True)
+        return self.args_model.model_validate(raw_args).model_dump(exclude_none=True, by_alias=True)
 
     async def run(self, raw_args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
         """Validate *raw_args* and dispatch to :meth:`execute`.

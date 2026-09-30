@@ -13,7 +13,7 @@ from minicode.providers import FakeProvider, FakeProviderOptions, FakeToolCall, 
 from minicode.runtime import AgentRuntime
 from minicode.security import AutoAllowPolicy, DefaultPolicy, PolicyBehavior
 from minicode.storage import SqliteStore
-from minicode.tools.base import BaseTool, ToolContext
+from minicode.tools.base import BaseTool, ToolContext, READ_EXECUTION
 from minicode.tools.registry import ToolRegistry
 
 
@@ -42,6 +42,7 @@ def test_adjacent_reads_overlap_but_write_is_a_barrier(tmp_path):
     peak = 0
 
     class Read(BaseTool):
+        execution = READ_EXECUTION
         name = "read"
         description = "Test read"
         args_model = Args
@@ -92,6 +93,7 @@ def test_cancelling_parallel_reads_stops_all_children(tmp_path):
     cancelled: list[str] = []
 
     class Read(BaseTool):
+        execution = READ_EXECUTION
         name = "read"
         description = "Blocking test read"
         args_model = Args
@@ -135,6 +137,7 @@ def test_read_approvals_are_serialized_even_when_calls_overlap(tmp_path):
     approval_peak = 0
 
     class Read(BaseTool):
+        execution = READ_EXECUTION
         name = "read"
         description = "Approved test read"
         args_model = Args

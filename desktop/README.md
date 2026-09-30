@@ -4,6 +4,9 @@
 
 ## 运行
 
+Windows 用户可直接下载安装版，无需另装 Python/Node/Git，见
+[集成发行说明](../release/README.md)。下列命令用于源码开发。
+
 在仓库根目录先安装 Python 底层依赖：
 
 ```powershell
@@ -44,9 +47,9 @@ npm run dev
 
 - 模型按 AI 服务管理，可随时新增、编辑、启停或删除服务；测试连接并获取模型列表，也可手动添加模型 ID。每个模型可配置显示名称、上下文窗口、输出上限与 OpenAI 接口的思考强度支持。不同服务可使用同一个模型 ID。可分别选择当前会话模型和新会话默认模型。
 - 子助手提供探索者、代码审查员、测试执行者、修复者与 UI 设计师模板；可复制模板或空白创建，编辑名称、委派条件、指令和工具，支持启停与删除。自定义子助手适用于所有工作区，委派时继承父会话权限、审批处理与共享预算。
-- 服务与子助手配置保存在 `~/.minicode/desktop-config.json`。API 密钥仅由桥接进程持有，已有密钥不会返回渲染进程，编辑时留空保留。
+- 服务与子助手配置保存在 `~/.minicode/desktop-config.json`。CLI 与 desktop 共用该配置。API 密钥仅由 Python 宿主持有，已有密钥不会返回渲染进程，编辑时留空保留。
 - 运行中仍可修改设置。模型与思考强度在下一次模型请求生效，权限与技能用于后续工具调用/请求；预算、插件与 MCP 更新在下一回合生效，验收配置用于新会话。插件更新工具时保留当前会话和后台任务。
-- 上下文用量环展示缓存命中率与最近请求 TPS，展开可查看缓存读取/写入与累计用量。任务栏下方包含 token 分布、缓存比例、每轮柱状图、TPS 趋势与请求明细。TPS 按输出 token / 完整请求耗时计算，包含首字等待；缺少用量或历史耗时的指标显示为未报告。
+- 上下文用量环只显示占用百分比，展开可查看缓存命中率、TPS、缓存读取/写入与累计用量。任务栏下方包含 token 分布、缓存比例、每轮柱状图、TPS 趋势与请求明细。TPS 按输出 token / 完整请求耗时计算，包含首字等待；缺少用量或历史耗时的指标显示为未报告。
 
 桌面端读取与 TUI 共用的 `/` 命令目录：`/help`、`/model`、`/effort`、`/permissions`、`/clear`、`/new`、`/compact`、`/skill`、`/sessions`、`/resume`、`/continue`、`/exit`。
 
@@ -86,9 +89,10 @@ desktop/
   electron/main.cjs        Electron 窗口、IPC、文件、Git 与系统集成
   electron/git-utils.cjs   可单测的 Git 解析与链接过滤
   electron/preload.cjs     受限渲染进程 API
-  bridge.py                Python Agent 双向 NDJSON 事件桥
-  configuration.py         持久化 AI 服务、模型与全局子助手配置
+  bridge.py                Python Agent 双向 NDJSON 事件桥（v2 并发请求）
   src/components/          标题栏、侧栏、对话流、输入框、工作台、设置与通用 UI
   src/hooks, src/lib       会话状态、偏好、格式化、Diff 与语法高亮
   src/styles/              设计令牌与分区样式
 ```
+
+共享服务和模型配置位于 `src/minicode/configuration.py` 与 `providers/factory.py`，工具、压缩器与项目扩展由 `runtime/services.py` 装配。桥接通过 runtime 的公开 API 读取快照、换模型、改预算与重载扩展。慢网络请求不阻塞取消和审批；协议细节与迁移说明见 [Harness 重构审计](../docs/harness-hardening.md)。

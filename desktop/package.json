@@ -1,10 +1,10 @@
 {
   "name": "minicode-desktop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
-    "test": "node --test tests/main-lifecycle.test.cjs tests/git-utils.test.cjs tests/git-changes.test.cjs",
+    "test": "node --test tests/*.test.cjs",
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
     "build": "tsc --noEmit && vite build",
     "start": "npm run build && electron ."
