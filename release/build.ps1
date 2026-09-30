@@ -42,7 +42,7 @@ try {
     Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", "$stage/runtime")
     if (-not $SkipTests) {
         Run 'npm.cmd' @('test', '--prefix', 'desktop')
-        Run $python @('-m', 'pytest', 'tests', '-q', '--basetemp', '.pytest_cache/release-tests')
+        Run $python @('-m', 'pytest', 'tests', '-q', '--basetemp', "$cache/tests")
     }
     Push-Location $PSScriptRoot
     try { Run 'node' @('node_modules/electron-builder/cli.js', '--config', 'electron-builder.yml', '--win', '--x64', '--publish', 'never') }
