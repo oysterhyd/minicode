@@ -59,7 +59,9 @@ def restore_runtime(
     events = store.get_events(session_id)
     start_event = next((event for event in events
                         if event.type is EventType.SESSION_START), None)
-    saved_budget = start_event.data.get("budget") if start_event else None
+    budget_event = next((event for event in reversed(events)
+                         if event.type is EventType.BUDGET_CHANGED), start_event)
+    saved_budget = budget_event.data.get("budget") if budget_event else None
     effective_budget = budget if budget is not None else Budget()
     if isinstance(saved_budget, dict):
         try:
@@ -68,7 +70,7 @@ def restore_runtime(
             saved_cap = 0
         # A default zero in a resumed frontend must not silently remove
         # an explicit spending cap. A negative cap is an explicit opt-out.
-        if saved_cap > 0 and effective_budget.max_total_tokens == 0:
+        if saved_cap != 0 and effective_budget.max_total_tokens == 0:
             effective_budget = effective_budget.model_copy(
                 update={"max_total_tokens": saved_cap}
             )
@@ -253,4 +255,7 @@ def restore_runtime(
         cache_write_tokens=runtime._usage.cache_write_tokens,
         usage_available=runtime._usage.available,
     )
+    # Explicit recovery overrides become the latest durable configuration too.
+    if effective_budget.model_dump() != saved_budget:
+        runtime.set_budget(effective_budget)
     return runtime

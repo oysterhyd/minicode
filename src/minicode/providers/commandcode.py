@@ -27,6 +27,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from minicode.core.limits import MAX_RESPONSE_BYTES, MAX_TOOL_CALLS, MAX_SSE_BYTES, MAX_SSE_LINE_BYTES
 from minicode.core.models import (
     Block,
     Message,
@@ -179,11 +180,34 @@ def _to_int(value: Any) -> int:
         return 0
 
 
+async def _bounded_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
+    """Bound raw transport and unterminated lines before JSON materialization."""
+    pending = bytearray()
+    captured = 0
+    async for chunk in response.aiter_bytes():
+        captured += len(chunk)
+        if captured > MAX_SSE_BYTES:
+            raise ProviderProtocolError("SSE stream exceeds the capture limit")
+        for start in range(0, len(chunk), 64 * 1024):
+            # CRLF split across chunks may emit an extra blank line; SSE ignores it.
+            parts = chunk[start:start + 64 * 1024].replace(b"\r", b"\n").split(b"\n")
+            for index, part in enumerate(parts):
+                if len(pending) + len(part) > MAX_SSE_LINE_BYTES:
+                    raise ProviderProtocolError("SSE line exceeds the capture limit")
+                pending.extend(part)
+                if index < len(parts) - 1:
+                    yield pending.decode("utf-8", errors="replace")
+                    pending.clear()
+    if pending:
+        yield pending.decode("utf-8", errors="replace")
+
+
 def _absorb_tool_call_delta(
     delta: dict[str, Any],
-    buffers: dict[int, dict[str, str]],
+    buffers: dict[int, dict[str, Any]],
     order: list[int],
-) -> None:
+    remaining_bytes: int,
+) -> int:
     """Fold one incremental ``delta.tool_calls`` entry into *buffers*.
 
     Entries are keyed by their ``index``; ``function.arguments`` arrives as
@@ -192,23 +216,27 @@ def _absorb_tool_call_delta(
     index = delta.get("index")
     if not isinstance(index, int) or index < 0:
         index = len(order)
+    if index not in buffers and len(buffers) >= MAX_TOOL_CALLS:
+        raise ProviderProtocolError("provider returned too many tool calls")
+    function = delta.get("function")
+    function = function if isinstance(function, dict) else {}
+    call_id, name, arguments = delta.get("id"), function.get("name"), function.get("arguments")
+    size = sum(len(value.encode("utf-8")) for value in (call_id, name, arguments)
+               if isinstance(value, str))
+    if size > remaining_bytes:
+        raise ProviderProtocolError("provider response exceeds the capture limit")
     buffer = buffers.get(index)
     if buffer is None:
-        buffer = {"id": "", "name": "", "arguments": ""}
+        buffer = {"id": "", "name": "", "arguments": []}
         buffers[index] = buffer
         order.append(index)
-
-    call_id = delta.get("id")
     if isinstance(call_id, str) and call_id:
         buffer["id"] = call_id
-    function = delta.get("function")
-    if isinstance(function, dict):
-        name = function.get("name")
-        if isinstance(name, str) and name:
-            buffer["name"] = name
-        arguments = function.get("arguments")
-        if isinstance(arguments, str) and arguments:
-            buffer["arguments"] += arguments
+    if isinstance(name, str) and name:
+        buffer["name"] = name
+    if isinstance(arguments, str) and arguments:
+        buffer["arguments"].append(arguments)
+    return size
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +382,8 @@ class CommandCodeProvider:
                                                    reserve_output_tokens=0)
 
         text_parts: list[str] = []
-        tool_buffers: dict[int, dict[str, str]] = {}
+        tool_buffers: dict[int, dict[str, Any]] = {}
+        captured = 0
         tool_order: list[int] = []
         finish_reason: str | None = None
         usage = Usage(available=False)
@@ -369,7 +398,10 @@ class CommandCodeProvider:
                     "POST", "/chat/completions", json=payload
                 ) as response:
                     if response.status_code >= 400:
-                        body = (await response.aread()).decode("utf-8", errors="replace")
+                        body = ""
+                        async for part in response.aiter_bytes(chunk_size=4096):
+                            body = part.decode("utf-8", errors="replace")
+                            break
                         error = self._map_http_status(response.status_code, body.replace(self.api_key, "[redacted]"))
                         try:
                             retry_after = float(response.headers.get("retry-after", ""))
@@ -379,7 +411,7 @@ class CommandCodeProvider:
                             pass
                         raise error
 
-                    async for line in response.aiter_lines():
+                    async for line in _bounded_sse_lines(response):
                         line = line.strip()
                         if not line.startswith(_DATA_PREFIX):
                             continue  # blank lines, SSE comments, "event:" lines
@@ -405,14 +437,18 @@ class CommandCodeProvider:
                                     # Reasoning-only chunks have content=None: skipped.
                                     content = delta.get("content")
                                     if isinstance(content, str) and content:
+                                        captured += len(content.encode("utf-8"))
+                                        if captured > MAX_RESPONSE_BYTES:
+                                            raise ProviderProtocolError("provider response exceeds the capture limit")
                                         text_parts.append(content)
                                         yield TextDelta(content)
                                     tool_call_deltas = delta.get("tool_calls")
                                     if isinstance(tool_call_deltas, list):
                                         for tool_delta in tool_call_deltas:
                                             if isinstance(tool_delta, dict):
-                                                _absorb_tool_call_delta(
-                                                    tool_delta, tool_buffers, tool_order
+                                                captured += _absorb_tool_call_delta(
+                                                    tool_delta, tool_buffers, tool_order,
+                                                    MAX_RESPONSE_BYTES - captured,
                                                 )
                                 raw_finish = choice.get("finish_reason")
                                 if isinstance(raw_finish, str) and raw_finish:
@@ -465,7 +501,8 @@ class CommandCodeProvider:
             if not buffer["id"] or not buffer["name"]:
                 raise ProviderProtocolError("tool call is missing its id or name")
             try:
-                parsed_input = json.loads(buffer["arguments"]) if buffer["arguments"] else {}
+                arguments = "".join(buffer["arguments"])
+                parsed_input = json.loads(arguments) if arguments else {}
             except json.JSONDecodeError as exc:
                 raise ProviderRequestError(
                     "commandcode returned malformed tool call arguments "

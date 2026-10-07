@@ -108,19 +108,22 @@ class TaskStore:
 
         Raises :class:`ValueError` when the task id already exists, when any
         dependency is unknown in this session, or when the dependency graph
-        would contain a cycle. New tasks start ``ready`` without
-        dependencies and ``pending`` with them.
+        would contain a cycle. New tasks start ``ready`` when all dependencies
+        are already done (including no dependencies), otherwise ``pending``.
         """
         deps = list(depends_on) if depends_on is not None else []
         now = utc_now()
         with self._store.transaction() as conn:
             if self._fetch(conn, session_id, task_id) is not None:
                 raise ValueError(f"task already exists: {task_id}")
+            ready = True
             for dep in deps:
-                if self._fetch(conn, session_id, dep) is None:
+                dependency = self._fetch(conn, session_id, dep)
+                if dependency is None:
                     raise ValueError(
                         f"unknown dependency: {dep} (task {task_id!r} in session {session_id!r})"
                     )
+                ready = ready and dependency["status"] == "done"
 
             graph = {
                 row["task_id"]: json.loads(row["depends_on"])
@@ -145,7 +148,7 @@ class TaskStore:
                     task_id,
                     title,
                     json.dumps(deps, ensure_ascii=False),
-                    "ready" if not deps else "pending",
+                    "ready" if ready else "pending",
                     now,
                     now,
                 ),

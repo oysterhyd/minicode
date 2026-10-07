@@ -14,11 +14,12 @@ User-facing strings are Chinese, code is English (project convention).
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections import deque
 import time
 from typer import Exit
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -293,7 +294,7 @@ class ToolCard(Vertical):
     output preview (details-style body, shown only when there is output)."""
 
     def __init__(self, call_id: str, name: str, summary: str,
-                 artifact_page: Callable[[str, int, int], tuple[str, int | None, bool] | None] | None = None) -> None:
+                 artifact_page: Callable[[str, int, int], Awaitable[tuple[str, int | None, bool] | None] | tuple[str, int | None, bool] | None] | None = None) -> None:
         super().__init__(classes="tool-card")
         self.can_focus = True
         self.call_id = call_id
@@ -310,6 +311,7 @@ class ToolCard(Vertical):
         self._artifact_page = artifact_page
         self._artifact_id: str | None = None
         self._page_offset = 0
+        self._page_generation = 0
         self._has_more = False
         self._has_detail = False
         self._expanded = False
@@ -369,6 +371,7 @@ class ToolCard(Vertical):
     def toggle_detail(self) -> None:
         if self._has_detail:
             self._expanded = not self._expanded
+            self._page_generation += 1
             if self._expanded and self._artifact_id and self._artifact_page:
                 self._load_page(0)
             self._body.display = self._expanded
@@ -377,7 +380,15 @@ class ToolCard(Vertical):
     def _load_page(self, offset: int) -> None:
         if not self._artifact_id or not self._artifact_page:
             return
+        self._page_generation += 1
+        self.run_worker(self._read_page(offset, self._page_generation), group="artifact-page", exclusive=True)
+
+    async def _read_page(self, offset: int, generation: int) -> None:
         result = self._artifact_page(self._artifact_id, offset, 20_000)
+        if inspect.isawaitable(result):
+            result = await result
+        if generation != self._page_generation or not self._expanded or not self.is_mounted:
+            return
         if result is None:
             self._detail.update(Text("归档内容不可用", style="red"))
             return
@@ -673,6 +684,9 @@ class MiniCodeApp(App[None]):
         self._busy = False
         self._turn_worker: Any = None
         self._approval_future: asyncio.Future[ApprovalDecision] | None = None
+        self._approval_modal: ApprovalModal | None = None
+        self._shutting_down = False
+        self._resources_closed = False
         self._last_idle_ctrl_c = 0.0
         self._current_reply: StreamedReply | None = None
         self._cards: dict[str, ToolCard] = {}
@@ -911,6 +925,8 @@ class MiniCodeApp(App[None]):
     # -- streaming callbacks (run inside the turn worker) ---------------------
 
     async def _on_text_delta(self, delta: str) -> None:
+        if self._shutting_down:
+            return
         if self._current_reply is None:
             self._current_reply = StreamedReply()
             self._mount(self._current_reply)
@@ -925,7 +941,15 @@ class MiniCodeApp(App[None]):
             self._mount(Static(Markdown(final_text), classes="msg-assistant"))
         self._current_reply = None
 
+    def _artifact_reader(self, session_id: str | None):
+        if session_id is None:
+            return None
+        artifacts = self._services.artifact_store
+        return lambda artifact_id, offset, limit: artifacts.aread_page(session_id, artifact_id, offset, limit)
+
     async def _on_event(self, event: Event) -> None:
+        if self._shutting_down:
+            return
         etype = event.type
         self._inspector_events.append(event)
         if etype in {EventType.ROUND_START, EventType.ASSISTANT_MESSAGE, EventType.CONTEXT_COMPACTED,
@@ -938,8 +962,7 @@ class MiniCodeApp(App[None]):
             call_id = str(data.get("call_id", ""))
             name = str(data.get("name", "?"))
             session_id = self._runtime.session_id
-            reader = (lambda artifact_id, offset, limit:
-                      self._services.artifact_store.read_page(session_id, artifact_id, offset, limit)) if session_id else None
+            reader = self._artifact_reader(session_id)
             card = ToolCard(call_id, name, _tool_args_summary(name, data.get("arguments") or {}), reader)
             self._cards[call_id] = card
             self._mount(card)
@@ -952,8 +975,7 @@ class MiniCodeApp(App[None]):
                 # Result without a seen start (e.g. recovered calls).
                 name = str(event.data.get("name", "?"))
                 session_id = self._runtime.session_id
-                reader = (lambda artifact_id, offset, limit:
-                          self._services.artifact_store.read_page(session_id, artifact_id, offset, limit)) if session_id else None
+                reader = self._artifact_reader(session_id)
                 card = ToolCard(call_id, name, "", reader)
                 self._cards[call_id] = card
                 self._mount(card)
@@ -1001,45 +1023,57 @@ class MiniCodeApp(App[None]):
         line.append(text)
         self._add_line(line, "msg-user")
 
-    async def _run_turn(self, text: str | None) -> None:
-        """One model turn inside a Textual worker; input can queue the next turn."""
-        self._end_streaming()
+    def _start_turn(self, text: str | None, description: str = "agent turn") -> None:
+        """Reserve admission before the worker is scheduled, not inside it."""
+        if self._shutting_down or self._busy:
+            return
         self._set_busy(True, "等待模型响应")
+        self._turn_worker = self.run_worker(
+            self._run_turn(text), group="turn", exclusive=False, description=description
+        )
+
+    async def _run_turn(self, text: str | None) -> None:
+        """One owning worker releases its reservation after runtime cleanup."""
+        status = "就绪"
         try:
+            if self._shutting_down:
+                return
+            self._end_streaming()
             result = (
                 await self._runtime.run_turn(text)
                 if text is not None else await self._runtime.continue_turn()
             )
+            if not self._shutting_down:
+                self._end_streaming()
+                self._add_line(_turn_summary_text(result), "msg-summary")
+                if result.exit_reason is not ExitReason.COMPLETED:
+                    detail = f" · {result.error}" if result.error else ""
+                    self._add_line(Text(f"任务已暂停，可用 /continue 继续{detail}", style="yellow"), "msg-warn")
+                    status = "已暂停"
         except asyncio.CancelledError:
-            # The runtime already persisted the session as cancelled.
-            self._end_streaming()
-            self._abort_pending_approval()
-            self._add_line(Text("回合已取消，会话状态已保存。", style="yellow"), "msg-warn")
-            self._set_busy(False, "已取消")
-            self.call_later(self._start_next_queued_turn)
+            status = "已取消"
+            if not self._shutting_down:
+                self._end_streaming()
+                self._abort_pending_approval()
+                self._add_line(Text("回合已取消，会话状态已保存。", style="yellow"), "msg-warn")
             raise
         except Exception as exc:  # noqa: BLE001 - presentation must survive runtime bugs
-            self._end_streaming()
-            self._add_line(Text(f"回合执行失败: {exc}", style="red"), "msg-warn")
-            self._set_busy(False, "就绪")
-            self.call_later(self._start_next_queued_turn)
-            return
-        self._end_streaming()
-        self._add_line(_turn_summary_text(result), "msg-summary")
-        if result.exit_reason is not ExitReason.COMPLETED:
-            detail = f" · {result.error}" if result.error else ""
-            self._add_line(Text(f"任务已暂停，可用 /continue 继续{detail}", style="yellow"), "msg-warn")
-        self._set_busy(False, "就绪" if result.exit_reason is ExitReason.COMPLETED else "已暂停")
-        self.call_later(self._start_next_queued_turn)
+            if not self._shutting_down:
+                self._end_streaming()
+                self._add_line(Text(f"回合执行失败: {exc}", style="red"), "msg-warn")
+        finally:
+            if self._shutting_down:
+                self._busy = False
+            else:
+                self._set_busy(False, status)
+                self.call_later(self._start_next_queued_turn)
 
     def _start_next_queued_turn(self) -> None:
-        if self._busy or not self._queued_turns:
+        if self._shutting_down or self._busy or not self._queued_turns:
             return
         text = self._queued_turns.popleft()
         self._refresh_activity()
-        self._turn_worker = self.run_worker(
-            self._run_turn(text), group="turn", exclusive=False, description="queued agent turn"
-        )
+        self._start_turn(text, "queued agent turn")
 
     # -- approval adapter -----------------------------------------------------
 
@@ -1058,24 +1092,38 @@ class MiniCodeApp(App[None]):
                     else ApprovalDecision(granted=False, reason="审批弹窗被关闭")
                 )
 
-        self.push_screen(ApprovalModal(request), _closed)
+        modal = ApprovalModal(request)
+        self._approval_modal = modal
+        self.push_screen(modal, _closed)
         try:
             return await fut
         finally:
-            self._approval_future = None
+            if self._approval_future is fut:
+                self._approval_future = None
+            self._remove_approval_modal(modal)
+
+    def _remove_approval_modal(self, modal: ApprovalModal | None) -> None:
+        """Remove this approval on all exits, including timeout and overlays."""
+        if modal is not None and modal in self.screen_stack:
+            # Pop transient overlays too so obsolete approvals cannot reappear.
+            while self.screen is not modal:
+                self.pop_screen()
+            self.pop_screen()
+        if self._approval_modal is modal:
+            self._approval_modal = None
 
     def _abort_pending_approval(self) -> None:
-        """Close a pending approval dialog after the turn was cancelled."""
         fut = self._approval_future
         if fut is not None and not fut.done():
             fut.cancel()
         self._approval_future = None
-        if isinstance(self.screen, ApprovalModal):
-            self.pop_screen()
+        self._remove_approval_modal(self._approval_modal)
 
     # -- message handling -----------------------------------------------------
 
     def on_prompt_area_submitted(self, event: PromptArea.Submitted) -> None:
+        if self._shutting_down:
+            return
         self.slash_close()
         text = event.text.strip()
         event.prompt_area.clear()
@@ -1094,9 +1142,7 @@ class MiniCodeApp(App[None]):
             self._handle_slash(text)
             return
         self._append_user_message(text)
-        self._turn_worker = self.run_worker(
-            self._run_turn(text), group="turn", exclusive=False, description="agent turn"
-        )
+        self._start_turn(text)
 
     def action_cancel_or_exit(self) -> None:
         """Ctrl+C: cancel the running turn; when idle, press twice to quit."""
@@ -1106,7 +1152,7 @@ class MiniCodeApp(App[None]):
             return
         now = time.monotonic()
         if now - self._last_idle_ctrl_c <= _DOUBLE_CTRL_C_WINDOW_S:
-            self.exit()
+            self.run_worker(self.action_quit(), group="shutdown")
             return
         self._last_idle_ctrl_c = now
         self._refresh_status("再按一次 Ctrl+C 退出")
@@ -1203,13 +1249,50 @@ class MiniCodeApp(App[None]):
         if self.is_mounted:
             self.query_one("#inspector").display = self._inspector_open and event.size.width >= 120
 
+    def _track_cleanup(self, awaitable) -> None:
+        task = asyncio.create_task(awaitable)
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._finish_cleanup)
+
+    def _finish_cleanup(self, task: asyncio.Task[None]) -> None:
+        self._cleanup_tasks.discard(task)
+        if not task.cancelled():
+            error = task.exception()  # retrieve failures even if finished before quit
+            if error is not None:
+                self.log.warning("Retired resource cleanup failed:", error)
+
+    async def _close_resources(self) -> None:
+        if self._resources_closed:
+            return
+        self._shutting_down = True
+        self._queued_turns.clear()
+        self._abort_pending_approval()
+        worker = self._turn_worker
+        if worker is not None and not worker.is_finished:
+            from textual.worker import WorkerCancelled
+            if not worker.is_cancelled:
+                worker.cancel()
+            try:
+                await worker.wait()
+            except WorkerCancelled:
+                pass
+        if self._cleanup_tasks:
+            await asyncio.gather(*self._cleanup_tasks, return_exceptions=True)
+        await self._runtime.aclose()
+        self._resources_closed = True
+
+    async def action_quit(self) -> None:
+        if self._shutting_down:
+            return
+        await self._close_resources()
+        self.exit()
+
     async def on_unmount(self) -> None:
         if self._activity_timer is not None:
             self._activity_timer.stop()
         self._activity_widget = None
-        if self._cleanup_tasks:
-            await asyncio.gather(*self._cleanup_tasks, return_exceptions=True)
-        await self._runtime.aclose()
+        # Also cover programmatic exit/run_test teardown after screens vanish.
+        await self._close_resources()
 
     # -- slash autocomplete: cascading two-level menu -------------------------
 
@@ -1466,7 +1549,7 @@ class MiniCodeApp(App[None]):
         if verb in ("/help", "/?"):
             self._add_line(_help_text(), "msg-system")
         elif verb in ("/exit", "/quit"):
-            self.exit()
+            self.run_worker(self.action_quit(), group="shutdown")
         elif verb == "/clear":
             # 仅清空终端渲染；Agent 的会话上下文与用量保持不变。
             self._clear_log()
@@ -1502,10 +1585,7 @@ class MiniCodeApp(App[None]):
                 self._add_line(Text("当前没有暂停的任务。", style="yellow"), "msg-warn")
             else:
                 self._add_line(Text("继续未完成任务…", style="dim"), "msg-event")
-                self._turn_worker = self.run_worker(
-                    self._run_turn(None), group="turn", exclusive=False,
-                    description="continued agent turn",
-                )
+                self._start_turn(None, "continued agent turn")
         elif verb == "/compact":
             self._cmd_compact()
         else:
@@ -1522,9 +1602,7 @@ class MiniCodeApp(App[None]):
         self._services.background_manager = BackgroundManager()
         # This app already owns the event loop; cancel the old session's jobs
         # there while the new runtime receives an isolated manager.
-        cleanup = asyncio.create_task(previous_jobs.cancel_all())
-        self._cleanup_tasks.add(cleanup)
-        cleanup.add_done_callback(self._cleanup_tasks.discard)
+        self._track_cleanup(previous_jobs.cancel_all())
         self._queued_turns.clear()
         self._clear_log()
         self._build_runtime()
@@ -1573,7 +1651,7 @@ class MiniCodeApp(App[None]):
         )
         close = getattr(previous_provider, "aclose", None)
         if close is not None:
-            asyncio.create_task(close())
+            self._track_cleanup(close())
         self.sub_title = f"{self._setup.workspace} · {info.provider}/{info.name}"
         self._add_line(
             Text(
@@ -1708,21 +1786,19 @@ class MiniCodeApp(App[None]):
         setup.workspace = runtime.workspace
         previous_provider = self._setup.provider
         previous_jobs = self._services.background_manager
-        cleanup = asyncio.create_task(previous_jobs.cancel_all())
-        self._cleanup_tasks.add(cleanup)
-        cleanup.add_done_callback(self._cleanup_tasks.discard)
+        self._track_cleanup(previous_jobs.cancel_all())
         self._queued_turns.clear()
         self._setup = setup
         self._services = services
         self._runtime = runtime
         self._clear_log()
-        self._inspector_events = deque(self._store.get_events(resolved), maxlen=200)
+        self._inspector_events = deque(reversed(self._store.get_events(resolved, limit=200, newest_first=True)), maxlen=200)
         self._inspector_context_tokens = runtime.context_tokens_used()
         self._refresh_inspector()
         if previous_provider is not setup.provider:
             close = getattr(previous_provider, "aclose", None)
             if close is not None:
-                asyncio.create_task(close())
+                self._track_cleanup(close())
         self.sub_title = f"{setup.workspace} · {setup.provider_name}/{setup.model_label}"
         self._add_line(
             Text(

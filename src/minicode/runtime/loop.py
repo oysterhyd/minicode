@@ -380,7 +380,11 @@ class AgentRuntime:
     def set_budget(self, budget: Budget) -> None:
         if self._running:
             raise SessionBusyError("budget changes apply at the next activation")
-        self._budget = budget.model_copy(deep=True)
+        updated = budget.model_copy(deep=True)
+        if self.session_id is not None:
+            self._store.append_event(self.session_id, EventType.BUDGET_CHANGED,
+                                     {"budget": updated.model_dump()})
+        self._budget = updated
 
     def set_compactor(self, compactor) -> None:
         if self._running:
@@ -1341,7 +1345,9 @@ class AgentRuntime:
                 await recorder.emit(EventType.BACKGROUND_JOB_STARTED, {
                     "job_id": job.job_id, "command": job.command,
                 })
-        for job in self._background_manager.poll_completed():
+        peek = getattr(self._background_manager, "peek_completed", None)
+        jobs = peek() if peek else self._background_manager.poll_completed()
+        for job in jobs:
             artifact_id = None
             full_output = getattr(job, "full_output", None)
             if full_output is not None and self._artifact_store is not None:
@@ -1349,7 +1355,8 @@ class AgentRuntime:
                 artifact_id = ref.artifact_id
                 job.output += f"\n[artifact:{artifact_id}] · 用 read_artifact 分页续读"
                 job.full_output = None
-            await recorder.emit(
+            message = Message(role="user", content=[TextBlock(text=_format_bg_result(job))])
+            event = recorder.commit(
                 EventType.BACKGROUND_JOB_LOST if job.status == "lost" else EventType.BACKGROUND_JOB_COMPLETED,
                 {
                     "job_id": job.job_id,
@@ -1359,12 +1366,15 @@ class AgentRuntime:
                     "output_preview": job.output[:_OUTPUT_PREVIEW_CHARS],
                     "artifact_id": artifact_id,
                     "truncated": artifact_id is not None,
+                    "delivered": True,
                 },
+                message=message,
             )
-            self._append_message(
-                session_id,
-                Message(role="user", content=[TextBlock(text=_format_bg_result(job))]),
-            )
+            self._messages.append(message)
+            acknowledge = getattr(self._background_manager, "ack_completed", None)
+            if acknowledge is not None:
+                acknowledge(job.job_id)
+            await recorder.publish(event)
 
     # -- persistence helpers ---------------------------------------------------
 

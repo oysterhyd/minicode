@@ -3,9 +3,12 @@ const { spawn, execFile } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const readline = require('node:readline')
+const { pathToFileURL } = require('node:url')
 const { setTimeout, clearTimeout } = require('node:timers')
 const utils = require(path.join(__dirname, 'git-utils.cjs'))
 const { bridgeLaunch } = require(path.join(__dirname, 'bundled-runtime.cjs'))
+const { stopBridge } = require(path.join(__dirname, 'bridge-shutdown.cjs'))
+const appIndex = path.resolve(__dirname, '../dist/index.html')
 
 const projectRoot = path.resolve(__dirname, '../..')
 const devServer = 'http://127.0.0.1:5173'
@@ -26,6 +29,7 @@ let nextId = 1
 let workspace = null
 let recent = []
 let quitting = false
+let quitReady = false
 let settingsPath = null
 let toolEnvironment = process.env
 const pending = new Map()
@@ -73,7 +77,7 @@ function callBridge(method, params = {}) {
 function run(file, args, cwd) {
   return new Promise((resolve) => {
     execFile(file, args, { cwd, env: toolEnvironment, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8', timeout: 30000, windowsHide: true }, (error, stdout, stderr) => {
-      resolve({ ok: !error, stdout, stderr, error: error ? error.message : '' })
+      resolve({ ok: !error, stdout, stderr, code: error?.code, error: error ? error.message : '' })
     })
   })
 }
@@ -165,14 +169,21 @@ async function changes(root = workspace) {
 async function diff(relative, root = workspace) {
   const target = insideWorkspace(relative, root)
   const result = await run('git', ['diff', 'HEAD', '--no-ext-diff', '--', relative], root)
-  if (!result.ok) throw new Error(result.stderr || result.error || '无法读取差异')
+  let unborn = false
+  if (!result.ok) {
+    const head = await run('git', ['rev-parse', '--verify', '--quiet', 'HEAD'], root)
+    const ref = !head.ok && head.code === 1 && !head.stderr.trim()
+      ? await run('git', ['symbolic-ref', '-q', 'HEAD'], root) : null
+    unborn = Boolean(ref?.ok && /^refs\/heads\//.test(ref.stdout.trim()))
+    if (!unborn) throw new Error(result.stderr || result.error || '无法读取差异')
+  }
   if (result.stdout.trim()) {
     return result.stdout.length > 200_000
       ? result.stdout.slice(0, 200_000) + '\n...[差异预览已截断，请用 Git 或 Agent 工具查看完整差异]'
       : result.stdout
   }
   if (fs.existsSync(target)) {
-    const status = await run('git', ['ls-files', '--error-unmatch', '--', relative], root)
+    const status = unborn ? { ok: false } : await run('git', ['ls-files', '--error-unmatch', '--', relative], root)
     if (!status.ok) {
       const preview = await readPreview(target)
       if (preview.truncated) return '文件超过 1 MiB，差异预览已省略。可用 Agent 的 read 工具分页查看。'
@@ -297,7 +308,14 @@ async function openPath(target) {
   return true
 }
 
-function isAppUrl(url) { return utils.isAppUrl(url, isDev ? devServer : null) }
+function isAppUrl(url) { return utils.isAppUrl(url, isDev ? devServer : null, pathToFileURL(appIndex).href) }
+
+function assertTrustedSender(event) {
+  const contents = window?.webContents
+  if (!contents || contents.isDestroyed() || event?.sender !== contents
+      || !event.senderFrame || event.senderFrame !== contents.mainFrame
+      || !isAppUrl(event.senderFrame.url)) throw new Error('拒绝不可信页面的 IPC 请求')
+}
 
 function secureContents(contents) {
   contents.setWindowOpenHandler?.(({ url }) => {
@@ -321,6 +339,8 @@ function startBridge() {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   })
+  // Writable errors (e.g. EPIPE while the bridge exits) are asynchronous too.
+  bridge.stdin.on?.('error', error => rejectPending(error))
   readline.createInterface({ input: bridge.stdout }).on('line', (line) => {
     let message
     try {
@@ -425,20 +445,23 @@ if (singleInstance) app.whenReady().then(() => {
   settingsPath = path.join(app.getPath('userData'), 'workspace.json')
   loadSettings()
   startBridge()
-  ipcMain.handle('desktop:choose-workspace', async () => {
+  ipcMain.handle('desktop:choose-workspace', async (event) => {
+    assertTrustedSender(event)
     const result = await dialog.showOpenDialog(window, { properties: ['openDirectory'] })
     // A cancelled dialog must not look like a fresh choice: the frontend treats
     // any non-null result as a new workspace and would start a task view.
     if (result.canceled) return null
     return useWorkspace(result.filePaths[0])
   })
-  ipcMain.handle('desktop:choose-acceptance', async () => {
+  ipcMain.handle('desktop:choose-acceptance', async (event) => {
+    assertTrustedSender(event)
     const result = await dialog.showOpenDialog(window, { properties: ['openFile'],
       filters: [{ name: 'YAML acceptance', extensions: ['yaml', 'yml'] }] })
     return result.canceled ? null : result.filePaths[0]
   })
-  ipcMain.handle('desktop:request', async (_event, method, params = {}) => {
+  ipcMain.handle('desktop:request', async (event, method, params = {}) => {
     if (quitting || !window || window.isDestroyed()) throw new Error('应用正在关闭')
+    assertTrustedSender(event)
     const handler = Object.prototype.hasOwnProperty.call(local, method) ? local[method] : null
     return handler ? handler(params || {}) : callBridge(method, params)
   })
@@ -462,13 +485,18 @@ if (singleInstance) app.whenReady().then(() => {
   secureContents(window.webContents)
   window.on('closed', () => { window = null })
   if (isDev) window.loadURL(devServer)
-  else window.loadFile(path.join(__dirname, '../dist/index.html'))
+  else window.loadFile(appIndex)
 })
 
 app.on('window-all-closed', () => app.quit())
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (quitReady || !bridge) return
+  event?.preventDefault()
   if (quitting) return
   quitting = true
   rejectPending(new Error('应用正在关闭'))
-  bridge?.kill()
+  void stopBridge(bridge).catch(error => console.error('Agent bridge shutdown failed:', error)).finally(() => {
+    quitReady = true
+    app.quit()
+  })
 })

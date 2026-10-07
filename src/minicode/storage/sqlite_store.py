@@ -104,7 +104,8 @@ class SessionStore(Protocol):
         self, session_id: str, type: EventType, data: dict[str, Any] | None = None
     ) -> Event: ...
 
-    def get_events(self, session_id: str) -> list[Event]: ...
+    def get_events(self, session_id: str, *, after_seq: int | None = None,
+                   limit: int | None = None, newest_first: bool = False) -> list[Event]: ...
 
     def get_session(self, session_id: str) -> SessionSummary | None: ...
 
@@ -235,6 +236,11 @@ class SqliteStore:
             self._conn.execute(
                 "ALTER TABLE sessions ADD COLUMN usage_available INTEGER NOT NULL DEFAULT 0"
             )
+        # Additive indexes keep v5 files readable by older clients. The latest
+        # timestamp query needs MAX(timestamp), not MAX(seq): clocks can retreat.
+        self._conn.execute("CREATE INDEX IF NOT EXISTS events_activity ON events(session_id, timestamp)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS messages_first_user ON messages(session_id, seq) WHERE role = 'user'")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS sessions_created ON sessions(created_at)")
         # PRAGMAs cannot bind parameters; SCHEMA_VERSION is a module constant.
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.commit()
@@ -275,17 +281,20 @@ class SqliteStore:
         self._conn.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
         try:
             yield self._conn
-        except BaseException:
             if nested:
-                self._conn.execute(f"ROLLBACK TO {savepoint}")
                 self._conn.execute(f"RELEASE {savepoint}")
             else:
-                self._conn.rollback()
+                self._conn.commit()
+        except BaseException:
+            # COMMIT can fail too (deferred constraints, disk/I/O errors).
+            # Never leave a failed write open for later savepoints to inherit.
+            if self._conn.in_transaction:
+                if nested:
+                    self._conn.execute(f"ROLLBACK TO {savepoint}")
+                    self._conn.execute(f"RELEASE {savepoint}")
+                else:
+                    self._conn.rollback()
             raise
-        if nested:
-            self._conn.execute(f"RELEASE {savepoint}")
-        else:
-            self._conn.commit()
 
     def checkpoint(
         self, session_id: str, type: EventType, data: dict[str, Any], *,
@@ -487,7 +496,8 @@ class SqliteStore:
     def last_activity(self) -> dict[str, str]:
         """Latest event timestamp per session (sessions without events are absent)."""
         rows = self._conn.execute(
-            "SELECT session_id, MAX(timestamp) AS latest FROM events GROUP BY session_id"
+            "SELECT s.session_id, (SELECT MAX(e.timestamp) FROM events e "
+            "WHERE e.session_id = s.session_id) AS latest FROM sessions s"
         ).fetchall()
         return {row["session_id"]: row["latest"] for row in rows if row["latest"]}
 
@@ -594,6 +604,14 @@ class SqliteStore:
                 (session_id, artifact_id, kind, relpath, created_at),
             )
 
+    def get_artifact_relpath(self, session_id: str, artifact_id: str) -> str | None:
+        """Use the composite primary key without loading/sorting the manifest."""
+        row = self._conn.execute(
+            "SELECT relpath FROM artifacts WHERE session_id = ? AND artifact_id = ?",
+            (session_id, artifact_id),
+        ).fetchone()
+        return row["relpath"] if row is not None else None
+
     def list_artifacts(self, session_id: str) -> list[dict[str, str]]:
         rows = self._conn.execute(
             "SELECT artifact_id, kind, relpath, created_at FROM artifacts"
@@ -633,12 +651,21 @@ class SqliteStore:
             )
         return Event(seq=seq, type=type, timestamp=timestamp, data=payload)
 
-    def get_events(self, session_id: str) -> list[Event]:
-        rows = self._conn.execute(
-            "SELECT seq, type, timestamp, data FROM events WHERE session_id = ?"
-            " ORDER BY seq ASC",
-            (session_id,),
-        ).fetchall()
+    def get_events(self, session_id: str, *, after_seq: int | None = None,
+                   limit: int | None = None, newest_first: bool = False) -> list[Event]:
+        """Read an indexed trace page; defaults preserve the full-history API."""
+        if limit is not None and limit < 0:
+            raise ValueError("event limit must be nonnegative")
+        query = "SELECT seq, type, timestamp, data FROM events WHERE session_id = ?"
+        params: list[Any] = [session_id]
+        if after_seq is not None:
+            query += " AND seq > ?"
+            params.append(after_seq)
+        query += " ORDER BY seq " + ("DESC" if newest_first else "ASC")
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn.execute(query, params).fetchall()
         return [
             Event(
                 seq=row["seq"],

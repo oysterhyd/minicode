@@ -55,12 +55,21 @@ function isAllowedExternal(url) {
 }
 
 /** Whether navigation stays inside the app (dev server, or the built index.html). */
-function isAppUrl(url, devServer = null) {
+function isAppUrl(url, devServer = null, appFileUrl = null) {
   if (typeof url !== 'string') return false
-  if (devServer) return url === devServer || url.startsWith(devServer + '/') || url.startsWith(devServer + '?') || url.startsWith(devServer + '#')
   try {
     const parsed = new URL(url)
-    return parsed.protocol === 'file:' && decodeURIComponent(parsed.pathname).replaceAll('\\', '/').endsWith('/dist/index.html')
+    if (devServer) return parsed.origin === new URL(devServer).origin && !parsed.username && !parsed.password
+    if (!appFileUrl || parsed.protocol !== 'file:' || parsed.host) return false
+    const expected = new URL(appFileUrl)
+    if (expected.protocol !== 'file:' || expected.host) return false
+    const { fileURLToPath } = require('node:url')
+    const path = require('node:path')
+    const canonical = value => {
+      const result = path.resolve(fileURLToPath(value))
+      return process.platform === 'win32' ? result.toLowerCase() : result
+    }
+    return canonical(parsed) === canonical(expected)
   } catch { return false }
 }
 

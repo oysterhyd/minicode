@@ -6,20 +6,7 @@ import { ApprovalCard } from './ApprovalCard'
 import { AssistantMessage, Notice, Thinking, ToolGroup, TurnSummary, UserMessage } from './Messages'
 import { ToolStep } from './ToolStep'
 
-type Row = { type: 'item'; item: FeedItem } | { type: 'tools'; id: string; items: FeedItem[] }
-
-/** Collapse consecutive tool calls into one group so long runs stay readable. */
-function rows(items: FeedItem[]): Row[] {
-  const result: Row[] = []
-  for (const item of items) {
-    const last = result[result.length - 1]
-    if (item.kind === 'tool') {
-      if (last?.type === 'tools') last.items.push(item)
-      else result.push({ type: 'tools', id: `tools-${item.id}`, items: [item] })
-    } else result.push({ type: 'item', item })
-  }
-  return result
-}
+import { groupFeedItems } from '../../lib/feed'
 
 export function SessionFeed({ items, busy, sessionId, clientKey, expandTools, onDecide, onEdit, onRetry, footer }: {
   items: FeedItem[]; busy: boolean; sessionId: string | null; clientKey: string; expandTools: boolean; footer?: ReactNode
@@ -29,7 +16,7 @@ export function SessionFeed({ items, busy, sessionId, clientKey, expandTools, on
   const follow = useRef(true)
   const [showLatest, setShowLatest] = useState(false)
   const reducedMotion = useReducedMotion()
-  const grouped = useMemo(() => rows(items), [items])
+  const grouped = useMemo(() => groupFeedItems(items), [items])
   const lastUser = items.findLastIndex(item => item.kind === 'user')
   const lastAssistant = items.findLastIndex(item => item.kind === 'assistant')
   const lastUserText = lastUser >= 0 ? items[lastUser].text || '' : ''
@@ -44,7 +31,8 @@ export function SessionFeed({ items, busy, sessionId, clientKey, expandTools, on
     observer.observe(content)
     return () => observer.disconnect()
   }, [])
-  const hasLive = items.some(item => item.pending || item.approvalId || item.kind === 'thinking')
+  const hasActiveTool = items.some(item => item.pending || item.approvalId)
+  const hasLive = hasActiveTool || items.some(item => item.kind === 'thinking')
   // The runtime announces a tool before asking for approval; show that row as waiting, not running.
   const approval = items.find(item => item.approvalId)
   const waitingId = approval ? items.findLast(item => item.kind === 'tool' && item.pending && item.name === approval.name)?.id : undefined
@@ -65,11 +53,11 @@ export function SessionFeed({ items, busy, sessionId, clientKey, expandTools, on
               defaultOpen={expandTools || (only.pending && only.name === 'bash' && only.id !== waitingId)} />
           }
           const item = row.item
-          const position = items.indexOf(item)
+          const position = row.position
           if (item.kind === 'approval') return <ApprovalCard key={item.id} item={item} onDecide={onDecide} />
           if (item.kind === 'notice') return <Notice key={item.id} item={item} />
           if (item.kind === 'summary') return <TurnSummary key={item.id} item={item} />
-          if (item.kind === 'thinking') return busy && !items.some(other => other.pending || other.approvalId) ? <Thinking key={item.id} item={item} /> : null
+          if (item.kind === 'thinking') return busy && !hasActiveTool ? <Thinking key={item.id} item={item} /> : null
           if (item.kind === 'user') return <UserMessage key={item.id} item={item} onEdit={!busy && position === lastUser ? onEdit : undefined} />
           return <AssistantMessage key={item.id} item={item} onRetry={!busy && position === lastAssistant && lastUser >= 0 && lastUser < position ? () => onRetry(lastUserText) : undefined} />
         })}

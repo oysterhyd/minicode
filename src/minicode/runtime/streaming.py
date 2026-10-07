@@ -9,6 +9,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+from minicode.core.limits import MAX_RESPONSE_BYTES, MAX_TOOL_CALLS
 from minicode.core.models import EventType, ExitReason, Message, ModelResponse, ToolResultBlock, ToolSpec
 from minicode.providers.base import Provider, ResponseDone, TextDelta
 from minicode.providers.errors import ProviderError, ProviderProtocolError
@@ -30,7 +31,7 @@ def validate_response(response: ModelResponse, known_ids: set[str],
     if any(isinstance(block, ToolResultBlock) for block in response.blocks):
         raise ProviderProtocolError("provider emitted a tool result as an assistant block")
     calls = response.tool_calls
-    if len(calls) > 128:
+    if len(calls) > MAX_TOOL_CALLS:
         raise ProviderProtocolError("provider returned too many tool calls")
     ids: set[str] = set()
     for call in calls:
@@ -38,7 +39,7 @@ def validate_response(response: ModelResponse, known_ids: set[str],
                 or call.id in ids or call.id in known_ids or settled(call.id)):
             raise ProviderProtocolError("provider returned a missing or reused tool call id/name")
         ids.add(call.id)
-    if len(response.model_dump_json().encode("utf-8")) > 16_000_000:
+    if len(response.model_dump_json().encode("utf-8")) > MAX_RESPONSE_BYTES:
         raise ProviderProtocolError("provider response exceeds the capture limit")
 
 
@@ -68,7 +69,7 @@ async def stream_response(
                         if isinstance(event, TextDelta):
                             saw_text = saw_text or bool(event.text)
                             captured += len(event.text.encode("utf-8"))
-                            if captured > 16_000_000:
+                            if captured > MAX_RESPONSE_BYTES:
                                 raise ProviderProtocolError("provider text exceeds the capture limit")
                             if on_delta is not None:
                                 try:

@@ -145,10 +145,11 @@ class Bridge:
         previous = self.runtime
         if previous is None:
             return
-        self.runtime = None
-        registry = self.registry
-        self.registry = None
+        # A failed close (notably a live activation) must retain its owner,
+        # approval route and callbacks. Detach only after cleanup succeeds.
         await previous.aclose()
+        self.runtime = None
+        self.registry = None
 
     async def discard_provider(self, provider: object | None = None) -> None:
         """Close a provider's HTTP client, if it has one.
@@ -309,7 +310,15 @@ class Bridge:
                 "agentDefinitions": self.configuration.agents()}
 
     async def ensure_runtime(self, workspace: Path, session_id: str | None, model: str | None = None):
-        chosen = model or (self.store.get_session(session_id).model if session_id else self.model)
+        if self.busy() and self.runtime is not None:
+            if self.runtime.workspace == workspace and session_id is None:
+                session_id = self.runtime.session_id  # draft ID assignment may lag IPC
+            if self.runtime.session_id != session_id or self.runtime.workspace != workspace:
+                raise ValueError("当前任务仍在运行，不能替换会话或工作区")
+        summary = self.store.get_session(session_id) if session_id else None
+        if session_id and summary is None:
+            raise ValueError(f"unknown session: {session_id}")
+        chosen = model or (summary.model if summary else self.model)
         if self.runtime is None or self.runtime.session_id != session_id or self.runtime.workspace != workspace:
             if self.runtime is not None and self.runtime.session_id not in (None, session_id):
                 # "Always allow" belongs to one conversation, not to this Bridge.

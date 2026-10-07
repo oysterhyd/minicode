@@ -15,7 +15,6 @@ from itertools import chain
 import mmap
 import os
 from pathlib import Path
-import shutil
 import tempfile
 
 from pydantic import BaseModel, Field
@@ -68,7 +67,8 @@ def _read_text(target: Path, limit_bytes: int) -> tuple[str | None, ToolOutcome 
             f"file too large: {size} bytes (limit {limit_bytes})"
         )
     try:
-        return target.read_text(encoding="utf-8"), None
+        with target.open("r", encoding="utf-8", newline="") as handle:
+            return handle.read(), None
     except UnicodeDecodeError:
         return None, ToolOutcome.failure("binary or non-UTF-8 file")
     except OSError as exc:
@@ -92,7 +92,27 @@ def _atomic_write_text(target: Path, content: str) -> None:
             Path(name).unlink(missing_ok=True)
 
 
-def _edit_large_file(target: Path, args: "EditArgs", relpath: str) -> ToolOutcome:
+async def _large_matches(mapped: mmap.mmap, needle: bytes):
+    """Find non-overlapping matches with bounded, cooperatively yielding scans."""
+    position = 0
+    checkpoint = 0
+    while position < len(mapped):
+        end = min(len(mapped), position + 64 * 1024 + len(needle) - 1)
+        found = mapped.find(needle, position, end)
+        if found < 0:
+            if end == len(mapped):
+                break
+            position += 64 * 1024
+        else:
+            yield found
+            position = found + len(needle)
+        if position - checkpoint >= 64 * 1024:
+            await asyncio.sleep(0)
+            checkpoint = position
+    await asyncio.sleep(0)
+
+
+async def _edit_large_file(target: Path, args: "EditArgs", relpath: str) -> ToolOutcome:
     """Replace exact UTF-8 bytes in a large file using bounded copying."""
     old = args.old_text.encode("utf-8")
     new = args.new_text.encode("utf-8")
@@ -102,16 +122,15 @@ def _edit_large_file(target: Path, args: "EditArgs", relpath: str) -> ToolOutcom
         try:
             for chunk in iter(lambda: source.read(64 * 1024), b""):
                 decoder.decode(chunk)
+                await asyncio.sleep(0)
             decoder.decode(b"", final=True)
         except UnicodeDecodeError:
             return ToolOutcome.failure("binary or non-UTF-8 file")
         source.seek(0)
         with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
             count = 0
-            position = 0
-            while (found := mapped.find(old, position)) != -1:
+            async for _found in _large_matches(mapped, old):
                 count += 1
-                position = found + len(old)
             if count == 0:
                 return ToolOutcome.failure(
                     f"old_text not found in {relpath}: file may have changed; re-read the file first"
@@ -126,20 +145,25 @@ def _edit_large_file(target: Path, args: "EditArgs", relpath: str) -> ToolOutcom
                 with os.fdopen(fd, "wb") as output:
                     position = 0
                     replacements = 0
-                    while (found := mapped.find(old, position)) != -1:
+                    async for found in _large_matches(mapped, old):
                         source.seek(position)
                         remaining = found - position
                         while remaining:
                             chunk = source.read(min(64 * 1024, remaining))
                             output.write(chunk)
+                            if not chunk:
+                                raise OSError("file was truncated while editing")
                             remaining -= len(chunk)
+                            await asyncio.sleep(0)
                         output.write(new)
                         position = found + len(old)
                         replacements += 1
                         if not args.replace_all:
                             break
                     source.seek(position)
-                    shutil.copyfileobj(source, output, length=64 * 1024)
+                    while chunk := source.read(64 * 1024):
+                        output.write(chunk)
+                        await asyncio.sleep(0)
                     output.flush()
                     os.fsync(output.fileno())
                 os.chmod(name, original_stat.st_mode)
@@ -148,6 +172,8 @@ def _edit_large_file(target: Path, args: "EditArgs", relpath: str) -> ToolOutcom
                     Path(name).unlink(missing_ok=True)
                 raise
     try:
+        # Give cancellation/deadline callbacks a final checkpoint before commit.
+        await asyncio.sleep(0)
         current_stat = target.stat()
         if (current_stat.st_size, current_stat.st_mtime_ns) != (
             original_stat.st_size, original_stat.st_mtime_ns
@@ -386,7 +412,7 @@ class EditTool(BaseTool):
             )
         try:
             if target.stat().st_size > ctx.limits.max_read_bytes:
-                return _edit_large_file(target, args, relpath)
+                return await _edit_large_file(target, args, relpath)
         except OSError as exc:
             return ToolOutcome.failure(f"failed to edit file: {exc}")
         text, failure = _read_text(target, ctx.limits.max_read_bytes)

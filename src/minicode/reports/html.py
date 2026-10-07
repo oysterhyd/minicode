@@ -66,6 +66,7 @@ _STATUS_LABELS: dict[str, str] = {
 #: EventType -> (badge label, badge color class suffix).
 _EVENT_META: dict[EventType, tuple[str, str]] = {
     EventType.SESSION_START: ("会话开始", "start"),
+    EventType.BUDGET_CHANGED: ("预算更新", "round"),
     EventType.ROUND_START: ("轮开始", "round"),
     EventType.ASSISTANT_MESSAGE: ("助手消息", "assistant"),
     EventType.TOOL_CALL_START: ("工具调用", "tool"),

@@ -15,7 +15,8 @@ async function launch({ lock = true, focused = true, files = {} } = {}) {
   const lines = new EventEmitter()
   const bridge = new EventEmitter()
   bridge.exitCode = null
-  bridge.stdin = { destroyed: false, write: (_text, callback) => callback() }
+  bridge.ends = 0
+  bridge.stdin = { destroyed: false, write: (_text, callback) => callback(), end: () => { bridge.ends++; bridge.exitCode = 0; bridge.emit('exit', 0) } }
   bridge.stdout = new EventEmitter()
   bridge.stderr = new EventEmitter()
   bridge.kills = 0
@@ -54,7 +55,9 @@ async function launch({ lock = true, focused = true, files = {} } = {}) {
         destroyed: false,
         isDestroyed() { return this.destroyed },
         setWindowOpenHandler(handler) { this.openHandler = handler },
-        on() {},
+        mainFrame: { url: require('node:url').pathToFileURL(path.resolve(__dirname, '../dist/index.html')).href },
+        listeners: new Map(),
+        on(name, callback) { this.listeners.set(name, callback) },
         send(channel, event) {
           if (this.destroyed) throw new TypeError('Object has been destroyed')
           messages.push({ channel, event })
@@ -92,7 +95,7 @@ async function launch({ lock = true, focused = true, files = {} } = {}) {
   }, { filename })
   await Promise.resolve()
   return { app, window, bridge, lines, messages, opened, shown, handlers,
-    request: (method, params = {}) => handlers.get('desktop:request')({}, method, params) }
+    request: (method, params = {}) => handlers.get('desktop:request')({ sender: window.contents, senderFrame: window.contents.mainFrame }, method, params) }
 }
 
 test('uses the MiniCode icon for the Windows taskbar', async () => {
@@ -146,7 +149,9 @@ test('normal quit rejects pending requests, suppresses exit errors and stops onc
   app.emit('before-quit')
   app.emit('before-quit')
   await rejected
-  assert.equal(bridge.kills, 1)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(bridge.ends, 1)
+  assert.equal(bridge.kills, 0)
   assert.equal(messages.length, 0)
   await assert.rejects(request('getState'), /关闭|不可用/)
 })
@@ -228,4 +233,30 @@ test('unknown methods are still forwarded to the bridge', async () => {
   const pending = request('listSessions')
   lines.emit('line', JSON.stringify({ id: 1, result: ['ok'] }))
   assert.deepEqual(plain(await pending), ['ok'])
+})
+
+test('all IPC handlers reject foreign senders, pages, and child frames', async () => {
+  const { window, handlers } = await launch()
+  const contents = window.contents
+  for (const name of ['desktop:request', 'desktop:choose-workspace', 'desktop:choose-acceptance']) {
+    const handler = handlers.get(name)
+    for (const event of [
+      {},
+      { sender: {}, senderFrame: contents.mainFrame },
+      { sender: contents, senderFrame: { url: contents.mainFrame.url } },
+    ]) await assert.rejects(handler(event, 'getState'), /不可信/)
+    const previous = contents.mainFrame.url
+    contents.mainFrame.url = 'file:///C:/untrusted-repo/dist/index.html'
+    await assert.rejects(handler({ sender: contents, senderFrame: contents.mainFrame }, 'getState'), /不可信/)
+    contents.mainFrame.url = previous
+  }
+})
+
+test('navigation blocks foreign local index pages but accepts the actual app', async () => {
+  const { window } = await launch()
+  const handler = window.contents.listeners.get('will-navigate')
+  let blocked = 0
+  handler({ preventDefault: () => blocked++ }, 'file:///C:/untrusted-repo/dist/index.html')
+  handler({ preventDefault: () => blocked++ }, window.contents.mainFrame.url + '#session')
+  assert.equal(blocked, 1)
 })

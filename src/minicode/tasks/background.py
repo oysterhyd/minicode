@@ -205,12 +205,18 @@ class BackgroundManager:
         state and leaves it here, so repeated polls stay idempotent. The job
         records themselves remain available through :meth:`get` / :meth:`jobs`.
         """
-        collected = [
-            job for job in self._jobs.values() if job.job_id in self._pending
-        ]
+        collected = self.peek_completed()
         for job in collected:
-            self._pending.discard(job.job_id)
+            self.ack_completed(job.job_id)
         return collected
+
+    def peek_completed(self) -> list[BackgroundJob]:
+        """Inspect terminal notifications without consuming undelivered results."""
+        return [job for job in self._jobs.values() if job.job_id in self._pending]
+
+    def ack_completed(self, job_id: str) -> None:
+        """Consume a notification only after its result is durably delivered."""
+        self._pending.discard(job_id)
 
     # -- teardown ------------------------------------------------------------
 

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -159,7 +160,20 @@ def _early_units(units: list[tuple[int, int]], keep: int) -> list[tuple[int, int
     return units[:-keep] if len(units) > keep else []
 
 
-def _pairing_ok(messages: list[Message], lo: int, hi: int) -> bool:
+def _pairing_counts(messages: Sequence[Message]) -> tuple[Counter[str], Counter[str]]:
+    uses: Counter[str] = Counter()
+    results: Counter[str] = Counter()
+    for message in messages:
+        for block in message.content:
+            if isinstance(block, ToolUseBlock):
+                uses[block.id] += 1
+            elif isinstance(block, ToolResultBlock):
+                results[block.tool_use_id] += 1
+    return uses, results
+
+
+def _pairing_ok(messages: list[Message], lo: int, hi: int,
+                counts: tuple[Counter[str], Counter[str]] | None = None) -> bool:
     """True when removing the span ``[lo, hi)`` cannot split a pair.
 
     Every tool_result inside the span must reference a tool_use inside it,
@@ -167,19 +181,17 @@ def _pairing_ok(messages: list[Message], lo: int, hi: int) -> bool:
     it. Well-formed histories always pass; the check is a safety net for
     pathological orderings (a result arriving after a new human input).
     """
-    uses_inside: set[str] = set()
-    uses_outside: set[str] = set()
-    for index, message in enumerate(messages):
-        for block in message.content:
-            if isinstance(block, ToolUseBlock):
-                (uses_inside if lo <= index < hi else uses_outside).add(block.id)
-    for index, message in enumerate(messages):
-        for block in message.content:
-            if isinstance(block, ToolResultBlock):
-                pool = uses_inside if lo <= index < hi else uses_outside
-                if block.tool_use_id not in pool:
-                    return False
-    return True
+    uses, results = counts if counts is not None else _pairing_counts(messages)
+    # Precomputed counts are validated once by the bulk exchange scanner.
+    if counts is None and results.keys() - uses.keys():
+        return False
+    inside_uses, inside_results = _pairing_counts(messages[lo:hi])
+    if inside_results.keys() - inside_uses.keys():
+        return False
+    # A result outside this span needs at least one use outside it. Counts
+    # preserve the original safety semantics even for duplicate legacy IDs.
+    return all(uses[call_id] > count or results[call_id] == inside_results[call_id]
+               for call_id, count in inside_uses.items())
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +495,9 @@ class ContextCompactor:
         unit_start, unit_end = units[0]
         anchor = messages[unit_start]
         spans: list[tuple[int, int]] = []
+        counts = _pairing_counts(messages)
+        if counts[1].keys() - counts[0].keys():
+            return messages, 0
         index = unit_start + 1
         while index + 1 < unit_end:
             assistant = messages[index]
@@ -499,7 +514,7 @@ class ContextCompactor:
             }
             if assistant.role != "assistant" or results.role != "user" or not calls:
                 break
-            if calls != answered or not _pairing_ok(messages, index, index + 2):
+            if calls != answered or not _pairing_ok(messages, index, index + 2, counts):
                 break
             spans.append((index, index + 2))
             index += 2
@@ -541,11 +556,12 @@ class ContextCompactor:
         )
         recent_budget = (0 if self.config.tail_keep_rounds > 0 else
                          min(self.config.tail_keep_tokens, self.context_tokens // 2))
+        recent_start = len(messages)
         for message_index in range(len(messages) - 1, -1, -1):
+            recent_start = message_index
             recent_budget -= estimate_messages_tokens(
                 None, [messages[message_index]], reserve_output_tokens=0
             )
-            protected.update(pos for pos in positions if pos[0] == message_index)
             if recent_budget <= 0:
                 break
         preview = self.config.shrink_preview_chars
@@ -557,6 +573,7 @@ class ContextCompactor:
             for block_index, block in enumerate(message.content):
                 if (
                     isinstance(block, ToolResultBlock)
+                    and message_index < recent_start
                     and (message_index, block_index) not in protected
                     and len(block.content) > preview
                 ):

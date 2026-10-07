@@ -24,6 +24,7 @@ from typing import BinaryIO
 from pydantic import BaseModel
 
 from minicode.storage.sqlite_store import SqliteStore
+from minicode.storage.paging import TextPageReader
 
 __all__ = ["ArtifactRef", "ArtifactStore"]
 
@@ -42,6 +43,7 @@ class ArtifactStore:
     def __init__(self, store: SqliteStore) -> None:
         self._store = store
         self._root = store._db_path.parent / "artifacts"
+        self._pages = TextPageReader()
 
     def _session_dir(self, session_id: str) -> Path:
         return self._root / session_id
@@ -54,7 +56,7 @@ class ArtifactStore:
         target = session_dir / f"{artifact_id}.txt"
         tmp = target.with_suffix(".tmp")
         try:
-            with tmp.open("w", encoding="utf-8") as stream:
+            with tmp.open("w", encoding="utf-8", newline="") as stream:
                 stream.write(content)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -80,14 +82,15 @@ class ArtifactStore:
             source.seek(0)
             sample = source.read(8192)
             try:
-                sample.decode("utf-8")
+                # A bounded sample may end inside a valid UTF-8 character.
+                codecs.getincrementaldecoder("utf-8")().decode(sample, final=False)
                 encoding = "utf-8"
             except UnicodeDecodeError:
                 encoding = locale.getpreferredencoding(False) or "utf-8"
             source.seek(0)
             decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
             size = 0
-            with tmp.open("w", encoding="utf-8") as output:
+            with tmp.open("w", encoding="utf-8", newline="") as output:
                 while chunk := source.read(64 * 1024):
                     decoded = decoder.decode(chunk)
                     output.write(decoded)
@@ -129,7 +132,8 @@ class ArtifactStore:
             return None
         target = self._session_dir(session_id) / relpath
         try:
-            return target.read_text(encoding="utf-8")
+            with target.open("r", encoding="utf-8", newline="") as handle:
+                return handle.read()
         except (OSError, UnicodeDecodeError):
             return None
 
@@ -153,26 +157,10 @@ class ArtifactStore:
         target = self._session_dir(session_id) / relpath
         return await asyncio.to_thread(self._read_page_path, target, offset, limit)
 
-    @staticmethod
     def _read_page_path(
-        target: Path, offset: int, limit: int
+        self, target: Path, offset: int, limit: int
     ) -> tuple[str, int | None, bool] | None:
-        try:
-            with target.open("r", encoding="utf-8") as handle:
-                skipped = 0
-                while skipped < offset:
-                    chunk = handle.read(min(64 * 1024, offset - skipped))
-                    if not chunk:
-                        return "", skipped, False
-                    skipped += len(chunk)
-                page = handle.read(limit)
-                has_more = bool(handle.read(1))
-                return page, None if has_more else offset + len(page), has_more
-        except (OSError, UnicodeDecodeError):
-            return None
+        return self._pages.read(target, offset, limit)
 
     def _relpath(self, session_id: str, artifact_id: str) -> str | None:
-        for entry in self._store.list_artifacts(session_id):
-            if entry["artifact_id"] == artifact_id:
-                return entry["relpath"]
-        return None
+        return self._store.get_artifact_relpath(session_id, artifact_id)

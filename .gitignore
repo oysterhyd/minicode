@@ -19,6 +19,7 @@ htmlcov/
 
 # Generated run workspaces and traces stay local; publish compact raw records.
 /reports/*
+!/reports/audit-performance.json
 !/reports/eval/
 /reports/eval/*
 !/reports/eval/results.json

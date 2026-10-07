@@ -1,0 +1,220 @@
+{
+  "baseline_ref": "fd8d15d28545e333db1680b74ed75740b536f536",
+  "method": "Same local Windows machine; serial before/after runs; fixture setup excluded; Python median of 3 or 5 runs with separate tracemalloc allocation pass; Node median of 7 runs after 2 warmups, explicit GC. No real model/network/production database.",
+  "caveats": [
+    "Microbenchmarks, not end-to-end application latency, browser FPS, RSS, physical cold-disk throughput or real model token savings.",
+    "Python peaks are traced Python allocations, not SQLite native buffers or RSS.",
+    "New indexes increase fixture database storage; compaction uses small additional counters.",
+    "The old large-file diff fallback incorrectly represents all lines as changed; new 10k-line diff preserves context and costs slightly more compute."
+  ],
+  "comparisons": {
+    "sidebar_activity_150k_events": {
+      "before_ms": 38.8606,
+      "after_ms": 0.3755,
+      "speedup": 103.49,
+      "time_reduction_pct": 99.03,
+      "before_peak_mib": 0.0293,
+      "after_peak_mib": 0.0293
+    },
+    "artifact_lookup_20k_rows": {
+      "before_ms": 40.8823,
+      "after_ms": 0.1072,
+      "speedup": 381.36,
+      "time_reduction_pct": 99.74,
+      "before_peak_mib": 10.247,
+      "after_peak_mib": 0.0007
+    },
+    "artifact_sequential_1m_chars_50_pages": {
+      "before_ms": 88.1,
+      "after_ms": 11.7335,
+      "speedup": 7.51,
+      "time_reduction_pct": 86.68,
+      "before_peak_mib": 1.5685,
+      "after_peak_mib": 0.4747
+    },
+    "compact_1000_closed_exchanges": {
+      "before_ms": 596.4471,
+      "after_ms": 9.6672,
+      "speedup": 61.7,
+      "time_reduction_pct": 98.38,
+      "before_peak_mib": 0.4923,
+      "after_peak_mib": 0.542
+    },
+    "tool_arguments_8000_fragments_2m_bytes": {
+      "before_ms": 1311.2807,
+      "after_ms": 6.4437,
+      "speedup": 203.5,
+      "time_reduction_pct": 99.51,
+      "before_peak_mib": 3.907,
+      "after_peak_mib": 2.0182
+    },
+    "feed_group_and_positions_30k_rows": {
+      "before_ms": 99.1775,
+      "after_ms": 0.5882,
+      "speedup": 168.61,
+      "time_reduction_pct": 99.41
+    },
+    "diff_400_lines_two_edits": {
+      "before_ms": 24.678,
+      "after_ms": 0.0837,
+      "speedup": 294.84,
+      "time_reduction_pct": 99.66
+    },
+    "diff_10k_lines_three_edits": {
+      "before_ms": 0.8977,
+      "after_ms": 1.0169,
+      "speedup": 0.88,
+      "time_reduction_pct": -13.28,
+      "before_output_rows": 20000,
+      "after_output_rows": 10003
+    }
+  },
+  "raw": {
+    "python": {
+      "before": {
+        "source_root": "C:\\Users\\oyster\\AppData\\Local\\Temp\\minicode-audit-original",
+        "python": "3.12.4",
+        "platform": "Windows-11-10.0.26200-SP0",
+        "benchmarks": {
+          "sidebar_activity_150k_events": {
+            "median_ms": 38.8606,
+            "min_ms": 36.5454,
+            "max_ms": 39.6858,
+            "peak_mib": 0.0293,
+            "repeats": 5
+          },
+          "artifact_lookup_20k_rows": {
+            "median_ms": 40.8823,
+            "min_ms": 39.3794,
+            "max_ms": 45.0637,
+            "peak_mib": 10.247,
+            "repeats": 5
+          },
+          "artifact_sequential_1m_chars_50_pages": {
+            "median_ms": 88.1,
+            "min_ms": 70.004,
+            "max_ms": 104.6629,
+            "peak_mib": 1.5685,
+            "repeats": 3
+          },
+          "compact_1000_closed_exchanges": {
+            "median_ms": 596.4471,
+            "min_ms": 592.9478,
+            "max_ms": 597.1311,
+            "peak_mib": 0.4923,
+            "repeats": 3
+          },
+          "tool_arguments_8000_fragments_2m_bytes": {
+            "median_ms": 1311.2807,
+            "min_ms": 1227.1014,
+            "max_ms": 1408.8288,
+            "peak_mib": 3.907,
+            "repeats": 3
+          }
+        },
+        "fixture_database_bytes": 23527424
+      },
+      "after": {
+        "source_root": "D:\\miniclaudecode",
+        "python": "3.12.4",
+        "platform": "Windows-11-10.0.26200-SP0",
+        "benchmarks": {
+          "sidebar_activity_150k_events": {
+            "median_ms": 0.3755,
+            "min_ms": 0.3619,
+            "max_ms": 1.0687,
+            "peak_mib": 0.0293,
+            "repeats": 5
+          },
+          "artifact_lookup_20k_rows": {
+            "median_ms": 0.1072,
+            "min_ms": 0.071,
+            "max_ms": 0.2794,
+            "peak_mib": 0.0007,
+            "repeats": 5
+          },
+          "artifact_sequential_1m_chars_50_pages": {
+            "median_ms": 11.7335,
+            "min_ms": 11.4786,
+            "max_ms": 18.7721,
+            "peak_mib": 0.4747,
+            "repeats": 3
+          },
+          "compact_1000_closed_exchanges": {
+            "median_ms": 9.6672,
+            "min_ms": 9.1029,
+            "max_ms": 10.7652,
+            "peak_mib": 0.542,
+            "repeats": 3
+          },
+          "tool_arguments_8000_fragments_2m_bytes": {
+            "median_ms": 6.4437,
+            "min_ms": 6.4228,
+            "max_ms": 7.0252,
+            "peak_mib": 2.0182,
+            "repeats": 3
+          }
+        },
+        "fixture_database_bytes": 34766848
+      }
+    },
+    "desktop": {
+      "before": {
+        "source_root": "C:\\Users\\oyster\\AppData\\Local\\Temp\\minicode-audit-original",
+        "node": "v22.22.0",
+        "platform": "win32",
+        "benchmarks": {
+          "feed_group_and_positions_30k_rows": {
+            "median_ms": 99.1775,
+            "min_ms": 97.0963,
+            "max_ms": 102.612,
+            "repeats": 7
+          },
+          "diff_400_lines_two_edits": {
+            "median_ms": 24.678,
+            "min_ms": 24.0269,
+            "max_ms": 27.6058,
+            "repeats": 7
+          },
+          "diff_10k_lines_three_edits": {
+            "median_ms": 0.8977,
+            "min_ms": 0.7162,
+            "max_ms": 1.8879,
+            "repeats": 7,
+            "output_rows": 20000,
+            "additions": 10000,
+            "deletions": 10000
+          }
+        }
+      },
+      "after": {
+        "source_root": "D:\\miniclaudecode",
+        "node": "v22.22.0",
+        "platform": "win32",
+        "benchmarks": {
+          "feed_group_and_positions_30k_rows": {
+            "median_ms": 0.5882,
+            "min_ms": 0.5417,
+            "max_ms": 2.6358,
+            "repeats": 7
+          },
+          "diff_400_lines_two_edits": {
+            "median_ms": 0.0837,
+            "min_ms": 0.0804,
+            "max_ms": 0.0962,
+            "repeats": 7
+          },
+          "diff_10k_lines_three_edits": {
+            "median_ms": 1.0169,
+            "min_ms": 0.5682,
+            "max_ms": 1.7897,
+            "repeats": 7,
+            "output_rows": 10003,
+            "additions": 3,
+            "deletions": 3
+          }
+        }
+      }
+    }
+  }
+}

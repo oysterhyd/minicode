@@ -17,8 +17,9 @@ async function launch() {
   Object.assign(bridge, { exitCode: null, stdin: { destroyed: false, write: (_t, cb) => cb() }, stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} })
   const app = new EventEmitter()
   Object.assign(app, { whenReady: () => Promise.resolve(), getPath: () => os.tmpdir(), quit() {}, setAppUserModelId() {}, requestSingleInstanceLock: () => true, getVersion: () => '0.0.0' })
+  let window
   class BrowserWindow extends EventEmitter {
-    constructor() { super(); this.webContents = { isDestroyed: () => false, send() {}, setWindowOpenHandler() {}, on() {} } }
+    constructor() { super(); window = this; this.webContents = { mainFrame: { url: require('node:url').pathToFileURL(path.resolve(__dirname, '../dist/index.html')).href }, isDestroyed: () => false, send() {}, setWindowOpenHandler() {}, on() {} } }
     isDestroyed() { return false }
     loadFile() {}
     loadURL() {}
@@ -35,7 +36,7 @@ async function launch() {
     },
   }, { filename })
   await Promise.resolve()
-  return (method, params) => handlers.get('desktop:request')({}, method, params)
+  return (method, params) => handlers.get('desktop:request')({ sender: window.webContents, senderFrame: window.webContents.mainFrame }, method, params)
 }
 
 function git(cwd, ...args) {
@@ -107,4 +108,16 @@ test('listFiles is no longer capped at 250 entries', async (t) => {
   for (let i = 0; i < 300; i++) fs.writeFileSync(path.join(root, `f${i}.txt`), '')
   const request = await launch()
   assert.equal((await request('listFiles', { workspace: root })).length, 300)
+})
+
+test('diff previews staged and untracked files before the first commit', async (t) => {
+  const root = repo()
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.writeFileSync(path.join(root, 'staged.txt'), 'one\ntwo\n')
+  git(root, 'add', 'staged.txt')
+  fs.writeFileSync(path.join(root, 'staged.txt'), 'one\ntwo\nthree\n')
+  fs.writeFileSync(path.join(root, 'untracked.txt'), 'new\n')
+  const request = await launch()
+  assert.match(await request('diff', { workspace: root, path: 'staged.txt' }), /@@ -0,0 \+1,3 @@\n\+one\n\+two\n\+three/)
+  assert.match(await request('diff', { workspace: root, path: 'untracked.txt' }), /@@ -0,0 \+1,1 @@\n\+new/)
 })

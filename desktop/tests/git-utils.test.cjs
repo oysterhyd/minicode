@@ -43,7 +43,11 @@ test('isAppUrl allows only the dev server or the bundled index', () => {
   assert.equal(utils.isAppUrl('http://127.0.0.1:5173/', 'http://127.0.0.1:5173'), true)
   assert.equal(utils.isAppUrl('http://127.0.0.1:5173.evil.com/', 'http://127.0.0.1:5173'), false)
   assert.equal(utils.isAppUrl('https://example.com', 'http://127.0.0.1:5173'), false)
-  assert.equal(utils.isAppUrl('file:///D:/app/desktop/dist/index.html#x'), true)
+  const bundled = 'file:///D:/app/desktop/dist/index.html'
+  assert.equal(utils.isAppUrl(bundled + '#x', null, bundled), true)
+  assert.equal(utils.isAppUrl(bundled), false)
+  assert.equal(utils.isAppUrl('file:///D:/untrusted/dist/index.html', null, bundled), false)
+  assert.equal(utils.isAppUrl('file://attacker/share/dist/index.html', null, bundled), false)
   assert.equal(utils.isAppUrl('file:///D:/other.html'), false)
   assert.equal(utils.isAppUrl('https://example.com/dist/index.html'), false)
 })

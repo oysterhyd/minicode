@@ -140,6 +140,7 @@ SAMPLE_DATA: dict[EventType, dict[str, Any]] = {
     EventType.SUBAGENT_START: {"kind": "review", "child_session_id": "child-1"},
     EventType.SUBAGENT_RESULT: {"kind": "review", "child_session_id": "child-1", "exit_reason": "completed"},
     EventType.MCP_DISCOVERY: {"server": "docs", "plugin": "docs", "protocol": "2026-07-28"},
+    EventType.BUDGET_CHANGED: {"budget": {"max_total_tokens": 1000}},
     EventType.PROVIDER_RETRY: {"attempt": 1, "next_attempt": 2, "delay_s": 0.25, "error": "temporary outage"},
 }
 

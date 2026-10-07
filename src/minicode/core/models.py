@@ -173,6 +173,7 @@ ApprovalHandler = Callable[[ApprovalRequest], Awaitable[ApprovalDecision]]
 
 class EventType(str, enum.Enum):
     SESSION_START = "session_start"
+    BUDGET_CHANGED = "budget_changed"
     ROUND_START = "round_start"
     ASSISTANT_MESSAGE = "assistant_message"
     TOOL_CALL_START = "tool_call_start"
