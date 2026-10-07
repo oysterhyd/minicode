@@ -1,5 +1,7 @@
 # Agent / TUI / Desktop 缺陷修复与性能审计
 
+> 本页保留 v1.0.0 审计记录。旧 Python TUI 已在 v1.1.0 移除；当前终端界面的审查见 [TUI 审查](tui-audit.md)。
+
 ## 1. 范围与结论
 
 - 基线：`release/v1.0.0`，`fd8d15d28545e333db1680b74ed75740b536f536`，开始时工作区干净。

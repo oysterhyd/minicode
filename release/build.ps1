@@ -12,7 +12,7 @@ function Run([string]$Program, [string[]]$Arguments) {
 Push-Location $root
 try {
     if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
-        throw 'The v1.0.0 installer must be built on Windows x64 with PowerShell 7.'
+        throw 'The installer must be built on Windows x64 with PowerShell 7.'
     }
     # Only release staging is cleared; caches and personal data are never copied.
     if ([IO.Path]::GetFullPath($stage) -ne [IO.Path]::Combine([IO.Path]::GetFullPath($PSScriptRoot), '.stage')) { throw 'Invalid staging path' }
@@ -20,6 +20,11 @@ try {
     New-Item -ItemType Directory -Force "$stage/app", "$stage/runtime", "$stage/wheels", $cache | Out-Null
     Run 'npm.cmd' @('ci', '--prefix', 'desktop', '--no-audit', '--no-fund')
     Run 'npm.cmd' @('run', 'build', '--prefix', 'desktop')
+    Run 'npm.cmd' @('ci', '--prefix', 'tui', '--no-audit', '--no-fund')
+    Run 'npm.cmd' @('run', 'build', '--prefix', 'tui')
+    New-Item -ItemType Directory -Force "$stage/runtime/tui" | Out-Null
+    Copy-Item -LiteralPath "$root/tui/dist", "$root/tui/package.json", "$root/tui/package-lock.json" -Destination "$stage/runtime/tui" -Recurse
+    Run 'npm.cmd' @('ci', '--prefix', "$stage/runtime/tui", '--omit=dev', '--no-audit', '--no-fund')
     Copy-Item -LiteralPath "$root/desktop/electron", "$root/desktop/dist" -Destination "$stage/app" -Recurse
     $version = (Get-Content "$PSScriptRoot/package.json" -Raw | ConvertFrom-Json).version
     @{ name = 'minicode'; version = $version; main = 'electron/main.cjs'; description = 'MiniCode Desktop and CLI';
@@ -39,6 +44,15 @@ try {
     }
     if ((Get-FileHash $gitZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '064b440ff870ed5198527e8f3a92cdf5bd2fd0fedf5e718af95e3fdaddeff718') { throw 'MinGit checksum mismatch' }
     Expand-Archive -LiteralPath $gitZip -DestinationPath "$stage/runtime/git"
+    $nodeVersion = '22.22.0'
+    $nodeZip = "$cache/node-v$nodeVersion-win-x64.zip"
+    if (-not (Test-Path -LiteralPath $nodeZip)) {
+        Invoke-WebRequest "https://nodejs.org/dist/v$nodeVersion/node-v$nodeVersion-win-x64.zip" -OutFile $nodeZip
+    }
+    if ((Get-FileHash $nodeZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c97fa376d2becdc8863fcd3ca2dd9a83a9f3468ee7ccf7a6d076ec66a645c77a') { throw 'Node.js checksum mismatch' }
+    Expand-Archive -LiteralPath $nodeZip -DestinationPath "$stage/node-download"
+    New-Item -ItemType Directory -Force "$stage/runtime/node" | Out-Null
+    Copy-Item -LiteralPath "$stage/node-download/node-v$nodeVersion-win-x64/node.exe", "$stage/node-download/node-v$nodeVersion-win-x64/LICENSE" -Destination "$stage/runtime/node"
     # Acceptance commands such as `python -m pytest` must use the same Python
     # as the packaged hosts, including on runners with another Python installed.
     $env:PATH = "$stage/runtime/python;$stage/runtime/python/Scripts;$stage/runtime/git/cmd;$originalPath"
@@ -46,7 +60,17 @@ try {
     Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", "$stage/runtime")
     if (-not $SkipTests) {
         Run 'npm.cmd' @('test', '--prefix', 'desktop')
-        Run $python @('-m', 'pytest', 'tests', '-q', '--basetemp', "$cache/tests")
+        Run $python @('-m', 'pytest', 'tests', '-o', 'addopts=', '-q', '--basetemp', "$cache/tests")
+        $oldPython = $env:MINICODE_PYTHON
+        $oldBridgeTest = $env:MINICODE_TUI_BRIDGE_TEST
+        try {
+            $env:MINICODE_PYTHON = $python
+            $env:MINICODE_TUI_BRIDGE_TEST = '1'
+            Run 'npm.cmd' @('test', '--prefix', 'tui')
+        } finally {
+            $env:MINICODE_PYTHON = $oldPython
+            $env:MINICODE_TUI_BRIDGE_TEST = $oldBridgeTest
+        }
     }
     Push-Location $PSScriptRoot
     try { Run 'node' @('node_modules/electron-builder/cli.js', '--config', 'electron-builder.yml', '--win', '--x64', '--publish', 'never') }

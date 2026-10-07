@@ -10,8 +10,6 @@ import pytest
 from minicode.core.models import EventType
 from minicode.storage import ArtifactStore, SqliteStore
 from minicode.storage.paging import TextPageReader
-from minicode.ui.app import ToolCard
-from test_tui import _make_app
 
 
 @pytest.fixture()
@@ -101,33 +99,3 @@ def test_event_pages_preserve_order_and_activity_handles_clock_reversal(fixture)
     assert store.last_activity()[sid] == "2026-10-01"
     plan = store.conn.execute("EXPLAIN QUERY PLAN SELECT MAX(timestamp) FROM events WHERE session_id = ?", (sid,)).fetchall()
     assert any("events_activity" in row[3] for row in plan)
-
-
-def test_tool_card_uses_async_reader_and_ignores_collapsed_response(tmp_path, monkeypatch):
-    async def scenario():
-        app, _ = _make_app(tmp_path, [])
-        started, release = asyncio.Event(), asyncio.Event()
-        sid = app._store.create_session(workspace=str(tmp_path), provider="fake", model="fake")
-        async def delayed_page(session_id, artifact_id, offset, limit):
-            assert session_id == sid
-            started.set()
-            await release.wait()
-            return "late page", None, True
-        monkeypatch.setattr(app._services.artifact_store, "aread_page", delayed_page)
-        try:
-            async with app.run_test() as pilot:
-                card = ToolCard("call", "bash", "", app._artifact_reader(sid))
-                app._mount(card)
-                await pilot.pause()
-                card.set_result({"name": "bash", "success": True, "artifact_id": "test", "output_preview": "preview"})
-                card.toggle_detail()
-                await asyncio.wait_for(started.wait(), 2)
-                # The event loop and collapse action remain usable while I/O waits.
-                card.toggle_detail()
-                release.set()
-                await pilot.pause()
-                assert not card._body.display
-                assert "late page" not in str(card._detail.content)
-        finally:
-            app._store.close()
-    asyncio.run(scenario())

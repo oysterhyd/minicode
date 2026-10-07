@@ -1,11 +1,16 @@
-# MiniCode 1.0.0 — Desktop + CLI
+# MiniCode 1.1.0 — Desktop + CLI + Ink TUI
 
 Windows 10/11 x64 安装版，包含 Electron、Python 3.12.12、全部 Python 依赖和
-Git 2.56.0。无需安装 Python、Node.js 或 Git。其他平台暂未提供安装包。
+Git 2.56.0、Node.js 22.22.0 和 React + Ink 终端界面。
+桌面端与 `minicode run` / `chat` / `tui` 无需另装 Python、Git 或 Node.js。
+其他平台暂未提供安装包。
+
+已有插件使用精确宿主版本约束；升级后将 manifest 的 `minicode_version`
+更新为 `1.1.0`，并重新生成插件锁文件。仓库中的 MCP 示例已同步更新。
 
 ## 安装和使用
 
-从 GitHub Releases 下载 `MiniCode-Setup-1.0.0-win-x64.exe`，运行安装向导，
+从 GitHub Releases 下载 `MiniCode-Setup-1.1.0-win-x64.exe`，运行安装向导，
 选择安装位置。可用 `Get-FileHash <安装包> -Algorithm SHA256` 对照同页的
 `SHA256SUMS.txt`。桌面/开始菜单的 MiniCode 快捷方式启动桌面端。
 
@@ -38,10 +43,11 @@ pwsh -NoProfile -File release/build.ps1
 
 `release/` 是集成项目：复用 `src/minicode` 与 `desktop/`，不复制维护第二套源码。
 构建脚本从下载的干净独立 Python 创建 staging，只安装带哈希的锁定依赖和
-当前源码生成的 wheel，再打包 Desktop；MinGit 下载也校验 SHA256。
+当前源码生成的 wheel，再打包 Desktop 与 TUI；MinGit 和 Node.js 下载均校验 SHA256。
+TUI 只安装锁定的生产依赖，不携带 TypeScript 编译器或测试工具。
 不会复制仓库虚拟环境、用户目录、`.minicode` 或个人配置。
 
-默认运行 Python 和 Electron 单元测试、源码/产物本机凭据审计、实际安装布局的
+默认运行 Python、Electron 和 Ink 单元/真实桥接测试、源码/产物本机凭据审计、实际安装布局的
 CLI launcher 检查、无密钥分页修复 B0/B2 评测，以及真实 Electron → preload →
 Python IPC 启动检查。烟测使用空白用户目录和仅包含内置 Python/Git 的工具 PATH。
 构建产物和验证截图位于被忽略的 `release/dist/` 和 `release/.cache/`。
@@ -60,4 +66,4 @@ uv pip compile pyproject.toml release/runtime.in --extra real --extra eval --pyt
 
 安装包及 `SHA256SUMS.txt` 上传 GitHub Release，构建产物不进入 Git 源码仓库。
 第三方软件许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
-v1.0.0 的本地验证结果见 [VERIFICATION.md](VERIFICATION.md)。
+本地验证结果见 [VERIFICATION.md](VERIFICATION.md)。

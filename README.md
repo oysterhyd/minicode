@@ -29,7 +29,7 @@ MiniCode 将自然语言任务、代码工具和执行记录放在同一个工�
 定位问题、修改文件或运行测试，再通过对话、Diff 和命令输出检查结果。
 
 桌面端提供可视化任务管理与代码审查界面；CLI 适合终端中的日常工作和脚本调用；
-TUI 提供全屏终端交互。三种入口复用同一个 Agent Runtime、权限机制和持久会话。
+TUI 提供 Claude Code 风格的终端对话界面。三种入口复用同一个 Agent Runtime、权限机制和持久会话。
 
 MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通过 Skills、MCP 和
 本地插件扩展项目能力。
@@ -44,8 +44,9 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
    API key 和模型 ID，测试连接并选择默认模型。
 3. 打开本地项目，输入任务描述。按提示审查修改或命令，并查看执行结果。
 
-安装版适用于 **Windows 10/11 x64**，内置 Python、Git 和应用依赖，
-无需另外安装 Python、Node.js 或 Git。项目需要的编译器、语言 SDK 和测试依赖仍由项目自身提供。
+安装版适用于 **Windows 10/11 x64**，内置 Python、Git、Node.js 和桌面端/终端界面依赖，
+`minicode chat` / `run` / `tui` 均可直接使用。项目需要的编译器、语言 SDK
+和测试依赖仍由项目自身提供。
 
 发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
@@ -61,7 +62,7 @@ Windows 安装版在安装目录提供 `minicode.cmd`。在该目录打开 Power
 # 执行一个任务
 .\minicode.cmd run "修复失败的测试，并验证修改" --workspace "C:\projects\my-app"
 
-# 开启持续对话或全屏终端界面
+# 开启持续对话或 Claude Code 风格的终端界面
 .\minicode.cmd chat --workspace "C:\projects\my-app"
 .\minicode.cmd tui --workspace "C:\projects\my-app"
 ```
@@ -128,7 +129,7 @@ MiniCode 在所选工作区内运行代码工具，并在本机保存会话、�
 
 ## 源码安装与开发
 
-CLI 要求 **Python 3.11+**；桌面端开发另需 **Node.js 22+**。
+CLI 要求 **Python 3.11+**；终端 TUI 与桌面端开发另需 **Node.js 22+**。
 
 ```bash
 git clone https://github.com/oysterhyd/minicode.git
@@ -143,6 +144,18 @@ python -m pip install -e ".[dev]"
 minicode --help
 ```
 
+启动终端 TUI 开发环境：
+
+```bash
+npm ci --prefix tui
+npm run build --prefix tui
+minicode tui --provider fake
+```
+
+TUI 使用紧凑对话布局和底部输入区。`Ctrl+J` 换行，`Ctrl+O` 展开工具输出，
+`Ctrl+C` 中断当前回合，空输入时两次 `Ctrl+C` 退出；审批使用 `Y` / `A` / `N`。
+运行中提交的多条消息按顺序排队，取消或暂停后可按 `Enter` 手动发送下一条。
+
 启动桌面端开发环境：
 
 ```bash
@@ -154,6 +167,7 @@ npm run dev --prefix desktop
 
 ```bash
 python -m pytest tests
+npm test --prefix tui
 npm test --prefix desktop
 ```
 

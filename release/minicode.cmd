@@ -5,5 +5,6 @@ set "PYTHONHOME="
 set "PYTHONPATH="
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+set "MINICODE_RESOURCES=%~dp0resources"
 "%~dp0resources\runtime\python\python.exe" -I -X utf8 -m minicode %*
 exit /b %errorlevel%

@@ -1,0 +1,33 @@
+{
+  "name": "minicode-tui",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "minicode-tui": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.tsx",
+    "test": "tsx --test tests/*.test.ts tests/*.test.tsx",
+    "test:audit": "tsx --test tests/audit-regressions.test.tsx tests/audit-bridge.integration.test.tsx"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ink": "6.8.0",
+    "marked": "^18.1.0",
+    "react": "^19.0.0",
+    "string-width": "^8.1.1",
+    "strip-ansi": "^7.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

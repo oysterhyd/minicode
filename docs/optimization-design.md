@@ -16,7 +16,7 @@
 2. **建立轻量扩展机制**：先项目指令与 Skills，再一层只读 Subagents、MCP，最后用 Plugins 分发这些能力。
 3. **TUI 先重组信息，再做动效**：使用清晰的任务状态、可展开工具与结果检查面板，让已有可靠性能力成为可感知的产品体验。
 
-继续使用 Python、asyncio、Textual、SQLite。现有问题不足以支持重写语言、引入庞大编排框架
+继续使用 Python、asyncio、SQLite 作为 Agent Runtime；终端 UI 使用 React + Ink。现有问题不足以支持把 loop / tools / 存储 / MCP 重写成 TypeScript。
 或立即建设插件市场。多代理也应通过可并行任务上的实测决定是否继续扩展。
 
 ## 2. 现状与代码阅读入口
@@ -31,7 +31,7 @@
 | 6 | [providers/commandcode.py](../src/minicode/providers/commandcode.py)、[Anthropic 适配器](../src/minicode/providers/anthropic_provider.py) | 两种真实 provider；缓存 usage 解析已有，策略和记账尚不完整 |
 | 7 | [storage/sqlite_store.py](../src/minicode/storage/sqlite_store.py)、[artifacts.py](../src/minicode/storage/artifacts.py) | 消息、事件、会话及验收基线；压缩会替换消息表，输出归档有宿主读取接口 |
 | 8 | [tasks/taskstore.py](../src/minicode/tasks/taskstore.py)、[background.py](../src/minicode/tasks/background.py) | 依赖/事务认领是独立模块；后台命令已接入且随用户回合结束清理 |
-| 9 | [ui/app.py](../src/minicode/ui/app.py) | Textual、纯文本流、工具预览、审批、补全、状态栏与全局加载指示器 |
+| 9 | [tui/](../tui/) | React + Ink transcript：用户盒、工具一行、底部 Prompt、inline 审批 |
 | 10 | [evals/run_eval.py](../evals/run_eval.py) | 20 个 FakeProvider 任务；b1=b0，b2 是 runner 外层验收续跑 |
 
 基线时 Subagents、Skills、MCP、Plugins 均为空缺；当前已实现 C 阶段的本地 Skills 与单层只读子任务。`TaskStore` 的存在不代表已有任务调度，
@@ -189,6 +189,10 @@ Hooks 可作为后续扩展，先只提供只读事件观察；会修改工具�
 授权之前，执行后的 hook 失败不能触发已完成副作用的重试。首版不开放任意自动安装脚本。
 
 ## 5. TUI 设计：Oyster Console
+
+> **已作废（2026-10-07）。** 产品 TUI 改为仓库根目录 `tui/` 的 React + Ink 应用，
+> 经现有 `desktop/bridge.py` NDJSON 协议驱动 Python `AgentRuntime`。侧栏检查面板、
+> Textual Pilot 多尺寸布局和 `ui/app.py` 拆分不再实施。下文保留为当时的设计记录。
 
 ### 5.1 现有界面的主要问题
 
@@ -384,9 +388,8 @@ cache read/write/unknown usage 的逐请求事件与 SQLite schema v4 恢复。
 
 B 已完成：连续内置只读调用最多 4 个并发，写入、命令和未知工具形成屏障，结果按模型调用顺序回填；
 `read`/`ls` 及 grep 的 Python 回退离开事件循环运行。CommandCode 在同一事件循环复用连接并由宿主关闭。
-TUI 使用紧凑时间线、可展开工具详情、活动状态与耗时、合并文本增量、回复结束后 Markdown 排版、
-保留上滚位置与下一条输入排队；Pilot 覆盖 80/120/160 列。暂不包含侧边检查面板、命令实时日志、
-运行中 steering 或真实网关的性能收益测量。
+TUI 使用 Ink transcript（用户盒、工具一行、底部输入、inline 审批）；不再使用 Textual Pilot。
+侧边检查面板、命令实时日志、运行中 steering 仍不在第一期范围。
 
 C 已完成可运行的单层委派闭环：根目录 `AGENTS.md` 启动加载、子目录首次访问时按需加载；
 项目与用户 Skills 只扫描元数据，正文通过 `/skill` 或工具激活并可显式停用，资源读取限制在技能目录。
@@ -401,7 +404,7 @@ C 已完成可运行的单层委派闭环：根目录 `AGENTS.md` 启动加载�
 ## 8. 验证与评测设计
 
 本轮相关测试：`test_context_compact.py`、`test_runtime_p1.py`、`test_runtime_regressions.py`、
-`test_commandcode_provider.py`、`test_anthropic_provider.py`、`test_tui.py`。
+`test_commandcode_provider.py`、`test_anthropic_provider.py`、`tests/test_tui.py`、`tui/tests/`。
 结果 **126 passed，1 skipped**；跳过原因为该环境不可创建符号链接。
 首次运行在 pytest 收尾清理公共临时目录时触发 PermissionError；改用新的独立 `--basetemp`
 后完整通过。测试使用禁用 bytecode 和 pytest cache 的设置，没有修改测试源码。
@@ -414,7 +417,7 @@ C 阶段实现后，本地全量测试为 **437 passed，2 skipped**；两项跳
 后续验证分两层：
 
 - **确定性机制测试**：保留 FakeProvider；覆盖压缩配对、约束/引用、归档分页、并发屏障、取消传播、
-  预算争用、MCP 断连、插件冲突、缓存 usage 恢复，以及 Textual Pilot 多尺寸布局。
+  预算争用、MCP 断连、插件冲突、缓存 usage 恢复，以及 Ink TUI 的桥协议与输入脚本测试。
 - **真实任务评测**：同模型、同初始仓库、同目标/预算/验收；包含单文件修复、跨文件调查、长日志、
   单次长工具循环、会话恢复及可并行模块审查。每种配置多次运行，报告波动和失败，不挑最佳结果。
 

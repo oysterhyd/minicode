@@ -47,6 +47,8 @@ htmlcov/
 ds-state.png
 /desktop/node_modules/
 /desktop/dist/
+/tui/node_modules/
+/tui/dist/
 /.playwright-cli/
 /output/playwright/
 

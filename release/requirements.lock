@@ -365,17 +365,10 @@ jsonschema-specifications==2025.9.1 \
     --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe \
     --hash=sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d
     # via jsonschema
-linkify-it-py==2.2.0 \
-    --hash=sha256:3adc40eb5af300b2605fcfdb968c24e1d780a90f1f2221af7c15e5111e94d443 \
-    --hash=sha256:907acd2d17ac1fbb9ddb62c8957ccbd6158cac602231a15c3b0cd1e215f03cee
-    # via markdown-it-py
 markdown-it-py==4.2.0 \
     --hash=sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49 \
     --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
-    # via
-    #   mdit-py-plugins
-    #   rich
-    #   textual
+    # via rich
 mcp==2.2.0 \
     --hash=sha256:2dc37ecb1974becdcebdbf7561e7c15a07dbbf20ba21ba16c3593b3038b3afbd \
     --hash=sha256:bde982589473a060ae145e3406e9a5333fe538c97229ba841f5a7f92be004f81
@@ -384,10 +377,6 @@ mcp-types==2.2.0 \
     --hash=sha256:d3ed53703ddd10d9c6399f29d322bb66f3f67ab41348ac8556ba23e07fedefad \
     --hash=sha256:ea476b73ee86709ab5abc9452385ed36cc05907e582355622e294595c9a04f13
     # via mcp
-mdit-py-plugins==0.6.1 \
-    --hash=sha256:214c82fb2ac524472ab6a5bcab1de80f73b50443e187f401bfd77efbc7c6481d \
-    --hash=sha256:a2bca0f039f39dbd35fb74ae1b5f998608c437463371f0ff7f49a19a17a114d0
-    # via textual
 mdurl==0.1.2 \
     --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
     --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
@@ -404,10 +393,6 @@ pip==26.2 \
     --hash=sha256:2d8542afcc84cdd8e846c2b36b2861fad1da376dd98f8e7113e9108a3c331690 \
     --hash=sha256:931c303696af6fa3417112103b1cad26890e5a07eccb5b99783700e33f2b8aad
     # via -r release/runtime.in
-platformdirs==4.12.2 \
-    --hash=sha256:29dbf06d96c500bc6bdbce75fb0a14d63279c93b1842f97e72a135b33e856983 \
-    --hash=sha256:eab5f70271a490ef74618bb314fbb86e3c7e82fa3b9c922c2ea0e0a1a155d329
-    # via textual
 pluggy==1.6.0 \
     --hash=sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3 \
     --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
@@ -556,7 +541,6 @@ pygments==2.21.0 \
     # via
     #   pytest
     #   rich
-    #   textual
 pyjwt==2.15.1 \
     --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193 \
     --hash=sha256:4f259e80cdfb6b3fc18a7de51fd1ef9ec79652f25019bae68975ca2468a34df8
@@ -810,7 +794,6 @@ rich==15.0.0 \
     --hash=sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36
     # via
     #   minicode (pyproject.toml)
-    #   textual
     #   typer
 rpds-py==2026.6.3 \
     --hash=sha256:0be972be84cfcaf46c8c6edf690ca0f154ac17babf1f6a955a51579b34ad2dc5 \
@@ -950,10 +933,6 @@ starlette==1.7.0 \
     # via
     #   mcp
     #   sse-starlette
-textual==8.2.8 \
-    --hash=sha256:267375fd402dc8d981457212efa71f0e3365fd17bba144ba9bb3ed7563cb374a \
-    --hash=sha256:3f106a9fbc73e39dd266c9712432087de78a6d644084c7c241d6a25c3169115b
-    # via minicode (pyproject.toml)
 truststore==0.10.4 \
     --hash=sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301 \
     --hash=sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981
@@ -978,7 +957,6 @@ typing-extensions==4.16.0 \
     #   pydantic-core
     #   referencing
     #   starlette
-    #   textual
     #   typing-inspection
 typing-inspection==0.4.4 \
     --hash=sha256:547274fa6b0a561ccf549cc9524b999a578e737d015d8709d021f9d0d13bea47 \

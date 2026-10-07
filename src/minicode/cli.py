@@ -8,7 +8,7 @@ Commands:
 - ``sessions`` session bookkeeping (``list``)
 - ``report``   execution report for one session (text or offline HTML)
 - ``eval``     run the local eval task set (delegates to evals/run_eval.py)
-- ``tui``      full-screen Textual interface
+- ``tui``      Claude Code-style terminal UI (React + Ink over the Python bridge)
 
 The CLI only wires the backend packages (runtime / providers / tools /
 security / storage) together and adds presentation; it never re-implements
@@ -21,6 +21,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -1608,6 +1609,60 @@ def _find_eval_runner() -> Path | None:
     return None
 
 
+def _repo_root() -> Path | None:
+    """Checkout or packaged resources root that contains ``tui/`` and the bridge."""
+    resources = os.environ.get("MINICODE_RESOURCES")
+    if resources:
+        candidate = Path(resources) / "runtime"
+        if (candidate / "tui").is_dir() and (candidate / "bridge.py").is_file():
+            return candidate
+    here = Path(__file__).resolve()
+    for base in (here.parents[2], here.parents[1], Path.cwd()):
+        if (base / "tui").is_dir() and (base / "desktop" / "bridge.py").is_file():
+            return base
+    return None
+
+
+def _tui_node() -> str:
+    override = os.environ.get("MINICODE_NODE")
+    if override:
+        return override
+    resources = os.environ.get("MINICODE_RESOURCES")
+    if resources:
+        bundled = Path(resources) / "runtime" / "node" / "node.exe"
+        if bundled.is_file():
+            return str(bundled)
+    found = shutil.which("node")
+    if found:
+        return found
+    _fail("找不到 Node.js。源码安装请先安装 Node.js 22+，或设置 MINICODE_NODE。")
+
+
+def _tui_entry() -> Path:
+    override = os.environ.get("MINICODE_TUI_ENTRY")
+    if override:
+        path = Path(override)
+        if not path.is_file():
+            _fail(f"终端 UI 入口不存在: {path}")
+        return path
+    root = _repo_root()
+    if root is not None:
+        built = root / "tui" / "dist" / "index.js"
+        if built.is_file():
+            return built
+        _fail("终端 UI 尚未构建：在仓库根目录执行 npm ci --prefix tui && npm run build --prefix tui")
+    _fail("找不到终端 UI。Windows 安装版请使用安装目录中的 minicode.cmd；源码安装需构建 tui/。")
+
+
+def _launch_tui(args: list[str]) -> None:
+    environment = {**os.environ, "MINICODE_PYTHON": sys.executable}
+    try:
+        completed = subprocess.run([_tui_node(), str(_tui_entry()), *args], env=environment)
+    except OSError as exc:
+        _fail(f"无法启动终端 UI: {exc}")
+    raise SystemExit(completed.returncode)
+
+
 @app.command()
 def tui(
     workspace: WorkspaceOpt = Path("."),
@@ -1621,15 +1676,29 @@ def tui(
     acceptance: AcceptanceOpt = None,
     db: DbOpt = DEFAULT_DB_PATH,
 ) -> None:
-    """全屏交互界面（Textual）：流式回复、工具卡片、审批弹窗、斜杠命令。"""
-    try:
-        from minicode.ui.app import run_tui
-    except ImportError as exc:
-        _fail(f"TUI 依赖未安装：pip install 'minicode' 后重试。({exc})")
-    setup = _prepare(
-        workspace, provider, model, script, max_rounds, max_tokens, max_seconds, acceptance
-    )
-    run_tui(setup=setup, db_path=db, yes=yes)
+    """Claude Code 风格的终端界面：对话时间线、工具一行、底部输入框。"""
+    resolved = Path(workspace).expanduser().resolve()
+    if not resolved.exists():
+        _fail(f"工作区不存在: {resolved}")
+    if not resolved.is_dir():
+        _fail(f"工作区不是目录: {resolved}")
+    if acceptance is not None:
+        acceptance = Path(acceptance).expanduser().resolve()
+        if not acceptance.is_file():
+            _fail(f"验收配置不存在或不是文件: {acceptance}")
+    args = ["--workspace", str(resolved), "--provider", provider.value]
+    if model:
+        args += ["--model", model]
+    if script:
+        args += ["--script", str(Path(script).expanduser().resolve())]
+    args += ["--max-rounds", str(max_rounds), "--max-tokens", str(max_tokens), "--max-seconds", str(max_seconds)]
+    if yes:
+        args.append("--yes")
+    if Path(db).expanduser().resolve() != Path(DEFAULT_DB_PATH).expanduser().resolve():
+        args += ["--db", str(Path(db).expanduser().resolve())]
+    if acceptance is not None:
+        args += ["--acceptance", str(Path(acceptance).expanduser().resolve())]
+    _launch_tui(args)
 
 
 def main() -> None:

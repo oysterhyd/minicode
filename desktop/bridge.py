@@ -19,7 +19,7 @@ from minicode.goals import AcceptanceSpec, EvidenceLedger, GoalChecker, Protecte
 from minicode.plugins import PluginCatalog
 from minicode.providers.anthropic_provider import AnthropicProvider
 from minicode.providers.commandcode import CommandCodeProvider
-from minicode.providers.fake import FakeProvider
+from minicode.providers.fake import FakeProvider, FakeProviderOptions, FakeTurn, FakeToolCall
 from minicode.providers.zcode_config import discover_commandcode
 from minicode.runtime.loop import AgentRuntime
 from minicode.runtime.protocol import RequestServer
@@ -37,10 +37,35 @@ def emit(message: dict) -> None:
     print(json.dumps(message, ensure_ascii=False), flush=True)
 
 
+def _open_store() -> SqliteStore:
+    raw = os.environ.get("MINICODE_DB_PATH")
+    return SqliteStore(raw) if raw else SqliteStore()
+
+
+def _fake_provider() -> FakeProvider:
+    raw = os.environ.get("MINICODE_FAKE_SCRIPT")
+    if not raw:
+        return FakeProvider(FakeProviderOptions(exhausted_text="(fake provider：未提供脚本，这里是一条演示回复。)"))
+    data = json.loads(Path(raw).read_text(encoding="utf-8"))
+    options = FakeProviderOptions.model_validate(data)
+
+    def check_fields(value: dict, fields: dict, where: str) -> None:
+        unknown = sorted(set(value) - set(fields))
+        if unknown:
+            raise ValueError(f"{where} 包含未知字段: {', '.join(unknown)}")
+
+    check_fields(data, FakeProviderOptions.model_fields, "脚本")
+    for index, turn in enumerate(data.get("turns", [])):
+        check_fields(turn, FakeTurn.model_fields, f"turns[{index}]")
+        for call_index, call in enumerate(turn.get("tool_calls", [])):
+            check_fields(call, FakeToolCall.model_fields, f"turns[{index}].tool_calls[{call_index}]")
+    return FakeProvider(options)
+
+
 def provider_for(model: str, effort: str = "off"):
     if model == "fake":
         # Keep old demo transcripts readable. This adapter is never listed in settings.
-        return FakeProvider()
+        return _fake_provider()
     info = lookup_model(model)
     if info.provider == "anthropic":
         return AnthropicProvider(model=model, max_tokens=info.max_output_tokens or 4096)
@@ -68,7 +93,7 @@ def session_list(store: SqliteStore) -> list[dict]:
 
 class Bridge:
     def __init__(self, store: SqliteStore | None = None) -> None:
-        self.store = store if store is not None else SqliteStore()
+        self.store = store if store is not None else _open_store()
         self.client_key: str | None = None
         #: Client key that owns the in-flight turn. Events keep this tag until
         #: the run ends, so a request arriving from another key (or from a
@@ -539,6 +564,20 @@ class Bridge:
             return self.state()
         if method == "getCapabilities":
             return self.capabilities(Path(params["workspace"]).resolve())
+        if method == "setTuiProvider":
+            choice = params.get("provider", "auto").lower()
+            model = params.get("model")
+            if choice not in {"auto", "fake", "anthropic", "commandcode"}:
+                raise ValueError(f"未知 provider：{choice}")
+            if choice == "fake" or (choice == "auto" and (model == "fake" or os.environ.get("MINICODE_FAKE_SCRIPT"))):
+                model = "fake"
+            elif choice != "auto":
+                model = model or ("claude-sonnet-4-5" if choice == "anthropic" else DEFAULT_MODEL)
+                configured = self.configuration.find_model(model)
+                provider = ("anthropic" if configured[0]["apiStyle"] == "anthropic" else "commandcode") if configured else lookup_model(model).provider
+                if provider != choice:
+                    raise ValueError(f"模型 {model} 不属于 provider {choice}")
+            return await self.change_model(model or self.model)
         if method == "setModel":
             return await self.change_model(params["model"])
         if method == "setEffort":
@@ -656,7 +695,7 @@ class BridgeRouter:
     IDLE_LIMIT = 6
 
     def __init__(self, store: SqliteStore | None = None) -> None:
-        self.store = store if store is not None else SqliteStore()
+        self.store = store if store is not None else _open_store()
         self.clients: dict[str, Bridge] = {}
         self.sessions: dict[str, Bridge] = {}
         #: Insertion-ordered recency of conversations, oldest first.

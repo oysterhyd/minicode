@@ -11,6 +11,7 @@ const installation = path.resolve(process.argv[2] || path.join(__dirname, 'dist/
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'minicode-release-'))
 const runtime = path.join(installation, 'resources/runtime')
 const python = path.join(runtime, 'python/python.exe')
+const version = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version
 const env = { ...process.env, USERPROFILE: scratch, HOME: scratch, APPDATA: path.join(scratch, 'AppData/Roaming'),
   LOCALAPPDATA: path.join(scratch, 'AppData/Local'), PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
 for (const key of Object.keys(env)) {
@@ -26,10 +27,44 @@ const run = (file, args) => execFileSync(file, args, { cwd: scratch, env, encodi
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 async function main() {
-  assert.equal(run(python, ['-I', '-c', 'import minicode; print(minicode.__version__)']).trim(), '1.0.0')
+  assert.equal(run(python, ['-I', '-c', 'import minicode; print(minicode.__version__)']).trim(), version)
   assert.match(run(python, ['-I', '-X', 'utf8', '-m', 'minicode', '--help']), /run/)
   assert.match(run(path.join(runtime, 'git/cmd/git.exe'), ['--version']), /2\.56\.0/)
   assert.match(run(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `""${path.join(installation, 'minicode.cmd')}" --help"`]), /run/)
+  const node = path.join(runtime, 'node/node.exe')
+  const tui = path.join(runtime, 'tui/dist/index.js')
+  assert.match(run(node, ['--version']), /^v22\.22\.0/)
+  assert.match(run(node, [tui, '--help']), /--workspace/)
+  const packagedEnv = { ...env, MINICODE_RESOURCES: path.join(installation, 'resources') }
+  const resolved = execFileSync(python, ['-I', '-c',
+    'from minicode.cli import _tui_node, _tui_entry; import json; print(json.dumps([_tui_node(), str(_tui_entry())]))'],
+    { cwd: scratch, env: packagedEnv, encoding: 'utf8', windowsHide: true })
+  assert.deepEqual(JSON.parse(resolved), [node, tui])
+  // Exercise production-only Ink modules and their Python bridge without a
+  // developer checkout, system Node/Python, credentials or a real model.
+  const tuiProbe = `
+    import assert from 'node:assert/strict'
+    const { spawnBridge } = await import('./dist/launch.js')
+    const { BridgeClient } = await import('./dist/bridge.js')
+    await import('./dist/App.js')
+    const client = new BridgeClient(spawnBridge())
+    try {
+      const initial = await client.request('initialize', { workspace: process.cwd() })
+      assert.equal(initial.sessions.length, 0)
+      const state = await client.request('setTuiProvider', { provider: 'fake' })
+      assert.equal(state.model, 'fake')
+      const done = new Promise(resolve => client.onEvent(event => {
+        if (event.event === 'run_done' || event.event === 'run_error') resolve(event)
+      }))
+      await client.request('sendPrompt', { workspace: process.cwd(), model: 'fake', text: 'offline installed TUI smoke' })
+      assert.equal((await done).result?.exit_reason, 'completed')
+    } finally { await client.close() }
+    console.log('Packaged Ink imports, provider, prompt and graceful Python shutdown passed.')
+  `
+  console.log(execFileSync(node, ['--input-type=module', '-e', tuiProbe], {
+    cwd: path.join(runtime, 'tui'), env: { ...packagedEnv, MINICODE_DB_PATH: path.join(scratch, 'tui.db') },
+    encoding: 'utf8', windowsHide: true, timeout: 30000,
+  }).trim())
   run(python, ['-I', '-X', 'utf8', '-m', 'minicode', 'eval', '--task', 'pagination_bounds', '--baselines', 'b0,b2', '--output', 'results'])
   const results = JSON.parse(fs.readFileSync(path.join(scratch, 'results/results.json'), 'utf8'))
   assert.equal(results.run_count, 2)
@@ -91,7 +126,7 @@ async function main() {
       })()` })
     assert.equal(evaluated.exceptionDetails, undefined, 'IPC call failed')
     const state = evaluated.result.value
-    assert.equal(state.version, '1.0.0')
+    assert.equal(state.version, version)
     assert.equal(state.sessions, 0)
     assert.equal(state.hasKeys, false)
     assert.equal(state.changes[0].path, 'hello.txt')

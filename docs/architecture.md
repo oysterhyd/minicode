@@ -41,9 +41,8 @@
                —— 所有模块的共享契约，无业务逻辑
 ```
 
-主调用方向：`CLI/TUI → runtime → {providers, tools, security, storage, goals}`，共享 `core` 契约。
-`cli.py` 同时承担服务装配、provider 选择、REPL 命令和展示；`ui/app.py` 复用其中多个私有函数。
-这部分耦合是当前状态，不能将两个前端视为已经完全独立。P1 模块见 §5。
+主调用方向：`CLI / Ink TUI / Desktop → runtime → {providers, tools, security, storage, goals}`，共享 `core` 契约。
+`cli.py` 装配 `run` / `chat` / `resume`；`minicode tui` 拉起 `tui/`（React + Ink），经 `desktop/bridge.py` 的 NDJSON 协议驱动同一个 `AgentRuntime`。P1 模块见 §5。
 
 ## 2. 一次 run 的事件流
 
@@ -135,7 +134,7 @@ tasks/               background（已接入）、taskstore（会话任务图，�
 tools/command.py     bash 增加 background 参数
 storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（当前数据库 schema v5，新增 tool_results）
 reports/             render_session_html：单文件离线 HTML 报告
-ui/                  Textual 全屏 TUI（minicode tui）
+tui/                 React + Ink 终端 UI（minicode tui，经 desktop/bridge.py）
 providers/           commandcode.py + zcode_config.py：OpenAI 兼容默认适配器
 evals/               20 任务离线评测集 + 真实模型重复评测（独立验收）
 ```
@@ -211,12 +210,14 @@ evals/               20 任务离线评测集 + 真实模型重复评测（独�
   FakeProvider 的 usage 来自脚本/默认值，不度量真实模型能力、缓存或 token 节省；恢复等边界另由 tests 覆盖。
 - `minicode report <id> --format html`：单文件 HTML（零外链、可离线打开），时间线、
   工具记录与 diff、验收证据表、用量；所有动态文本经 HTML 转义。
-- `minicode tui`：Textual 全屏界面——流式回复、可展开工具卡片、审批 ModalScreen、
-  斜杠命令与自动补全（/help /model /effort /permissions /clear /new /sessions /resume
-  /compact /exit）、简短环境信息、状态栏（CWD · 权限模式 · 模型 · 上下文负载 · Token ·
-  缓存命中率）、Ctrl+C 取消当前回合。文本增量合并刷新，回复结束后渲染 Markdown；
-  工具结果按需展开，运行中可排队下一条输入，用户上滚后新消息不强制拉到底部。
-  子任务开始和终态会进入时间线；尚无命令实时输出或独立任务检查面板。
+- `minicode tui`：React + Ink 终端界面——线性 transcript、用户消息盒子、工具一行、
+  底部横线输入框、内联审批块。斜杠命令经桥下发（/help /model /effort
+  /permissions /clear /new /sessions /resume /compact /skill /continue /exit），
+  状态行显示模型 · 权限模式 · 上下文占用。Ctrl+C 取消当前回合；空闲时连按两次退出。
+  源码安装需 Node.js 22+ 并构建 `tui/`；进程退出时关闭 Python 桥。
+  Windows 安装版内置 Node.js 与 TUI 生产依赖；滚轮或 PageUp/PageDown 查看历史，
+  点击“返回最新”或 Ctrl+End 恢复跟随输出。
+  `minicode chat` 仍是无 Node 的 Rich + prompt_toolkit REPL。
 
 ### 5.7 P1 → 实现位置映射
 
@@ -228,14 +229,14 @@ evals/               20 任务离线评测集 + 真实模型重复评测（独�
 | 后台命令；任务依赖存储 | `tasks/background.py`、`tasks/taskstore.py`、`tools/tasks.py`、`tools/command.py`、`loop._deliver_finished_jobs` |
 | 评测集、基线、失败分析 | `evals/`（离线 b0/b1/b2 与真实模型 B0/B2 重复运行） |
 | 可离线查看的 HTML 执行报告 | `reports/html.py`、`cli.py`（`report --format html`） |
-| 类 Claude Code TUI | `ui/`（Textual App + Pilot 测试） |
+| 类 Claude Code TUI | `tui/`（React + Ink，经 `desktop/bridge.py`） |
 
 ## 6. Provider、缓存及扩展边界
 
 - `Provider.stream` 目前只提供 `TextDelta` 与终结 `ResponseDone`，没有工具参数增量、
   阶段反馈或细粒度 usage 事件。CommandCode 忽略 reasoning-only 文本增量。
 - CommandCode 在同一事件循环内复用 `httpx.AsyncClient`；CLI 每个 `asyncio.run` 回合结束前
-  显式关闭，TUI 退出或切换模型时关闭旧 client。Anthropic 持有 SDK client。
+  显式关闭，Ink TUI / Desktop 退出时关闭桥进程及其 provider client。Anthropic 持有 SDK client。
 - 缓存统计：CommandCode 解析 `prompt_tokens_details.cached_tokens`；Anthropic 将普通输入、
   缓存创建和缓存读取合并到输入总数。`Usage` 单独记录 cache-read/cache-write 和 available；轮次事件、
   SQLite schema v5 与 resume 保存并恢复这些累计值，缺失 usage 不再冒充真实的零。
