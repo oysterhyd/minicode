@@ -39,6 +39,8 @@ pwsh -NoProfile -File release/smoke-native.ps1
 
 `-SkipTests` 仅用于已经单独完成测试后的重新打包；运行环境烟测和产物审计仍执行。完整构建不依赖 Electron 或 electron-builder。源码、个人目录、虚拟环境和用户数据不会被复制进安装包。
 
+手动触发 GitHub Windows installer workflow 时可选择 `skip_tests`，默认关闭；tag 发布始终执行完整测试。该选项对应上述 `-SkipTests`，不跳过签名、运行环境、更新或实际安装验收。
+
 构建还执行 `release/test-installer.ps1`：将实际 NSIS 安装包静默安装到中文和空格路径，核对可执行文件、开始菜单及卸载登记，运行包内烟测，然后卸载。测试前备份已有同名快捷方式和登记，结束后恢复。
 
 ## 产物目录
@@ -73,4 +75,4 @@ MyGo 在可写的正式安装目录启用更新。开发构建或只读目录会
 pwsh -NoProfile -File release/test-updater.ps1
 ```
 
-此验收在 `.cache/` 的中文和空格路径里调用真实 MyGo SDK，确认篡改签名被拒绝且原程序未变、正确签名能替换完整运行环境、相同版本不重复更新，再对更新后的实际 Desktop / CLI / TUI 做烟测。正常构建自动执行该验收。
+此验收在 `.cache/` 的中文和空格路径里调用真实 MyGo SDK，确认篡改签名被拒绝且原程序未变、正确签名能替换完整运行环境、相同版本不重复更新。升级过程中保留已加载 SSL / SQLite 的包内 Python 进程，更新后继续执行查询，确认进程未被中断；再对更新后的实际 Desktop / CLI / TUI 做烟测。正常构建自动执行该验收。

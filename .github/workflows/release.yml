@@ -2,6 +2,11 @@ name: Windows installer
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: Skip full suites only if already verified; installer and update smoke still run
+        type: boolean
+        default: false
   push:
     tags: ['v*']
 
@@ -27,7 +32,7 @@ jobs:
         env:
           MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
         shell: pwsh
-        run: ./release/build.ps1
+        run: ./release/build.ps1 -SkipTests:$${{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == true }}
       - uses: actions/upload-artifact@v4
         with:
           name: MiniCode-Windows-x64

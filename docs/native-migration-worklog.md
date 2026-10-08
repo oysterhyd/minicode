@@ -83,6 +83,10 @@ Go module: `desktop/native`, import path `minicode.desktop`, Mygo pinned to
   ignores the same version; updated Unicode/space-path runtime smoke passes.
 - Final measurements and verification scope are recorded in
   `docs/native-desktop-report.md` and `docs/assets/native-performance.json`.
+- Published v1.2.0, configured the Actions signing secret and verified the
+  public latest feed with MyGo SDK, downloaded archive signature and installer
+  checksum. A Windows 8.3-path TUI test assertion now uses native realpath;
+  the follow-up seven-job cross-platform test workflow passes.
 
 Physical IME candidate windows, every notification click and full-motion
 pixel equivalence have not been manually verified. CPU scene capture and GPU

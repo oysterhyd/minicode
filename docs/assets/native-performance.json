@@ -184,7 +184,8 @@
     "installed_sha256": "c027c53d4b359ee64a1f679324c081cde876559fa2bb1df6258a778fc8873d39",
     "same_version_ignored": true,
     "tamper_rejected": true,
-    "version": "1.2.0"
+    "version": "1.2.0",
+    "live_python_ssl_sqlite_survived": true
   },
   "installer": {
     "version": "1.2.0",
@@ -207,5 +208,22 @@
     "snapshots": 18,
     "packaged_evaluation_passed": 2,
     "packaged_evaluation_total": 2
+  },
+  "published_update": {
+    "feed": "https://github.com/oysterhyd/minicode/releases/latest/download/update-windows-amd64.json",
+    "same_version_ignored": true,
+    "sdk": "MyGo 0.2.15",
+    "update_offered": true,
+    "version": "1.2.0",
+    "archive_signature_verified": true,
+    "installer_checksum_verified": true,
+    "release_url": "https://github.com/oysterhyd/minicode/releases/tag/v1.2.0",
+    "archive_bytes": 125110650
+  },
+  "cross_platform_ci": {
+    "url": "https://github.com/oysterhyd/minicode/actions/runs/37736334659",
+    "conclusion": "success",
+    "jobs": 7,
+    "commit": "1299b7e"
   }
 }

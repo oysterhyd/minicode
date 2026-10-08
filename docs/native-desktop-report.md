@@ -10,6 +10,8 @@
 
 MyGo 官方 `updater/native` 提供原生更新窗口。“通用”页默认自动检查更新，自动下载安装可选；“关于”页可手动检查。签名、升级与发布规则见 [发行说明](../release/README.md#自动更新与签名)。首次从 Electron 1.1.0 迁移需下载一次原生安装包，后续可应用内升级。
 
+[v1.2.0 已发布](https://github.com/oysterhyd/minicode/releases/tag/v1.2.0)。发布后使用实际 MyGo SDK 请求公开 `releases/latest/download/update-windows-amd64.json`，确认新版本可发现、相同版本被忽略；从公开地址下载完整更新归档后验证签名，并核对发布安装器的校验值。
+
 ## 安装体积
 
 | 产物 | Electron 1.1.0 | MyGo 1.2.0 | 减少 |
@@ -55,6 +57,7 @@ Windows 状态和输入变化主动请求响应帧，D3D 呈现不阻塞 UI 线�
 - 实际原生窗口启动包内 Python 并完成 NDJSON v2 初始化。空白用户目录和仅含包内工具及 Windows 系统目录的 PATH 下，CLI、Git、TUI 桥接和 B0/B2 离线评测 2/2 通过。
 - 实际 NSIS 安装到中文和空格路径，核对开始菜单、卸载登记和程序摘要；安装后运行烟测及卸载通过。测试恢复此前的用户快捷方式。
 - 真实 MyGo SDK 在中文和空格安装路径中拒绝篡改签名且原程序摘要保持不变；有效签名替换完整运行环境，程序摘要与发行包一致；同版本不重复更新。更新后再跑 Desktop / CLI / TUI 烟测。
+- 升级期间保留加载了 SSL / SQLite 的旧 Python 进程，更新后继续执行 SQLite 查询并返回 42，进程未中断。
 - 源码、Git 历史和完整运行目录通过凭据及个人文件审计。签名私钥保存在仓库外，并配置为 Actions Secret；只发布公钥、签名和更新归档。
 - README 介绍图以实际原生截图为参考重新生图。图中文字和会话来自 fixture，不作为真实模型效果或测试通过的证据。
 

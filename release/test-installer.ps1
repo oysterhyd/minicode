@@ -36,7 +36,10 @@ try {
     if ((Get-FileHash (Join-Path $target 'MiniCode.exe')).Hash -ne (Get-FileHash (Join-Path $source 'MiniCode.exe')).Hash) { throw 'Installed executable differs' }
     if ((Get-ItemProperty -LiteralPath $registry).InstallLocation -ne $target) { throw 'Incorrect uninstall registration' }
     $shell = New-Object -ComObject WScript.Shell
-    if ($shell.CreateShortcut($shortcuts[0]).TargetPath -ne (Join-Path $target 'MiniCode.exe')) { throw 'Incorrect Start Menu shortcut' }
+    $shortcutTarget = $shell.CreateShortcut($shortcuts[0]).TargetPath
+    $node = Join-Path $source 'runtime/node/node.exe'
+    & $node -e 'const fs=require("node:fs"); const actual=fs.realpathSync.native(process.argv[1]); const expected=fs.realpathSync.native(process.argv[2]); if(actual.toLowerCase()!==expected.toLowerCase())throw Error(`Incorrect Start Menu shortcut: ${actual} != ${expected}`)' $shortcutTarget (Join-Path $target 'MiniCode.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Incorrect Start Menu shortcut' }
     & (Join-Path $PSScriptRoot 'smoke-native.ps1') -Installation $target
     [pscustomobject]@{version=$version; unicode_space_path=$true; executable_matches=$true; start_menu=$true; uninstall_registration=$true; runtime_smoke=$true} | ConvertTo-Json | Set-Content (Join-Path $scratch 'installer-verification.json') -Encoding utf8
 } finally {

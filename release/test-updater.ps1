@@ -26,8 +26,29 @@ try {
     go build -trimpath -ldflags $ldflags -o (Join-Path $qaTarget 'MiniCode.exe') ./tools/updatecheck
     if ($LASTEXITCODE -ne 0) { throw 'Update SDK probe build failed' }
 } finally { Pop-Location }
-& (Join-Path $qaTarget 'MiniCode.exe') -manifest $manifestPath -archive $archivePath -target $qaTarget -expected (Join-Path $installationPath 'MiniCode.exe') -port $qaPort
-if ($LASTEXITCODE -ne 0) { throw 'Update SDK install/tamper probe failed' }
+$liveStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $qaTarget 'runtime/python/python.exe'))
+$liveStart.UseShellExecute = $false
+$liveStart.CreateNoWindow = $true
+$liveStart.RedirectStandardInput = $true
+$liveStart.RedirectStandardOutput = $true
+$liveStart.ArgumentList.Add('-I')
+$liveStart.ArgumentList.Add('-c')
+$liveStart.ArgumentList.Add("import sys,ssl,sqlite3; print('ready',flush=True); sys.stdin.readline(); print(sqlite3.connect(':memory:').execute('select 42').fetchone()[0],flush=True)")
+$liveRuntime = [Diagnostics.Process]::Start($liveStart)
+try {
+    $ready = $liveRuntime.StandardOutput.ReadLineAsync()
+    if (-not $ready.Wait(5000) -or $ready.Result -ne 'ready') { throw 'Existing Python runtime did not initialize' }
+    & (Join-Path $qaTarget 'MiniCode.exe') -manifest $manifestPath -archive $archivePath -target $qaTarget -expected (Join-Path $installationPath 'MiniCode.exe') -port $qaPort
+    if ($LASTEXITCODE -ne 0) { throw 'Update SDK install/tamper probe failed' }
+    $liveRuntime.StandardInput.WriteLine('continue')
+    $liveRuntime.StandardInput.Flush()
+    $response = $liveRuntime.StandardOutput.ReadLineAsync()
+    if (-not $response.Wait(5000) -or $response.Result -ne '42') { throw 'Update interrupted the existing Python runtime' }
+} finally {
+    $liveRuntime.StandardInput.Close()
+    if (-not $liveRuntime.WaitForExit(5000)) { $liveRuntime.Kill(); $liveRuntime.WaitForExit() }
+    $liveRuntime.Dispose()
+}
 & (Join-Path $PSScriptRoot 'smoke-native.ps1') -Installation $qaTarget
 if ($LASTEXITCODE -ne 0) { throw 'Updated installation smoke failed' }
 Write-Host "Signed update, tamper rejection and updated runtime verified: $qaTarget"
