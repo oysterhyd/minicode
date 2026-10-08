@@ -87,6 +87,10 @@ Go module: `desktop/native`, import path `minicode.desktop`, Mygo pinned to
   public latest feed with MyGo SDK, downloaded archive signature and installer
   checksum. A Windows 8.3-path TUI test assertion now uses native realpath;
   the follow-up seven-job cross-platform test workflow passes.
+- Final Windows release CI passes, including Unicode Shell link verification,
+  signed updates with a live old Python process, actual NSIS install/uninstall
+  and complete post-update runtime smoke. Public assets retain their verified
+  original checksums. Final packaged ShowInactive benchmark logs 97 GPU frames.
 
 Physical IME candidate windows, every notification click and full-motion
 pixel equivalence have not been manually verified. CPU scene capture and GPU

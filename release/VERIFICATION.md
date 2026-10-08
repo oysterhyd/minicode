@@ -20,6 +20,8 @@ CPython 3.12.12，Node.js 22.22.0。Desktop 使用原生 UI / D3D11。
 
 发布后的公开 `latest` 清单已通过真实 SDK 检查，新版本可发现、同版本被忽略；下载完整公开归档后签名验证通过，安装器校验值与发布资产 digest 一致。
 
+最终 [Windows 发行 CI](https://github.com/oysterhyd/minicode/actions/runs/37738782495) 通过：实际中文路径安装、Unicode 快捷方式、卸载、签名升级、旧 Python 进程继续运行和更新后完整烟测。该次手动构建复用此前已通过的全量测试结果，使用 `skip_tests=true`；所有安装与更新验收仍完整执行。已发布的安装包保持原校验值。
+
 ## v1.1.0 本地发行核验
 
 Windows x64，PowerShell 7，CPython 3.12.12，Electron 44.2.0，Node.js 22.22.0。

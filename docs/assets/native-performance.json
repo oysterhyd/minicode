@@ -225,5 +225,26 @@
     "conclusion": "success",
     "jobs": 7,
     "commit": "1299b7e"
+  },
+  "packaged_gpu": {
+    "executable_sha256": "c027c53d4b359ee64a1f679324c081cde876559fa2bb1df6258a778fc8873d39",
+    "frame_samples": 97,
+    "method": "MYGO_FRAME_STATS=all, final packaged executable shown with benchmark ShowInactive",
+    "sample_logs": [
+      "2026/10/08 14:42:08 mygo: frame 1 took 114.5 ms: build 0.0, layout 7.4, paint 7.4, present 99.2 (drawn on the GPU), other 0.5; meanwhile the process made about 23062 allocations, 2353.6 KB, 153 text layouts; GC: 1 cycles ended, 0.0 ms of assists",
+      "2026/10/08 14:42:09 mygo: frame 2 took 1.2 ms: build 0.0, layout 0.0, paint 0.6, present 0.6 (drawn on the GPU), other 0.0; meanwhile the process made about 5 allocations, 9.0 KB, 0 text layouts; no GC",
+      "2026/10/08 14:42:09 mygo: frame 3 took 20.0 ms: build 0.0, layout 0.5, paint 0.5, present 17.5 (drawn on the GPU), other 1.4; meanwhile the process made about 477 allocations, 14.5 KB, 6 text layouts; no GC"
+    ],
+    "note": "initial shader setup and render phases logged; no startup or input-to-photon speedup inferred"
+  },
+  "windows_release_ci": {
+    "url": "https://github.com/oysterhyd/minicode/actions/runs/37738782495",
+    "conclusion": "success",
+    "commit": "7134708",
+    "full_suites_already_verified": true,
+    "skip_tests": true,
+    "unicode_shortcut_verified": true,
+    "live_python_verified": true,
+    "install_update_uninstall_verified": true
   }
 }

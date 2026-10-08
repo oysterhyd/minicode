@@ -12,6 +12,8 @@ MyGo 官方 `updater/native` 提供原生更新窗口。“通用”页默认自
 
 [v1.2.0 已发布](https://github.com/oysterhyd/minicode/releases/tag/v1.2.0)。发布后使用实际 MyGo SDK 请求公开 `releases/latest/download/update-windows-amd64.json`，确认新版本可发现、相同版本被忽略；从公开地址下载完整更新归档后验证签名，并核对发布安装器的校验值。
 
+[跨平台 CI 七个任务](https://github.com/oysterhyd/minicode/actions/runs/37736334659) 和最终 [Windows 发行 CI](https://github.com/oysterhyd/minicode/actions/runs/37738782495) 均通过。最后一次仅跳过已通过的完整套件，仍执行签名、更新、实际安装、快捷方式、运行环境及卸载验收。英语 runner 的快捷方式验收使用 Unicode Shell API，避免 WScript 把中文路径读为问号。
+
 ## 安装体积
 
 | 产物 | Electron 1.1.0 | MyGo 1.2.0 | 减少 |
