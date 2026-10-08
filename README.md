@@ -4,7 +4,7 @@
 
 # MiniCode
 
-**面向本地代码仓库的 AI 编程工作台**
+**面向本地代码仓库的原生 AI 编程工作台**
 
 Desktop · CLI · TUI — 一个运行核心，三种工作方式
 
@@ -17,9 +17,9 @@ Desktop · CLI · TUI — 一个运行核心，三种工作方式
 
 [下载安装](https://github.com/oysterhyd/minicode/releases/latest) · [快速开始](#快速开始) · [功能介绍](#功能介绍) · [文档](#文档)
 
-<img src="docs/assets/minicode-hero.png" width="100%" alt="MiniCode 工作台宣传图：任务对话、实际测试输出和代码 Diff" />
+<img src="docs/assets/minicode-hero.png" width="100%" alt="MiniCode 原生工作台宣传图：任务对话、测试数据和代码 Diff" />
 
-<sub>基于应用实际运行界面制作。图中为离线示例任务，文件修改与测试实际执行。</sub>
+<sub>以 MyGo 原生界面截图为参考，通过生图制作的产品介绍图。界面内容来自隔离测试数据。</sub>
 
 </div>
 
@@ -28,7 +28,7 @@ Desktop · CLI · TUI — 一个运行核心，三种工作方式
 MiniCode 将自然语言任务、代码工具和执行记录放在同一个工作台中。你可以让它梳理项目、
 定位问题、修改文件或运行测试，再通过对话、Diff 和命令输出检查结果。
 
-桌面端提供可视化任务管理与代码审查界面；CLI 适合终端中的日常工作和脚本调用；
+桌面端使用 MyGo native UI，Windows 由 Direct3D 11 绘制，提供可视化任务管理与代码审查界面；CLI 适合终端中的日常工作和脚本调用；
 TUI 提供 Claude Code 风格的终端对话界面。三种入口复用同一个 Agent Runtime、权限机制和持久会话。
 
 MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通过 Skills、MCP 和
@@ -48,7 +48,10 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
 `minicode chat` / `run` / `tui` 均可直接使用。项目需要的编译器、语言 SDK
 和测试依赖仍由项目自身提供。
 
-发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未签名，
+1.2.0 起 Desktop 使用原生 UI，并内置 GitHub Releases 自动更新。“设置 → 通用”可管理自动检查和自动下载安装，“关于”页可手动检查。1.1.0 用户需要下载安装一次原生版本，后续可在应用内升级。体积、界面响应及 Diff 对比和验收范围见
+[原生迁移报告](docs/native-desktop-report.md)。
+
+发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未作 Windows 代码签名，更新归档使用 Ed25519 签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
 
 ### 终端使用
@@ -129,7 +132,7 @@ MiniCode 在所选工作区内运行代码工具，并在本机保存会话、�
 
 ## 源码安装与开发
 
-CLI 要求 **Python 3.11+**；终端 TUI 与桌面端开发另需 **Node.js 22+**。
+CLI 要求 **Python 3.11+**；TUI 开发需要 **Node.js 22+**；原生 Desktop 开发需要 **Go 1.27.1 和 PowerShell 7**。
 
 ```bash
 git clone https://github.com/oysterhyd/minicode.git
@@ -159,8 +162,7 @@ TUI 使用紧凑对话布局和底部输入区。`Ctrl+J` 换行，`Ctrl+O` 展�
 启动桌面端开发环境：
 
 ```bash
-npm ci --prefix desktop
-npm run dev --prefix desktop
+pwsh -NoProfile -File desktop/native/dev.ps1
 ```
 
 运行测试：
@@ -168,7 +170,8 @@ npm run dev --prefix desktop
 ```bash
 python -m pytest tests
 npm test --prefix tui
-npm test --prefix desktop
+cd desktop/native
+go test -count=1 ./...
 ```
 
 Windows 安装包的构建入口位于 [`release/`](release/README.md)，桌面端开发说明见
@@ -180,6 +183,7 @@ Windows 安装包的构建入口位于 [`release/`](release/README.md)，桌面�
 | --- | --- |
 | [安装与发行](release/README.md) | 安装说明、CLI 入口、构建和校验。 |
 | [桌面端](desktop/README.md) | 工作台、模型管理、权限、快捷键与开发。 |
+| [原生迁移报告](docs/native-desktop-report.md) | 安装包体积、实测响应、Diff 性能与验收范围。 |
 | [架构](docs/architecture.md) | 运行核心、工具、会话存储与扩展契约。 |
 | [MCP 示例](examples/mcp_docs/plugin.json) | 本地文档工具插件的 manifest 与示例实现。 |
 | [许可证](LICENSE) | MIT 许可证。 |

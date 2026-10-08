@@ -1,6 +1,6 @@
 [project]
 name = "minicode"
-version = "1.1.0"
+version = "1.2.0"
 description = "A resumable CLI coding agent harness with durable traces and evidence-based acceptance"
 readme = "README.md"
 requires-python = ">=3.11"

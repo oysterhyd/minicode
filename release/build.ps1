@@ -5,6 +5,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $PSScriptRoot '.stage'
 $cache = Join-Path $PSScriptRoot '.cache'
 $originalPath = $env:PATH
+$originalSigningKey = $env:MYGO_UPDATER_PRIVATE_KEY
 function Run([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Program failed ($LASTEXITCODE)" }
@@ -14,21 +15,21 @@ try {
     if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
         throw 'The installer must be built on Windows x64 with PowerShell 7.'
     }
+    if (-not $env:MYGO_UPDATER_PRIVATE_KEY) {
+        $signingFile = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'mygo/update-keys/mygo-update.key'
+        if (-not (Test-Path -LiteralPath $signingFile)) { throw 'Set MYGO_UPDATER_PRIVATE_KEY to the existing update signing key before building a release.' }
+        $env:MYGO_UPDATER_PRIVATE_KEY = (Get-Content -LiteralPath $signingFile -Raw).Trim()
+    }
     # Only release staging is cleared; caches and personal data are never copied.
     if ([IO.Path]::GetFullPath($stage) -ne [IO.Path]::Combine([IO.Path]::GetFullPath($PSScriptRoot), '.stage')) { throw 'Invalid staging path' }
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-    New-Item -ItemType Directory -Force "$stage/app", "$stage/runtime", "$stage/wheels", $cache | Out-Null
-    Run 'npm.cmd' @('ci', '--prefix', 'desktop', '--no-audit', '--no-fund')
-    Run 'npm.cmd' @('run', 'build', '--prefix', 'desktop')
+    New-Item -ItemType Directory -Force "$stage/runtime", "$stage/wheels", $cache | Out-Null
     Run 'npm.cmd' @('ci', '--prefix', 'tui', '--no-audit', '--no-fund')
     Run 'npm.cmd' @('run', 'build', '--prefix', 'tui')
     New-Item -ItemType Directory -Force "$stage/runtime/tui" | Out-Null
     Copy-Item -LiteralPath "$root/tui/dist", "$root/tui/package.json", "$root/tui/package-lock.json" -Destination "$stage/runtime/tui" -Recurse
     Run 'npm.cmd' @('ci', '--prefix', "$stage/runtime/tui", '--omit=dev', '--no-audit', '--no-fund')
-    Copy-Item -LiteralPath "$root/desktop/electron", "$root/desktop/dist" -Destination "$stage/app" -Recurse
     $version = (Get-Content "$PSScriptRoot/package.json" -Raw | ConvertFrom-Json).version
-    @{ name = 'minicode'; version = $version; main = 'electron/main.cjs'; description = 'MiniCode Desktop and CLI';
-       author = 'MiniCode contributors'; license = 'MIT' } | ConvertTo-Json | Set-Content "$stage/app/package.json" -Encoding utf8NoBOM
     Run 'uv' @('python', 'install', '3.12.12', '--install-dir', "$cache/python", '--no-bin')
     Copy-Item -LiteralPath "$cache/python/cpython-3.12.12-windows-x86_64-none" -Destination "$stage/runtime/python" -Recurse
     $python = "$stage/runtime/python/python.exe"
@@ -59,7 +60,8 @@ try {
     Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", '--source', '--history', $root)
     Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", "$stage/runtime")
     if (-not $SkipTests) {
-        Run 'npm.cmd' @('test', '--prefix', 'desktop')
+        Push-Location "$root/desktop/native"
+        try { Run 'go' @('test', './...') } finally { Pop-Location }
         Run $python @('-m', 'pytest', 'tests', '-o', 'addopts=', '-q', '--basetemp', "$cache/tests")
         $oldPython = $env:MINICODE_PYTHON
         $oldBridgeTest = $env:MINICODE_TUI_BRIDGE_TEST
@@ -72,13 +74,36 @@ try {
             $env:MINICODE_TUI_BRIDGE_TEST = $oldBridgeTest
         }
     }
-    Push-Location $PSScriptRoot
-    try { Run 'node' @('node_modules/electron-builder/cli.js', '--config', 'electron-builder.yml', '--win', '--x64', '--publish', 'never') }
+    Push-Location "$root/desktop/native"
+    try {
+        Run 'go' @('run', './tools/icon', 'assets/app-mark.svg', 'resources/icon.png')
+        $licenseTarget = "$root/desktop/native/resources/licenses"
+        New-Item -ItemType Directory -Force $licenseTarget | Out-Null
+        $modules = @(Get-ChildItem -LiteralPath "$root/desktop/native/vendor" -File -Recurse |
+            Where-Object { $_.Name -match '^LICENSE|^COPYING|^NOTICE' })
+        foreach ($licenseFile in $modules) {
+            $relative = [IO.Path]::GetRelativePath("$root/desktop/native/vendor", $licenseFile.FullName)
+            $destination = Join-Path $licenseTarget $relative
+            New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
+            Copy-Item -LiteralPath $licenseFile.FullName -Destination $destination
+        }
+        $env:CGO_ENABLED = '0'
+        Run 'mygo' @('build', '-platform', 'windows/amd64')
+    }
     finally { Pop-Location }
-    Run 'node' @("$PSScriptRoot/smoke.cjs", "$PSScriptRoot/dist/win-unpacked")
-    Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", "$PSScriptRoot/dist/win-unpacked")
-    $installer = Get-Item "$PSScriptRoot/dist/MiniCode-Setup-$version-win-x64.exe"
+    $installation = "$PSScriptRoot/dist/native/windows-amd64"
+    Run 'pwsh' @('-NoProfile', '-File', "$PSScriptRoot/smoke-native.ps1", '-Installation', $installation)
+    Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", $installation)
+    Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/verify-update.py", "$installation/update-windows-amd64.json", "$root/desktop/native/mygo.json")
+    Run 'pwsh' @('-NoProfile', '-File', "$PSScriptRoot/test-updater.ps1", '-Installation', $installation)
+    Run 'pwsh' @('-NoProfile', '-File', "$PSScriptRoot/test-installer.ps1", '-Installation', $installation)
+    $builtInstaller = Get-Item "$installation/MiniCode Setup $version.exe"
+    $installerPath = "$PSScriptRoot/dist/MiniCode-Setup-$version-win-x64.exe"
+    Copy-Item -LiteralPath $builtInstaller.FullName -Destination $installerPath
+    Copy-Item -LiteralPath "$installation/update-windows-amd64.json" -Destination "$PSScriptRoot/dist"
+    Get-ChildItem -LiteralPath $installation -File | Where-Object { $_.Name -like '*.tar.gz' -or $_.Name -like '*.delta' } | Copy-Item -Destination "$PSScriptRoot/dist"
+    $installer = Get-Item $installerPath
     $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $($installer.Name)" | Set-Content "$PSScriptRoot/dist/SHA256SUMS.txt" -Encoding ascii
     Write-Host "Installer verified: $($installer.FullName)"
-} finally { $env:PATH = $originalPath; Pop-Location }
+} finally { $env:PATH = $originalPath; $env:MYGO_UPDATER_PRIVATE_KEY = $originalSigningKey; Pop-Location }

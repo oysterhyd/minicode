@@ -1,10 +1,11 @@
 @echo off
 setlocal
-set "PATH=%~dp0resources\runtime\python;%~dp0resources\runtime\python\Scripts;%~dp0resources\runtime\git\cmd;%PATH%"
+set "MINICODE_RESOURCES=%~dp0"
+if exist "%~dp0resources\runtime\python\python.exe" set "MINICODE_RESOURCES=%~dp0resources"
+set "PATH=%MINICODE_RESOURCES%\runtime\python;%MINICODE_RESOURCES%\runtime\python\Scripts;%MINICODE_RESOURCES%\runtime\git\cmd;%PATH%"
 set "PYTHONHOME="
 set "PYTHONPATH="
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
-set "MINICODE_RESOURCES=%~dp0resources"
-"%~dp0resources\runtime\python\python.exe" -I -X utf8 -m minicode %*
+"%MINICODE_RESOURCES%\runtime\python\python.exe" -I -X utf8 -m minicode %*
 exit /b %errorlevel%

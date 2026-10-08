@@ -1,6 +1,6 @@
 # minicode 当前架构
 
-本文按 2026-09-30 的代码核对，描述模块划分、一次 run 的事件流与关键执行语义。核心重构的完整契约与迁移见 [Harness 重构审计](harness-hardening.md)。
+本文描述模块划分、一次 run 的事件流与关键执行语义。核心重构的完整契约与迁移见 [Harness 重构审计](harness-hardening.md)。2026-10-08 的 Desktop 原生迁移与验证见 [迁移报告](native-desktop-report.md)。
 [plan.md](../plan.md) 是原始设计目标；后续优化见 [探索与优化方案](optimization-design.md)。
 交互界面以中文为主，部分工具错误为英文。共享模型位于 `core/models.py`，运行时也直接依赖
 工具、存储与 Goal 实现；本地 Plugin 已加载，任务图通过模型工具接入，共享工作区的写入型子助手在父会话内按序执行。
@@ -42,6 +42,11 @@
 ```
 
 主调用方向：`CLI / Ink TUI / Desktop → runtime → {providers, tools, security, storage, goals}`，共享 `core` 契约。
+
+Desktop 1.2 使用 `desktop/native` 的 MyGo 原生窗口和 Go 控制器，经 NDJSON v2 连接
+`desktop/bridge.py`。Go 负责多会话状态、GPU 视图、文件/Git 与系统集成；Python 继续负责
+模型、权限、插件和 SQLite。CLI 与 Ink TUI 的入口及运行契约保持共用。旧 Electron/React
+源码仅作为对照，不进入新发行包。
 `cli.py` 装配 `run` / `chat` / `resume`；`minicode tui` 拉起 `tui/`（React + Ink），经 `desktop/bridge.py` 的 NDJSON 协议驱动同一个 `AgentRuntime`。P1 模块见 §5。
 
 ## 2. 一次 run 的事件流

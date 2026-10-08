@@ -1,0 +1,27 @@
+package ui
+
+import "time"
+
+// Flush changed/input frames on Windows after the current event is handled.
+// Animation-only frames keep the toolkit's normal coalescing and cadence.
+func (h *windowHost) immediateFrame() {
+	if h.rt.inFrame || h.detached || h.occluded() { return }
+	if surface, ok := h.conn.Surface.(interface{ RequestImmediateFrame() }); ok {
+		surface.RequestImmediateFrame()
+	}
+}
+
+func (h *windowHost) requestAnimatedFrame() {
+	hz := h.refreshRate()
+	if hz <= 0 { hz = 60 }
+	h.minicodeFrameDue = h.lastFrame.Add(time.Duration(float32(time.Second)/hz))
+	delay := max(time.Until(h.minicodeFrameDue), time.Millisecond)
+	wake := func() { h.post(func() {
+		if !h.detached && !time.Now().Before(h.minicodeFrameDue) { h.requestFrame() }
+	}) }
+	if h.minicodeFrameTimer == nil { h.minicodeFrameTimer = time.AfterFunc(delay, wake) } else { h.minicodeFrameTimer.Reset(delay) }
+}
+
+func (rt *engine) requestAnimatedFrame() {
+	if h, ok := rt.host.(interface{ requestAnimatedFrame() }); ok { h.requestAnimatedFrame() } else { rt.host.requestFrame() }
+}

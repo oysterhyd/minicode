@@ -1,4 +1,20 @@
-# v1.1.0 本地发行核验
+# v1.2.0 本地发行核验
+
+2026-10-08，Windows x64，PowerShell 7，MyGo 0.2.15，Go 1.27.1，
+CPython 3.12.12，Node.js 22.22.0。Desktop 使用原生 UI / D3D11。
+
+- 干净发行 Python 完整测试：560 通过、3 跳过；Ink TUI：79 通过，包含真实 Python bridge、审批、取消及恢复。
+- 原生 `go test -count=1 ./...`、`go vet ./...` 通过，无 CGO 的 Windows / Linux 编译通过。真实 GUI 只验收 Windows。
+- 浅色 / 深色 18 张状态截图、最小窗口及 150% 缩放、快捷键、补全、撤销、排队、菜单、Markdown、图片边界、更新偏好和文件/Git 服务检查通过。
+- 包内 Python、Git、CLI、TUI 及实际原生窗口在空白用户目录下通过；B0/B2 离线分页评测 2/2；NDJSON v2 与原生更新可用性通过。
+- 实际 NSIS 静默安装至中文和空格路径，程序摘要、开始菜单、卸载登记及安装后运行烟测通过；卸载清除测试目录和登记，原有用户快捷方式恢复。
+- MyGo 更新清单和归档的 Ed25519 签名验证通过。真实 SDK 在中文和空格路径中拒绝篡改签名、保留原程序；正确签名安装完整运行环境，摘要一致；相同版本不重复安装；更新后的实际运行环境烟测通过。
+- 源码、历史和最终运行环境凭据审计通过，个人目录及签名私钥未进入包。GitHub Actions 使用 repository secret，公钥编入正式应用。
+- 独立算法和原生/Chromium fixture 响应测量见 [迁移报告](../docs/native-desktop-report.md)，其中说明计时边界，未声称输入到屏幕、模型、内存或启动性能改善。
+
+物理输入法候选窗、全部通知点击与完整动效逐像素一致性尚未完成手动验收。截图来自 MyGo CPU 场景渲染，GPU 运行另由实际窗口 FrameStats 验证。测试使用离线 Provider，没有进行新的付费模型评测。安装器未作 Windows 代码签名；更新归档签名独立于代码签名。远端 CI 结果在 GitHub Actions 记录，本页数量来自本机完整测试。
+
+## v1.1.0 本地发行核验
 
 Windows x64，PowerShell 7，CPython 3.12.12，Electron 44.2.0，Node.js 22.22.0。
 

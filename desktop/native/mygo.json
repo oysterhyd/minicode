@@ -1,0 +1,19 @@
+{
+  "name": "MiniCode",
+  "identifier": "com.minicode.desktop",
+  "version": "1.2.0",
+  "copyright": "Copyright 2026 MiniCode contributors",
+  "icon": "resources/icon.png",
+  "out": "../../release/dist/native",
+  "updates": {
+    "github": "oysterhyd/minicode",
+    "publicKey": "4Ykb7FjKNYD3nPbz3ogPgB8KlxYTN4uflE/MO8EEJo0=",
+    "changelog": "../../release/CHANGELOG.md"
+  },
+  "resources": [
+    "../../release/.stage/runtime",
+    "../../release/minicode.cmd",
+    "../../release/THIRD-PARTY-NOTICES.md",
+    "../../LICENSE"
+  ]
+}

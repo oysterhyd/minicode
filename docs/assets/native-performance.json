@@ -1,0 +1,211 @@
+{
+  "date": "2026-10-08",
+  "platform": "Windows AMD64",
+  "toolchain": {
+    "mygo": "0.2.15",
+    "go": "1.27.1",
+    "python": "3.12.12",
+    "node": "22.22.0"
+  },
+  "method": {
+    "warmup": 2,
+    "repeats": 7,
+    "statistic": "median",
+    "gc": "outside algorithm timing",
+    "native_ui": "final packaged executable, after packaging I/O completed",
+    "ui_limit": "different rendering-pipeline endpoints; not input-to-photon or model latency"
+  },
+  "baseline": {
+    "version": "1.1.0",
+    "unpacked_bytes": 711588396.0,
+    "installer": {
+      "bytes": 200622437,
+      "path": "release/dist/MiniCode-Setup-1.1.0-win-x64.exe",
+      "sha256": "9C7065DB106B8B15E0CFE5A50436D85B31363191B8B125E693F2677BBFD38D04"
+    },
+    "git": "b5468576d54d603a353608160fe3f31b3dc5ef3c"
+  },
+  "native": {
+    "version": "1.2.0",
+    "installer": {
+      "bytes": 82944812,
+      "sha256": "5d70863a69aeacd9c6cbfe0147d4c7969ed293c53793909c9c228b0154457d90"
+    },
+    "unpacked_bytes": 332235402,
+    "executable_bytes": 18941952,
+    "executable_sha256": "c027c53d4b359ee64a1f679324c081cde876559fa2bb1df6258a778fc8873d39",
+    "update_archive_bytes": 125110650,
+    "update_archive_sha256": "271ab7dff8d8209c4cb7eeb1764bf57bbceacd025a72e2c162654e65cc39a273"
+  },
+  "algorithms": {
+    "initial_baseline": {
+      "node": "v22.22.0",
+      "platform": "win32",
+      "benchmarks": {
+        "feed_group_and_positions_30k_rows": {
+          "median_ms": 1.2244,
+          "min_ms": 1.0054,
+          "max_ms": 2.9327,
+          "repeats": 7
+        },
+        "diff_400_lines_two_edits": {
+          "median_ms": 0.1456,
+          "min_ms": 0.0953,
+          "max_ms": 0.2311,
+          "repeats": 7
+        },
+        "diff_10k_lines_three_edits": {
+          "median_ms": 1.777,
+          "min_ms": 1.0252,
+          "max_ms": 2.1085,
+          "repeats": 7,
+          "output_rows": 10003,
+          "additions": 3,
+          "deletions": 3
+        }
+      }
+    },
+    "recalibrated_baseline": {
+      "node": "v22.22.0",
+      "platform": "win32",
+      "benchmarks": {
+        "feed_group_and_positions_30k_rows": {
+          "median_ms": 0.7122,
+          "min_ms": 0.5984,
+          "max_ms": 2.3448,
+          "repeats": 7
+        },
+        "diff_400_lines_two_edits": {
+          "median_ms": 0.1245,
+          "min_ms": 0.1152,
+          "max_ms": 0.1333,
+          "repeats": 7
+        },
+        "diff_10k_lines_three_edits": {
+          "median_ms": 1.7308,
+          "min_ms": 0.6133,
+          "max_ms": 2.873,
+          "repeats": 7,
+          "output_rows": 10003,
+          "additions": 3,
+          "deletions": 3
+        }
+      }
+    },
+    "native": {
+      "benchmarks": {
+        "diff_10k_lines_three_edits": {
+          "median_ms": 0.25769996643066406,
+          "min_ms": 0.2446000576019287,
+          "max_ms": 0.37109994888305664,
+          "repeats": 7,
+          "output_rows": 10003,
+          "additions": 3,
+          "deletions": 3
+        },
+        "diff_400_lines_two_edits": {
+          "median_ms": 0.01230001449584961,
+          "min_ms": 0.011500000953674316,
+          "max_ms": 0.016499996185302734,
+          "repeats": 7
+        },
+        "feed_group_and_positions_30k_rows": {
+          "median_ms": 0.2371000051498413,
+          "min_ms": 0.22820007801055908,
+          "max_ms": 0.411099910736084,
+          "repeats": 7
+        }
+      },
+      "go": "go1.27.1",
+      "platform": "windows"
+    }
+  },
+  "ui": {
+    "chromium": {
+      "metric": "event dispatch to first animation-frame boundary after the changed content commits; excludes paint and animation completion",
+      "benchmarks": {
+        "work_tab": {
+          "median_ms": 7.5,
+          "min_ms": 6.100000023841858,
+          "max_ms": 8,
+          "repeats": 7
+        },
+        "settings_open": {
+          "median_ms": 22.200000047683716,
+          "min_ms": 12.700000047683716,
+          "max_ms": 37.60000002384186,
+          "repeats": 7
+        },
+        "context_open": {
+          "median_ms": 9.5,
+          "min_ms": 8.800000071525574,
+          "max_ms": 14.699999928474426,
+          "repeats": 7
+        },
+        "stream_delta": {
+          "median_ms": 58.89999997615814,
+          "min_ms": 54,
+          "max_ms": 69.30000007152557,
+          "repeats": 7
+        }
+      }
+    },
+    "native": {
+      "benchmarks": {
+        "context_open": {
+          "max_ms": 4.0771,
+          "median_ms": 2.2895,
+          "min_ms": 1.5079,
+          "repeats": 7
+        },
+        "settings_open": {
+          "max_ms": 9.7474,
+          "median_ms": 6.8471,
+          "min_ms": 6.5535,
+          "repeats": 7
+        },
+        "stream_delta": {
+          "max_ms": 11.034,
+          "median_ms": 10.6829,
+          "min_ms": 10.059,
+          "repeats": 7
+        },
+        "work_tab": {
+          "max_ms": 4.8226,
+          "median_ms": 4.6118,
+          "min_ms": 3.2526,
+          "repeats": 7
+        }
+      },
+      "metric": "controller dispatch to view construction; excludes layout, paint and animation"
+    }
+  },
+  "update_sdk": {
+    "installed_sha256": "c027c53d4b359ee64a1f679324c081cde876559fa2bb1df6258a778fc8873d39",
+    "same_version_ignored": true,
+    "tamper_rejected": true,
+    "version": "1.2.0"
+  },
+  "installer": {
+    "version": "1.2.0",
+    "unicode_space_path": true,
+    "executable_matches": true,
+    "start_menu": true,
+    "uninstall_registration": true,
+    "runtime_smoke": true
+  },
+  "tests": {
+    "python_passed": 560,
+    "python_skipped": 3,
+    "tui_passed": 79,
+    "native_tests": "passed",
+    "native_vet": "passed",
+    "cgo_free_builds": [
+      "windows/amd64",
+      "linux/amd64"
+    ],
+    "snapshots": 18,
+    "packaged_evaluation_passed": 2,
+    "packaged_evaluation_total": 2
+  }
+}

@@ -65,3 +65,23 @@ jobs:
           npm ci --prefix tui
           npm run build --prefix tui
           npm test --prefix tui
+
+  native-desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: desktop/native/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install shared Agent runtime
+        run: python -m pip install -e ".[dev]"
+      - name: Verify native UI, workspace and Python bridge
+        working-directory: desktop/native
+        run: go test -count=1 ./...
+      - name: Build native Windows executable
+        working-directory: desktop/native
+        run: ./build.ps1

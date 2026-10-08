@@ -1,14 +1,10 @@
 {
   "name": "minicode-release",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "MiniCode Desktop and CLI Windows distribution",
   "scripts": {
     "build": "pwsh -NoProfile -File build.ps1",
-    "smoke": "node smoke.cjs dist/win-unpacked"
-  },
-  "devDependencies": {
-    "electron": "44.2.0",
-    "electron-builder": "26.15.3"
+    "smoke": "pwsh -NoProfile -File smoke-native.ps1"
   }
 }

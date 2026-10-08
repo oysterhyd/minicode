@@ -1,13 +1,15 @@
 {
   "name": "minicode-desktop",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "main": "electron/main.cjs",
   "scripts": {
-    "test": "node --test tests/*.test.cjs",
-    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
-    "build": "tsc --noEmit && vite build",
-    "start": "npm run build && electron ."
+    "test": "cd native && go test ./...",
+    "dev": "pwsh -NoProfile -File native/dev.ps1",
+    "build": "pwsh -NoProfile -File native/build.ps1",
+    "start": "pwsh -NoProfile -File native/dev.ps1",
+    "test:legacy": "node --test tests/*.test.cjs",
+    "dev:legacy": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron electron/main.cjs --dev\"",
+    "build:legacy": "tsc --noEmit && vite build"
   },
   "dependencies": {
     "lowlight": "3.3.0",

@@ -17,9 +17,15 @@ jobs:
         with:
           node-version: '22'
       - uses: astral-sh/setup-uv@v6
-      - name: Install packaging tools
-        run: npm ci --prefix release
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: desktop/native/go.sum
+      - name: Install native packaging tool
+        run: go install github.com/egoist/mygo/cmd/mygo@v0.2.15
       - name: Build and verify installer
+        env:
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
         shell: pwsh
         run: ./release/build.ps1
       - uses: actions/upload-artifact@v4
@@ -28,6 +34,9 @@ jobs:
           path: |
             release/dist/MiniCode-Setup-*-win-x64.exe
             release/dist/SHA256SUMS.txt
+            release/dist/update-*.json
+            release/dist/*.tar.gz
+            release/dist/*.delta
       - name: Upload release assets
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -36,5 +45,6 @@ jobs:
         run: |
           gh release view $env:GITHUB_REF_NAME
           if ($LASTEXITCODE -ne 0) { gh release create $env:GITHUB_REF_NAME --title "MiniCode $env:GITHUB_REF_NAME" --generate-notes --verify-tag }
-          gh release upload $env:GITHUB_REF_NAME release/dist/MiniCode-Setup-*-win-x64.exe release/dist/SHA256SUMS.txt --clobber
+          $assets = @(Get-ChildItem release/dist -File | Where-Object { $_.Name -like 'MiniCode-Setup-*-win-x64.exe' -or $_.Name -eq 'SHA256SUMS.txt' -or $_.Name -like 'update-*.json' -or $_.Name -like '*.tar.gz' -or $_.Name -like '*.delta' } | ForEach-Object FullName)
+          gh release upload $env:GITHUB_REF_NAME @assets --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed' }
