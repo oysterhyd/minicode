@@ -74,7 +74,8 @@ test('real Ink + Python: script selection, approvals, pause/continue, persisted 
   await waitFor(() => f.events.filter(event => event.event === 'run_done').length === 2, 'continue finishes')
   assert.equal(f.events.filter(event => event.event === 'run_done')[1].result?.exit_reason, 'completed')
   const detail = await f.client.request<SessionDetail>('getSession', { sessionId })
-  assert.equal(fs.realpathSync(detail.summary.workspace), fs.realpathSync(f.workspace))
+  // Node's JS realpath preserves Windows 8.3 aliases; Python resolves them.
+  assert.equal(fs.realpathSync.native(detail.summary.workspace), fs.realpathSync.native(f.workspace))
   const history = historyItems(detail)
   assert.ok(history.some(item => item.kind === 'tool' && item.name === 'read' && item.success && item.output?.includes('Independent TUI audit')))
   assert.ok(history.some(item => item.kind === 'assistant' && item.text?.includes('修改已完成')))

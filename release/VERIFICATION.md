@@ -14,6 +14,8 @@ CPython 3.12.12，Node.js 22.22.0。Desktop 使用原生 UI / D3D11。
 
 物理输入法候选窗、全部通知点击与完整动效逐像素一致性尚未完成手动验收。截图来自 MyGo CPU 场景渲染，GPU 运行另由实际窗口 FrameStats 验证。测试使用离线 Provider，没有进行新的付费模型评测。安装器未作 Windows 代码签名；更新归档签名独立于代码签名。远端 CI 结果在 GitHub Actions 记录，本页数量来自本机完整测试。
 
+首次远端 Windows 验收发现 TUI 测试使用的 Node JS `realpathSync` 保留 8.3 别名，Python 则返回长路径。测试改用 `realpathSync.native` 比较实际目录；此修正仅影响测试，不改变发布程序。
+
 ## v1.1.0 本地发行核验
 
 Windows x64，PowerShell 7，CPython 3.12.12，Electron 44.2.0，Node.js 22.22.0。
