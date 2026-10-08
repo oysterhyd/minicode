@@ -40,7 +40,7 @@ pwsh -NoProfile -File desktop/native/build.ps1
 
 ## 数据与升级
 
-Python 配置和会话继续位于 `%USERPROFILE%\.minicode`，服务密钥仅由 Python 持有。旧版 Electron 的 workspace.json 和 Chromium Local Storage 偏好会从临时 LevelDB 副本导入，不改写旧文件。主题、缩放、面板状态、发送方式和输入历史随之迁移。
+Python 配置和会话继续位于 `%USERPROFILE%\.minicode`，服务密钥仅由 Python 持久保存。旧版 Electron 的 workspace.json 和 Chromium Local Storage 偏好会从临时 LevelDB 副本导入，不改写旧文件。主题、缩放、面板状态、发送方式和输入历史随之迁移。
 
 原生偏好保存在 MyGo 用户数据目录中的 `native-preferences.json`，窗口位置、尺寸和最大化状态由 MyGo 保存。写入合并后落盘。安装包不携带个人配置或会话。
 

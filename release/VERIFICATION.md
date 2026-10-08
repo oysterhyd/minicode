@@ -16,7 +16,7 @@ CPython 3.12.12，Node.js 22.22.0。Desktop 使用原生 UI / D3D11。
 
 首次远端 Windows 验收发现 TUI 测试使用的 Node JS `realpathSync` 保留 8.3 别名，Python 则返回长路径。测试改用 `realpathSync.native` 比较实际目录；此修正仅影响测试，不改变发布程序。
 
-修正后的 [跨平台 CI 七个任务](https://github.com/oysterhyd/minicode/actions/runs/37736334659) 全部通过。发行安装的快捷方式验收也使用原生路径解析，以识别指向同一文件的长短路径。额外验收已加载 SSL / SQLite 的 Python 进程在签名升级过程中继续运行并返回查询结果。
+修正后的 [跨平台 CI 七个任务](https://github.com/oysterhyd/minicode/actions/runs/37736334659) 全部通过。发行安装的快捷方式验收使用 Unicode `IShellLinkW` 和原生路径解析，以识别中文与长短路径；WScript 在英语系统上把中文目标读成问号，已替换该验收 API。额外验收已加载 SSL / SQLite 的 Python 进程在签名升级过程中继续运行并返回查询结果。
 
 发布后的公开 `latest` 清单已通过真实 SDK 检查，新版本可发现、同版本被忽略；下载完整公开归档后签名验证通过，安装器校验值与发布资产 digest 一致。
 
