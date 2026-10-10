@@ -1,4 +1,15 @@
-# v1.2.1 核验
+# v1.2.2 核验
+
+2026-10-10，开始页仅保留简短提示、工作区选择与任务输入，移除大图标、建议卡片和最近任务区。
+
+- 原生测试、Go 静态检查与 Windows 可执行文件编译通过，浅色 / 深色截图及小窗口布局已检查。
+- [完整发行构建](https://github.com/oysterhyd/minicode/actions/runs/38034726932) 通过：Python 563 通过、2 跳过，TUI 79 通过；包内空白配置、原生窗口、桥接、CLI / Git / TUI 烟测通过。
+- 中文路径安装、Unicode 快捷方式、卸载、签名更新、篡改拒绝、旧 Python 进程继续运行与更新后烟测通过。
+- [跨平台 CI](https://github.com/oysterhyd/minicode/actions/runs/38034727099) 七个任务全部通过。
+- GitHub 上的安装包摘要与校验文件一致；完整更新归档及 1.2.0 / 1.2.1 差分包的摘要与 Ed25519 签名核对通过。
+- [v1.2.2 已发布](https://github.com/oysterhyd/minicode/releases/tag/v1.2.2)。安装包 SHA256：`4fe8ff137e26eb0e5350a7ebbf41b38d282e0d6171a35a2a018bec753ac881f1`。
+
+## v1.2.1 核验
 
 2026-10-10，Windows x64。
 
