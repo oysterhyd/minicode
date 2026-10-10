@@ -382,120 +382,26 @@ func (d *desktop) sessionMenu(menu *ui.Menu, session model.Session) {
 	}
 }
 
-var starters = []struct{ Icon, Label, Detail, Prompt string }{
-	{"Code2", "了解这个项目", "梳理结构、技术栈与运行方式", "请阅读当前项目，梳理目录结构、技术栈和主要模块，告诉我如何运行与验证。"},
-	{"FileSearch", "审查当前改动", "发现潜在问题，给出具体建议", "请审查当前工作区的未提交改动，关注正确性与潜在回归，给出文件位置和改进建议。"},
-	{"FlaskConical", "补充测试", "为关键路径编写并运行测试", "请找出当前项目中缺少测试覆盖的关键逻辑，补充测试并运行，报告结果。"},
-	{"Bug", "排查一个问题", "定位根因并给出修复方案", "我遇到了一个问题："},
-}
-
-func greeting() string {
-	hour := time.Now().Hour()
-	if hour < 5 {
-		return "夜深了，还在构建什么？"
-	}
-	if hour < 12 {
-		return "早上好，今天想构建什么？"
-	}
-	if hour < 18 {
-		return "下午好，接下来做点什么？"
-	}
-	return "晚上好，想继续构建什么？"
-}
-
 func (d *desktop) welcome(c *ui.Context, p palette) {
 	v := d.current()
 	_, height := c.Size()
-	ui.Scroll(c).Fill().Padding(0, 10, 0, 0).Children(func() {
+	ui.Scroll(c).Fill().Children(func() {
 		ui.Column(c).FillWidth().MinHeight(height - 50).Center().Children(func() {
-			ui.Column(c).FillWidth().MaxWidth(720).Padding(48, 32, 40, 32).Margin(0, ui.Auto).Gap(0).Children(func() {
-				ui.Column(c).AlignItems(ui.Center).Children(func() {
-					ui.Box(c).Size(48, 48).Radius(14).Background(p.Elevated).Border(1, p.Border).Margin(0, 0, 18, 0).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.15)).Center().Children(func() { ui.Image(c, logo).Size(28, 28) })
-					ui.Text(c, greeting()).FontSize(p.font(25.9)).FontWeight(650).Margin(0, 0, 10, 0).TextAlign(ui.Center)
-					project := button(c, p, func() string {
-						if v.Workspace == "" {
-							return "选择工作区"
-						}
-						return basename(v.Workspace)
-					}(), "FolderOpen", false).
-						Height(28).Border(0, ui.Transparent).FontSize(p.font(11.9)).Padding(0, 10)
+			ui.Column(c).FillWidth().MaxWidth(720).Padding(40, 32).Margin(0, ui.Auto).Children(func() {
+				ui.Text(c, "想做些什么？").FontSize(p.font(22)).FontWeight(550).TextAlign(ui.Center).Margin(0, 0, 12, 0)
+				ui.Row(c).Justify(ui.Center).Margin(0, 0, 20, 0).Children(func() {
+					workspace := basename(v.Workspace)
+					if v.Workspace == "" {
+						workspace = "选择工作区"
+					}
+					project := button(c, p, workspace, "FolderOpen", false).Label("选择工作区").
+						Height(28).Border(0, ui.Transparent).FontSize(p.font(11.9)).FontWeight(400).Padding(0, 10)
 					project.Children(func() { icon(c, "ChevronDown", 13, p.Text3) })
 					if project.Clicked() {
 						d.chooseWorkspace()
 					}
 				})
-				ui.Box(c).Height(24)
 				d.composer(c, p, true)
-				if v.Workspace != "" {
-					ui.Column(c).Margin(18, 0, 0, 0).Gap(8).Children(func() {
-						for pair := 0; pair < 2; pair++ {
-							ui.Row(c).Gap(8).AlignItems(ui.Stretch).Children(func() {
-								for offset := 0; offset < 2; offset++ {
-									starter := starters[pair*2+offset]
-									ui.Column(c).Grow(1).Basis(0).Children(func() {
-										card := ui.ButtonBase(c).Label(starter.Label+" "+starter.Detail).FillWidth().Height(63.7).Gap(10).Padding(12, 14).Radius(12).Border(1, p.Border).AlignItems(ui.Start).Background(p.Main).Transition(fastMotion)
-										color := p.Text3
-										if card.Hovered() {
-											card.BorderColor(p.BorderStrong).Background(p.Panel)
-											color = p.Accent
-										}
-										card.Children(func() {
-											icon(c, starter.Icon, 16, color)
-											ui.Column(c).Grow(1).Gap(2).Children(func() {
-												ui.Text(c, starter.Label).FontSize(p.font(12.6)).FontWeight(600)
-												ui.Text(c, starter.Detail).FontSize(p.font(11.2)).TextColor(p.Text3)
-											})
-											if svg := icons["ArrowUpRight"]; svg != nil {
-												arrow := ui.Icon(c, svg).FontSize(14).TextColor(p.Text3).Absolute().Top(12).Right(12)
-												if !card.Hovered() {
-													arrow.Opacity(0)
-												}
-											}
-										})
-										if card.Clicked() {
-											v.Draft = starter.Prompt
-											d.focusPrompt = true
-										}
-									})
-								}
-							})
-						}
-					})
-					ui.Column(c).Margin(22, 0, 0, 0).Children(func() {
-						ui.Row(c).Gap(6).Padding(0, 4, 6, 4).Children(func() {
-							icon(c, "History", 12, p.Text3)
-							muted(c, p, "继续最近的任务").FontSize(p.font(10.64)).FontWeight(600)
-						})
-						count := 0
-						for _, session := range d.sessions {
-							if session.Workspace != v.Workspace || count >= 3 {
-								continue
-							}
-							count++
-							row := ui.ButtonBase(c).Label("继续 "+session.Title).Height(34).FillWidth().Padding(0, 10).Radius(8).Gap(12)
-							if row.Hovered() {
-								row.Background(p.Hover)
-							}
-							row.Children(func() {
-								ui.Text(c, session.Title).Grow(1).SingleLine().FontSize(p.font(12.32)).TextColor(p.Text2)
-								ui.Text(c, relativeTime(session.UpdatedAt)).FontSize(p.font(10.64)).TextColor(p.Text4)
-							})
-							if row.Clicked() {
-								d.openSession(session)
-							}
-						}
-					})
-				} else {
-					ui.Column(c).AlignItems(ui.Center).Margin(20, 0).Gap(16).Children(func() {
-						ui.Text(c, "MiniCode 在你的本地目录中读取、编辑并运行代码。每一次写入与命令执行都会先征得你的同意。").TextColor(p.Text3).FontSize(p.font(12.6)).MaxWidth(500).TextAlign(ui.Center)
-						if button(c, p, "打开本地项目", "FolderOpen", true).Height(36).Clicked() {
-							d.chooseWorkspace()
-						}
-					})
-				}
-				if height < 700 {
-					ui.Box(c).Height(8)
-				}
 			})
 		})
 	})
