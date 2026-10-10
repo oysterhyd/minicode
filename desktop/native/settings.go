@@ -205,13 +205,7 @@ func (d *desktop) settingsContent(c *ui.Context, p palette, s *settingsState) {
 			effortDescription = "当前模型不支持调整思考强度。"
 		}
 		section(c, p, "思考强度", effortDescription, func() {
-			options := [][2]string{}
-			for _, e := range effortOptions {
-				options = append(options, [2]string{e.Value, e.Label})
-			}
-			ui.Column(c).Disabled(!supports).Children(func() {
-				segmented(c, p, "思考强度", v.State.Effort, options, func(value string) { d.changeState("setEffort", map[string]any{"effort": value}) })
-			})
+			effortSlider(c, p, v.State.Effort, supports, func(value string) { d.changeState("setEffort", map[string]any{"effort": value}) })
 		})
 		section(c, p, "运行预算", "限制单次任务的资源上限。0 表示不限制，下一回合生效。", func() {
 			ui.Row(c).Gap(12).Children(func() {
@@ -254,21 +248,13 @@ func (d *desktop) settingsContent(c *ui.Context, p palette, s *settingsState) {
 		})
 	case "permissions":
 		section(c, p, "工具权限", "选择文件编辑与终端命令的批准方式。只读工具始终直接执行。", func() {
-			for _, option := range permissionOptions {
-				row := ui.ButtonBase(c).Label(option.Label).FillWidth().Padding(11, 14).Radius(12).Border(1, p.Border).Margin(0, 0, 8, 0)
-				if v.State.PermissionMode == option.Value {
-					row.BorderColor(p.Accent).Background(p.AccentSofter)
+			ui.Column(c).FillWidth().Gap(8).Role(ui.RoleRadioGroup).FocusGroup(ui.Vertical).Label("工具权限").Children(func() {
+				for i, option := range permissionOptions {
+					if permissionChoice(c, p, v.State.PermissionMode, i, false).Changed() {
+						d.changeState("setPermissionMode", map[string]any{"mode": option.Value})
+					}
 				}
-				row.Children(func() {
-					ui.Column(c).Gap(2).Children(func() {
-						ui.Text(c, option.Label).FontSize(p.font(12.32)).FontWeight(600)
-						muted(c, p, option.Detail).FontSize(p.font(10.92))
-					})
-				})
-				if row.Clicked() {
-					d.changeState("setPermissionMode", map[string]any{"mode": option.Value})
-				}
-			}
+			})
 		})
 		section(c, p, "本会话始终允许", "在审批卡片中选择“本会话始终允许”的工具，会在当前会话内自动批准。", func() {
 			if len(v.State.AlwaysAllow) == 0 {
@@ -430,7 +416,7 @@ func (d *desktop) modelSettings(c *ui.Context, p palette, s *settingsState) {
 		return
 	}
 	section(c, p, "当前模型", "切换模型在下一次请求生效；默认模型用于新会话。", func() {
-		options := []selectOption{}
+		options := []selectOption{{Value: "", Label: "请选择模型", Disabled: true}}
 		for _, m := range d.models {
 			label := m.Provider + " · " + m.Name
 			if m.Name == "" {
@@ -438,22 +424,29 @@ func (d *desktop) modelSettings(c *ui.Context, p palette, s *settingsState) {
 			}
 			options = append(options, selectOption{Value: m.ID, Label: label, Disabled: !m.Available})
 		}
-		settingsRow(c, p, "当前会话", "", func() {
-			selected := v.State.Model
-			if selectField(c, p, &selected, options).Label("当前会话模型").Width(320).Changed() {
-				d.changeState("setModel", map[string]any{"model": selected})
-			}
-		})
-		defaults := append([]selectOption{{Value: "", Label: "自动选择可用模型"}}, options...)
-		settingsRow(c, p, "默认模型", "", func() {
-			value := d.config.DefaultModel
-			if selectField(c, p, &value, defaults).Label("默认模型").Width(320).Changed() {
-				d.configAction(s, "setDefaultModel", map[string]any{"model": value}, nil)
-			}
+		ui.Column(c).FillWidth().Gap(16).Children(func() {
+			ui.Column(c).FillWidth().Gap(6).Children(func() {
+				muted(c, p, "当前会话")
+				selected := v.State.Model
+				if selectField(c, p, &selected, options).Label("当前会话模型").FillWidth().Disabled(len(d.models) == 0).Changed() {
+					d.changeState("setModel", map[string]any{"model": selected})
+				}
+			})
+			defaults := append([]selectOption{{Value: "", Label: "自动选择可用模型"}}, options[1:]...)
+			ui.Column(c).FillWidth().Gap(6).Children(func() {
+				muted(c, p, "默认模型")
+				value := d.config.DefaultModel
+				if selectField(c, p, &value, defaults).Label("默认模型").FillWidth().Disabled(len(d.models) == 0).Changed() {
+					d.configAction(s, "setDefaultModel", map[string]any{"model": value}, nil)
+				}
+			})
 		})
 	})
 	section(c, p, fmt.Sprintf("AI 服务 · %d", len(d.config.Services)), "", func() {
-		if button(c, p, "添加服务", "Plus", true).Clicked() {
+		if len(d.config.Services) == 0 {
+			empty(c, p, "尚未添加 AI 服务。填写接口地址、密钥和模型 ID，从零配置你的模型。")
+		}
+		if button(c, p, "添加服务", "Plus", true).Justify(ui.Start).Clicked() {
 			s.Service = &model.Service{APIStyle: "openai", Enabled: true, Models: []model.ServiceModel{}}
 			s.Found = nil
 			s.Status = ""

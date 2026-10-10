@@ -68,7 +68,7 @@ func clickInput(t *testing.T, tt *ui.Tester, label string) {
 }
 
 func TestNativeSnapshots(t *testing.T) {
-	for _, page := range []string{"home", "conversation", "approval", "files", "diff", "settings", "settings-model", "settings-subagents", "settings-about"} {
+	for _, page := range []string{"home", "conversation", "approval", "files", "diff", "settings", "settings-model", "settings-subagents", "settings-about", "settings-permissions", "settings-empty", "model-menu", "permission-menu", "collapsed"} {
 		t.Run(page, func(t *testing.T) {
 			r := newTestRig(t, page)
 			for _, theme := range []string{"light", "dark"} {
@@ -87,6 +87,137 @@ func TestNativeSnapshots(t *testing.T) {
 					t.Fatal(err)
 				}
 				_ = file.Close()
+			}
+		})
+	}
+}
+
+func TestPanelControlsAndCompactRail(t *testing.T) {
+	r := newTestRig(t, "home")
+	if _, ok := r.ui.Find("搜索"); ok {
+		t.Fatal("removed header controls still visible")
+	}
+	rect, ok := r.ui.Find("收拢左侧面板")
+	if !ok || rect.Y < 40 || rect.X < r.d.preferences.SidebarWidth-48 {
+		t.Fatalf("collapse control outside sidebar top right: %+v", rect)
+	}
+	click(t, r.ui, "收拢左侧面板")
+	rect, ok = r.ui.Find("展开左侧面板")
+	if !ok || rect.X > 44 || rect.Y > 48 {
+		t.Fatalf("collapsed control not at rail top: %+v", rect)
+	}
+	click(t, r.ui, "展开左侧面板")
+	if r.d.preferences.LeftCollapsed {
+		t.Fatal("sidebar did not reopen")
+	}
+	r.d.preferences.RightCollapsed = true
+	r.ui.Frame()
+	rect, ok = r.ui.Find("展开工作区")
+	if !ok || rect.X < 1460 {
+		t.Fatalf("work rail reserves excess width: %+v", rect)
+	}
+	click(t, r.ui, "展开工作区")
+	if r.d.preferences.RightCollapsed {
+		t.Fatal("work rail did not reopen")
+	}
+}
+
+func TestPermissionChoicesAlignAndApply(t *testing.T) {
+	for _, page := range []string{"settings-permissions", "permission-menu"} {
+		t.Run(page, func(t *testing.T) {
+			r := newTestRig(t, page)
+			var labelX float32
+			for i, option := range permissionOptions {
+				rect, ok := r.ui.Find(option.Detail)
+				if !ok || (i > 0 && rect.X != labelX) {
+					t.Fatalf("permission descriptions do not align: %+v", rect)
+				}
+				labelX = rect.X
+			}
+			click(t, r.ui, "自动编辑")
+			r.settle()
+			if r.d.current().State.PermissionMode != "accept_edits" {
+				t.Fatal("permission did not reach bridge")
+			}
+		})
+	}
+}
+
+func TestEffortSliderPointerKeyboardAndDisabled(t *testing.T) {
+	value, supported, commits := "off", true, 0
+	tt := ui.NewTester(func(c *ui.Context) {
+		ui.Column(c).Width(320).Padding(8).Children(func() {
+			effortSlider(c, colors(false), value, supported, func(next string) { value = next; commits++ })
+		})
+	}, 360, 150)
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	rect, ok := tt.Find("思考强度滑条")
+	if !ok {
+		t.Fatal("slider missing")
+	}
+	y := rect.Y + rect.H/2
+	tt.Press(rect.X+12, y)
+	tt.Move(rect.X+rect.W-12, y)
+	if commits != 0 {
+		t.Fatal("drag sent intermediate bridge updates")
+	}
+	tt.Release(rect.X+rect.W-12, y)
+	if value != "max" || commits != 1 {
+		t.Fatalf("drag result %s, commits %d", value, commits)
+	}
+	tt.Key(0, ui.KeyLeft)
+	if value != "xhigh" {
+		t.Fatal("arrow key did not step effort")
+	}
+	click(t, tt, "思考强度：中")
+	if value != "medium" {
+		t.Fatal("tick alternative did not apply")
+	}
+	supported = false
+	tt.Frame()
+	click(t, tt, "思考强度：最大")
+	if value != "medium" {
+		t.Fatal("disabled slider changed effort")
+	}
+}
+
+func TestModelMenuKeepsEffortAvailableAfterSwitch(t *testing.T) {
+	r := newTestRig(t, "model-menu")
+	click(t, r.ui, "切换至 fake")
+	r.settle()
+	if r.d.current().State.Model != "fake" || !r.d.modelOpen {
+		t.Fatal("model switch failed or closed controls")
+	}
+	if !r.ui.HasText("不可用") {
+		t.Fatal("unsupported model effort not disabled")
+	}
+	click(t, r.ui, "切换至 deepseek/deepseek-v4.1-flash")
+	r.settle()
+	click(t, r.ui, "思考强度：中")
+	r.settle()
+	if r.d.current().State.Effort != "medium" {
+		t.Fatal("menu effort did not reach bridge")
+	}
+}
+
+func TestChoiceSurfacesAtMinimumWindowAndLargeText(t *testing.T) {
+	for _, page := range []string{"model-menu", "permission-menu", "settings-permissions", "settings-empty"} {
+		t.Run(page, func(t *testing.T) {
+			r := newTestRig(t, page)
+			r.ui.SetSize(1030, 680)
+			r.ui.SetScale(1.5)
+			r.ui.SetPreferences(ui.Preferences{ReduceMotion: true, TextScale: 1.2})
+			labels := []string{"自动编辑", "全部允许"}
+			if page == "model-menu" {
+				labels = []string{"思考强度滑条", "管理模型与服务"}
+			} else if page == "settings-empty" {
+				labels = []string{"当前会话模型", "添加服务"}
+			}
+			for _, label := range labels {
+				rect, ok := r.ui.Find(label)
+				if !ok || rect.X < 0 || rect.Y < 0 || rect.X+rect.W > 1030 || rect.Y+rect.H > 680 {
+					t.Fatalf("%s is clipped at minimum size: %+v", label, rect)
+				}
 			}
 		})
 	}

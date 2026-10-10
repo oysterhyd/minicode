@@ -1,7 +1,7 @@
 {
   "name": "docs",
   "version": "0.1.0",
-  "minicode_version": "1.2.0",
+  "minicode_version": "1.2.1",
   "enabled": true,
   "mcp_servers": [
     {

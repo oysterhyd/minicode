@@ -40,7 +40,7 @@ try {
         if ($results.run_count -ne 2 -or $results.passed -ne 2) { throw 'Installed CLI evaluation failed' }
         $env:MINICODE_PYTHON = $python
         $env:MINICODE_BRIDGE = Join-Path $runtime 'bridge.py'
-        $tuiProbe = "const {BridgeClient}=await import('./dist/bridge.js');const {spawnBridge}=await import('./dist/launch.js');const c=new BridgeClient(spawnBridge({}));try{const state=await c.request('getState');if(state.protocolVersion!==2)throw Error('protocol');await c.request('setTuiProvider',{provider:'fake',model:'fake'});}finally{await c.close();}console.log('Packaged TUI bridge passed');"
+        $tuiProbe = "const {BridgeClient}=await import('./dist/bridge.js');const {spawnBridge}=await import('./dist/launch.js');const c=new BridgeClient(spawnBridge({}));try{const state=await c.request('getState');if(state.protocolVersion!==2)throw Error('protocol');const config=await c.request('getConfiguration');const models=await c.request('listModels');if(state.model!==''||config.services.length!==0||config.defaultModel!==''||models.length!==0)throw Error('fresh model configuration must be empty');await c.request('setTuiProvider',{provider:'fake',model:'fake'});}finally{await c.close();}console.log('Packaged TUI bridge and empty model configuration passed');"
         Push-Location (Join-Path $runtime 'tui')
         try { Run $node @('--input-type=module','-e',$tuiProbe) } finally { Pop-Location }
         $env:PATH = "$env:SystemRoot/System32"

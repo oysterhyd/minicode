@@ -112,7 +112,7 @@ class Bridge:
         self.policy = ModePolicy()
         self.configuration = HarnessConfiguration()
         configured = self.configuration.models()
-        self.model = self.configuration.read().get("defaultModel") or next((m["id"] for m in configured if m["available"]), configured[0]["id"] if configured else "")
+        self.model = self.configuration.read().get("defaultModel") or next((m["id"] for m in configured if m["available"]), "")
         self.effort = "off"
         self.budget = Budget()
         self.acceptance: Path | None = None
@@ -835,7 +835,7 @@ class BridgeRouter:
             for item in set(self.clients.values()) | set(self.sessions.values()):
                 selected = item.configuration.find_model(item.model)
                 if item.runtime is None and not any(m["id"] == item.model and m["available"] for m in item.configuration.models()):
-                    item.model = item.configuration.read().get("defaultModel") or next((m["id"] for m in item.configuration.models() if m["available"]), item.model)
+                    item.model = item.configuration.read().get("defaultModel") or next((m["id"] for m in item.configuration.models() if m["available"]), "")
                 if selected is not None and selected[0]["id"] == changed_id and selected[0]["enabled"] and item.configuration.credentials(selected[0])[1] and item.runtime:
                     item.pending_model = True
         current_session = context.runtime.session_id if context.runtime else None

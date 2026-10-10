@@ -27,6 +27,38 @@ def service(name="Gateway", model="same-model"):
                 enabled=True, models=[dict(modelId=model, name=model, contextWindow=1000000, maxOutputTokens=32000, supportsEffort=True)])
 
 
+def test_fresh_configuration_is_empty_even_with_provider_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-placeholder")
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "test-commandcode-placeholder")
+    config = HarnessConfiguration(tmp_path / "fresh.json")
+    monkeypatch.setattr(bridge_mod, "HarnessConfiguration", lambda: config)
+    assert config.read()["services"] == []
+    assert config.models() == []
+    assert config.public()["defaultModel"] == ""
+    assert not config.path.exists()
+    b = bridge_mod.Bridge(SqliteStore(":memory:"))
+    assert b.state()["model"] == ""
+    b.store.close()
+    config.save_service(service())
+    assert len(config.models()) == 1
+    assert config.read()["defaultModel"] == config.models()[0]["id"]
+    assert HarnessConfiguration(config.path).public() == config.public()
+
+
+def test_removing_last_service_clears_idle_model(configuration):
+    configuration.save_service(service())
+    async def scenario():
+        router = bridge_mod.BridgeRouter(SqliteStore(":memory:"))
+        initial = await router.handle("initialize", dict(clientKey="blank"))
+        assert initial["state"]["model"]
+        await router.handle("deleteService", dict(clientKey="blank", id=configuration.read()["services"][0]["id"]))
+        state = await router.handle("getState", dict(clientKey="blank"))
+        assert state["model"] == ""
+        assert configuration.read()["defaultModel"] == ""
+        await router.aclose()
+    asyncio.run(scenario())
+
+
 def test_service_persistence_and_secret_redaction(configuration):
     public = configuration.save_service(service())
     assert "test-private-key" not in json.dumps(public)

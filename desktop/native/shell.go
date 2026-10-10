@@ -14,10 +14,10 @@ func (d *desktop) view(c *ui.Context) {
 	p := d.theme(c)
 	ui.Column(c).Fill().Children(func() {
 		d.titlebar(c, p)
-		ui.Row(c).Grow(1).AlignItems(ui.Stretch).Padding(0, 8, 8, 0).Children(func() {
+		ui.Row(c).Grow(1).AlignItems(ui.Stretch).Padding(0, 4, 8, 0).Children(func() {
 			leftWidth := d.preferences.SidebarWidth
 			if d.preferences.LeftCollapsed {
-				leftWidth = 52
+				leftWidth = 44
 			}
 			ui.Column(c).Key("sidebar").Width(leftWidth).FillHeight().ClipX().Transition(panelMotion).Children(func() { d.sidebar(c, p) })
 			if !d.preferences.LeftCollapsed {
@@ -39,8 +39,8 @@ func (d *desktop) view(c *ui.Context) {
 				d.splitter(c, p, &d.preferences.WorkWidth, 280, 680, true)
 				ui.Column(c).Key("work").Width(d.preferences.WorkWidth).FillHeight().Clip().Border(1, p.Border).Radius(12).Background(p.Panel).Transition(panelMotion).Children(func() { d.workPanel(c, p) })
 			} else {
-				ui.Box(c).Width(8)
-				ui.Column(c).Key("work-rail").Width(48).Gap(4).Children(func() {
+				ui.Box(c).Width(4)
+				ui.Column(c).Key("work-rail").Width(32).AlignItems(ui.Center).Gap(4).Children(func() {
 					if iconButton(c, p, "PanelRightOpen", "展开工作区").Clicked() {
 						d.preferences.RightCollapsed = false
 						d.persist()
@@ -110,13 +110,6 @@ func (d *desktop) titlebar(c *ui.Context, p palette) {
 		ui.Row(c).Width(250).Gap(6).Children(func() {
 			ui.Image(c, logo).Size(18, 18).Radius(5)
 			ui.Text(c, "MiniCode").FontSize(p.font(11.9)).FontWeight(650).TextColor(p.Text2).Margin(0, 8, 0, 0)
-			if iconButton(c, p, "PanelLeft", "收拢左侧面板").Clicked() {
-				d.preferences.LeftCollapsed = !d.preferences.LeftCollapsed
-				d.persist()
-			}
-			if iconButton(c, p, "SquarePen", "新建任务").Clicked() {
-				d.newSession(v.Workspace)
-			}
 		})
 		ui.Row(c).Grow(1).Justify(ui.Center).Gap(6).Children(func() {
 			ui.Text(c, basename(v.Workspace)).FontSize(p.font(11.9)).TextColor(p.Text3).SingleLine()
@@ -143,16 +136,7 @@ func (d *desktop) titlebar(c *ui.Context, p palette) {
 				ui.Text(c, status).FontSize(p.font(9.8)).FontWeight(550).TextColor(color).NoWrap().Shrink(0)
 			})
 		})
-		ui.Row(c).Width(250).Justify(ui.End).Gap(6).Children(func() {
-			if button(c, p, "搜索", "Search", false).Height(26).FontSize(p.font(10.92)).Clicked() {
-				d.modal = "palette"
-				d.paletteQuery = ""
-			}
-			if iconButton(c, p, "PanelRight", "收拢右侧面板").Clicked() {
-				d.preferences.RightCollapsed = !d.preferences.RightCollapsed
-				d.persist()
-			}
-		})
+		ui.Box(c).Width(250)
 	})
 }
 
@@ -160,8 +144,9 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 	v := d.current()
 	if d.preferences.LeftCollapsed {
 		ui.Column(c).Fill().AlignItems(ui.Center).Gap(4).Children(func() {
-			if iconButton(c, p, "SquarePen", "新建任务").Size(34, 34).Clicked() {
-				d.newSession(v.Workspace)
+			if iconButton(c, p, "PanelLeftOpen", "展开左侧面板").Size(32, 32).Clicked() {
+				d.preferences.LeftCollapsed = false
+				d.persist()
 			}
 			if iconButton(c, p, "FolderOpen", "打开工作区").Size(34, 34).Clicked() {
 				d.chooseWorkspace()
@@ -183,14 +168,13 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 	}
 	ui.Column(c).Fill().Children(func() {
 		ui.Column(c).Padding(2, 8, 8, 10).Gap(6).Children(func() {
-			newTask := button(c, p, "新建任务", "SquarePen", false).Height(34).Padding(0, 8, 0, 10).Gap(8).Justify(ui.Start).Background(p.Main).TextColor(p.Text).FillWidth()
-			newTask.Children(func() {
+			ui.Row(c).FillWidth().Height(32).Children(func() {
 				ui.Spacer(c)
-				badge(c, p, "Ctrl N", p.Text3, p.Elevated).Border(1, p.Border).Radius(4).FontSize(p.font(9.24))
+				if iconButton(c, p, "PanelLeft", "收拢左侧面板").Clicked() {
+					d.preferences.LeftCollapsed = true
+					d.persist()
+				}
 			})
-			if newTask.Clicked() {
-				d.newSession(v.Workspace)
-			}
 			search := ui.Row(c).Height(30).Padding(0, 10).Gap(7).Radius(8)
 			if search.Hovered() || search.FocusWithin() {
 				search.Background(p.Hover)

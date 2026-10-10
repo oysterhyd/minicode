@@ -26,7 +26,7 @@ var mentionPattern = regexp.MustCompile(`(?:^|\s)@([^\s@]*)$`)
 var permissionOptions = []struct{ Value, Label, Detail string }{
 	{"default", "逐项确认", "每一次写入、编辑和命令执行都需要你批准。"},
 	{"accept_edits", "自动编辑", "自动批准文件编辑，终端命令仍需确认。"},
-	{"bypass", "全部允许", "自动执行所有工具，请确认当前工作区与工具可信。"},
+	{"bypass", "全部允许", "自动执行所有工具，请确认工作区与工具可信。"},
 }
 var effortOptions = []struct{ Value, Label string }{
 	{"off", "关闭"}, {"low", "低"}, {"medium", "中"}, {"high", "高"}, {"xhigh", "很高"}, {"max", "最大"},
@@ -325,7 +325,7 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 					}
 				}
 			}
-			ui.Row(c).Padding(6, 8, 8, 8).Gap(4).Children(func() {
+			ui.Row(c).Wrap().Padding(6, 8, 8, 8).Gap(4).Children(func() {
 				if iconButton(c, p, "AtSign", "引用文件").Size(30, 30).Radius(99).Disabled(v.Workspace == "").Clicked() {
 					anchor, caret := input.TextSelection()
 					v.Draft = input.ReplaceSelection(anchor, caret, "@")
@@ -442,10 +442,13 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 		}
 	}
 	if label == "" {
-		label = "切换模型"
+		label = "配置模型"
 	}
-	chip := button(c, p, label, "Cpu", false).Label("切换模型").Height(30).Radius(99).Border(0, ui.Transparent).FontSize(p.font(11.2)).MaxWidth(220)
+	chip := styleButton(ui.ButtonBase(c).Label("切换模型"), p, false).Height(30).Radius(99).Border(0, ui.Transparent).FontSize(p.font(11.2)).MaxWidth(260)
 	chip.Children(func() {
+		icon(c, "Cpu", 14, p.Text3)
+		textWidth, _ := c.MeasureText(0, ui.Span{Text: label, Size: p.font(11.2), Weight: 550})
+		ui.Text(c, label).SingleLine().Width(min(180, textWidth+2)).Shrink(1).Tooltip(label)
 		if v.State.Effort != "" && v.State.Effort != "off" {
 			for _, effort := range effortOptions {
 				if effort.Value == v.State.Effort {
@@ -469,34 +472,51 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 		if !home {
 			panel.AttachTo(chip, ui.AnchorTopLeft, ui.AnchorBottomLeft)
 		}
-		panel.Width(290).Padding(4).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2))
+		panel.Width(320).Padding(8).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2))
 		panel.FocusGroup(ui.Vertical)
-		muted(c, p, "切换模型").Padding(5, 8).FontSize(p.font(10.08))
-		for _, m := range d.models {
-			name := m.Name
-			if name == "" {
-				name = m.ID
-			}
-			row := button(c, p, name, "", false).FillWidth().Height(40).Border(0, ui.Transparent).Disabled(!m.Available && m.ID != v.State.Model)
-			if m.ID == v.State.Model {
-				row.AutoFocus()
-			}
-			if row.Clicked() {
-				d.modelOpen = false
-				d.changeState("setModel", map[string]any{"model": m.ID})
-			}
-		}
-		muted(c, p, "思考强度").Padding(6, 8)
-		ui.Row(c).Gap(2).Children(func() {
-			for _, effort := range effortOptions {
-				if button(c, p, effort.Label, "", false).Padding(0, 6).FontSize(p.font(10.5)).Disabled(!supports).Clicked() {
-					d.modelOpen = false
-					d.changeState("setEffort", map[string]any{"effort": effort.Value})
+		muted(c, p, "切换模型").Padding(4, 8, 8, 8).FontSize(p.font(10.36))
+		if len(d.models) == 0 {
+			muted(c, p, "尚未配置模型，添加你的 AI 服务后开始使用。").Padding(8).FontSize(p.font(11.2))
+		} else {
+			ui.Scroll(c).FillWidth().MaxHeight(240).Children(func() {
+				for _, m := range d.models {
+					name := m.Name
+					if name == "" {
+						name = m.ID
+					}
+					selected := m.ID == v.State.Model
+					row := ui.ButtonBase(c).Label("切换至 "+m.ID).FillWidth().Height(52).Padding(8, 10).Gap(10).Justify(ui.Start).Radius(8).
+						Role(ui.RoleRadio).Checked(selected).Disabled(!m.Available).Transition(fastMotion)
+					if selected {
+						row.Background(p.AccentSofter).AutoFocus()
+					} else if row.Hovered() {
+						row.Background(p.Hover)
+					}
+					row.Children(func() {
+						ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(3).Children(func() {
+							ui.Text(c, name).SingleLine().FontSize(p.font(12.04)).FontWeight(550)
+							detail := m.Provider
+							if !m.Available {
+								detail += " · 未配置或未启用"
+							}
+							muted(c, p, detail).SingleLine().FontSize(p.font(10.36))
+						})
+						if selected {
+							icon(c, "Check", 15, p.Accent)
+						}
+					})
+					if row.Clicked() {
+						d.changeState("setModel", map[string]any{"model": m.ID})
+					}
 				}
-			}
-		})
-		if !supports {
-			muted(c, p, "当前模型不支持").Padding(4, 8)
+			})
+			ui.Column(c).FillWidth().Padding(12, 8, 8, 8).Margin(8, 0, 0, 0).BorderWidth(1, 0, 0, 0).BorderColor(p.BorderSubtle).Children(func() {
+				effortSlider(c, p, v.State.Effort, supports, func(value string) { d.changeState("setEffort", map[string]any{"effort": value}) })
+			})
+		}
+		if button(c, p, "管理模型与服务", "Settings2", false).FillWidth().Justify(ui.Start).Border(0, ui.Transparent).Margin(4, 0, 0, 0).Clicked() {
+			d.modelOpen = false
+			d.openSettings("model")
 		}
 	})
 }
@@ -527,23 +547,14 @@ func (d *desktop) permissionMenu(c *ui.Context, p palette, home bool) {
 		if !home {
 			panel.AttachTo(chip, ui.AnchorTopLeft, ui.AnchorBottomLeft)
 		}
-		panel.Width(290).Padding(4).Radius(12).Border(1, p.Border).Background(p.Elevated)
+		panel.Width(340).Padding(6).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2))
 		panel.FocusGroup(ui.Vertical)
-		for _, option := range permissionOptions {
-			row := ui.ButtonBase(c).Label(option.Label).FillWidth().Padding(7, 8).Radius(6)
+		for i, option := range permissionOptions {
+			row := permissionChoice(c, p, v.State.PermissionMode, i, true)
 			if option.Value == v.State.PermissionMode {
 				row.AutoFocus()
 			}
-			if row.Hovered() {
-				row.Background(p.Hover)
-			}
-			row.Children(func() {
-				ui.Column(c).Gap(2).Children(func() {
-					ui.Text(c, option.Label).FontSize(p.font(12.04))
-					muted(c, p, option.Detail).FontSize(p.font(10.36))
-				})
-			})
-			if row.Clicked() {
+			if row.Changed() {
 				d.permissionOpen = false
 				d.changeState("setPermissionMode", map[string]any{"mode": option.Value})
 			}

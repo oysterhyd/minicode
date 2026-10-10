@@ -39,16 +39,7 @@ class HarnessConfiguration:
                     or not isinstance(data.get("agents"), list)):
                 raise ValueError("harness configuration must contain services and agents lists")
             return data
-        discovered = discover_commandcode()
-        services = []
-        for provider, label, url in [("commandcode", "CommandCode", discovered[0] if discovered else "https://api.commandcode.ai/provider/v1"), ("anthropic", "Anthropic", "https://api.anthropic.com")]:
-            services.append(dict(id=provider, name=label, baseUrl=url,
-                                 apiStyle="anthropic" if provider == "anthropic" else "openai",
-                                 apiKey="", enabled=True, builtin=True,
-                                 models=[dict(modelId=i.name, name=i.name, contextWindow=i.context_window,
-                                              maxOutputTokens=i.max_output_tokens or 8192, supportsEffort=i.supports_effort)
-                                         for i in MODEL_CATALOG.values() if i.provider == provider]))
-        return dict(services=services, agents=[], disabledAgents=[], defaultModel="")
+        return dict(services=[], agents=[], disabledAgents=[], defaultModel="")
 
     def write(self, data):
         self.path.parent.mkdir(parents=True, exist_ok=True)

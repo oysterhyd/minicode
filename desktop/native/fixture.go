@@ -202,6 +202,20 @@ func loadFixture(d *desktop, page string) {
 	v.Files = fixturePaths()
 	v.Changes = fixtureChanges()
 	switch {
+	case page == "model-menu":
+		v.State.Model = models[1].ID
+		v.State.Effort = "high"
+		d.modelOpen = true
+	case page == "permission-menu":
+		d.permissionOpen = true
+	case page == "collapsed":
+		d.preferences.LeftCollapsed = true
+		d.preferences.RightCollapsed = true
+	case page == "settings-empty":
+		d.models = nil
+		d.config.Services = nil
+		v.State.Model = ""
+		d.settings = &settingsState{Tab: "model", Budget: [3]string{"0", "0", "0"}, OpenModels: map[int]bool{}}
 	case page == "conversation" || page == "approval":
 		v.SessionID = "audit"
 		v.State.SessionID = "audit"
