@@ -147,13 +147,20 @@ class Bridge:
                 continue
             usage = event.data.get("usage", {})
             seconds = event.data.get("request_seconds")
+            generation = event.data.get("generation_seconds")
             samples.append({"round": len(samples) + 1, "input": usage.get("input_tokens", 0), "output": usage.get("output_tokens", 0),
                             "cached": usage.get("cache_read_tokens", 0), "available": usage.get("available", True),
-                            "seconds": seconds, "tps": usage.get("output_tokens", 0) / seconds if seconds and usage.get("available", True) else None})
-        measured = [s for s in samples if s["seconds"] and s["available"]]
+                            "seconds": seconds, "generationSeconds": generation,
+                            "firstTokenSeconds": event.data.get("first_token_seconds"),
+                            "requestTps": usage.get("output_tokens", 0) / seconds if seconds and seconds > 0 and usage.get("available", True) else None,
+                            "tps": usage.get("output_tokens", 0) / generation if generation and generation > 0 and usage.get("available", True) else None})
+        measured = [s for s in samples if s["seconds"] and s["seconds"] > 0 and s["available"]]
         seconds = sum(s["seconds"] for s in measured)
+        generated = [s for s in samples if s["tps"] is not None]
+        generation_seconds = sum(s["generationSeconds"] for s in generated)
         return {"toolCalls": sum(e.type.value == "tool_call_start" for e in events), "requests": len(samples),
-                "modelSeconds": seconds, "tps": sum(s["output"] for s in measured) / seconds if seconds else None,
+                "modelSeconds": seconds, "tps": sum(s["output"] for s in generated) / generation_seconds if generation_seconds else None,
+                "requestTps": sum(s["output"] for s in measured) / seconds if seconds else None,
                 "lastTps": samples[-1]["tps"] if samples else None, "samples": samples[-32:]}
 
     def emit(self, message: dict) -> None:

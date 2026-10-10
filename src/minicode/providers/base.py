@@ -47,6 +47,10 @@ class ResponseDone:
     """Terminal stream event carrying the fully assembled response."""
 
     response: ModelResponse
+    # Client-observed generation interval, including reasoning/tool arguments.
+    # None for a single buffered chunk or adapters without timing support.
+    generation_seconds: float | None = None
+    first_token_seconds: float | None = None
 
 
 StreamEvent = TextDelta | ResponseDone

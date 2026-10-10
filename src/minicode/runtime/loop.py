@@ -681,6 +681,8 @@ class AgentRuntime:
                                   "total_tokens": response.usage.total_tokens},
                         "stop_reason": response.stop_reason.value,
                         "request_seconds": getattr(self, "_request_seconds", 0.0),
+                        "generation_seconds": getattr(self, "_generation_seconds", None),
+                        "first_token_seconds": getattr(self, "_first_token_seconds", None),
                     }
                     commit = getattr(self._store, "checkpoint", None)
                     counters = self._counter_values(next_usage)
@@ -932,6 +934,8 @@ class AgentRuntime:
             settled=lambda call_id: bool(lookup(self.session_id, call_id)) if lookup else False,
         )
         self._request_seconds = result.duration_s
+        self._generation_seconds = result.generation_seconds
+        self._first_token_seconds = result.first_token_seconds
         if result.usage_uncertain:
             self._usage = self._usage.model_copy(update={"available": False})
         return result.response, result.failure, str(result.error) if result.error else None, result.error

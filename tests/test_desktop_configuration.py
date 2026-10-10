@@ -181,7 +181,8 @@ def test_statistics_survive_resume_and_exclude_unmeasured_tps(configuration, tmp
         b.store.append_event(sid, EventType.ASSISTANT_MESSAGE, {"usage": Usage(input_tokens=200, output_tokens=30).model_dump()})
         await b.handle("selectSession", {"sessionId": sid})
         stats = b.state()["statistics"]
-        assert stats["requests"] == 2 and stats["tps"] == 10
+        assert stats["requests"] == 2 and stats["requestTps"] == 10
+        assert stats["tps"] is None  # Old total-request timing is not generation timing.
         assert stats["samples"][0]["cached"] == 60
         assert stats["samples"][1]["tps"] is None
         assert b.runtime.usage.input_tokens == 300
@@ -196,6 +197,42 @@ def test_desktop_initialization_has_no_offline_model(configuration):
         initial = await b.handle("initialize", {})
         assert all(m["id"] != "fake" for m in initial["models"])
         assert initial["state"]["model"] != "fake"
+        b.store.close()
+    asyncio.run(scenario())
+
+
+def test_generation_statistics_are_weighted_and_persisted(configuration, tmp_path, monkeypatch):
+    from minicode.core.models import EventType
+    from minicode.providers.base import ResponseDone
+
+    class TimedProvider(FakeProvider):
+        async def stream(self, **kwargs):
+            async for event in super().stream(**kwargs):
+                if isinstance(event, ResponseDone):
+                    event.generation_seconds = 2
+                    event.first_token_seconds = 5
+                yield event
+
+    monkeypatch.setattr(bridge_mod, "provider_for", lambda *_: TimedProvider())
+    async def scenario():
+        b = bridge_mod.Bridge(SqliteStore(tmp_path / "generation.sqlite"))
+        await b.create_runtime(tmp_path, "fake", None)
+        await b.runtime.run_turn("hello")
+        sid = b.runtime.session_id
+        event = next(e for e in b.store.get_events(sid) if e.type == EventType.ASSISTANT_MESSAGE)
+        assert event.data["generation_seconds"] == 2 and event.data["first_token_seconds"] == 5
+        output = event.data["usage"]["output_tokens"]
+        for usage, timing in [(Usage(output_tokens=1200), 4), (Usage(output_tokens=9999, available=False), 1)]:
+            b.store.append_event(sid, EventType.ASSISTANT_MESSAGE, {"usage": usage.model_dump(), "generation_seconds": timing, "request_seconds": 10})
+        b.store.append_event(sid, EventType.ASSISTANT_MESSAGE, {"usage": Usage(output_tokens=100).model_dump(), "request_seconds": 10})
+        stats = b.statistics()
+        assert stats["tps"] == (output + 1200) / 6
+        assert stats["samples"][1]["tps"] == 300
+        assert stats["samples"][2]["tps"] is None and stats["samples"][3]["tps"] is None
+        assert stats["lastTps"] is None
+        await b.handle("selectSession", {"sessionId": sid})
+        assert b.statistics()["tps"] == stats["tps"]
+        await b.discard_runtime()
         b.store.close()
     asyncio.run(scenario())
 

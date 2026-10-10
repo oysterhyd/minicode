@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any, AsyncIterator
 
 import httpx
@@ -180,11 +181,13 @@ def _to_int(value: Any) -> int:
         return 0
 
 
-async def _bounded_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
+async def _bounded_sse_lines(response: httpx.Response) -> AsyncIterator[tuple[str, float]]:
     """Bound raw transport and unterminated lines before JSON materialization."""
     pending = bytearray()
     captured = 0
+    received = 0.0
     async for chunk in response.aiter_bytes():
+        received = time.monotonic()
         captured += len(chunk)
         if captured > MAX_SSE_BYTES:
             raise ProviderProtocolError("SSE stream exceeds the capture limit")
@@ -196,10 +199,10 @@ async def _bounded_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
                     raise ProviderProtocolError("SSE line exceeds the capture limit")
                 pending.extend(part)
                 if index < len(parts) - 1:
-                    yield pending.decode("utf-8", errors="replace")
+                    yield pending.decode("utf-8", errors="replace"), received
                     pending.clear()
     if pending:
-        yield pending.decode("utf-8", errors="replace")
+        yield pending.decode("utf-8", errors="replace"), received
 
 
 def _absorb_tool_call_delta(
@@ -388,6 +391,8 @@ class CommandCodeProvider:
         finish_reason: str | None = None
         usage = Usage(available=False)
         terminated = False
+        started = time.monotonic()
+        first_output = last_output = None
 
         try:
             # The host closes the provider at the end of its event-loop life.
@@ -411,7 +416,7 @@ class CommandCodeProvider:
                             pass
                         raise error
 
-                    async for line in _bounded_sse_lines(response):
+                    async for line, received in _bounded_sse_lines(response):
                         line = line.strip()
                         if not line.startswith(_DATA_PREFIX):
                             continue  # blank lines, SSE comments, "event:" lines
@@ -434,6 +439,10 @@ class CommandCodeProvider:
                             if isinstance(choice, dict):
                                 delta = choice.get("delta")
                                 if isinstance(delta, dict):
+                                    if any(delta.get(key) for key in ("content", "reasoning_content", "reasoning", "tool_calls")):
+                                        last_output = received
+                                        if first_output is None:
+                                            first_output = last_output
                                     # Reasoning-only chunks have content=None: skipped.
                                     content = delta.get("content")
                                     if isinstance(content, str) and content:
@@ -527,5 +536,7 @@ class CommandCodeProvider:
             else StopReason.END_TURN
         )
         yield ResponseDone(
-            response=ModelResponse(blocks=blocks, stop_reason=stop_reason, usage=usage)
+            response=ModelResponse(blocks=blocks, stop_reason=stop_reason, usage=usage),
+            generation_seconds=last_output - first_output if first_output is not None and last_output > first_output else None,
+            first_token_seconds=first_output - started if first_output is not None else None,
         )

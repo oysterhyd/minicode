@@ -125,6 +125,48 @@ def base_user_message() -> list[Message]:
     return [Message(role="user", content=[TextBlock(text="hi")])]
 
 
+@pytest.mark.parametrize("kind", ["text", "reasoning", "tool"])
+def test_generation_timing_excludes_wait_and_usage_tail(monkeypatch, kind):
+    from types import SimpleNamespace
+    from minicode.providers import commandcode
+    now = [0.0]
+    monkeypatch.setattr(commandcode, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    if kind == "tool":
+        outputs = [
+            {"tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "read", "arguments": '{"path":'}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": '"README.md"}'}}]},
+        ]
+    elif kind == "reasoning":
+        outputs = [{"reasoning_content": "thinking"}, {"content": "answer"}]
+    else:
+        outputs = [{"content": "hello"}, {"content": " world"}]
+
+    class TimedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for at, chunk in [
+                (2, {"choices": [{"delta": {"role": "assistant"}}]}),
+                (5, {"choices": [{"delta": outputs[0]}]}),
+                (7, {"choices": [{"delta": outputs[1]}]}),
+                (9, {"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+                (10, {"usage": {"completion_tokens": 600}}),
+            ]:
+                now[0] = at
+                yield sse_body([chunk], done=False)
+            now[0] = 12
+            yield b"data: [DONE]\n\n"
+
+    provider, _ = make_provider(lambda _: httpx.Response(200, stream=TimedStream()))
+    done = run_stream(provider)[-1]
+    assert done.generation_seconds == 2
+    assert done.first_token_seconds == 5
+    assert done.response.usage.output_tokens / done.generation_seconds == 300
+
+
+def test_buffered_response_has_no_fabricated_generation_speed():
+    provider, _ = make_provider(lambda _: sse_response([text_delta("hello"), text_delta(" world")]))
+    assert run_stream(provider)[-1].generation_seconds is None
+
+
 # ---------------------------------------------------------------------------
 # 1. Happy path: text deltas, usage, request shape
 # ---------------------------------------------------------------------------

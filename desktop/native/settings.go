@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,7 +54,7 @@ func section(c *ui.Context, p palette, title, description string, fn func()) {
 
 func settingsRow(c *ui.Context, p palette, label, description string, fn func()) {
 	ui.Row(c).MinHeight(48).Padding(6, 0).Gap(16).Children(func() {
-		ui.Column(c).Grow(1).Gap(1).Children(func() {
+		ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(1).Children(func() {
 			ui.Text(c, label).FontSize(p.font(12.32)).FontWeight(550)
 			if description != "" {
 				muted(c, p, description).FontSize(p.font(10.92))
@@ -78,11 +77,21 @@ func field(c *ui.Context, p palette, label string, value *string, password bool)
 }
 
 func numericField(c *ui.Context, p palette, label string, value *int, minimum int) {
-	ui.Column(c).Gap(5).Children(func() {
+	root := ui.Column(c).FillWidth().Gap(5)
+	text := ui.Local(root, "number", func() string { return strconv.Itoa(*value) })
+	root.Children(func() {
 		ui.Text(c, label).FontSize(p.font(11.48)).TextColor(p.Text2)
-		n := float64(*value)
-		if ui.NumberInput(c, &n, float64(minimum), math.MaxInt32, 1).Label(label).Height(32).FillWidth().Changed() {
-			*value = int(n)
+		input := ui.TextInput(c, text).Label(label).Height(32).FillWidth().FontSize(p.font(11.76))
+		if input.Changed() {
+			if n, err := strconv.Atoi(*text); err == nil && n >= minimum && n <= 2147483647 {
+				*value = n
+			}
+		}
+		if !input.Focused() {
+			*text = strconv.Itoa(*value)
+		}
+		if n, err := strconv.Atoi(*text); err != nil || n < minimum || n > 2147483647 {
+			ui.Text(c, fmt.Sprintf("请输入 %d 至 2147483647 的整数", minimum)).FontSize(p.font(10.36)).TextColor(p.Danger)
 		}
 	})
 }
@@ -135,19 +144,31 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 					label = tab.Label
 				}
 			}
-			ui.Row(c).Height(56).Padding(0, 12, 0, 28).Children(func() {
+			ui.Row(c).Height(56).Shrink(0).Padding(0, 12, 0, 28).Children(func() {
 				ui.Text(c, label).FontSize(p.font(14.7)).FontWeight(650).Grow(1)
 				if iconButton(c, p, "X", "关闭设置").Clicked() {
 					open = false
 				}
 			})
-			if s.Error != "" {
-				ui.Text(c, s.Error).Margin(0, 28, 10, 28).Padding(8, 12).Radius(8).Background(p.DangerSoft).FontSize(p.font(11.48))
+			ui.Scroll(c).Key(fmt.Sprintf("%s-%t", s.Tab, s.Service != nil)).Grow(1).Basis(0).MinHeight(0).Padding(0, 28, 28, 28).Children(func() {
+				if s.Error != "" {
+					ui.Text(c, s.Error).Margin(0, 0, 10, 0).Padding(8, 12).Radius(8).Background(p.DangerSoft).FontSize(p.font(11.48))
+				}
+				if d.current().Busy {
+					ui.Text(c, "模型与思考强度在下一次请求生效，预算在下一回合生效。").Margin(0, 0, 10, 0).Padding(8, 12).Radius(8).Background(p.WarningSoft).FontSize(p.font(11.48))
+				}
+				d.settingsContent(c, p, s)
+			})
+			if s.Tab == "model" && s.Service != nil {
+				ui.Row(c).Shrink(0).Padding(12, 28).Gap(8).BorderWidth(1, 0, 0, 0).BorderColor(p.BorderSubtle).Children(func() {
+					if button(c, p, "保存服务", "", true).Disabled(s.Working).Clicked() {
+						d.configAction(s, "saveService", map[string]any{"service": *s.Service}, func() { s.Service = nil })
+					}
+					if button(c, p, "取消", "", false).Disabled(s.Working).Clicked() {
+						s.Service = nil
+					}
+				})
 			}
-			if d.current().Busy {
-				ui.Text(c, "设置可随时修改。模型与思考强度在下一次请求生效；预算、插件与 MCP 在下一回合生效；验收配置用于新会话。").Margin(0, 28, 10, 28).Padding(8, 12).Radius(8).Background(p.WarningSoft).FontSize(p.font(11.48))
-			}
-			ui.Scroll(c).Key(s.Tab).Grow(1).Padding(0, 28, 28, 28).Transition(enterMotion).Children(func() { d.settingsContent(c, p, s) })
 		})
 	})
 	if !open {
@@ -415,6 +436,10 @@ func (d *desktop) modelSettings(c *ui.Context, p palette, s *settingsState) {
 		d.serviceEditor(c, p, s)
 		return
 	}
+	d.serviceSettings(c, p, s)
+	if len(d.models) == 0 || s.Service != nil {
+		return
+	}
 	section(c, p, "当前模型", "切换模型在下一次请求生效；默认模型用于新会话。", func() {
 		options := []selectOption{{Value: "", Label: "请选择模型", Disabled: true}}
 		for _, m := range d.models {
@@ -442,7 +467,10 @@ func (d *desktop) modelSettings(c *ui.Context, p palette, s *settingsState) {
 			})
 		})
 	})
-	section(c, p, fmt.Sprintf("AI 服务 · %d", len(d.config.Services)), "", func() {
+}
+
+func (d *desktop) serviceSettings(c *ui.Context, p palette, s *settingsState) {
+	section(c, p, fmt.Sprintf("AI 服务 · %d", len(d.config.Services)), "配置接口与模型，新服务从空白开始。", func() {
 		if len(d.config.Services) == 0 {
 			empty(c, p, "尚未添加 AI 服务。填写接口地址、密钥和模型 ID，从零配置你的模型。")
 		}
@@ -450,6 +478,8 @@ func (d *desktop) modelSettings(c *ui.Context, p palette, s *settingsState) {
 			s.Service = &model.Service{APIStyle: "openai", Enabled: true, Models: []model.ServiceModel{}}
 			s.Found = nil
 			s.Status = ""
+			s.ModelQuery, s.CustomModel = "", ""
+			s.OpenModels = map[int]bool{}
 		}
 		for _, service := range d.config.Services {
 			settingsRow(c, p, service.Name, service.BaseURL+fmt.Sprintf(" · %d 个模型", len(service.Models)), func() {
@@ -460,6 +490,8 @@ func (d *desktop) modelSettings(c *ui.Context, p palette, s *settingsState) {
 					s.Service = &copy
 					s.Found = nil
 					s.Status = ""
+					s.ModelQuery, s.CustomModel = "", ""
+					s.OpenModels = map[int]bool{}
 				}
 				on := service.Enabled
 				if toggle(c, p, &on, "启用 "+service.Name).Changed() {
@@ -522,76 +554,85 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 					}
 				})
 			}
-			muted(c, p, s.Status)
 		})
-		ui.Row(c).Gap(16).AlignItems(ui.Start).Children(func() {
-			ui.Column(c).Grow(1).Basis(0).Gap(8).Children(func() {
-				ui.Text(c, "该服务的模型").FontSize(p.font(12.04)).FontWeight(600)
-				field(c, p, "搜索服务模型", &s.ModelQuery, false)
-				if len(s.Found) == 0 {
-					empty(c, p, "获取列表，或手动添加模型 ID。")
-				}
-				for _, found := range s.Found {
-					if !strings.Contains(strings.ToLower(found.ModelID), strings.ToLower(s.ModelQuery)) {
-						continue
+		if s.Status != "" {
+			muted(c, p, s.Status).FontSize(p.font(11.2))
+		}
+	})
+	section(c, p, "添加模型", "获取服务列表或输入模型 ID。", func() {
+		ui.Column(c).FillWidth().Gap(12).Children(func() {
+			ui.Row(c).FillWidth().Gap(8).Children(func() {
+				ui.TextInput(c, &s.CustomModel).Label("自定义模型 ID").Placeholder("输入模型 ID").Grow(1).Basis(0).MinWidth(0).Height(32)
+				if button(c, p, "添加", "Plus", false).Disabled(strings.TrimSpace(s.CustomModel) == "").Clicked() {
+					id := strings.TrimSpace(s.CustomModel)
+					if !slices.ContainsFunc(service.Models, func(m model.ServiceModel) bool { return m.ModelID == id }) {
+						service.Models = append(service.Models, model.ServiceModel{ModelID: id, Name: id, ContextWindow: 200000, MaxOutput: 8192})
+						s.OpenModels[len(service.Models)-1] = true
 					}
-					selected := slices.ContainsFunc(service.Models, func(m model.ServiceModel) bool { return m.ModelID == found.ModelID })
-					if ui.Checkbox(c, &selected, found.ModelID).Changed() {
-						if selected {
-							service.Models = append(service.Models, found)
-						} else {
-							service.Models = slices.DeleteFunc(service.Models, func(m model.ServiceModel) bool { return m.ModelID == found.ModelID })
-						}
-					}
+					s.CustomModel = ""
 				}
 			})
-			ui.Column(c).Grow(1).Basis(0).Gap(8).Children(func() {
-				ui.Text(c, fmt.Sprintf("模型设置 · %d", len(service.Models))).FontSize(p.font(12.04)).FontWeight(600)
-				remove := -1
-				for i := range service.Models {
-					m := &service.Models[i]
-					ui.Column(c).Key(i).Border(1, p.Border).Radius(8).Padding(8).Gap(8).Children(func() {
-						label := m.Name
-						if label == "" {
-							label = m.ModelID
-						}
-						if button(c, p, label, "ChevronDown", false).FillWidth().Border(0, ui.Transparent).Clicked() {
-							s.OpenModels[i] = !s.OpenModels[i]
-						}
-						if s.OpenModels[i] {
-							field(c, p, "模型 ID", &m.ModelID, false)
-							field(c, p, "显示名称", &m.Name, false)
-							numericField(c, p, "上下文窗口", &m.ContextWindow, 2)
-							numericField(c, p, "输出上限", &m.MaxOutput, 1)
-							ui.Checkbox(c, &m.SupportsEffort, "支持思考强度（OpenAI 兼容接口）").Disabled(service.APIStyle != "openai")
-							if button(c, p, "移除模型", "Trash2", false).Clicked() {
-								remove = i
+			if len(s.Found) > 0 {
+				ui.Column(c).FillWidth().Gap(8).Children(func() {
+					field(c, p, "搜索服务模型", &s.ModelQuery, false)
+					ui.Scroll(c).FillWidth().MaxHeight(180).Children(func() {
+						for _, found := range s.Found {
+							if !strings.Contains(strings.ToLower(found.ModelID), strings.ToLower(s.ModelQuery)) {
+								continue
+							}
+							selected := slices.ContainsFunc(service.Models, func(m model.ServiceModel) bool { return m.ModelID == found.ModelID })
+							if ui.Checkbox(c, &selected, found.ModelID).Changed() {
+								if selected {
+									service.Models = append(service.Models, found)
+								} else {
+									service.Models = slices.DeleteFunc(service.Models, func(m model.ServiceModel) bool { return m.ModelID == found.ModelID })
+								}
 							}
 						}
 					})
-				}
-				if remove >= 0 {
-					service.Models = append(service.Models[:remove], service.Models[remove+1:]...)
-				}
-				ui.Row(c).Gap(6).Children(func() {
-					ui.TextInput(c, &s.CustomModel).Label("自定义模型 ID").Placeholder("输入模型 ID").Grow(1)
-					if button(c, p, "添加", "Plus", false).Disabled(strings.TrimSpace(s.CustomModel) == "").Clicked() {
-						id := strings.TrimSpace(s.CustomModel)
-						if !slices.ContainsFunc(service.Models, func(m model.ServiceModel) bool { return m.ModelID == id }) {
-							service.Models = append(service.Models, model.ServiceModel{ModelID: id, Name: id, ContextWindow: 200000, MaxOutput: 8192})
-							s.OpenModels[len(service.Models)-1] = true
+				})
+			}
+		})
+	})
+	section(c, p, fmt.Sprintf("已配置模型 · %d", len(service.Models)), "展开模型，编辑名称、上下文窗口与输出上限。", func() {
+		ui.Column(c).FillWidth().Gap(12).Children(func() {
+			if len(service.Models) == 0 {
+				empty(c, p, "尚未添加模型。")
+			}
+			remove := -1
+			for i := range service.Models {
+				m := &service.Models[i]
+				ui.Column(c).Key(i).FillWidth().Border(1, p.Border).Radius(10).Padding(14).Gap(12).Children(func() {
+					label := m.Name
+					if label == "" {
+						label = m.ModelID
+					}
+					head := ui.ButtonBase(c).Label("编辑模型 " + m.ModelID).FillWidth().Height(28).Gap(8).Justify(ui.Start)
+					head.Children(func() {
+						ui.Text(c, label).SingleLine().Grow(1).Basis(0).MinWidth(0).FontSize(p.font(12.04)).FontWeight(600)
+						icon(c, map[bool]string{true: "ChevronDown", false: "ChevronRight"}[s.OpenModels[i]], 14, p.Text3)
+					})
+					if head.Clicked() {
+						s.OpenModels[i] = !s.OpenModels[i]
+					}
+					if s.OpenModels[i] {
+						field(c, p, "模型 ID", &m.ModelID, false)
+						field(c, p, "显示名称", &m.Name, false)
+						ui.Row(c).FillWidth().Gap(16).Children(func() {
+							ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() { numericField(c, p, "上下文窗口", &m.ContextWindow, 2) })
+							ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() { numericField(c, p, "输出上限", &m.MaxOutput, 1) })
+						})
+						ui.Checkbox(c, &m.SupportsEffort, "支持思考强度").Disabled(service.APIStyle != "openai").FontSize(p.font(11.48))
+						muted(c, p, "仅适用于支持 reasoning_effort 的 OpenAI 兼容模型。").FontSize(p.font(10.36))
+						if button(c, p, "移除模型", "Trash2", false).Clicked() {
+							remove = i
 						}
-						s.CustomModel = ""
 					}
 				})
-			})
-		})
-		ui.Row(c).Gap(8).Children(func() {
-			if button(c, p, "保存服务", "", true).Disabled(s.Working).Clicked() {
-				d.configAction(s, "saveService", map[string]any{"service": *service}, func() { s.Service = nil })
 			}
-			if button(c, p, "取消", "", false).Disabled(s.Working).Clicked() {
-				s.Service = nil
+			if remove >= 0 {
+				service.Models = append(service.Models[:remove], service.Models[remove+1:]...)
+				s.OpenModels = map[int]bool{}
 			}
 		})
 	})

@@ -19,6 +19,8 @@ from minicode.providers.errors import ProviderError, ProviderProtocolError
 class StreamResult:
     response: ModelResponse | None = None
     duration_s: float = 0.0
+    generation_seconds: float | None = None
+    first_token_seconds: float | None = None
     failure: ExitReason | None = None
     error: Exception | None = None
     usage_uncertain: bool = False
@@ -82,6 +84,8 @@ async def stream_response(
                             if not event.response.blocks:
                                 raise ProviderProtocolError("provider returned an empty assistant response")
                             return StreamResult(response=event.response.model_copy(deep=True), duration_s=time.monotonic() - started,
+                                                generation_seconds=event.generation_seconds,
+                                                first_token_seconds=event.first_token_seconds,
                                                 usage_uncertain=uncertain)
                         else:
                             raise ProviderProtocolError("provider emitted an unknown stream event")

@@ -337,3 +337,18 @@ def test_stop_sequence_maps_to_end_turn() -> None:
     response = [e for e in collected if isinstance(e, ResponseDone)][0].response
     assert response.stop_reason == StopReason.END_TURN
     assert response.usage == Usage()
+
+
+def test_timing_counts_thinking_and_tool_arguments(monkeypatch):
+    from minicode.providers import anthropic_provider
+    clock = iter([0, 5, 7])
+    monkeypatch.setattr(anthropic_provider, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    events = [
+        SimpleNamespace(type="message_start"),
+        SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(type="thinking_delta", thinking="think")),
+        SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(type="input_json_delta", partial_json='{"path":"a"}')),
+    ]
+    final = SimpleNamespace(content=[], stop_reason="tool_use", usage=SimpleNamespace(output_tokens=600))
+    provider, _ = make_provider(events, final)
+    done = run_stream(provider, system=None, messages=[], tools=[])[-1]
+    assert done.generation_seconds == 2 and done.first_token_seconds == 5

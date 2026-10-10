@@ -1,8 +1,8 @@
-# MiniCode 1.2.2 Windows 发行版
+# MiniCode 1.2.3 Windows 发行版
 
 Windows 10/11 x64 原生 Desktop + CLI + Ink TUI。Desktop 使用 MyGo 0.2.15 / Go，安装包内含 Python 3.12.12、Git 2.56.0、Node.js 22.22.0 和锁定运行依赖。无需安装 Electron、WebView2、Python、Git 或 Node.js。项目编译器和语言 SDK 仍由项目自行提供。
 
-安装包为 `dist/MiniCode-Setup-1.2.2-win-x64.exe`，SHA256 在 `dist/SHA256SUMS.txt`。发布地址为 [v1.2.2](https://github.com/oysterhyd/minicode/releases/tag/v1.2.2)。安装包未作 Windows 代码签名；自动更新归档使用 Ed25519 签名。
+安装包为 `dist/MiniCode-Setup-1.2.3-win-x64.exe`，SHA256 在 `dist/SHA256SUMS.txt`。发布地址为 [v1.2.3](https://github.com/oysterhyd/minicode/releases/tag/v1.2.3)。安装包未作 Windows 代码签名；自动更新归档使用 Ed25519 签名。
 
 ## 安装和使用
 
@@ -18,7 +18,7 @@ Windows 10/11 x64 原生 Desktop + CLI + Ink TUI。Desktop 使用 MyGo 0.2.15 / 
 
 使用自定义安装目录时替换路径。CLI 不自动添加到系统 PATH。配置和会话继续保存在 `%USERPROFILE%\.minicode`；旧 Electron 界面偏好会导入原生用户数据目录。卸载保留个人配置和会话。
 
-插件仍使用精确宿主版本约束。现有插件需将 `minicode_version` 更新到 `1.2.2` 后重新生成锁文件；仓库 MCP 示例已更新。
+插件仍使用精确宿主版本约束。现有插件需将 `minicode_version` 更新到 `1.2.3` 后重新生成锁文件；仓库 MCP 示例已更新。
 
 ## 从源码打包
 
@@ -46,10 +46,10 @@ pwsh -NoProfile -File release/smoke-native.ps1
 ## 产物目录
 
 ```text
-dist/MiniCode-Setup-1.2.2-win-x64.exe
+dist/MiniCode-Setup-1.2.3-win-x64.exe
 dist/SHA256SUMS.txt
 dist/update-windows-amd64.json
-dist/minicode-1.2.2-windows-amd64.tar.gz
+dist/minicode-1.2.3-windows-amd64.tar.gz
 dist/native/windows-amd64/
   MiniCode.exe
   minicode.cmd
@@ -65,7 +65,7 @@ dist/native/windows-amd64/
 
 Desktop 使用 MyGo 官方 `updater/native`，默认启动后约 10 秒检查一次，随后每 24 小时检查 GitHub Releases。“设置 → 通用”提供自动检查、自动下载安装和手动检查；“关于”也提供手动检查。自动下载安装默认关闭，开启后下次启动使用新版本。更新不主动中断任务。
 
-MyGo 在可写的正式安装目录启用更新。开发构建或只读目录会显示禁用原因。1.1.0 的 Electron 版需要手动安装一次 1.2.2，此后的原生版本可应用内更新。Python 配置、会话及原生偏好均在安装目录外保留。
+MyGo 在可写的正式安装目录启用更新。开发构建或只读目录会显示禁用原因。1.1.0 的 Electron 版需要手动安装一次 1.2.3，此后的原生版本可应用内更新。Python 配置、会话及原生偏好均在安装目录外保留。
 
 `desktop/native/mygo.json` 只包含公开验证密钥。签名私钥由 `MYGO_UPDATER_PRIVATE_KEY` 环境变量提供，本机构建也可从 `%APPDATA%\mygo\update-keys\mygo-update.key` 读取；私钥不进入仓库或发行包。GitHub Actions 使用同名 repository secret。保留并备份当前密钥，后续版本继续用同一把密钥签名；重新生成密钥会导致现有客户端拒绝更新。
 

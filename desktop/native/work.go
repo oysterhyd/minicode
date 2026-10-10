@@ -387,7 +387,7 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 			ui.Box(c).Grow(1).FillHeight().Background(p.Success)
 		}
 	})
-	values := []struct{ Label, Value string }{{"输入 token", "未报告"}, {"输出 token", "未报告"}, {"缓存命中率", "未报告"}, {"平均输出 TPS", "未报告"}}
+	values := []struct{ Label, Value string }{{"输入 token", "未报告"}, {"输出 token", "未报告"}, {"缓存命中率", "未报告"}, {"平均生成 TPS", "未记录"}}
 	if usage != nil && usage.Available {
 		values[0].Value = number(usage.Input)
 		values[1].Value = number(usage.Output)
@@ -480,10 +480,16 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 					speed = fmt.Sprintf("%.1f", *sample.TPS)
 				}
 				ui.Text(c, fmt.Sprintf("#%d  输入 %d  输出 %d  缓存 %d  TPS %s", sample.Round, sample.Input, sample.Output, sample.Cached, speed)).FontSize(p.font(10.36)).Padding(4, 8).Selectable()
+				if sample.FirstTokenSeconds != nil && sample.GenerationSeconds != nil {
+					muted(c, p, fmt.Sprintf("首字等待 %.2fs · 生成 %.2fs", *sample.FirstTokenSeconds, *sample.GenerationSeconds)).FontSize(p.font(10.08)).Padding(0, 8, 4, 8)
+				}
 			}
 		}
 	}
-	muted(c, p, "TPS = 输出 token / 请求耗时（含首字等待）。历史请求未记录耗时时不计算速度。").Padding(8).FontSize(p.font(10.08))
+	if stats != nil && stats.RequestTPS != nil {
+		muted(c, p, fmt.Sprintf("请求整体速度（含首字等待）：%.1f tok/s", *stats.RequestTPS)).Padding(8).FontSize(p.font(10.08))
+	}
+	muted(c, p, "生成 TPS = 输出 token / 首个至最后一个生成片段的时间（包含推理与工具参数）。历史记录和单个片段无法计算生成速度；客户端测量可能与网关不同。").Padding(8).FontSize(p.font(10.08))
 }
 
 var _ = content.DiffLine{}

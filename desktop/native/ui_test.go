@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -211,7 +212,7 @@ func TestChoiceSurfacesAtMinimumWindowAndLargeText(t *testing.T) {
 			if page == "model-menu" {
 				labels = []string{"思考强度滑条", "管理模型与服务"}
 			} else if page == "settings-empty" {
-				labels = []string{"当前会话模型", "添加服务"}
+				labels = []string{"添加服务"}
 			}
 			for _, label := range labels {
 				rect, ok := r.ui.Find(label)
@@ -220,6 +221,99 @@ func TestChoiceSurfacesAtMinimumWindowAndLargeText(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestModelMenuManyModelsFitsWindow(t *testing.T) {
+	for _, size := range [][2]float32{{1030, 680}, {1500, 940}} {
+		r := newTestRig(t, "home")
+		r.ui.SetSize(int(size[0]), int(size[1]))
+		r.ui.SetPreferences(ui.Preferences{ReduceMotion: true, TextScale: 1.2})
+		for i := 0; i < 20; i++ {
+			r.d.models = append(r.d.models, model.Model{ID: fmt.Sprintf("model-%d", i), Name: fmt.Sprintf("Model %d", i), Available: true})
+		}
+		click(t, r.ui, "切换模型")
+		for _, label := range []string{"思考强度滑条", "管理模型与服务"} {
+			rect, ok := r.ui.Find(label)
+			if !ok || rect.W <= 0 || rect.H <= 0 || rect.Y < 0 || rect.Y+rect.H > size[1] {
+				t.Fatalf("%s outside window %+v at %v", label, rect, size)
+			}
+		}
+		list, _ := r.ui.Find("切换至 fake")
+		r.ui.Scroll(list.X+20, list.Y+10, 0, 1500)
+		click(t, r.ui, "切换至 model-19")
+		r.settle()
+		if r.d.current().State.Model != "model-19" {
+			t.Fatal("last model cannot be selected")
+		}
+	}
+}
+
+func TestContextShowsBothSpeedMeasurements(t *testing.T) {
+	r := newTestRig(t, "home")
+	r.ui.SetSize(1030, 680)
+	generation, request, wait := 300.0, 30.0, 5.0
+	stats := &model.Statistics{TPS: &generation, LastTPS: &generation, RequestTPS: &request, Samples: []model.UsageSample{{FirstTokenSeconds: &wait}}}
+	r.d.current().State.Statistics = stats
+	r.d.client.(*fixtureClient).State.Statistics = stats
+	click(t, r.ui, "上下文窗口详情")
+	r.settle()
+	for _, label := range []string{"请求整体速度", "最近首字等待", "300.0 tok/s", "30.0 tok/s", "5.00 秒"} {
+		rect, ok := r.ui.Find(label)
+		if !ok || rect.W <= 0 || rect.H <= 0 || rect.Y < 0 || rect.Y+rect.H > 680 {
+			t.Fatalf("speed metric hidden: %s %+v", label, rect)
+		}
+	}
+}
+
+func TestBusyStatusDoesNotWrapAndServiceEditorStaysUsable(t *testing.T) {
+	r := newTestRig(t, "conversation")
+	r.ui.SetSize(1030, 680)
+	r.ui.SetPreferences(ui.Preferences{ReduceMotion: true, TextScale: 1.2})
+	v := r.d.current()
+	v.Busy = true
+	v.StartedAt = time.Now().Add(-65 * time.Second)
+	r.ui.Frame()
+	for _, label := range []string{"任务处理中", "1 分 5 秒"} {
+		rect, ok := r.ui.Find(label)
+		if !ok || rect.H > 24 || rect.W <= 0 {
+			t.Fatalf("busy status wraps or vanishes: %s %+v", label, rect)
+		}
+	}
+	r.d.openSettings("model")
+	r.settle()
+	click(t, r.ui, "编辑 CommandCode")
+	s := r.d.settings
+	s.OpenModels[0] = true
+	s.Service.Models[0].ContextWindow = 1048576
+	s.Service.Models[0].MaxOutput = 524288
+	r.ui.Frame()
+	for _, label := range []string{"服务名称", "保存服务", "取消"} {
+		rect, ok := r.ui.Find(label)
+		if !ok || rect.W <= 0 || rect.H <= 0 || rect.Y+rect.H > 680 {
+			t.Fatalf("service action missing: %s %+v", label, rect)
+		}
+	}
+	r.ui.Scroll(800, 400, 0, 1000)
+	for _, label := range []string{"上下文窗口", "输出上限"} {
+		rect, ok := r.ui.Find(label)
+		if !ok || rect.W < 180 || rect.Y+rect.H > 610 {
+			t.Fatalf("number field too narrow or clipped: %s %+v", label, rect)
+		}
+	}
+	clickInput(t, r.ui, "上下文窗口")
+	r.ui.Key(ui.Cmd, ui.KeyA)
+	r.ui.Type("2097152")
+	if s.Service.Models[0].ContextWindow != 2097152 {
+		t.Fatal("context number edit did not apply")
+	}
+	file, err := os.Create(filepath.Join("..", "..", "output", "native", "settings-service-large-text.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := png.Encode(file, r.ui.Image()); err != nil {
+		t.Fatal(err)
 	}
 }
 

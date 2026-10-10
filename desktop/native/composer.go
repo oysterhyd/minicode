@@ -217,10 +217,10 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 		}
 		if v.Busy && !home {
 			ui.Row(c).Justify(ui.Center).Children(func() {
-				ui.Row(c).Height(30).Padding(0, 4, 0, 12).Gap(8).Radius(99).Background(p.Elevated).Border(1, p.Border).Children(func() {
+				ui.Row(c).Height(30).Shrink(0).Padding(0, 4, 0, 12).Gap(8).Radius(99).Background(p.Elevated).Border(1, p.Border).Children(func() {
 					spinner(c, p)
-					ui.Text(c, "任务处理中").FontSize(p.font(11.2)).TextColor(p.Text2)
-					ui.Text(c, formatDuration(time.Since(v.StartedAt))).FontSize(p.font(10.64)).TextColor(p.Text3)
+					ui.Text(c, "任务处理中").NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(p.Text2)
+					ui.Text(c, formatDuration(time.Since(v.StartedAt))).NoWrap().Shrink(0).FontSize(p.font(10.64)).TextColor(p.Text3)
 					if button(c, p, "停止", "Square", false).Height(22).Radius(99).Padding(0, 9).FontSize(p.font(10.36)).Clicked() {
 						d.cancel(v)
 					}
@@ -469,16 +469,14 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 		d.modelOpen = !d.modelOpen
 	}
 	ui.PopoverBase(c, chip, &d.modelOpen, func(panel *ui.Element) {
-		if !home {
-			panel.AttachTo(chip, ui.AnchorTopLeft, ui.AnchorBottomLeft)
-		}
-		panel.Width(320).Padding(8).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2))
+		available := composerPopover(c, panel, chip, 340, home)
+		panel.Key("model-popup").Padding(8).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2))
 		panel.FocusGroup(ui.Vertical)
 		muted(c, p, "切换模型").Padding(4, 8, 8, 8).FontSize(p.font(10.36))
 		if len(d.models) == 0 {
 			muted(c, p, "尚未配置模型，添加你的 AI 服务后开始使用。").Padding(8).FontSize(p.font(11.2))
 		} else {
-			ui.Scroll(c).FillWidth().MaxHeight(240).Children(func() {
+			ui.Scroll(c).FillWidth().Height(min(240, float32(len(d.models))*52, available-190*p.Scale)).MinHeight(52).Children(func() {
 				for _, m := range d.models {
 					name := m.Name
 					if name == "" {
@@ -519,6 +517,21 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 			d.openSettings("model")
 		}
 	})
+}
+
+// Attached popovers only flip sides; their content must fit the chosen side.
+func composerPopover(c *ui.Context, panel, anchor *ui.Element, width float32, home bool) float32 {
+	w, h := c.Size()
+	r := anchor.Bounds()
+	above, below := max(0, r.Y-12), max(0, h-r.Y-r.H-12)
+	up := !home || above > below
+	available := below
+	if up {
+		available = above
+		panel.AttachTo(anchor, ui.AnchorTopLeft, ui.AnchorBottomLeft)
+	}
+	panel.Width(min(width, w-24)).MaxHeight(available).Margin(6, 0).Clip()
+	return available
 }
 
 func (d *desktop) permissionMenu(c *ui.Context, p palette, home bool) {
@@ -583,71 +596,80 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 		}
 	}
 	ui.PopoverBase(c, chip, &d.contextOpen, func(panel *ui.Element) {
-		if !home {
-			panel.AttachTo(chip, ui.AnchorTopRight, ui.AnchorBottomRight)
-		}
-		panel.Width(280).Padding(14).Radius(12).Border(1, p.Border).Background(p.Elevated)
-		ui.Row(c).Children(func() {
-			ui.Text(c, "上下文窗口").FontSize(p.font(11.76)).Grow(1)
-			ui.Text(c, fmt.Sprintf("%s / %s", number(v.State.ContextTokens), number(v.State.ContextWindow))).FontSize(p.font(11.76)).Bold()
-		})
-		parts := []struct {
-			Key, Label string
-			Color      ui.Color
-		}{{"system", "系统提示词", ui.Hex("#8b7cf6")}, {"tools", "工具定义", ui.Hex("#3aa0d8")}, {"messages", "对话消息", p.Accent}}
-		ui.Row(c).Height(6).Margin(10, 0, 12, 0).Gap(2).Radius(99).Clip().Background(p.Active).Children(func() {
-			for _, part := range parts {
-				ui.Box(c).WidthPercent(min(100, 100*float32(v.State.Breakdown[part.Key])/float32(max(1, v.State.ContextWindow)))).FillHeight().Background(part.Color)
-			}
-		})
-		for _, entry := range parts {
-			ui.Row(c).Height(23).Gap(8).Children(func() {
-				ui.Box(c).Size(7, 7).Radius(2).Background(entry.Color)
-				muted(c, p, entry.Label).Grow(1).FontSize(p.font(11.2))
-				ui.Text(c, number(v.State.Breakdown[entry.Key])).FontSize(p.font(11.2))
+		available := composerPopover(c, panel, chip, 300, home)
+		panel.Padding(14).Radius(12).Border(1, p.Border).Background(p.Elevated)
+		ui.Scroll(c).FillWidth().MaxHeight(available - 28).Children(func() {
+			ui.Row(c).Children(func() {
+				ui.Text(c, "上下文窗口").FontSize(p.font(11.76)).Grow(1)
+				ui.Text(c, fmt.Sprintf("%s / %s", number(v.State.ContextTokens), number(v.State.ContextWindow))).FontSize(p.font(11.76)).Bold()
 			})
-		}
-		usage := v.State.Usage
-		known := usage != nil && usage.Available
-		if usage != nil {
-			value := "未报告"
-			if known {
-				value = fmt.Sprintf("↑ %s　↓ %s", number(usage.Input), number(usage.Output))
-			}
-			ui.Row(c).Margin(10, 0, 0, 0).Children(func() {
-				muted(c, p, "本会话累计").Grow(1)
-				ui.Text(c, value).FontSize(p.font(10.92)).FontWeight(550)
-			})
-		}
-		metrics := []struct{ Label, Value string }{{"缓存命中率", "未报告"}, {"最近输出 TPS", "未报告"}, {"缓存读取 / 写入", "未报告"}, {"会话平均 TPS", "未报告"}}
-		if known {
-			if usage.Input > 0 {
-				metrics[0].Value = fmt.Sprintf("%.1f%%", min(100, float64(usage.CacheRead)/float64(usage.Input)*100))
-			}
-			metrics[2].Value = number(usage.CacheRead) + " / " + number(usage.CacheWrite)
-		}
-		if stats := v.State.Statistics; stats != nil {
-			if stats.LastTPS != nil {
-				metrics[1].Value = fmt.Sprintf("%.1f tok/s", *stats.LastTPS)
-			}
-			if stats.TPS != nil {
-				metrics[3].Value = fmt.Sprintf("%.1f tok/s", *stats.TPS)
-			}
-		}
-		for pair := 0; pair < 2; pair++ {
-			ui.Row(c).Margin(12, 0, 0, 0).Gap(12).Children(func() {
-				for _, metric := range metrics[pair*2 : pair*2+2] {
-					ui.Column(c).Grow(1).Basis(0).Gap(3).Children(func() {
-						muted(c, p, metric.Label).FontSize(p.font(10.08))
-						ui.Text(c, metric.Value).FontSize(p.font(10.92)).FontWeight(550)
-					})
+			parts := []struct {
+				Key, Label string
+				Color      ui.Color
+			}{{"system", "系统提示词", ui.Hex("#8b7cf6")}, {"tools", "工具定义", ui.Hex("#3aa0d8")}, {"messages", "对话消息", p.Accent}}
+			ui.Row(c).Height(6).Margin(10, 0, 12, 0).Gap(2).Radius(99).Clip().Background(p.Active).Children(func() {
+				for _, part := range parts {
+					ui.Box(c).WidthPercent(min(100, 100*float32(v.State.Breakdown[part.Key])/float32(max(1, v.State.ContextWindow)))).FillHeight().Background(part.Color)
 				}
 			})
-		}
-		if percent >= 40 && button(c, p, "立即压缩上下文", "Layers", false).FillWidth().Margin(8, 0, 0, 0).Disabled(v.SessionID == "" || v.Busy).Clicked() {
-			d.contextOpen = false
-			d.slash("/compact", v)
-		}
+			for _, entry := range parts {
+				ui.Row(c).Height(23).Gap(8).Children(func() {
+					ui.Box(c).Size(7, 7).Radius(2).Background(entry.Color)
+					muted(c, p, entry.Label).Grow(1).FontSize(p.font(11.2))
+					ui.Text(c, number(v.State.Breakdown[entry.Key])).FontSize(p.font(11.2))
+				})
+			}
+			usage := v.State.Usage
+			known := usage != nil && usage.Available
+			if usage != nil {
+				value := "未报告"
+				if known {
+					value = fmt.Sprintf("↑ %s　↓ %s", number(usage.Input), number(usage.Output))
+				}
+				ui.Row(c).Margin(10, 0, 0, 0).Children(func() {
+					muted(c, p, "本会话累计").Grow(1)
+					ui.Text(c, value).FontSize(p.font(10.92)).FontWeight(550)
+				})
+			}
+			metrics := []struct{ Label, Value string }{{"缓存命中率", "未报告"}, {"最近生成 TPS", "未记录"}, {"缓存读取 / 写入", "未报告"}, {"平均生成 TPS", "未记录"}, {"请求整体速度", "未记录"}}
+			if known {
+				if usage.Input > 0 {
+					metrics[0].Value = fmt.Sprintf("%.1f%%", min(100, float64(usage.CacheRead)/float64(usage.Input)*100))
+				}
+				metrics[2].Value = number(usage.CacheRead) + " / " + number(usage.CacheWrite)
+			}
+			if stats := v.State.Statistics; stats != nil {
+				if stats.LastTPS != nil {
+					metrics[1].Value = fmt.Sprintf("%.1f tok/s", *stats.LastTPS)
+				}
+				if stats.TPS != nil {
+					metrics[3].Value = fmt.Sprintf("%.1f tok/s", *stats.TPS)
+				}
+				if stats.RequestTPS != nil {
+					metrics[4].Value = fmt.Sprintf("%.1f tok/s", *stats.RequestTPS)
+				}
+				if len(stats.Samples) > 0 {
+					last := stats.Samples[len(stats.Samples)-1]
+					if last.FirstTokenSeconds != nil {
+						metrics = append(metrics, struct{ Label, Value string }{"最近首字等待", fmt.Sprintf("%.2f 秒", *last.FirstTokenSeconds)})
+					}
+				}
+			}
+			for pair := 0; pair*2 < len(metrics); pair++ {
+				ui.Row(c).Margin(12, 0, 0, 0).Gap(12).Children(func() {
+					for _, metric := range metrics[pair*2 : min(len(metrics), pair*2+2)] {
+						ui.Column(c).Grow(1).Basis(0).Gap(3).Children(func() {
+							muted(c, p, metric.Label).FontSize(p.font(10.08))
+							ui.Text(c, metric.Value).FontSize(p.font(10.92)).FontWeight(550)
+						})
+					}
+				})
+			}
+			if percent >= 40 && button(c, p, "立即压缩上下文", "Layers", false).FillWidth().Margin(8, 0, 0, 0).Disabled(v.SessionID == "" || v.Busy).Clicked() {
+				d.contextOpen = false
+				d.slash("/compact", v)
+			}
+		})
 	})
 }
 

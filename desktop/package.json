@@ -1,6 +1,6 @@
 {
   "name": "minicode-desktop",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "scripts": {
     "test": "cd native && go test ./...",

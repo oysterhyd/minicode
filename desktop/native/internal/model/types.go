@@ -77,13 +77,15 @@ type Usage struct {
 }
 
 type UsageSample struct {
-	Round     int      `json:"round"`
-	Input     int      `json:"input"`
-	Output    int      `json:"output"`
-	Cached    int      `json:"cached"`
-	Available bool     `json:"available"`
-	Seconds   *float64 `json:"seconds"`
-	TPS       *float64 `json:"tps"`
+	Round             int      `json:"round"`
+	Input             int      `json:"input"`
+	Output            int      `json:"output"`
+	Cached            int      `json:"cached"`
+	Available         bool     `json:"available"`
+	Seconds           *float64 `json:"seconds"`
+	GenerationSeconds *float64 `json:"generationSeconds"`
+	FirstTokenSeconds *float64 `json:"firstTokenSeconds"`
+	TPS               *float64 `json:"tps"`
 }
 
 type Statistics struct {
@@ -91,6 +93,7 @@ type Statistics struct {
 	Requests     int           `json:"requests"`
 	ModelSeconds float64       `json:"modelSeconds"`
 	TPS          *float64      `json:"tps"`
+	RequestTPS   *float64      `json:"requestTps"`
 	LastTPS      *float64      `json:"lastTps"`
 	Samples      []UsageSample `json:"samples"`
 }

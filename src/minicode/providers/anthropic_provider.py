@@ -7,6 +7,7 @@ imports cleanly even when the ``anthropic`` package is not installed.
 
 from __future__ import annotations
 
+import time
 from typing import Any, AsyncIterator
 
 from minicode.core.models import (
@@ -180,9 +181,17 @@ class AnthropicProvider:
         if system is not None:
             request_kwargs["system"] = system
 
+        started = time.monotonic()
+        first_output = last_output = None
         try:
             async with self._client.messages.stream(**request_kwargs) as stream:
                 async for event in stream:
+                    if event.type == "content_block_delta" and any(
+                        getattr(event.delta, key, None) for key in ("text", "thinking", "partial_json")
+                    ):
+                        last_output = time.monotonic()
+                        if first_output is None:
+                            first_output = last_output
                     if (
                         event.type == "content_block_delta"
                         and event.delta.type == "text_delta"
@@ -205,5 +214,7 @@ class AnthropicProvider:
                 blocks=self._map_blocks(getattr(response, "content", None)),
                 stop_reason=_STOP_REASON_MAP.get(raw_stop, StopReason.END_TURN),
                 usage=self._map_usage(response),
-            )
+            ),
+            generation_seconds=last_output - first_output if first_output is not None and last_output > first_output else None,
+            first_token_seconds=first_output - started if first_output is not None else None,
         )

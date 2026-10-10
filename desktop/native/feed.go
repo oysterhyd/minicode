@@ -107,9 +107,9 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 		ui.Row(c).Height(26).Gap(10).Children(func() {
 			orb := ui.Box(c).Size(10, 10).Radius(99).Background(p.Accent).Shadow(0, 0, 0, 4, p.AccentSoft)
 			orb.Opacity(0.4 + 0.6*orb.Loop("breathe", 1600*time.Millisecond, ui.Bounce(ui.EaseInOut)))
-			ui.Text(c, item.Text).FontSize(p.font(12.6)).TextColor(p.Text3)
+			ui.Text(c, item.Text).SingleLine().Grow(1).Basis(0).MinWidth(0).FontSize(p.font(12.6)).TextColor(p.Text3)
 			if elapsed := time.Since(item.StartedAt); elapsed >= 2*time.Second {
-				muted(c, p, fmt.Sprintf("%ds", int(elapsed.Seconds()))).FontSize(p.font(10.92))
+				muted(c, p, fmt.Sprintf("%ds", int(elapsed.Seconds()))).NoWrap().Shrink(0).FontSize(p.font(10.92))
 			}
 		})
 		c.After(time.Second)
@@ -142,7 +142,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 		ui.Row(c).Height(28).Gap(8).Children(func() {
 			ui.Box(c).Grow(1).Height(1).Background(p.BorderSubtle)
 			icon(c, name, 13, color)
-			ui.Text(c, text).FontSize(p.font(10.64)).TextColor(p.Text3)
+			ui.Text(c, text).NoWrap().Shrink(0).FontSize(p.font(10.64)).TextColor(p.Text3)
 			ui.Box(c).Grow(1).Height(1).Background(p.BorderSubtle)
 		})
 	case "approval":
@@ -186,14 +186,19 @@ func (d *desktop) toolGroup(c *ui.Context, p palette, row model.FeedRow) {
 		if running {
 			label = fmt.Sprintf("正在执行 %d 个操作", len(row.Tools))
 		}
-		head := ui.ButtonBase(c).Label(label).Height(36).Gap(8).Radius(12).Padding(0, 12)
+		head := ui.ButtonBase(c).Label(label).FillWidth().MinHeight(42).Gap(8).Radius(12).Padding(8, 12)
 		if head.Hovered() {
 			head.Background(p.Hover)
 		}
 		head.Children(func() {
 			icon(c, "Layers", 14, p.Text3)
-			ui.Text(c, label).FontSize(p.font(12.04)).FontWeight(550).TextColor(p.Text2)
-			muted(c, p, strings.Join(names, "、")).Grow(1).SingleLine().FontSize(p.font(10.92))
+			ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(3).Children(func() {
+				ui.Text(c, label).NoWrap().FontSize(p.font(12.04)).FontWeight(550).TextColor(p.Text2)
+				if len(names) > 0 {
+					muted(c, p, strings.Join(names, "、")).SingleLine().FontSize(p.font(10.92))
+				}
+			})
+			icon(c, map[bool]string{true: "ChevronDown", false: "ChevronRight"}[open], 12, p.Text4)
 		})
 		if head.Clicked() {
 			v.Open["group-"+row.ID] = !open
@@ -245,8 +250,8 @@ func (d *desktop) tool(c *ui.Context, p palette, item *model.FeedItem, force boo
 			if item.Pending {
 				label = meta.Label
 			}
-			ui.Text(c, label).FontSize(p.font(11.76)).TextColor(p.Text2)
-			ui.Text(c, toolTarget(item)).Grow(1).SingleLine().Font("Cascadia Mono, Consolas").FontSize(p.font(10.92)).TextColor(p.Text3)
+			ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(11.76)).TextColor(p.Text2)
+			ui.Text(c, toolTarget(item)).Grow(1).Basis(0).MinWidth(0).SingleLine().Font("Cascadia Mono, Consolas").FontSize(p.font(10.92)).TextColor(p.Text3)
 			if waiting {
 				badge(c, p, "等待批准", p.Warning, p.WarningSoft)
 			} else if item.Interrupted {
@@ -255,7 +260,7 @@ func (d *desktop) tool(c *ui.Context, p palette, item *model.FeedItem, force boo
 				badge(c, p, "自动批准", p.Success, p.SuccessSoft)
 			}
 			if !item.StartedAt.IsZero() && !item.EndedAt.IsZero() {
-				muted(c, p, fmt.Sprintf("%.1fs", item.EndedAt.Sub(item.StartedAt).Seconds())).FontSize(p.font(10.08))
+				muted(c, p, fmt.Sprintf("%.1fs", item.EndedAt.Sub(item.StartedAt).Seconds())).NoWrap().Shrink(0).FontSize(p.font(10.08))
 			}
 			name := "ChevronRight"
 			if open {
