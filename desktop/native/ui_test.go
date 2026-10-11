@@ -123,6 +123,31 @@ func TestPanelControlsAndCompactRail(t *testing.T) {
 	}
 }
 
+func TestSidebarNewConversationPreservesRunningConversation(t *testing.T) {
+	for _, collapsed := range []bool{false, true} {
+		r := newTestRig(t, "conversation")
+		r.d.preferences.LeftCollapsed = collapsed
+		previous := r.d.current()
+		previous.Busy = true
+		previous.Draft = "保留追加指令"
+		r.ui.Frame()
+		create, ok := r.ui.Find("新建对话")
+		search, _ := r.ui.Find("搜索任务")
+		if !ok || create.W <= 0 || create.Y+create.H > search.Y {
+			t.Fatalf("new conversation control not above search: %+v", create)
+		}
+		click(t, r.ui, "新建对话")
+		r.settle()
+		current := r.d.current()
+		if current == previous || current.SessionID != "" || len(current.Items) != 0 || current.Draft != "" || current.Workspace != previous.Workspace {
+			t.Fatal("new conversation did not open a blank view in the current workspace")
+		}
+		if !previous.Busy || previous.Draft != "保留追加指令" || previous.SessionID != "audit" {
+			t.Fatal("creating a conversation modified the running conversation")
+		}
+	}
+}
+
 func TestPermissionChoicesAlignAndApply(t *testing.T) {
 	for _, page := range []string{"settings-permissions", "permission-menu"} {
 		t.Run(page, func(t *testing.T) {

@@ -148,6 +148,9 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 				d.preferences.LeftCollapsed = false
 				d.persist()
 			}
+			if iconButton(c, p, "SquarePen", "新建对话").Size(34, 34).Clicked() {
+				d.newSession(v.Workspace)
+			}
 			if iconButton(c, p, "FolderOpen", "打开工作区").Size(34, 34).Clicked() {
 				d.chooseWorkspace()
 			}
@@ -169,6 +172,9 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 	ui.Column(c).Fill().Children(func() {
 		ui.Column(c).Padding(2, 8, 8, 10).Gap(6).Children(func() {
 			ui.Row(c).FillWidth().Height(32).Children(func() {
+				if button(c, p, "新建对话", "SquarePen", false).Height(28).Padding(0, 10).Border(0, ui.Transparent).Justify(ui.Start).FontSize(p.font(12.04)).Clicked() {
+					d.newSession(v.Workspace)
+				}
 				ui.Spacer(c)
 				if iconButton(c, p, "PanelLeft", "收拢左侧面板").Clicked() {
 					d.preferences.LeftCollapsed = true
