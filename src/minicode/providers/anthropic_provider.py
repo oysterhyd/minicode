@@ -179,7 +179,8 @@ class AnthropicProvider:
     ) -> AsyncIterator[StreamEvent]:
         import anthropic  # lazy: needed here for the exception classes
 
-        check_attachments([b for m in messages for b in m.content if isinstance(b, MediaBlock)], self.input_modalities, "anthropic")
+        for message in messages:
+            check_attachments([b for b in message.content if isinstance(b, MediaBlock)], self.input_modalities, "anthropic")
         request_kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": self._serialize_messages(messages),

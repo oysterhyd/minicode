@@ -108,8 +108,8 @@ def _build_payload(
     so the gateway applies its own default.
     """
     chat_messages: list[dict[str, Any]] = []
-    media = [b for m in messages for b in m.content if isinstance(b, MediaBlock)]
-    check_attachments(media, input_modalities, "openai")
+    for message in messages:
+        check_attachments([b for b in message.content if isinstance(b, MediaBlock)], input_modalities, "openai")
     if system:
         chat_messages.append({"role": "system", "content": system})
 

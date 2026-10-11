@@ -126,3 +126,17 @@ def test_disabled_model_capability_rejects_before_http(media_files,tmp_path):
             async for _ in provider.stream(system="",messages=[Message(role="user",content=[block])],tools=[]): pass
         await provider.aclose()
     asyncio.run(scenario())
+
+
+def test_attachment_limits_apply_per_message_not_entire_history(media_files, tmp_path):
+    from minicode.providers.commandcode import _build_payload
+    paths, _ = media_files
+    store = AttachmentStore(tmp_path / "cache")
+    block = store.import_file(str(paths[0]))
+    messages = [Message(role="user", content=[block, TextBlock(text="check")]) for _ in range(11)]
+    payload = _build_payload(model="vision", system="", messages=messages, tools=[],
+                             max_tokens=100, attachment_store=store, input_modalities=("image",))
+    assert len(payload["messages"]) == 11
+    with pytest.raises(ProviderRequestError, match="10"):
+        _build_payload(model="vision", system="", messages=[Message(role="user", content=[block]*11)],
+                       tools=[], max_tokens=100, attachment_store=store, input_modalities=("image",))
