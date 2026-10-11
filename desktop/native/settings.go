@@ -528,7 +528,12 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 			ui.Column(c).Grow(1).Basis(0).Children(func() { field(c, p, "服务名称", &service.Name, false) })
 			ui.Column(c).Grow(1).Basis(0).Gap(5).Children(func() {
 				muted(c, p, "接口格式")
-				selectField(c, p, &service.APIStyle, []selectOption{{Value: "openai", Label: "OpenAI Chat Completions"}, {Value: "anthropic", Label: "Anthropic Messages"}}).Label("接口格式").FillWidth().Height(32)
+				if selectField(c, p, &service.APIStyle, []selectOption{{Value: "openai", Label: "OpenAI Chat Completions"}, {Value: "anthropic", Label: "Anthropic Messages"}}).Label("接口格式").FillWidth().Height(32).Changed() && service.APIStyle == "anthropic" {
+					for i := range service.Models {
+						service.Models[i].InputCapabilities.Audio = false
+						service.Models[i].InputCapabilities.Video = false
+					}
+				}
 			})
 		})
 		field(c, p, "接口地址", &service.BaseURL, false)
@@ -624,6 +629,19 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 						})
 						ui.Checkbox(c, &m.SupportsEffort, "支持思考强度").Disabled(service.APIStyle != "openai").FontSize(p.font(11.48))
 						muted(c, p, "仅适用于支持 reasoning_effort 的 OpenAI 兼容模型。").FontSize(p.font(10.36))
+						ui.Column(c).FillWidth().Gap(6).Children(func() {
+							muted(c, p, "输入能力")
+							ui.Row(c).Wrap().Gap(16).Children(func() {
+								for _, option := range []struct {
+									Label  string
+									Value  *bool
+									OpenAI bool
+								}{{"图片", &m.InputCapabilities.Images, false}, {"PDF", &m.InputCapabilities.PDF, false}, {"音频", &m.InputCapabilities.Audio, true}, {"视频", &m.InputCapabilities.Video, true}} {
+									ui.Checkbox(c, option.Value, option.Label).FontSize(p.font(11.48)).Disabled(option.OpenAI && service.APIStyle != "openai")
+								}
+							})
+							muted(c, p, "按服务和模型的实际能力勾选；视频需要接口支持视频输入。Anthropic Messages 支持图片与 PDF。").FontSize(p.font(10.36))
+						})
 						if button(c, p, "移除模型", "Trash2", false).Clicked() {
 							remove = i
 						}

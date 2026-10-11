@@ -10,7 +10,7 @@ from __future__ import annotations
 import enum
 from typing import Annotated, Any, Awaitable, Callable, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 # ---------------------------------------------------------------------------
 # Conversation messages (provider-facing, Anthropic-style block model)
@@ -22,6 +22,26 @@ Role = Literal["user", "assistant"]
 class TextBlock(BaseModel):
     type: Literal["text"] = "text"
     text: str
+
+
+class ModelCapabilities(BaseModel):
+    images: StrictBool = False
+    pdf: StrictBool = False
+    audio: StrictBool = False
+    video: StrictBool = False
+
+    def modalities(self) -> tuple[str, ...]:
+        return tuple(kind for kind, enabled in (("image", self.images), ("pdf", self.pdf), ("audio", self.audio), ("video", self.video)) if enabled)
+
+
+class MediaBlock(BaseModel):
+    """Durable local attachment reference; binary bytes never enter SQLite/IPC."""
+    type: Literal["media"] = "media"
+    asset_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    kind: Literal["image", "pdf", "audio", "video"]
+    name: str = Field(min_length=1, max_length=255)
+    mime_type: str
+    size: int = Field(gt=0, le=20_000_000)
 
 
 class ToolUseBlock(BaseModel):
@@ -43,7 +63,7 @@ class ToolResultBlock(BaseModel):
 
 
 Block = Annotated[
-    Union[TextBlock, ToolUseBlock, ToolResultBlock],
+    Union[TextBlock, MediaBlock, ToolUseBlock, ToolResultBlock],
     Field(discriminator="type"),
 ]
 

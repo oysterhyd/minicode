@@ -21,21 +21,23 @@ type Session struct {
 }
 
 type Model struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	ModelID        string `json:"modelId"`
-	ServiceID      string `json:"serviceId"`
-	Provider       string `json:"provider"`
-	Available      bool   `json:"available"`
-	SupportsEffort bool   `json:"supportsEffort"`
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	ModelID           string            `json:"modelId"`
+	ServiceID         string            `json:"serviceId"`
+	Provider          string            `json:"provider"`
+	Available         bool              `json:"available"`
+	SupportsEffort    bool              `json:"supportsEffort"`
+	InputCapabilities ModelCapabilities `json:"capabilities"`
 }
 
 type ServiceModel struct {
-	ModelID        string `json:"modelId"`
-	Name           string `json:"name"`
-	ContextWindow  int    `json:"contextWindow"`
-	MaxOutput      int    `json:"maxOutputTokens"`
-	SupportsEffort bool   `json:"supportsEffort"`
+	ModelID           string            `json:"modelId"`
+	Name              string            `json:"name"`
+	ContextWindow     int               `json:"contextWindow"`
+	MaxOutput         int               `json:"maxOutputTokens"`
+	SupportsEffort    bool              `json:"supportsEffort"`
+	InputCapabilities ModelCapabilities `json:"capabilities"`
 }
 
 type Service struct {
@@ -48,6 +50,35 @@ type Service struct {
 	Enabled   bool           `json:"enabled"`
 	Builtin   bool           `json:"builtin"`
 	Models    []ServiceModel `json:"models"`
+}
+
+type ModelCapabilities struct {
+	Images bool `json:"images"`
+	PDF    bool `json:"pdf"`
+	Audio  bool `json:"audio"`
+	Video  bool `json:"video"`
+}
+
+func (c ModelCapabilities) Supports(kind string) bool {
+	switch kind {
+	case "image":
+		return c.Images
+	case "pdf":
+		return c.PDF
+	case "audio":
+		return c.Audio
+	case "video":
+		return c.Video
+	}
+	return false
+}
+
+type Attachment struct {
+	AssetID string `json:"asset_id"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+	MIME    string `json:"mime_type"`
+	Size    int    `json:"size"`
 }
 
 type Agent struct {
@@ -207,6 +238,7 @@ type FeedItem struct {
 	ID             string
 	Kind           string
 	Text           string
+	Attachments    []Attachment
 	Name           string
 	Args           map[string]any
 	Output         string

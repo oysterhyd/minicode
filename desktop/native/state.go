@@ -31,6 +31,11 @@ type fileService interface {
 	Unstage(context.Context, string, string) error
 }
 
+type queuedPrompt struct {
+	Text        string
+	Attachments []model.Attachment
+}
+
 type conversation struct {
 	Key, SessionID, Workspace     string
 	State                         model.State
@@ -43,7 +48,9 @@ type conversation struct {
 	FilesVersion                  uint64
 	Capabilities                  model.Capabilities
 	Draft                         string
-	Queue                         []string
+	Queue                         []queuedPrompt
+	Attachments                   []model.Attachment
+	Uploading                     bool
 	Busy, Loading, Loaded, Unread bool
 	Error                         string
 	StartedAt                     time.Time
@@ -339,7 +346,7 @@ func (d *desktop) newSession(root string) {
 	source := d.current()
 	key := fmt.Sprintf("draft-%d", d.next.Add(1))
 	for k, v := range d.views {
-		if k != source.Key && v.SessionID == "" && !v.Busy && len(v.Items) == 0 && v.Draft == "" && v.Workspace == root {
+		if k != source.Key && v.SessionID == "" && !v.Busy && len(v.Items) == 0 && v.Draft == "" && len(v.Attachments) == 0 && !v.Uploading && v.Workspace == root {
 			key = k
 			break
 		}
@@ -433,11 +440,24 @@ func (v *conversation) removeThinking() {
 }
 
 func (d *desktop) send(text string, v *conversation) {
+	d.sendAttached(text, v, nil)
+}
+
+func (d *desktop) sendAttached(text string, v *conversation, attachments []model.Attachment) {
 	text = strings.TrimSpace(text)
+	if text == "" && len(attachments) > 0 {
+		text = "请分析这些附件"
+	}
 	if text == "" || v.Loading {
 		return
 	}
 	if strings.HasPrefix(text, "/") {
+		if len(attachments) > 0 {
+			v.Error = "附件不能随斜杠命令发送"
+			v.Draft = text
+			v.Attachments = attachments
+			return
+		}
 		d.slash(text, v)
 		return
 	}
@@ -445,8 +465,14 @@ func (d *desktop) send(text string, v *conversation) {
 		v.Error = "请先选择本地工作区"
 		return
 	}
+	if problem := d.attachmentProblem(v, attachments); problem != "" {
+		v.Error = problem
+		v.Draft = text
+		v.Attachments = attachments
+		return
+	}
 	if v.Busy {
-		v.Queue = append(v.Queue, text)
+		v.Queue = append(v.Queue, queuedPrompt{Text: text, Attachments: attachments})
 		return
 	}
 	v.Error = ""
@@ -454,16 +480,25 @@ func (d *desktop) send(text string, v *conversation) {
 	v.Loaded = true
 	v.StartedAt = time.Now()
 	d.rememberPrompt(text)
-	v.append(&model.FeedItem{ID: fmt.Sprint("user-", d.next.Add(1)), Kind: "user", Text: text, StartedAt: v.StartedAt},
+	user := &model.FeedItem{ID: fmt.Sprint("user-", d.next.Add(1)), Kind: "user", Text: text, Attachments: attachments, StartedAt: v.StartedAt}
+	v.append(user,
 		&model.FeedItem{ID: fmt.Sprint("thinking-", d.next.Add(1)), Kind: "thinking", Text: "正在思考", StartedAt: v.StartedAt})
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
-	d.request(v, "sendPrompt", map[string]any{"text": text, "model": v.State.Model}, &result, func(err error) {
+	d.request(v, "sendPrompt", map[string]any{"text": text, "model": v.State.Model, "attachments": attachments}, &result, func(err error) {
 		if err != nil {
 			v.Busy = false
 			v.StartedAt = time.Time{}
 			v.removeThinking()
+			v.Items = slices.DeleteFunc(v.Items, func(item *model.FeedItem) bool { return item == user })
+			v.rebuildRows()
+			if v.Draft == "" && len(v.Attachments) == 0 {
+				v.Draft = text
+				v.Attachments = attachments
+			} else {
+				v.Queue = append([]queuedPrompt{{Text: text, Attachments: attachments}}, v.Queue...)
+			}
 			d.error(v, err)
 			return
 		}
@@ -474,22 +509,28 @@ func (d *desktop) send(text string, v *conversation) {
 
 func (d *desktop) submit() {
 	v := d.current()
-	if v.Busy && strings.TrimSpace(v.Draft) == "" {
+	if v.Uploading {
+		return
+	}
+	if v.Busy && strings.TrimSpace(v.Draft) == "" && len(v.Attachments) == 0 {
 		d.cancel(v)
 		return
 	}
 	text := v.Draft
-	if strings.TrimSpace(text) == "" && len(v.Queue) > 0 && !v.Busy {
-		text = v.Queue[0]
+	attachments := slices.Clone(v.Attachments)
+	if strings.TrimSpace(text) == "" && len(attachments) == 0 && len(v.Queue) > 0 && !v.Busy {
+		text = v.Queue[0].Text
+		attachments = v.Queue[0].Attachments
 		v.Queue = v.Queue[1:]
 	}
-	if strings.TrimSpace(text) == "" {
+	if strings.TrimSpace(text) == "" && len(attachments) == 0 {
 		return
 	}
 	v.Draft = ""
+	v.Attachments = nil
 	d.completion = nil
 	d.historyIndex = -1
-	d.send(text, v)
+	d.sendAttached(text, v, attachments)
 }
 
 func (d *desktop) cancel(v *conversation) {
@@ -943,7 +984,7 @@ func (d *desktop) finish(v *conversation, event bridge.Event) {
 	if ok && len(v.Queue) > 0 {
 		next := v.Queue[0]
 		v.Queue = v.Queue[1:]
-		d.send(next, v)
+		d.sendAttached(next.Text, v, next.Attachments)
 	}
 }
 

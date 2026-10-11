@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from minicode.core.catalog import MODEL_CATALOG
+from minicode.core.models import ModelCapabilities
 from minicode.providers.zcode_config import discover_commandcode
 
 
@@ -73,12 +74,13 @@ class HarnessConfiguration:
 
     def public(self):
         data = self.read()
-        return {**data, "services": [{**s, "apiKey": "", "hasApiKey": bool(self.credentials(s)[1])} for s in data["services"]], "agents": self.agents()}
+        return {**data, "services": [{**s, "apiKey": "", "hasApiKey": bool(self.credentials(s)[1]), "models": [{**m, "capabilities": ModelCapabilities.model_validate(m.get("capabilities") or {}).model_dump()} for m in s["models"]]} for s in data["services"]], "agents": self.agents()}
 
     def models(self):
         return [dict(id=self.model_key(s, m), name=m.get("name") or m["modelId"], modelId=m["modelId"],
                      serviceId=s["id"], provider=s["name"], supportsEffort=m["supportsEffort"],
                      contextWindow=m["contextWindow"], maxOutputTokens=m["maxOutputTokens"],
+                     capabilities=ModelCapabilities.model_validate(m.get("capabilities") or {}).model_dump(),
                      available=bool(s["enabled"] and self.credentials(s)[1]))
                 for s in self.read()["services"] for m in s["models"]]
 
@@ -114,6 +116,10 @@ class HarnessConfiguration:
             if not 0 < model["maxOutputTokens"] < model["contextWindow"]:
                 raise ValueError("输出上限必须大于 0 且小于上下文窗口")
             model["supportsEffort"] = bool(model.get("supportsEffort")) and service["apiStyle"] == "openai"
+            capabilities = ModelCapabilities.model_validate(model.get("capabilities") or {})
+            if service["apiStyle"] == "anthropic" and (capabilities.audio or capabilities.video):
+                raise ValueError("Anthropic Messages 可配置图片与 PDF；音频、视频需要支持这些输入的兼容接口")
+            model["capabilities"] = capabilities.model_dump()
         service["enabled"] = bool(service.get("enabled", True))
         data["services"] = [s for s in data["services"] if s["id"] != service["id"]] + [service]
         valid = {self.model_key(s, m) for s in data["services"] if s["enabled"] and self.credentials(s)[1] for m in s["models"]}

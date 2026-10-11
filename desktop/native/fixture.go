@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +68,25 @@ func (f *fixtureClient) Request(_ context.Context, method string, params any, ta
 		result = model.Capabilities{Agents: []string{"explore", "review"}}
 	case "sendPrompt":
 		result = map[string]string{"sessionId": "test-run"}
+	case "importAttachments":
+		var args struct {
+			Paths []string `json:"paths"`
+		}
+		_ = json.Unmarshal(raw, &args)
+		var files []model.Attachment
+		for i, path := range args.Paths {
+			kind, mime := "image", "image/png"
+			switch strings.ToLower(filepath.Ext(path)) {
+			case ".pdf":
+				kind, mime = "pdf", "application/pdf"
+			case ".wav":
+				kind, mime = "audio", "audio/wav"
+			case ".mp4":
+				kind, mime = "video", "video/mp4"
+			}
+			files = append(files, model.Attachment{AssetID: fmt.Sprintf("%064x", i+1), Name: basename(path), Kind: kind, MIME: mime, Size: 512})
+		}
+		result = files
 	case "cancelTurn", "resolveApproval", "clearAlwaysAllow":
 		result = true
 	case "renameSession", "pinSession", "deleteSession":
@@ -193,6 +214,7 @@ func loadFixture(d *desktop, page string) {
 	d.recent = []string{root}
 	d.sessions = sessions
 	d.models = models
+	d.models[0].InputCapabilities = model.ModelCapabilities{Images: true, PDF: true, Audio: true, Video: true}
 	d.commands = fixtureCommands()
 	d.config = config
 	v := d.current()
@@ -202,6 +224,8 @@ func loadFixture(d *desktop, page string) {
 	v.Files = fixturePaths()
 	v.Changes = fixtureChanges()
 	switch {
+	case page == "attachments":
+		v.Attachments = []model.Attachment{{AssetID: strings.Repeat("1", 64), Kind: "image", Name: "界面截图.png", MIME: "image/png", Size: 2048}, {AssetID: strings.Repeat("2", 64), Kind: "pdf", Name: "需求说明.pdf", MIME: "application/pdf", Size: 2048}, {AssetID: strings.Repeat("3", 64), Kind: "audio", Name: "访谈录音.wav", MIME: "audio/wav", Size: 2048}, {AssetID: strings.Repeat("4", 64), Kind: "video", Name: "操作演示.mp4", MIME: "video/mp4", Size: 2048}}
 	case page == "reasoning":
 		v.SessionID = "audit"
 		v.Busy = true

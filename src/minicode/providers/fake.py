@@ -72,6 +72,7 @@ class FakeProvider:
     """Concrete scripted provider satisfying the :class:`Provider` contract."""
 
     name = "fake"
+    input_modalities = ("image", "pdf", "audio", "video")
 
     def __init__(self, options: FakeProviderOptions | None = None) -> None:
         self.options = options if options is not None else FakeProviderOptions()

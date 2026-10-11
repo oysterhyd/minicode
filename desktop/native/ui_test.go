@@ -6,6 +6,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func clickInput(t *testing.T, tt *ui.Tester, label string) {
 }
 
 func TestNativeSnapshots(t *testing.T) {
-	for _, page := range []string{"home", "conversation", "reasoning", "approval", "files", "diff", "settings", "settings-model", "settings-subagents", "settings-about", "settings-permissions", "settings-empty", "model-menu", "permission-menu", "collapsed"} {
+	for _, page := range []string{"home", "attachments", "conversation", "reasoning", "approval", "files", "diff", "settings", "settings-model", "settings-subagents", "settings-about", "settings-permissions", "settings-empty", "model-menu", "permission-menu", "collapsed"} {
 		t.Run(page, func(t *testing.T) {
 			r := newTestRig(t, page)
 			for _, theme := range []string{"light", "dark"} {
@@ -188,6 +189,46 @@ func TestReasoningStreamDisplayCompletionCancellationAndIsolation(t *testing.T) 
 	r.d.handleEvent(bridge.Event{Event: "bridge_error", Error: "Agent bridge exited"})
 	if other.reasoning != nil || other.Items[0].Pending || !other.Items[0].Interrupted {
 		t.Fatal("bridge exit left reasoning pending")
+	}
+}
+
+func TestAttachmentsImportRemoveQueueAndCapabilityGate(t *testing.T) {
+	r := newTestRig(t, "home")
+	v := r.d.current()
+	r.d.addAttachments(v, []string{"截图.png", "文档.pdf", "录音.wav", "演示.mp4"})
+	r.settle()
+	if v.Uploading || len(v.Attachments) != 4 {
+		t.Fatal("attachment import did not complete")
+	}
+	click(t, r.ui, "移除附件 截图.png")
+	if len(v.Attachments) != 3 {
+		t.Fatal("attachment removal failed")
+	}
+	v.Busy = true
+	v.Draft = "分析附件"
+	r.ui.Frame()
+	click(t, r.ui, "加入队列")
+	if len(v.Queue) != 1 || len(v.Queue[0].Attachments) != 3 || len(v.Attachments) != 0 {
+		t.Fatal("queued message lost its attachments")
+	}
+	r.d.finish(v, bridge.Event{Event: "run_done", Result: json.RawMessage(`{"exit_reason":"completed"}`)})
+	r.settle()
+	var sent *model.FeedItem
+	for _, item := range v.Items {
+		if item.Kind == "user" {
+			sent = item
+		}
+	}
+	if sent == nil || len(sent.Attachments) != 3 {
+		t.Fatal("dequeued message did not retain attachments")
+	}
+	v.Busy = false
+	v.Draft = "继续"
+	v.Attachments = []model.Attachment{{AssetID: strings.Repeat("1", 64), Kind: "audio", Name: "录音.wav", Size: 512}}
+	r.d.models[0].InputCapabilities.Audio = false
+	r.d.submit()
+	if v.Busy || len(v.Attachments) != 1 || v.Draft != "继续" || !strings.Contains(v.Error, "音频") {
+		t.Fatal("unsupported attachment was sent or draft was lost")
 	}
 }
 
@@ -440,10 +481,10 @@ func TestQueueRemoveAndCancel(t *testing.T) {
 	r := newTestRig(t, "home")
 	v := r.d.current()
 	v.Busy = true
-	v.Queue = []string{"first", "second"}
+	v.Queue = []queuedPrompt{{Text: "first"}, {Text: "second"}}
 	r.ui.Frame()
 	click(t, r.ui, "取消排队消息 1")
-	if len(v.Queue) != 1 || v.Queue[0] != "second" {
+	if len(v.Queue) != 1 || v.Queue[0].Text != "second" {
 		t.Fatalf("queue %v", v.Queue)
 	}
 	r.d.handleEvent(bridge.Event{Event: "run_done", ClientKey: v.Key, Result: []byte(`{"exit_reason":"cancelled"}`)})

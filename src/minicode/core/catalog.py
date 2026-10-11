@@ -26,6 +26,7 @@ class ModelInfo:
     #: ``None`` = unknown, keep the provider's own default.
     max_output_tokens: int | None = None
     supports_effort: bool = False  # accepts a reasoning_effort parameter
+    input_modalities: tuple[str, ...] = ()
 
 
 #: Z.ai gateway models share the CommandCode (OpenAI-compatible) endpoint;
@@ -50,6 +51,7 @@ _CLAUDE_SONNET_4_5 = ModelInfo(
     provider="anthropic",
     context_window=200_000,
     max_output_tokens=64_000,
+    input_modalities=("image", "pdf"),
 )
 
 #: Registry keyed by model id; ``default_model`` names the CommandCode default.

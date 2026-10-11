@@ -8,11 +8,13 @@ imports cleanly even when the ``anthropic`` package is not installed.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from minicode.core.models import (
     Block,
     Message,
+    MediaBlock,
     ModelResponse,
     StopReason,
     TextBlock,
@@ -23,6 +25,8 @@ from minicode.core.models import (
 )
 
 from .base import ReasoningDelta, ResponseDone, StreamEvent, TextDelta
+from .media import content_part
+from minicode.storage.attachments import AttachmentStore, check_attachments
 from .errors import ProviderAuthError, ProviderError, ProviderRequestError
 
 # Anthropic stop_reason -> our normalized StopReason (anything else -> END_TURN).
@@ -47,6 +51,8 @@ class AnthropicProvider:
         max_tokens: int = 4096,
     ) -> None:
         self.model = model
+        self.input_modalities = ("image", "pdf")
+        self.attachment_store = AttachmentStore(Path.home() / ".minicode" / "attachments")
         self.api_key = api_key
         self.max_tokens = max_tokens
         if client is None:
@@ -78,8 +84,9 @@ class AnthropicProvider:
     # Serialization: our block model -> Anthropic request dicts
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _serialize_block(block: Block) -> dict[str, Any]:
+    def _serialize_block(self, block: Block) -> dict[str, Any]:
+        if isinstance(block, MediaBlock):
+            return content_part(block, self.attachment_store, "anthropic")
         if isinstance(block, ToolUseBlock):
             return {
                 "type": "tool_use",
@@ -172,6 +179,7 @@ class AnthropicProvider:
     ) -> AsyncIterator[StreamEvent]:
         import anthropic  # lazy: needed here for the exception classes
 
+        check_attachments([b for m in messages for b in m.content if isinstance(b, MediaBlock)], self.input_modalities, "anthropic")
         request_kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": self._serialize_messages(messages),

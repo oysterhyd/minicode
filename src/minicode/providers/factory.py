@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from minicode.configuration import HarnessConfiguration
 from minicode.providers.errors import ProviderRequestError
+from minicode.core.models import ModelCapabilities
 
 
 def model_catalog():
@@ -17,6 +18,7 @@ def model_catalog():
                 name=key, provider="anthropic" if service["apiStyle"] == "anthropic" else "commandcode",
                 context_window=model["contextWindow"], max_output_tokens=model["maxOutputTokens"],
                 supports_effort=model["supportsEffort"],
+                input_modalities=ModelCapabilities.model_validate(model.get("capabilities") or {}).modalities(),
             )
     return catalog
 
@@ -53,4 +55,5 @@ def configured_provider(model: str, *, configuration: HarnessConfiguration | Non
                                        reasoning_effort=effort if info["supportsEffort"] and effort != "off" else None)
     provider.configuration_id = model
     provider.context_window = info["contextWindow"]
+    provider.input_modalities = ModelCapabilities.model_validate(info.get("capabilities") or {}).modalities()
     return provider

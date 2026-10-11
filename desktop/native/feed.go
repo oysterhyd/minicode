@@ -67,6 +67,9 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 	case "user":
 		turn := ui.Column(c).AlignItems(ui.End).Gap(2).Margin(6, 0, 0, 0).Transition(enterMotion)
 		turn.Children(func() {
+			if len(item.Attachments) > 0 {
+				d.attachmentChips(c, p, item.Attachments, false)
+			}
 			ui.Text(c, item.Text).MaxWidthPercent(85).Padding(9, 14).Radius(18).Background(p.Subtle).Border(1, p.BorderSubtle).FontSize(p.font(13.72)).LineHeight(1.6).Selectable()
 			actions := ui.Row(c).Height(26).Gap(2)
 			if !turn.Hovered() && !turn.FocusWithin() {
@@ -78,6 +81,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 				}
 				if !v.Busy && iconButton(c, p, "PencilLine", "编辑并重新发送").Size(26, 26).Clicked() {
 					v.Draft = item.Text
+					v.Attachments = append([]model.Attachment(nil), item.Attachments...)
 					d.focusPrompt = true
 				}
 			})

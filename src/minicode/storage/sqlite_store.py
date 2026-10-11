@@ -42,7 +42,8 @@ DEFAULT_DB_PATH = Path.home() / ".minicode" / "sessions.db"
 
 #: Layout version recorded in ``PRAGMA user_version``. Bump when the schema
 #: changes in a way older code cannot read.
-SCHEMA_VERSION = 5
+# V6 adds media-reference message blocks; older decoders must not open them.
+SCHEMA_VERSION = 6
 
 _SESSION_COLUMNS = (
     "session_id, created_at, workspace, provider, model, "

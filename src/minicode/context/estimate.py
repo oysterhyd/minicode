@@ -14,6 +14,7 @@ import json
 
 from minicode.core.models import (
     Message,
+    MediaBlock,
     TextBlock,
     ToolResultBlock,
     ToolSpec,
@@ -38,6 +39,8 @@ def _block_tokens(block: TextBlock | ToolUseBlock | ToolResultBlock) -> int:
     """Estimated tokens carried by one conversation block."""
     if isinstance(block, TextBlock):
         return estimate_tokens(block.text)
+    if isinstance(block, MediaBlock):
+        return 1536 if block.kind == "image" else 1024 + block.size // 256
     if isinstance(block, ToolResultBlock):
         return estimate_tokens(block.content)
     if isinstance(block, ToolUseBlock):

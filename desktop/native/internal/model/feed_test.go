@@ -17,3 +17,11 @@ func TestReasoningHistoryMatchesPreservedMessages(t *testing.T) {
 		t.Fatalf("reasoning not restored before matching answer/tool: %+v", items)
 	}
 }
+
+func TestHistoryKeepsAttachmentWithUserCaption(t *testing.T) {
+	detail := Detail{Messages: []Message{{Role: "user", Content: []map[string]any{{"type": "media", "asset_id": "cached", "kind": "image", "name": "截图.png", "mime_type": "image/png", "size": 512}, {"type": "text", "text": "分析图片"}}}}}
+	items := History(detail)
+	if len(items) != 1 || items[0].Text != "分析图片" || len(items[0].Attachments) != 1 || items[0].Attachments[0].Name != "截图.png" {
+		t.Fatal("restored attachment was detached from its caption")
+	}
+}

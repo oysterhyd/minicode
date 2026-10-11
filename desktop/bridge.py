@@ -28,6 +28,7 @@ from minicode.security.policy import ModePolicy, PermissionMode, parse_permissio
 from minicode.slash import SLASH_COMMANDS, format_command_lines
 from minicode.storage import SqliteStore
 from minicode.storage.artifacts import ArtifactStore
+from minicode.storage.attachments import AttachmentStore, check_attachments, MAX_ATTACHMENTS, MAX_TOTAL_BYTES
 from minicode.tasks.background import BackgroundManager
 from minicode.tasks.taskstore import TaskStore
 from minicode.tools.registry import default_registry
@@ -94,6 +95,7 @@ def session_list(store: SqliteStore) -> list[dict]:
 class Bridge:
     def __init__(self, store: SqliteStore | None = None) -> None:
         self.store = store if store is not None else _open_store()
+        self.attachments = AttachmentStore(self.store._db_path.parent / "attachments")
         self.client_key: str | None = None
         #: Client key that owns the in-flight turn. Events keep this tag until
         #: the run ends, so a request arriving from another key (or from a
@@ -269,10 +271,10 @@ class Bridge:
         self.registry_dirty = False
         self.pending_model = False
 
-    async def run_prompt(self, text: str | None):
+    async def run_prompt(self, text: str | None, attachments=None):
         message = None
         try:
-            result = await (self.runtime.run_turn(text) if text is not None else self.runtime.continue_turn())
+            result = await ((self.runtime.run_turn(text, attachments=attachments) if attachments else self.runtime.run_turn(text)) if text is not None else self.runtime.continue_turn())
             message = {"event": "run_done", "sessionId": self.runtime.session_id,
                        "result": result.model_dump(mode="json")}
         except asyncio.CancelledError:
@@ -656,10 +658,28 @@ class Bridge:
             if self.busy():
                 self.run_task.cancel()
             return True
+        if method == "importAttachments":
+            paths = params.get("paths", [])
+            if not isinstance(paths, list) or not paths or len(paths) > MAX_ATTACHMENTS or any(not isinstance(p, str) for p in paths):
+                raise ValueError("请选择 1 至 10 个附件")
+            files = [await asyncio.to_thread(self.attachments.import_file, path) for path in paths]
+            if sum(b.size for b in files) > MAX_TOTAL_BYTES:
+                raise ValueError("附件总大小不能超过 24 MB")
+            return [b.model_dump() for b in files]
+        if method == "attachmentPath":
+            block = self.attachments.get(params["assetId"])
+            await asyncio.to_thread(self.attachments.encoded, block)
+            return {"path": str(self.attachments.path(block))}
         if method == "sendPrompt":
             if self.busy():
                 raise ValueError("当前任务仍在运行")
             text = params["text"].strip()
+            requested_files = params.get("attachments") or []
+            if not isinstance(requested_files, list) or len(requested_files)>MAX_ATTACHMENTS:
+                raise ValueError("附件列表无效或超过 10 个")
+            files = [self.attachments.get(item["asset_id"]) for item in requested_files]
+            if not text and files:
+                text = "请分析这些附件"
             if not text:
                 raise ValueError("请输入任务内容")
             session_id = params.get("sessionId")
@@ -676,9 +696,10 @@ class Bridge:
             await self.ensure_runtime(workspace, session_id, model)
             if self.runtime.model != model:
                 await self.change_model(model)
+            check_attachments(files, getattr(self.runtime.provider, "input_modalities", ()))
             self.runtime.set_budget(self.budget)
             self.event_key = self.client_key
-            self.run_task = asyncio.create_task(self.run_prompt(text))
+            self.run_task = asyncio.create_task(self.run_prompt(text, files))
             await asyncio.sleep(0)
             return {"sessionId": self.runtime.session_id}
         if method == "resolveApproval":

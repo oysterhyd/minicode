@@ -144,6 +144,7 @@ class AgentRuntime:
         self._provider = provider
         self._registry = registry
         self._store = store
+        self._bind_attachment_store(provider)
         # The board shares the session database; its tools only appear when
         # the host explicitly registers them. Reopening a session keeps tasks.
         from minicode.storage.sqlite_store import SqliteStore
@@ -446,6 +447,12 @@ class AgentRuntime:
                 if close is not None:
                     await close()
 
+    def _bind_attachment_store(self, provider):
+        from minicode.storage import SqliteStore
+        from minicode.storage.attachments import AttachmentStore
+        if isinstance(self._store, SqliteStore) and hasattr(provider, "attachment_store"):
+            provider.attachment_store = AttachmentStore(self._store._db_path.parent / "attachments")
+
     def set_model(
         self, *, provider: Provider, provider_name: str, model: str
     ) -> None:
@@ -464,6 +471,7 @@ class AgentRuntime:
         self._provider = provider
         self._provider_name = provider_name
         self._model = model
+        self._bind_attachment_store(provider)
 
     @staticmethod
     def _validate_provider(provider: Provider, provider_name: str, model: str) -> None:
@@ -485,15 +493,18 @@ class AgentRuntime:
             self._goal_attempts = 0
         return await self.run_turn(None)
 
-    async def run_turn(self, user_message: str | None) -> RunResult:
+    async def run_turn(self, user_message: str | None, *, attachments=None) -> RunResult:
         """Activate the session once; rejected concurrent callers change nothing."""
         if self._running:
             raise SessionBusyError("this runtime already has an active turn")
+        from minicode.storage.attachments import check_attachments
+        attachments = [b.model_copy(deep=True) for b in (attachments or [])]
+        check_attachments(attachments, getattr(self._provider, "input_modalities", ()))
         self._running = True
         self._run_id = uuid.uuid4().hex
         self._phase = RunPhase.PREPARING
         try:
-            return await self._run_turn(user_message)
+            return await self._run_turn(user_message, attachments)
         finally:
             if self._activation_guard is not None:
                 self._activation_guard.__exit__(None, None, None)
@@ -503,7 +514,7 @@ class AgentRuntime:
             self._run_id = None
             self._phase = RunPhase.PAUSED if self._task_pending else RunPhase.IDLE
 
-    async def _run_turn(self, user_message: str | None) -> RunResult:
+    async def _run_turn(self, user_message: str | None, attachments=None) -> RunResult:
         """Run one activation of a user task and return its durable outcome.
 
         On the first call the session row is created and ``SESSION_START``
@@ -599,7 +610,7 @@ class AgentRuntime:
                 )
 
                 if user_message is not None:
-                    user_msg = Message(role="user", content=[TextBlock(text=user_message)])
+                    user_msg = Message(role="user", content=[*(attachments or []), TextBlock(text=user_message)])
                     self._append_message(session_id, user_msg)
                     self._task_pending = True
                     self._goal_attempts = 0
@@ -781,12 +792,12 @@ class AgentRuntime:
                 self._provider_in_flight = False
                 self._persist_counters()
             if user_message is not None and not user_recorded:
-                self._append_message(session_id, Message(role="user", content=[TextBlock(text=user_message)]))
+                self._append_message(session_id, Message(role="user", content=[*(attachments or []), TextBlock(text=user_message)]))
                 self._task_pending = True
             return await self._finalize(recorder, ExitReason.TIME_BUDGET, turn_started)
         except asyncio.CancelledError:
             if user_message is not None and not user_recorded:
-                self._append_message(session_id, Message(role="user", content=[TextBlock(text=user_message)]))
+                self._append_message(session_id, Message(role="user", content=[*(attachments or []), TextBlock(text=user_message)]))
                 self._task_pending = True
             if self._provider_in_flight:
                 self._usage = self._usage.model_copy(update={"available": False})
@@ -796,7 +807,7 @@ class AgentRuntime:
             raise  # never swallow cancellation
         except Exception as exc:  # noqa: BLE001 - checkpoint unexpected failures
             if user_message is not None and not user_recorded:
-                self._append_message(session_id, Message(role="user", content=[TextBlock(text=user_message)]))
+                self._append_message(session_id, Message(role="user", content=[*(attachments or []), TextBlock(text=user_message)]))
                 self._task_pending = True
             return await self._finalize(
                 recorder, ExitReason.INTERNAL_ERROR, turn_started, error=str(exc)

@@ -232,10 +232,14 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			ui.Column(c).Gap(4).Children(func() {
 				muted(c, p, fmt.Sprintf("等待执行 · %d", len(v.Queue))).FontSize(p.font(10.36))
 				remove := -1
-				for i, text := range v.Queue {
-					ui.Row(c).Key(fmt.Sprintf("queue-%d-%s", i, text)).Height(32).Padding(0, 4, 0, 10).Gap(8).Border(1, p.BorderStrong).BorderStyle(ui.BorderDashed).Radius(8).Background(p.Panel).Transition(enterMotion).Children(func() {
+				for i, prompt := range v.Queue {
+					ui.Row(c).Key(fmt.Sprintf("queue-%d-%s", i, prompt.Text)).Height(32).Padding(0, 4, 0, 10).Gap(8).Border(1, p.BorderStrong).BorderStyle(ui.BorderDashed).Radius(8).Background(p.Panel).Transition(enterMotion).Children(func() {
 						icon(c, "ListPlus", 13, p.Text3)
-						ui.Text(c, text).Grow(1).SingleLine().FontSize(p.font(11.76)).TextColor(p.Text2)
+						text := prompt.Text
+						if len(prompt.Attachments) > 0 {
+							text += fmt.Sprintf(" · %d 个附件", len(prompt.Attachments))
+						}
+						ui.Text(c, text).Grow(1).Basis(0).SingleLine().FontSize(p.font(11.76)).TextColor(p.Text2)
 						if iconButton(c, p, "X", fmt.Sprintf("取消排队消息 %d", i+1)).Size(24, 24).Clicked() {
 							remove = i
 						}
@@ -251,6 +255,17 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			composer.BorderColor(p.BorderStrong).Shadow(0, 0, 0, 4, p.Accent.Alpha(0.1))
 		}
 		composer.Children(func() {
+			if v.Uploading {
+				ui.Row(c).Padding(10, 18, 0, 18).Gap(8).Children(func() { spinner(c, p); muted(c, p, "正在添加附件…") })
+			}
+			if len(v.Attachments) > 0 {
+				ui.Column(c).Padding(12, 14, 0, 14).Gap(6).Children(func() {
+					ui.Scroll(c).FillWidth().MaxHeight(96).Children(func() { d.attachmentChips(c, p, v.Attachments, true) })
+					if problem := d.attachmentProblem(v, v.Attachments); problem != "" {
+						ui.Text(c, problem).FontSize(p.font(10.92)).TextColor(p.Warning)
+					}
+				})
+			}
 			placeholder := "描述任务，输入 / 使用命令，@ 引用文件"
 			if v.Workspace == "" {
 				placeholder = "先打开工作区，再描述你想完成的任务…"
@@ -326,6 +341,9 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				}
 			}
 			ui.Row(c).Wrap().Padding(6, 8, 8, 8).Gap(4).Children(func() {
+				if iconButton(c, p, "FileUp", "添加附件").Size(30, 30).Radius(99).Disabled(v.Workspace == "" || v.Uploading).Clicked() {
+					d.chooseAttachments(v)
+				}
 				if iconButton(c, p, "AtSign", "引用文件").Size(30, 30).Radius(99).Disabled(v.Workspace == "").Clicked() {
 					anchor, caret := input.TextSelection()
 					v.Draft = input.ReplaceSelection(anchor, caret, "@")
@@ -335,8 +353,8 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				d.permissionMenu(c, p, home)
 				ui.Spacer(c)
 				d.contextMeter(c, p, home)
-				stopping := v.Busy && strings.TrimSpace(v.Draft) == ""
-				ready := stopping || (strings.TrimSpace(v.Draft) != "" && (v.Workspace != "" || strings.HasPrefix(v.Draft, "/")) && !v.Loading)
+				stopping := v.Busy && strings.TrimSpace(v.Draft) == "" && len(v.Attachments) == 0
+				ready := stopping || ((strings.TrimSpace(v.Draft) != "" || len(v.Attachments) > 0) && (v.Workspace != "" || strings.HasPrefix(v.Draft, "/")) && !v.Loading && !v.Uploading && d.attachmentProblem(v, v.Attachments) == "")
 				name, label := "ArrowUp", "发送任务"
 				if v.Busy {
 					name, label = "ListPlus", "加入队列"
@@ -365,7 +383,12 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			}
 		})
 		if dropped := composer.DroppedFiles(); len(dropped) > 0 {
+			var media []string
 			for _, path := range dropped {
+				if isMediaPath(path) {
+					media = append(media, path)
+					continue
+				}
 				if relative, err := relativeFile(v.Workspace, path); err == nil {
 					v.Draft += func() string {
 						if v.Draft != "" && !strings.HasSuffix(v.Draft, " ") {
@@ -374,6 +397,9 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 						return ""
 					}() + "@" + relative + " "
 				}
+			}
+			if len(media) > 0 {
+				d.addAttachments(v, media)
 			}
 			d.focusPrompt = true
 		}
@@ -494,6 +520,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 						ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(3).Children(func() {
 							ui.Text(c, name).SingleLine().FontSize(p.font(12.04)).FontWeight(550)
 							detail := m.Provider
+							detail += " · " + capabilityLabel(m.InputCapabilities)
 							if !m.Available {
 								detail += " · 未配置或未启用"
 							}

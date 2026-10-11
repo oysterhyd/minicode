@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from minicode.core.limits import MAX_RESPONSE_BYTES, MAX_TOOL_CALLS
-from minicode.core.models import EventType, ExitReason, Message, ModelResponse, ToolResultBlock, ToolSpec
+from minicode.core.models import EventType, ExitReason, MediaBlock, Message, ModelResponse, ToolResultBlock, ToolSpec
 from minicode.providers.base import Provider, ReasoningDelta, ResponseDone, TextDelta
 from minicode.providers.errors import ProviderError, ProviderProtocolError
 
@@ -33,6 +33,8 @@ def validate_response(response: ModelResponse, known_ids: set[str],
         raise ProviderProtocolError("provider returned an invalid response")
     if any(isinstance(block, ToolResultBlock) for block in response.blocks):
         raise ProviderProtocolError("provider emitted a tool result as an assistant block")
+    if any(isinstance(block, MediaBlock) for block in response.blocks):
+        raise ProviderProtocolError("provider emitted an input attachment as an assistant block")
     calls = response.tool_calls
     if len(calls) > MAX_TOOL_CALLS:
         raise ProviderProtocolError("provider returned too many tool calls")

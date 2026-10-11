@@ -32,6 +32,7 @@ from minicode.core.limits import MAX_RESPONSE_BYTES, MAX_TOOL_CALLS, MAX_SSE_BYT
 from minicode.core.models import (
     Block,
     Message,
+    MediaBlock,
     ModelResponse,
     StopReason,
     TextBlock,
@@ -44,6 +45,9 @@ from minicode.context.estimate import estimate_messages_tokens
 from minicode.core.catalog import lookup_model
 
 from .base import ReasoningDelta, ResponseDone, StreamEvent, TextDelta
+from .media import content_part
+from minicode.storage.attachments import AttachmentStore, check_attachments
+from pathlib import Path
 from .errors import ProviderAuthError, ProviderError, ProviderRequestError, ProviderProtocolError
 from .zcode_config import DEFAULT_MODEL, discover_commandcode
 
@@ -81,6 +85,8 @@ def _build_payload(
     reasoning_effort: str | None = None,
     prompt_scale: float = 1.0,
     context_window: int | None = None,
+    attachment_store: AttachmentStore | None = None,
+    input_modalities: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Serialize the normalized conversation into an OpenAI-compatible
     request body.
@@ -102,6 +108,8 @@ def _build_payload(
     so the gateway applies its own default.
     """
     chat_messages: list[dict[str, Any]] = []
+    media = [b for m in messages for b in m.content if isinstance(b, MediaBlock)]
+    check_attachments(media, input_modalities, "openai")
     if system:
         chat_messages.append({"role": "system", "content": system})
 
@@ -136,8 +144,14 @@ def _build_payload(
             ]
             chat_messages.extend(tool_messages)
             text = _assistant_text(message)
-            if not tool_messages or text:
-                chat_messages.append({"role": "user", "content": text})
+            media_blocks = [b for b in message.content if isinstance(b, MediaBlock)]
+            if not tool_messages or text or media_blocks:
+                content = text
+                if media_blocks:
+                    if attachment_store is None: raise ProviderRequestError("附件存储未初始化")
+                    content = [content_part(b, attachment_store, "openai") for b in media_blocks]
+                    if text: content.append({"type": "text", "text": text})
+                chat_messages.append({"role": "user", "content": content})
 
     prompt_estimate = int(estimate_messages_tokens(
         system, messages, tools, reserve_output_tokens=0
@@ -288,6 +302,8 @@ class CommandCodeProvider:
         injected so tests can run without any network access.
         """
         self.model = model
+        self.input_modalities = lookup_model(model).input_modalities
+        self.attachment_store = AttachmentStore(Path.home() / ".minicode" / "attachments")
         self.timeout_s = timeout_s
         self.reasoning_effort = reasoning_effort
         self.max_tokens = DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
@@ -380,6 +396,8 @@ class CommandCodeProvider:
             reasoning_effort=self.reasoning_effort,
             prompt_scale=self.prompt_scale,
             context_window=getattr(self, "context_window", None),
+            attachment_store=self.attachment_store,
+            input_modalities=self.input_modalities,
         )
         estimated_input = estimate_messages_tokens(system, messages, tools,
                                                    reserve_output_tokens=0)

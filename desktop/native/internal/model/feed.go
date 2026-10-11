@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -73,6 +74,18 @@ func History(detail Detail) []*FeedItem {
 	}
 	items := make([]*FeedItem, 0, len(detail.Messages))
 	for i, message := range detail.Messages {
+		var attachments []Attachment
+		if message.Role == "user" {
+			for _, block := range message.Content {
+				if String(block["type"]) == "media" {
+					raw, _ := json.Marshal(block)
+					var file Attachment
+					if json.Unmarshal(raw, &file) == nil {
+						attachments = append(attachments, file)
+					}
+				}
+			}
+		}
 		if event, ok := reasoning[i]; ok && String(event.Data["reasoning"]) != "" {
 			items = append(items, &FeedItem{ID: fmt.Sprintf("reasoning-%d", event.Seq), Kind: "reasoning", Text: String(event.Data["reasoning"]), EndedAt: Time(event.Timestamp)})
 		}
@@ -82,7 +95,8 @@ func History(detail Detail) []*FeedItem {
 			case "text":
 				text := String(block["text"])
 				if text != "" {
-					items = append(items, &FeedItem{ID: id, Kind: message.Role, Text: text})
+					items = append(items, &FeedItem{ID: id, Kind: message.Role, Text: text, Attachments: attachments})
+					attachments = nil
 				}
 			case "tool_use":
 				callID := String(block["id"])
@@ -102,6 +116,9 @@ func History(detail Detail) []*FeedItem {
 					Success: Bool(result.Data["success"]), Pending: false, Interrupted: !ok,
 					StartedAt: Time(starts[callID].Timestamp), EndedAt: Time(result.Timestamp)})
 			}
+		}
+		if len(attachments) > 0 {
+			items = append(items, &FeedItem{ID: fmt.Sprintf("%d-media", i), Kind: "user", Attachments: attachments})
 		}
 	}
 	return items
