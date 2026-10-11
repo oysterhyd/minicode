@@ -25,7 +25,7 @@ from minicode.core.models import (
     ToolUseBlock,
     Usage,
 )
-from minicode.providers.base import ResponseDone, StreamEvent, TextDelta
+from minicode.providers.base import ReasoningDelta, ResponseDone, StreamEvent, TextDelta
 from minicode.providers.commandcode import (
     DEFAULT_MAX_TOKENS,
     CommandCodeProvider,
@@ -195,6 +195,7 @@ def test_stream_text_deltas_usage_and_request_shape() -> None:
     dones = [e for e in collected if isinstance(e, ResponseDone)]
     # Reasoning-only chunk must not surface as a TextDelta.
     assert [d.text for d in deltas] == ["Hello ", "world"]
+    assert [e.text for e in collected if isinstance(e, ReasoningDelta)] == ["hmm"]
     assert len(dones) == 1
     assert collected[-1] is dones[0]
 

@@ -22,7 +22,7 @@ from minicode.core.models import (
     Usage,
 )
 
-from .base import ResponseDone, StreamEvent, TextDelta
+from .base import ReasoningDelta, ResponseDone, StreamEvent, TextDelta
 from .errors import ProviderAuthError, ProviderError, ProviderRequestError
 
 # Anthropic stop_reason -> our normalized StopReason (anything else -> END_TURN).
@@ -197,6 +197,8 @@ class AnthropicProvider:
                         and event.delta.type == "text_delta"
                     ):
                         yield TextDelta(event.delta.text)
+                    elif event.type == "content_block_delta" and event.delta.type == "thinking_delta":
+                        yield ReasoningDelta(event.delta.thinking)
                 response = await stream.get_final_message()
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
             raise ProviderAuthError(f"anthropic auth failed: {exc}") from exc

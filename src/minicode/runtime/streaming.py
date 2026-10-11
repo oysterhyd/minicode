@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 
 from minicode.core.limits import MAX_RESPONSE_BYTES, MAX_TOOL_CALLS
 from minicode.core.models import EventType, ExitReason, Message, ModelResponse, ToolResultBlock, ToolSpec
-from minicode.providers.base import Provider, ResponseDone, TextDelta
+from minicode.providers.base import Provider, ReasoningDelta, ResponseDone, TextDelta
 from minicode.providers.errors import ProviderError, ProviderProtocolError
 
 
@@ -21,6 +21,7 @@ class StreamResult:
     duration_s: float = 0.0
     generation_seconds: float | None = None
     first_token_seconds: float | None = None
+    reasoning: str = ""
     failure: ExitReason | None = None
     error: Exception | None = None
     usage_uncertain: bool = False
@@ -48,6 +49,7 @@ def validate_response(response: ModelResponse, known_ids: set[str],
 async def stream_response(
     provider: Provider, *, system: str, messages: list[Message], tools: list[ToolSpec],
     on_delta: Callable[[str], Awaitable[None]] | None,
+    on_reasoning: Callable[[str], Awaitable[None]] | None = None,
     on_retry: Callable[[EventType, dict], Awaitable[object]],
     settled: Callable[[str], bool], attempts: int = 3,
 ) -> StreamResult:
@@ -61,6 +63,7 @@ async def stream_response(
         started = time.monotonic()
         saw_text = False
         captured = 0
+        reasoning: list[str] = []
         try:
             async with asyncio.timeout(getattr(provider, "timeout_s", 180.0)):
                 async with aclosing(provider.stream(
@@ -68,14 +71,18 @@ async def stream_response(
                     tools=[tool.model_copy(deep=True) for tool in tools],
                 )) as stream:
                     async for event in stream:
-                        if isinstance(event, TextDelta):
+                        if isinstance(event, (TextDelta, ReasoningDelta)):
                             saw_text = saw_text or bool(event.text)
                             captured += len(event.text.encode("utf-8"))
                             if captured > MAX_RESPONSE_BYTES:
                                 raise ProviderProtocolError("provider text exceeds the capture limit")
-                            if on_delta is not None:
+                            callback = on_delta
+                            if isinstance(event, ReasoningDelta):
+                                reasoning.append(event.text)
+                                callback = on_reasoning
+                            if callback is not None:
                                 try:
-                                    await on_delta(event.text)
+                                    await callback(event.text)
                                 except Exception:
                                     # UI observer failure cannot invalidate a response.
                                     pass
@@ -86,6 +93,7 @@ async def stream_response(
                             return StreamResult(response=event.response.model_copy(deep=True), duration_s=time.monotonic() - started,
                                                 generation_seconds=event.generation_seconds,
                                                 first_token_seconds=event.first_token_seconds,
+                                                reasoning="".join(reasoning),
                                                 usage_uncertain=uncertain)
                         else:
                             raise ProviderProtocolError("provider emitted an unknown stream event")

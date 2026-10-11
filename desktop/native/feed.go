@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -113,6 +114,8 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 			}
 		})
 		c.After(time.Second)
+	case "reasoning":
+		d.reasoningView(c, p, item)
 	case "notice":
 		color := p.Info
 		name := "Info"
@@ -148,6 +151,51 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 	case "approval":
 		d.approval(c, p, item)
 	}
+}
+
+func (d *desktop) reasoningView(c *ui.Context, p palette, item *model.FeedItem) {
+	v := d.current()
+	key := "reasoning-" + item.ID
+	open, stored := v.Open[key]
+	if !stored {
+		open = item.Pending
+	}
+	root := ui.Column(c).Key(key).FillWidth().Border(1, p.BorderSubtle).Radius(10).Background(p.Panel)
+	scroll := ui.Local(root, "scroll", func() ui.ScrollState { return ui.ScrollState{} })
+	root.Children(func() {
+		head := ui.ButtonBase(c).Label("思考过程").Description("模型接口返回的推理内容").Expanded(open).FillWidth().Height(34).Padding(0, 12).Gap(8).Justify(ui.Start)
+		if head.Hovered() {
+			head.Background(p.Hover)
+		}
+		head.Children(func() {
+			if item.Pending {
+				spinner(c, p)
+			} else {
+				icon(c, "Sparkles", 14, p.Text3)
+			}
+			ui.Text(c, "思考过程").NoWrap().FontSize(p.font(11.76)).FontWeight(550).TextColor(p.Text2)
+			ui.Spacer(c)
+			status := "已完成"
+			if item.Pending {
+				status = "生成中"
+			} else if item.Interrupted {
+				status = "已中断"
+			}
+			muted(c, p, status).NoWrap().Shrink(0).FontSize(p.font(10.36))
+			icon(c, map[bool]string{true: "ChevronDown", false: "ChevronRight"}[open], 12, p.Text4)
+		})
+		if head.Clicked() {
+			v.Open[key] = !open
+		}
+		if open {
+			if item.Pending && scroll.Y >= scroll.MaxY-1 {
+				scroll.Y = math.MaxFloat32
+			}
+			ui.Scroll(c).FillWidth().MaxHeight(180).TrackScroll(scroll).Padding(0, 12, 12, 12).Children(func() {
+				ui.Text(c, item.Text).FillWidth().Selectable().FontSize(p.font(11.48)).LineHeight(1.6).TextColor(p.Text2)
+			})
+		}
+	})
 }
 
 func (d *desktop) toolGroup(c *ui.Context, p palette, row model.FeedRow) {

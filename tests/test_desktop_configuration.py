@@ -237,6 +237,40 @@ def test_generation_statistics_are_weighted_and_persisted(configuration, tmp_pat
     asyncio.run(scenario())
 
 
+def test_reasoning_stream_is_routed_persisted_and_separate_from_answer(configuration, tmp_path, monkeypatch):
+    from minicode.providers.base import ReasoningDelta
+    from minicode.core.models import EventType
+    inputs, emitted = [], []
+    class ReasoningProvider(FakeProvider):
+        async def stream(self, **kwargs):
+            inputs.extend(kwargs["messages"])
+            yield ReasoningDelta("核对输入。")
+            yield ReasoningDelta("选择方案。")
+            async for event in super().stream(**kwargs):
+                yield event
+    monkeypatch.setattr(bridge_mod, "provider_for", lambda *_: ReasoningProvider())
+    monkeypatch.setattr(bridge_mod, "emit", emitted.append)
+    async def scenario():
+        b = bridge_mod.Bridge(SqliteStore(tmp_path / "reasoning.sqlite"))
+        b.client_key = "thinking-view"
+        await b.create_runtime(tmp_path, "fake", None)
+        await b.runtime.run_turn("hello")
+        sid = b.runtime.session_id
+        deltas = [e for e in emitted if e.get("event") == "reasoning_delta"]
+        assert [e["text"] for e in deltas] == ["核对输入。", "选择方案。"]
+        assert all(e["clientKey"] == "thinking-view" and e["sessionId"] == sid for e in deltas)
+        data = next(e.data for e in b.store.get_events(sid) if e.type == EventType.ASSISTANT_MESSAGE)
+        assert data["reasoning"] == "核对输入。选择方案。"
+        assert "核对输入" not in data["text"]
+        await b.handle("selectSession", {"sessionId": sid})
+        await b.runtime.run_turn("continue")
+        assert len([e for e in emitted if e.get("event") == "reasoning_delta"]) == 4
+        assert all("核对输入" not in message.model_dump_json() for message in inputs)
+        await b.discard_runtime()
+        b.store.close()
+    asyncio.run(scenario())
+
+
 def test_model_discovery_retains_stored_secret_and_handles_errors(configuration, monkeypatch):
     import httpx
     public = configuration.save_service(service())

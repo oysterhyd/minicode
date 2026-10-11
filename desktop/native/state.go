@@ -52,6 +52,8 @@ type conversation struct {
 	Artifacts                     map[string]*artifact
 	stream                        *model.FeedItem
 	streamText                    strings.Builder
+	reasoning                     *model.FeedItem
+	reasoningText                 strings.Builder
 	version                       uint64
 	refreshVersion                uint64
 	refreshPending                bool
@@ -625,7 +627,7 @@ func (d *desktop) queueEvent(event bridge.Event) {
 	d.eventsScheduled = true
 	d.eventsMu.Unlock()
 	if start {
-		if event.Event == "text_delta" {
+		if event.Event == "text_delta" || event.Event == "reasoning_delta" {
 			time.AfterFunc(8*time.Millisecond, func() { d.schedule(d.flushEvents) })
 		} else {
 			d.schedule(d.flushEvents)
@@ -652,6 +654,11 @@ func (d *desktop) handleEvent(event bridge.Event) {
 		for _, v := range d.views {
 			v.Error = event.Error
 			if strings.Contains(event.Error, "exited") {
+				if v.reasoning != nil {
+					v.reasoning.Interrupted = true
+				}
+				v.finishStream()
+				v.removeThinking()
 				v.Busy = false
 			}
 		}
@@ -682,7 +689,25 @@ func (d *desktop) handleEvent(event bridge.Event) {
 		v.SessionID = event.SessionID
 	}
 	switch event.Event {
+	case "reasoning_delta":
+		if event.Text == "" {
+			return
+		}
+		if v.reasoning == nil {
+			v.removeThinking()
+			v.reasoning = &model.FeedItem{ID: fmt.Sprint("reasoning-", d.next.Add(1)), Kind: "reasoning", Pending: true, StartedAt: time.Now()}
+			v.reasoningText.Reset()
+			v.append(v.reasoning)
+		}
+		v.reasoningText.WriteString(event.Text)
+		v.reasoning.Text = v.reasoningText.String()
+		v.reasoning.Pending = true
+		v.reasoning.Version++
 	case "text_delta":
+		if v.reasoning != nil && v.reasoning.Pending {
+			v.reasoning.Pending = false
+			v.reasoning.EndedAt = time.Now()
+		}
 		if v.stream == nil {
 			v.removeThinking()
 			v.stream = &model.FeedItem{ID: fmt.Sprint("stream-", d.next.Add(1)), Kind: "assistant", Pending: true}
@@ -723,6 +748,15 @@ func (d *desktop) handleEvent(event bridge.Event) {
 }
 
 func (v *conversation) finishStream() {
+	if v.reasoning != nil {
+		v.reasoning.Pending = false
+		if v.reasoning.EndedAt.IsZero() {
+			v.reasoning.EndedAt = time.Now()
+		}
+		v.reasoning.Version++
+		v.reasoning = nil
+	}
+	v.reasoningText.Reset()
 	if v.stream != nil {
 		v.stream.Pending = false
 		v.stream.Version++
@@ -757,8 +791,17 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 		v.append(&model.FeedItem{ID: fmt.Sprintf("retry-%d", event.Seq), Kind: "notice", Tone: "warning", Text: fmt.Sprintf("模型请求暂时失败，%g 秒后重试（第 %g 次）。", model.Number(data["delay_s"]), model.Number(data["next_attempt"]))})
 	case "assistant_message":
 		stream := v.stream
+		reasoning := v.reasoning
 		v.finishStream()
 		v.removeThinking()
+		if text := model.String(data["reasoning"]); text != "" {
+			if reasoning != nil {
+				reasoning.Text = text
+				reasoning.Version++
+			} else {
+				v.append(&model.FeedItem{ID: fmt.Sprintf("reasoning-%d", event.Seq), Kind: "reasoning", Text: text, EndedAt: stamp})
+			}
+		}
 		text := model.String(data["text"])
 		if stream != nil {
 			if text != "" {
@@ -851,6 +894,9 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 func (d *desktop) finish(v *conversation, event bridge.Event) {
 	var result model.RunResult
 	_ = json.Unmarshal(event.Result, &result)
+	if v.reasoning != nil && v.reasoning.Pending {
+		v.reasoning.Interrupted = event.Event == "run_error" || result.ExitReason == "cancelled" || result.ExitReason == "provider_error"
+	}
 	v.finishStream()
 	v.removeThinking()
 	v.Busy = false

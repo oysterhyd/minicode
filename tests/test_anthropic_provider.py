@@ -29,6 +29,7 @@ from minicode.providers import (
     ProviderError,
     ProviderRequestError,
     ResponseDone,
+    ReasoningDelta,
     StreamEvent,
     TextDelta,
 )
@@ -350,5 +351,7 @@ def test_timing_counts_thinking_and_tool_arguments(monkeypatch):
     ]
     final = SimpleNamespace(content=[], stop_reason="tool_use", usage=SimpleNamespace(output_tokens=600))
     provider, _ = make_provider(events, final)
-    done = run_stream(provider, system=None, messages=[], tools=[])[-1]
+    collected = run_stream(provider, system=None, messages=[], tools=[])
+    assert [e.text for e in collected if isinstance(e, ReasoningDelta)] == ["think"]
+    done = collected[-1]
     assert done.generation_seconds == 2 and done.first_token_seconds == 5

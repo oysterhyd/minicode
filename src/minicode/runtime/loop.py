@@ -128,6 +128,7 @@ class AgentRuntime:
         budget: Budget | None = None,
         approval_handler: ApprovalHandler | None = None,
         on_text_delta: TextDeltaCallback | None = None,
+        on_reasoning_delta: TextDeltaCallback | None = None,
         on_event: EventCallback | None = None,
         system_prompt: str | None = None,
         compactor: Any | None = None,
@@ -157,6 +158,7 @@ class AgentRuntime:
         self._budget = budget if budget is not None else Budget()
         self._approval_handler = approval_handler
         self._on_text_delta = on_text_delta
+        self._on_reasoning_delta = on_reasoning_delta
         self._on_event = on_event
         self._base_system_prompt = (
             system_prompt
@@ -676,7 +678,9 @@ class AgentRuntime:
                     # transition. Observers always see the complete checkpoint.
                     data = {
                         "text": response.text,
+                        "reasoning": getattr(self, "_reasoning", ""),
                         "tool_calls": [call.name for call in response.tool_calls],
+                        "tool_call_ids": [call.id for call in response.tool_calls],
                         "usage": {**response.usage.model_dump(),
                                   "total_tokens": response.usage.total_tokens},
                         "stop_reason": response.stop_reason.value,
@@ -930,12 +934,14 @@ class AgentRuntime:
         result = await stream_response(
             self._provider, system=self._system_prompt, messages=self._messages,
             tools=self._registry.specs(), on_delta=self._on_text_delta,
+            on_reasoning=self._on_reasoning_delta,
             on_retry=recorder.emit,
             settled=lambda call_id: bool(lookup(self.session_id, call_id)) if lookup else False,
         )
         self._request_seconds = result.duration_s
         self._generation_seconds = result.generation_seconds
         self._first_token_seconds = result.first_token_seconds
+        self._reasoning = result.reasoning
         if result.usage_uncertain:
             self._usage = self._usage.model_copy(update={"available": False})
         return result.response, result.failure, str(result.error) if result.error else None, result.error

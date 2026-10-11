@@ -8,8 +8,8 @@ Stream contract
 ---------------
 Every ``Provider.stream`` call returns an async generator that:
 
-- yields **zero or more** :class:`TextDelta` events (incremental assistant
-  text), then **exactly one** :class:`ResponseDone` event;
+- yields **zero or more** :class:`TextDelta` or :class:`ReasoningDelta`
+  events, then **exactly one** :class:`ResponseDone` event;
 - yields **nothing after** ``ResponseDone`` — it is the terminal event;
 - **raises** :class:`~minicode.providers.errors.ProviderError` (or a
   subclass) on failure instead of returning a malformed or partial
@@ -23,6 +23,8 @@ Consumers may therefore drive the loop as::
     async for event in provider.stream(system=..., messages=..., tools=...):
         if isinstance(event, TextDelta):
             ...  # render incrementally
+        elif isinstance(event, ReasoningDelta):
+            ...  # show separately from the answer
         else:  # ResponseDone
             ...  # persist blocks / dispatch tool calls
 """
@@ -43,6 +45,13 @@ class TextDelta:
 
 
 @dataclass(slots=True)
+class ReasoningDelta:
+    """Displayable reasoning returned by the model, separate from its answer."""
+
+    text: str
+
+
+@dataclass(slots=True)
 class ResponseDone:
     """Terminal stream event carrying the fully assembled response."""
 
@@ -53,7 +62,7 @@ class ResponseDone:
     first_token_seconds: float | None = None
 
 
-StreamEvent = TextDelta | ResponseDone
+StreamEvent = TextDelta | ReasoningDelta | ResponseDone
 
 
 class Provider(Protocol):

@@ -202,6 +202,12 @@ func loadFixture(d *desktop, page string) {
 	v.Files = fixturePaths()
 	v.Changes = fixtureChanges()
 	switch {
+	case page == "reasoning":
+		v.SessionID = "audit"
+		v.Busy = true
+		v.StartedAt = now.Add(-5 * time.Second)
+		v.Items = []*model.FeedItem{items[0], {ID: "reasoning-example", Kind: "reasoning", Pending: true, StartedAt: v.StartedAt, Text: "先检查事件流从接口到界面的路径，确认每个片段都进入对应会话。\n\n将思考内容与最终回答分开展示，完成后保留折叠入口，避免长文本挤占对话区域。\n\n接下来核对会话恢复和取消操作，确保不会把一个会话的片段显示到另一个会话。"}}
+		v.rebuildRows()
 	case page == "model-menu":
 		v.State.Model = models[1].ID
 		v.State.Effort = "high"

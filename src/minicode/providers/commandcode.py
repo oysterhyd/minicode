@@ -4,7 +4,7 @@ Talks the OpenAI ``chat/completions`` wire protocol — as served by the ZCode
 gateway — over Server-Sent Events, using ``httpx`` directly (no SDK). The
 gateway is OpenAI-compatible: reasoning-capable models may send leading
 chunks that only carry reasoning content (``delta.content`` is ``None``);
-such chunks are skipped.
+such chunks are emitted separately as reasoning deltas.
 
 Stream contract (see :mod:`minicode.providers.base`): zero or more
 :class:`TextDelta` events, then exactly one :class:`ResponseDone` carrying a
@@ -43,7 +43,7 @@ from minicode.core.models import (
 from minicode.context.estimate import estimate_messages_tokens
 from minicode.core.catalog import lookup_model
 
-from .base import ResponseDone, StreamEvent, TextDelta
+from .base import ReasoningDelta, ResponseDone, StreamEvent, TextDelta
 from .errors import ProviderAuthError, ProviderError, ProviderRequestError, ProviderProtocolError
 from .zcode_config import DEFAULT_MODEL, discover_commandcode
 
@@ -443,7 +443,12 @@ class CommandCodeProvider:
                                         last_output = received
                                         if first_output is None:
                                             first_output = last_output
-                                    # Reasoning-only chunks have content=None: skipped.
+                                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                                    if isinstance(reasoning, str) and reasoning:
+                                        captured += len(reasoning.encode("utf-8"))
+                                        if captured > MAX_RESPONSE_BYTES:
+                                            raise ProviderProtocolError("provider response exceeds the capture limit")
+                                        yield ReasoningDelta(reasoning)
                                     content = delta.get("content")
                                     if isinstance(content, str) and content:
                                         captured += len(content.encode("utf-8"))

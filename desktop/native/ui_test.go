@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"image/png"
 	"os"
@@ -69,7 +70,7 @@ func clickInput(t *testing.T, tt *ui.Tester, label string) {
 }
 
 func TestNativeSnapshots(t *testing.T) {
-	for _, page := range []string{"home", "conversation", "approval", "files", "diff", "settings", "settings-model", "settings-subagents", "settings-about", "settings-permissions", "settings-empty", "model-menu", "permission-menu", "collapsed"} {
+	for _, page := range []string{"home", "conversation", "reasoning", "approval", "files", "diff", "settings", "settings-model", "settings-subagents", "settings-about", "settings-permissions", "settings-empty", "model-menu", "permission-menu", "collapsed"} {
 		t.Run(page, func(t *testing.T) {
 			r := newTestRig(t, page)
 			for _, theme := range []string{"light", "dark"} {
@@ -145,6 +146,48 @@ func TestSidebarNewConversationPreservesRunningConversation(t *testing.T) {
 		if !previous.Busy || previous.Draft != "保留追加指令" || previous.SessionID != "audit" {
 			t.Fatal("creating a conversation modified the running conversation")
 		}
+	}
+}
+
+func TestReasoningStreamDisplayCompletionCancellationAndIsolation(t *testing.T) {
+	r := newTestRig(t, "home")
+	v := r.d.current()
+	r.d.runtimeEvent(v, model.Event{Seq: 1, Type: "round_start"})
+	for _, text := range []string{"核对输入。", "选择方案。"} {
+		r.d.handleEvent(bridge.Event{Event: "reasoning_delta", ClientKey: v.Key, SessionID: "audit", Text: text})
+	}
+	r.ui.Frame()
+	if !r.ui.HasText("核对输入。选择方案。") || !r.ui.HasText("生成中") || len(v.Items) != 1 {
+		t.Fatal("reasoning did not stream into its own card")
+	}
+	reasoning := v.reasoning
+	r.d.handleEvent(bridge.Event{Event: "text_delta", ClientKey: v.Key, SessionID: "audit", Text: "最终回答"})
+	r.d.runtimeEvent(v, model.Event{Seq: 2, Type: "assistant_message", Data: map[string]any{"text": "最终回答", "reasoning": "核对输入。选择方案。"}})
+	r.ui.Frame()
+	if reasoning.Pending || v.reasoning != nil || len(v.Items) != 2 || v.Items[1].Text != "最终回答" {
+		t.Fatal("reasoning was duplicated or merged into the answer")
+	}
+	click(t, r.ui, "思考过程")
+	if !r.ui.HasText("核对输入。选择方案。") {
+		t.Fatal("completed reasoning cannot be expanded")
+	}
+	r.d.runtimeEvent(v, model.Event{Seq: 3, Type: "round_start"})
+	r.d.handleEvent(bridge.Event{Event: "reasoning_delta", ClientKey: v.Key, SessionID: "audit", Text: "继续检查。"})
+	partial := v.reasoning
+	r.d.handleEvent(bridge.Event{Event: "run_done", ClientKey: v.Key, SessionID: "audit", Result: json.RawMessage(`{"exit_reason":"cancelled"}`)})
+	if partial.Pending || !partial.Interrupted || partial.Text != "继续检查。" {
+		t.Fatal("cancelled reasoning was lost or stayed pending")
+	}
+	other := newConversation("other-reasoning", v.Workspace, initialState())
+	r.d.views[other.Key] = other
+	count := len(v.Items)
+	r.d.handleEvent(bridge.Event{Event: "reasoning_delta", ClientKey: other.Key, SessionID: "other-session", Text: "另一会话。"})
+	if len(v.Items) != count || other.reasoning == nil || other.reasoning.Text != "另一会话。" {
+		t.Fatal("reasoning crossed conversations")
+	}
+	r.d.handleEvent(bridge.Event{Event: "bridge_error", Error: "Agent bridge exited"})
+	if other.reasoning != nil || other.Items[0].Pending || !other.Items[0].Interrupted {
+		t.Fatal("bridge exit left reasoning pending")
 	}
 }
 

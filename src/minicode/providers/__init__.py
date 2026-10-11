@@ -12,7 +12,7 @@ configured via ``COMMANDCODE_API_KEY`` or a local ZCode installation).
 from __future__ import annotations
 
 from .anthropic_provider import AnthropicProvider
-from .base import Provider, ResponseDone, StreamEvent, TextDelta
+from .base import Provider, ReasoningDelta, ResponseDone, StreamEvent, TextDelta
 from .commandcode import CommandCodeProvider
 from .errors import ProviderAuthError, ProviderError, ProviderRequestError
 from .fake import FakeProvider, FakeProviderOptions, FakeToolCall, FakeTurn
@@ -29,6 +29,7 @@ __all__ = [
     "ProviderError",
     "ProviderRequestError",
     "ResponseDone",
+    "ReasoningDelta",
     "StreamEvent",
     "TextDelta",
 ]

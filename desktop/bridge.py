@@ -213,6 +213,9 @@ class Bridge:
         async def on_text_delta(delta: str):
             self.emit({"event": "text_delta", "sessionId": self.runtime.session_id, "text": delta})
 
+        async def on_reasoning_delta(delta: str):
+            self.emit({"event": "reasoning_delta", "sessionId": self.runtime.session_id, "text": delta})
+
         async def on_event(event):
             self.emit({"event": "agent_event", "sessionId": self.runtime.session_id, "item": event.model_dump(mode="json")})
 
@@ -246,6 +249,7 @@ class Bridge:
             budget=self.budget,
             approval_handler=on_approval,
             on_text_delta=on_text_delta,
+            on_reasoning_delta=on_reasoning_delta,
             on_event=on_event,
             artifact_store=artifacts,
             background_manager=BackgroundManager(),

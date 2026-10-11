@@ -1,8 +1,59 @@
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+// Context compaction can remove earlier messages. Match the preserved suffix
+// backwards against committed responses, using tool IDs when present.
+func reasoningHistory(detail Detail) map[int]Event {
+	var responses []Event
+	for _, event := range detail.Events {
+		if event.Type == "assistant_message" {
+			responses = append(responses, event)
+		}
+	}
+	matched := map[int]Event{}
+	cursor := len(responses) - 1
+	for i := len(detail.Messages) - 1; i >= 0; i-- {
+		message := detail.Messages[i]
+		if message.Role != "assistant" {
+			continue
+		}
+		var text strings.Builder
+		var ids, names []string
+		for _, block := range message.Content {
+			switch String(block["type"]) {
+			case "text":
+				text.WriteString(String(block["text"]))
+			case "tool_use":
+				ids = append(ids, String(block["id"]))
+				names = append(names, String(block["name"]))
+			}
+		}
+		for j := cursor; j >= 0; j-- {
+			event := responses[j]
+			if String(event.Data["text"]) != text.String() {
+				continue
+			}
+			if raw, ok := event.Data["tool_call_ids"]; ok {
+				if fmt.Sprint(raw) != fmt.Sprint(ids) {
+					continue
+				}
+			} else if raw, ok := event.Data["tool_calls"]; ok && fmt.Sprint(raw) != fmt.Sprint(names) {
+				continue
+			}
+			matched[i] = event
+			cursor = j - 1
+			break
+		}
+	}
+	return matched
+}
 
 func History(detail Detail) []*FeedItem {
+	reasoning := reasoningHistory(detail)
 	results := map[string]Event{}
 	starts := map[string]Event{}
 	decisions := map[string]Event{}
@@ -22,6 +73,9 @@ func History(detail Detail) []*FeedItem {
 	}
 	items := make([]*FeedItem, 0, len(detail.Messages))
 	for i, message := range detail.Messages {
+		if event, ok := reasoning[i]; ok && String(event.Data["reasoning"]) != "" {
+			items = append(items, &FeedItem{ID: fmt.Sprintf("reasoning-%d", event.Seq), Kind: "reasoning", Text: String(event.Data["reasoning"]), EndedAt: Time(event.Timestamp)})
+		}
 		for j, block := range message.Content {
 			id := fmt.Sprintf("%d-%d", i, j)
 			switch String(block["type"]) {
