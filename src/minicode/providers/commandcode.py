@@ -110,6 +110,9 @@ def _build_payload(
     chat_messages: list[dict[str, Any]] = []
     for message in messages:
         check_attachments([b for b in message.content if isinstance(b, MediaBlock)], input_modalities, "openai")
+        for block in message.content:
+            if isinstance(block, ToolResultBlock):
+                check_attachments(block.images, input_modalities, "openai")
     if system:
         chat_messages.append({"role": "system", "content": system})
 
@@ -145,11 +148,16 @@ def _build_payload(
             chat_messages.extend(tool_messages)
             text = _assistant_text(message)
             media_blocks = [b for b in message.content if isinstance(b, MediaBlock)]
-            if not tool_messages or text or media_blocks:
+            image_results = [b for b in message.content if isinstance(b, ToolResultBlock) and b.images]
+            if not tool_messages or text or media_blocks or image_results:
                 content = text
-                if media_blocks:
+                if media_blocks or image_results:
                     if attachment_store is None: raise ProviderRequestError("附件存储未初始化")
-                    content = [content_part(b, attachment_store, "openai") for b in media_blocks]
+                    content = []
+                    for result in image_results:
+                        content.append({"type": "text", "text": f"Images read by tool call {result.tool_use_id}: {result.content}"})
+                        content.extend(content_part(image, attachment_store, "openai") for image in result.images)
+                    content.extend(content_part(b, attachment_store, "openai") for b in media_blocks)
                     if text: content.append({"type": "text", "text": text})
                 chat_messages.append({"role": "user", "content": content})
 

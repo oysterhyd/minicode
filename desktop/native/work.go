@@ -28,7 +28,7 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 	v := d.current()
 	ui.Row(c).Height(42).Padding(6).Gap(2).BorderWidth(0, 0, 1, 0).BorderColor(p.Border).Children(func() {
 		for i, tab := range workTabs {
-			b := button(c, p, tab.Label, tab.Icon, false).Label(tab.Label).Height(28).Padding(0, 8).FontSize(p.font(11.2)).Border(0, ui.Transparent)
+			b := button(c, p, tab.Label, tab.Icon, false).Label(tr(tab.Label)).Height(28).Padding(0, 8).FontSize(p.font(11.2)).Border(0, ui.Transparent)
 			b.Role(ui.RoleTab)
 			b.Children(func() {
 				count := ""
@@ -57,10 +57,10 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 			}
 		}
 		ui.Spacer(c)
-		if iconButton(c, p, "RefreshCw", "刷新工作区").Size(24, 24).Clicked() {
+		if iconButton(c, p, "RefreshCw", tr("刷新工作区")).Size(24, 24).Clicked() {
 			d.refresh(v, true)
 		}
-		if iconButton(c, p, "PanelRightClose", "收拢右侧面板").Size(24, 24).Clicked() {
+		if iconButton(c, p, "PanelRightClose", tr("收拢右侧面板")).Size(24, 24).Clicked() {
 			d.preferences.RightCollapsed = true
 			d.persist()
 		}
@@ -77,9 +77,9 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 			r += change.Deletions
 		}
 		ui.Row(c).Padding(10, 10, 8, 12).Gap(6).Children(func() {
-			muted(c, p, "未提交的改动").Grow(1).FontSize(p.font(10.36))
+			muted(c, p, tr("未提交的改动")).Grow(1).FontSize(p.font(10.36))
 			d.diffStat(c, p, a, r)
-			if button(c, p, "全部暂存", "Plus", false).Height(26).FontSize(p.font(10.64)).Padding(0, 8).Disabled(len(v.Changes) == 0).Clicked() {
+			if button(c, p, tr("全部暂存"), "Plus", false).Height(26).FontSize(p.font(10.64)).Padding(0, 8).Disabled(len(v.Changes) == 0).Clicked() {
 				d.stage("", true, false)
 			}
 		})
@@ -107,13 +107,13 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 			}
 		}).Grow(1).Padding(0, 6).Children(func() {
 			if len(v.Changes) == 0 {
-				empty(c, p, "工作区没有未提交的改动。")
+				empty(c, p, tr("工作区没有未提交的改动。"))
 			}
 		})
 	case 1:
 		ui.Row(c).Height(40).Padding(6, 10).Gap(7).Children(func() {
 			icon(c, "Search", 13, p.Text3)
-			ui.TextInputBase(c, &d.fileQuery).Label("搜索文件").Placeholder("搜索文件").Grow(1).FontSize(p.font(11.76))
+			ui.TextInputBase(c, &d.fileQuery).Label(tr("搜索文件")).Placeholder(tr("搜索文件")).Grow(1).FontSize(p.font(11.76))
 		})
 		d.fileTree(c, p)
 	case 2:
@@ -128,7 +128,7 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 			d.terminal(c, p, model.String(item.Args["command"]), item.Output)
 		}).Grow(1).Padding(10).Gap(8).Children(func() {
 			if len(items) == 0 {
-				empty(c, p, "Agent 运行的终端命令会显示在这里。")
+				empty(c, p, tr("Agent 运行的终端命令会显示在这里。"))
 			}
 		})
 	case 3:
@@ -140,7 +140,7 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 				}
 			}
 			ui.Row(c).Padding(2, 6).Children(func() {
-				muted(c, p, "任务进度").Grow(1).FontSize(p.font(10.36))
+				muted(c, p, tr("任务进度")).Grow(1).FontSize(p.font(10.36))
 				muted(c, p, fmt.Sprintf("%d / %d", done, len(v.Tasks))).FontSize(p.font(10.36))
 			})
 			if len(v.Tasks) > 0 {
@@ -164,12 +164,12 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 					if task.Status == "done" {
 						text.Strikethrough().TextColor(p.Text3)
 					}
-					label := map[string]string{"done": "完成", "running": "进行中", "failed": "失败", "pending": "待执行"}[task.Status]
+					label := map[string]string{"done": tr("完成"), "running": tr("进行中"), "failed": tr("失败"), "pending": tr("待执行")}[task.Status]
 					muted(c, p, label).FontSize(p.font(10.08))
 				})
 			}
 			if len(v.Tasks) == 0 {
-				empty(c, p, "任务开始后，这里会显示执行步骤。")
+				empty(c, p, tr("任务开始后，这里会显示执行步骤。"))
 			}
 			d.sessionUsage(c, p)
 		})
@@ -177,7 +177,7 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 }
 
 func empty(c *ui.Context, p palette, text string) {
-	ui.Text(c, text).Padding(18).Margin(6).FontSize(p.font(11.76)).TextColor(p.Text3).TextAlign(ui.Center).Border(1, p.Border).BorderStyle(ui.BorderDashed).Radius(8)
+	ui.Text(c, tr(text)).Padding(18).Margin(6).FontSize(p.font(11.76)).TextColor(p.Text3).TextAlign(ui.Center).Border(1, p.Border).BorderStyle(ui.BorderDashed).Radius(8)
 }
 
 func (d *desktop) diffStat(c *ui.Context, p palette, a, r int) {
@@ -284,24 +284,24 @@ func (d *desktop) fileTreeEntries(c *ui.Context, p palette, entries []treeEntry)
 			}
 		}
 		row.ContextMenu(func(menu *ui.Menu) {
-			if menu.Item("在输入框中引用").Chosen() {
+			if menu.Item(tr("在输入框中引用")).Chosen() {
 				d.insertMention(entry.Path)
 			}
-			if menu.Item("在文件夹中显示").Chosen() {
+			if menu.Item(tr("在文件夹中显示")).Chosen() {
 				d.reveal(v.Workspace, entry.Path)
 			}
-			if menu.Item("用默认应用打开").Chosen() {
+			if menu.Item(tr("用默认应用打开")).Chosen() {
 				d.openPath(v.Workspace, entry.Path)
 			}
 		})
-	}).Grow(1).Padding(0, 6).Role(ui.RoleTree).Label("工作区文件")
+	}).Grow(1).Padding(0, 6).Role(ui.RoleTree).Label(tr("工作区文件"))
 }
 
 func (d *desktop) previewView(c *ui.Context, p palette) {
 	preview := d.preview
 	root := d.current().Workspace
 	ui.Row(c).Height(44).Padding(0, 6).Gap(4).BorderWidth(0, 0, 1, 0).BorderColor(p.BorderSubtle).Children(func() {
-		if iconButton(c, p, "ArrowLeft", "返回文件列表").Clicked() {
+		if iconButton(c, p, "ArrowLeft", tr("返回文件列表")).Clicked() {
 			d.preview = nil
 			return
 		}
@@ -309,21 +309,21 @@ func (d *desktop) previewView(c *ui.Context, p palette) {
 			ui.Text(c, basename(preview.Path)).FontSize(p.font(12.04)).FontWeight(600).SingleLine()
 			muted(c, p, preview.Path).FontSize(p.font(10.08)).SingleLine()
 		})
-		if iconButton(c, p, "AtSign", "在输入框中引用").Size(24, 24).Clicked() {
+		if iconButton(c, p, "AtSign", tr("在输入框中引用")).Size(24, 24).Clicked() {
 			d.insertMention(preview.Path)
 		}
-		if iconButton(c, p, "FolderSearch", "在文件夹中显示").Size(24, 24).Clicked() {
+		if iconButton(c, p, "FolderSearch", tr("在文件夹中显示")).Size(24, 24).Clicked() {
 			d.reveal(root, preview.Path)
 		}
-		if iconButton(c, p, "ExternalLink", "用默认应用打开").Size(24, 24).Clicked() {
+		if iconButton(c, p, "ExternalLink", tr("用默认应用打开")).Size(24, 24).Clicked() {
 			d.openPath(root, preview.Path)
 		}
-		if iconButton(c, p, "Copy", "复制内容").Size(24, 24).Clicked() {
+		if iconButton(c, p, "Copy", tr("复制内容")).Size(24, 24).Clicked() {
 			c.WriteClipboard(preview.Text)
 		}
 	})
 	if preview.Loading {
-		ui.Row(c).Grow(1).Padding(24).Gap(8).Children(func() { spinner(c, p); muted(c, p, "正在读取…") })
+		ui.Row(c).Grow(1).Padding(24).Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在读取…")) })
 		return
 	}
 	if preview.Error != "" {
@@ -345,13 +345,13 @@ func (d *desktop) previewView(c *ui.Context, p palette) {
 		staged := len(preview.Status) > 0 && preview.Status[0] != ' ' && preview.Status[0] != '?'
 		ui.Row(c).Padding(8, 10).Gap(6).BorderWidth(1, 0, 0, 0).BorderColor(p.BorderSubtle).Children(func() {
 			if staged {
-				badge(c, p, "已暂存", p.Success, p.SuccessSoft)
+				badge(c, p, tr("已暂存"), p.Success, p.SuccessSoft)
 			}
 			ui.Spacer(c)
-			if staged && button(c, p, "取消暂存", "Minus", false).Disabled(preview.Busy).Clicked() {
+			if staged && button(c, p, tr("取消暂存"), "Minus", false).Disabled(preview.Busy).Clicked() {
 				d.stage(preview.Path, false, true)
 			}
-			if button(c, p, "暂存此文件", "Plus", true).Disabled(preview.Busy).Clicked() {
+			if button(c, p, tr("暂存此文件"), "Plus", true).Disabled(preview.Busy).Clicked() {
 				d.stage(preview.Path, false, false)
 			}
 		})
@@ -368,8 +368,8 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 		requests = stats.Requests
 	}
 	ui.Row(c).Padding(6).Children(func() {
-		muted(c, p, "会话统计").Grow(1).FontSize(p.font(10.36))
-		muted(c, p, fmt.Sprintf("%d 次请求", requests)).FontSize(p.font(10.36))
+		muted(c, p, tr("会话统计")).Grow(1).FontSize(p.font(10.36))
+		muted(c, p, fmt.Sprintf(tr("%d 次请求"), requests)).FontSize(p.font(10.36))
 	})
 	known := usage != nil && usage.Available
 	inputRatio, cacheRatio := float32(0), float32(0)
@@ -381,13 +381,13 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 			cacheRatio = min(1, float32(usage.CacheRead)/float32(usage.Input))
 		}
 	}
-	ui.Row(c).Height(6).Margin(2, 0, 2, 0).Radius(99).Clip().Background(p.Active).Label("输入与输出 token 分布").Children(func() {
+	ui.Row(c).Height(6).Margin(2, 0, 2, 0).Radius(99).Clip().Background(p.Active).Label(tr("输入与输出 token 分布")).Children(func() {
 		if known && usage.Input+usage.Output > 0 {
 			ui.Box(c).WidthPercent(inputRatio * 100).FillHeight().Background(p.Accent)
 			ui.Box(c).Grow(1).FillHeight().Background(p.Success)
 		}
 	})
-	values := []struct{ Label, Value string }{{"输入 token", "未报告"}, {"输出 token", "未报告"}, {"缓存命中率", "未报告"}, {"平均生成 TPS", "未记录"}}
+	values := []struct{ Label, Value string }{{tr("输入 token"), tr("未报告")}, {tr("输出 token"), tr("未报告")}, {tr("缓存命中率"), tr("未报告")}, {tr("平均生成 TPS"), tr("未记录")}}
 	if usage != nil && usage.Available {
 		values[0].Value = number(usage.Input)
 		values[1].Value = number(usage.Output)
@@ -412,14 +412,14 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 	if stats != nil {
 		calls = stats.ToolCalls
 	}
-	ui.Row(c).Height(6).Margin(2, 0).Radius(99).Clip().Background(p.Active).Label("缓存命中率").Children(func() {
+	ui.Row(c).Height(6).Margin(2, 0).Radius(99).Clip().Background(p.Active).Label(tr("缓存命中率")).Children(func() {
 		ui.Box(c).WidthPercent(cacheRatio * 100).FillHeight().Background(p.Text3)
 	})
 	read, write := "—", "—"
 	if known {
 		read, write = number(usage.CacheRead), number(usage.CacheWrite)
 	}
-	for _, pair := range [][2]string{{fmt.Sprintf("轮次 %d", state.Rounds), fmt.Sprintf("工具调用 %d", calls)}, {"缓存读取 " + read, "缓存写入 " + write}} {
+	for _, pair := range [][2]string{{fmt.Sprintf(tr("轮次 %d"), state.Rounds), fmt.Sprintf(tr("工具调用 %d"), calls)}, {tr("缓存读取 ") + read, tr("缓存写入 ") + write}} {
 		ui.Row(c).Padding(0, 6).Children(func() {
 			muted(c, p, pair[0]).Grow(1).Basis(0).FontSize(p.font(10.5))
 			muted(c, p, pair[1]).Grow(1).Basis(0).FontSize(p.font(10.5))
@@ -434,11 +434,11 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 				maxTPS = max(maxTPS, *sample.TPS)
 			}
 		}
-		muted(c, p, "每轮 token").Padding(6).FontSize(p.font(10.64))
+		muted(c, p, tr("每轮 token")).Padding(6).FontSize(p.font(10.64))
 		ui.Row(c).Height(110).Gap(3).Padding(6).AlignItems(ui.End).Children(func() {
 			for _, sample := range samples {
 				ui.Column(c).Grow(1).Basis(0).Height(100).Justify(ui.End).Gap(2).Children(func() {
-					bar := ui.Column(c).Grow(1).Justify(ui.End).Tooltip(fmt.Sprintf("#%d · 输入 %d · 缓存 %d · 输出 %d", sample.Round, sample.Input, sample.Cached, sample.Output))
+					bar := ui.Column(c).Grow(1).Justify(ui.End).Tooltip(fmt.Sprintf(tr("#%d · 输入 %d · 缓存 %d · 输出 %d"), sample.Round, sample.Input, sample.Cached, sample.Output))
 					bar.Children(func() {
 						ui.Box(c).Height(80 * float32(sample.Output) / float32(maxTokens)).Background(p.Info)
 						ui.Box(c).Height(80 * float32(min(sample.Input, sample.Cached)) / float32(maxTokens)).Background(p.Success)
@@ -448,7 +448,7 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 				})
 			}
 		})
-		muted(c, p, "输出速度").Padding(6).FontSize(p.font(10.64))
+		muted(c, p, tr("输出速度")).Padding(6).FontSize(p.font(10.64))
 		ui.Box(c).Height(68).Margin(0, 6).Draw(func(painter *ui.Painter, r ui.Rect) {
 			var path ui.Path
 			started := false
@@ -470,7 +470,7 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 			}
 		})
 		open := v.Open["usage-table"]
-		if button(c, p, fmt.Sprintf("请求明细（最近 %d 次）", len(samples)), "ChevronDown", false).FillWidth().Border(0, ui.Transparent).Clicked() {
+		if button(c, p, fmt.Sprintf(tr("请求明细（最近 %d 次）"), len(samples)), "ChevronDown", false).FillWidth().Border(0, ui.Transparent).Clicked() {
 			v.Open["usage-table"] = !open
 		}
 		if open {
@@ -479,17 +479,17 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 				if sample.TPS != nil {
 					speed = fmt.Sprintf("%.1f", *sample.TPS)
 				}
-				ui.Text(c, fmt.Sprintf("#%d  输入 %d  输出 %d  缓存 %d  TPS %s", sample.Round, sample.Input, sample.Output, sample.Cached, speed)).FontSize(p.font(10.36)).Padding(4, 8).Selectable()
+				ui.Text(c, fmt.Sprintf(tr("#%d  输入 %d  输出 %d  缓存 %d  TPS %s"), sample.Round, sample.Input, sample.Output, sample.Cached, speed)).FontSize(p.font(10.36)).Padding(4, 8).Selectable()
 				if sample.FirstTokenSeconds != nil && sample.GenerationSeconds != nil {
-					muted(c, p, fmt.Sprintf("首字等待 %.2fs · 生成 %.2fs", *sample.FirstTokenSeconds, *sample.GenerationSeconds)).FontSize(p.font(10.08)).Padding(0, 8, 4, 8)
+					muted(c, p, fmt.Sprintf(tr("首字等待 %.2fs · 生成 %.2fs"), *sample.FirstTokenSeconds, *sample.GenerationSeconds)).FontSize(p.font(10.08)).Padding(0, 8, 4, 8)
 				}
 			}
 		}
 	}
 	if stats != nil && stats.RequestTPS != nil {
-		muted(c, p, fmt.Sprintf("请求整体速度（含首字等待）：%.1f tok/s", *stats.RequestTPS)).Padding(8).FontSize(p.font(10.08))
+		muted(c, p, fmt.Sprintf(tr("请求整体速度（含首字等待）：%.1f tok/s"), *stats.RequestTPS)).Padding(8).FontSize(p.font(10.08))
 	}
-	muted(c, p, "生成 TPS = 输出 token / 首个至最后一个生成片段的时间（包含推理与工具参数）。历史记录和单个片段无法计算生成速度；客户端测量可能与网关不同。").Padding(8).FontSize(p.font(10.08))
+	muted(c, p, tr("生成 TPS = 输出 token / 首个至最后一个生成片段的时间（包含推理与工具参数）。历史记录和单个片段无法计算生成速度；客户端测量可能与网关不同。")).Padding(8).FontSize(p.font(10.08))
 }
 
 var _ = content.DiffLine{}

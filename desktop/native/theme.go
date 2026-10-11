@@ -148,6 +148,7 @@ func styleButton(e *ui.Element, p palette, primary bool) *ui.Element {
 }
 
 func button(c *ui.Context, p palette, label, iconName string, primary bool) *ui.Element {
+	label = tr(label)
 	e := styleButton(ui.ButtonBase(c).Label(label), p, primary)
 	e.Children(func() {
 		if iconName != "" {
@@ -165,6 +166,7 @@ func eText(p palette, primary bool) ui.Color {
 }
 
 func iconButton(c *ui.Context, p palette, name, label string) *ui.Element {
+	label = tr(label)
 	e := ui.ButtonBase(c).Label(label).Size(28, 28).Center().Radius(8).TextColor(p.Text3).Transition(fastMotion)
 	if e.Hovered() {
 		e.Background(p.Hover).TextColor(p.Text)
@@ -186,11 +188,11 @@ func iconButton(c *ui.Context, p palette, name, label string) *ui.Element {
 }
 
 func badge(c *ui.Context, p palette, text string, color, bg ui.Color) *ui.Element {
-	return ui.Text(c, text).FontSize(p.font(9.8)).FontWeight(550).Padding(2, 6).Radius(99).TextColor(color).Background(bg).SingleLine()
+	return ui.Text(c, tr(text)).FontSize(p.font(9.8)).FontWeight(550).Padding(2, 6).Radius(99).TextColor(color).Background(bg).SingleLine().Shrink(0)
 }
 
 func muted(c *ui.Context, p palette, text string) *ui.Element {
-	return ui.Text(c, text).FontSize(p.font(11.48)).TextColor(p.Text3)
+	return ui.Text(c, tr(text)).FontSize(p.font(11.48)).TextColor(p.Text3)
 }
 
 func spinner(c *ui.Context, p palette) {
@@ -203,7 +205,7 @@ func spinner(c *ui.Context, p palette) {
 func formatDuration(d time.Duration) string {
 	seconds := int(d.Seconds())
 	if seconds < 60 {
-		return fmtInt(seconds) + " 秒"
+		return fmtInt(seconds) + tr(" 秒")
 	}
-	return fmtInt(seconds/60) + " 分 " + fmtInt(seconds%60) + " 秒"
+	return fmtInt(seconds/60) + tr(" 分 ") + fmtInt(seconds%60) + tr(" 秒")
 }

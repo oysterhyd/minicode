@@ -450,8 +450,10 @@ class AgentRuntime:
     def _bind_attachment_store(self, provider):
         from minicode.storage import SqliteStore
         from minicode.storage.attachments import AttachmentStore
-        if isinstance(self._store, SqliteStore) and hasattr(provider, "attachment_store"):
-            provider.attachment_store = AttachmentStore(self._store._db_path.parent / "attachments")
+        self._attachment_store = (AttachmentStore(self._store._db_path.parent / "attachments")
+                                  if isinstance(self._store, SqliteStore) else getattr(provider, "attachment_store", None))
+        if hasattr(provider, "attachment_store"):
+            provider.attachment_store = self._attachment_store
 
     def set_model(
         self, *, provider: Provider, provider_name: str, model: str
@@ -627,6 +629,13 @@ class AgentRuntime:
                 context_rejections = 0
                 truncations = 0
                 while True:
+                    if self._project_instructions is not None and self._project_instructions.reload_global():
+                        self._refresh_system_prompt()
+                        source = self._project_instructions.loaded.get(self._project_instructions.global_path)
+                        await recorder.emit(EventType.PROJECT_INSTRUCTIONS, {
+                            "path": str(self._project_instructions.global_path),
+                            "sha256": source.digest if source else "", "scope": "global",
+                        })
                     before_round = getattr(self, "before_round", None)
                     if before_round is not None:
                         await before_round()
@@ -1003,6 +1012,8 @@ class AgentRuntime:
                 "truncated": "已截断" in presented.output or "truncated" in presented.output,
                 "duration_s": round(time.monotonic() - started, 3),
             }
+        if block.images:
+            result_data["images"] = [image.model_dump() for image in block.images]
         if recovered:
             result_data["recovered"] = True
         if source is not None:
@@ -1087,6 +1098,8 @@ class AgentRuntime:
             delegate=self._delegate if self._allow_delegation else None,
             task_store=self._task_store,
             project_memory=self._project_memory,
+            attachment_store=self._attachment_store,
+            input_modalities=tuple(getattr(self._provider, "input_modalities", ())),
             on_output=(lambda output: recorder.emit(EventType.TOOL_OUTPUT, {
                 "call_id": call.id, "name": call.name, "output_preview": output[-1000:],
             })),
@@ -1113,7 +1126,8 @@ class AgentRuntime:
             if outcome.output:
                 content = f"{content}\n{outcome.output}"
         return ToolResultBlock(
-            tool_use_id=call.id, content=content, is_error=not outcome.success
+            tool_use_id=call.id, content=content, is_error=not outcome.success,
+            images=outcome.images if outcome.success else [],
         )
 
     # -- P1: goal gate, compaction, background delivery ----------------------

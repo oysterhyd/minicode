@@ -95,10 +95,15 @@ class AnthropicProvider:
                 "input": block.input,
             }
         if isinstance(block, ToolResultBlock):
+            check_attachments(block.images, self.input_modalities, "anthropic")
+            content = block.content
+            if block.images:
+                content = [{"type": "text", "text": block.content}]
+                content.extend(content_part(image, self.attachment_store, "anthropic") for image in block.images)
             return {
                 "type": "tool_result",
                 "tool_use_id": block.tool_use_id,
-                "content": block.content,
+                "content": content,
                 "is_error": block.is_error,
             }
         return {"type": "text", "text": block.text}

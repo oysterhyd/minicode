@@ -43,9 +43,16 @@ class AttachmentStore:
             raise ValueError("请选择图片、PDF、WAV / MP3 音频或 MP4 / MOV / WebM 视频")
         with source.open("rb") as stream:
             data = stream.read(MAX_ATTACHMENT_BYTES + 1)
+        kind, mime = FORMATS[source.suffix.lower()]
+        return self.import_bytes(data, source.name, mime)
+
+    def import_bytes(self, data: bytes, name: str, mime: str) -> MediaBlock:
+        """Import an actual tool response using the same validation as files."""
+        if mime not in MIME_KINDS:
+            raise ValueError("Unsupported attachment MIME type")
         if not data or len(data) > MAX_ATTACHMENT_BYTES:
             raise ValueError("附件不能为空，单个文件不能超过 20 MB")
-        kind, mime = FORMATS[source.suffix.lower()]
+        kind = MIME_KINDS[mime]
         valid = {
             "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"), "image/jpeg": data.startswith(b"\xff\xd8\xff"),
             "image/gif": data.startswith((b"GIF87a", b"GIF89a")),
@@ -57,9 +64,9 @@ class AttachmentStore:
             "video/webm": data.startswith(b"\x1aE\xdf\xa3"),
         }[mime]
         if not valid:
-            raise ValueError(f"文件内容与格式不符：{source.name}")
+            raise ValueError(f"文件内容与格式不符：{name}")
         digest = hashlib.sha256(mime.encode() + b"\0" + data).hexdigest()
-        block = MediaBlock(asset_id=digest, kind=kind, name=source.name, mime_type=mime, size=len(data))
+        block = MediaBlock(asset_id=digest, kind=kind, name=name, mime_type=mime, size=len(data))
         self.root.mkdir(parents=True, exist_ok=True)
         for target, payload in [(self.root / (digest + SUFFIXES[mime]), data), (self.root / (digest + ".json"), block.model_dump_json().encode("utf-8"))]:
             temporary = None

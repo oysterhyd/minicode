@@ -16,7 +16,7 @@ import (
 	"minicode.desktop/internal/workspace"
 )
 
-const appVersion = "1.2.7"
+const appVersion = "1.3.0"
 
 func projectRoot() string {
 	if override := os.Getenv("MINICODE_PROJECT_ROOT"); override != "" {
@@ -62,7 +62,11 @@ func main() {
 		return
 	}
 	if !*fixture {
-		mygo.Use(updaterui.New(updater.Options{Language: "zh-Hans"}))
+		language := "zh-Hans"
+		if dir, err := mygo.App.Path(mygo.PathUserData); err == nil && storedUILanguage(dir) == "en" {
+			language = "en"
+		}
+		mygo.Use(updaterui.New(updater.Options{Language: language}))
 	}
 	var d *desktop
 	var client *bridge.Client

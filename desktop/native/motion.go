@@ -33,7 +33,7 @@ func legacyEase(value float32) float32 {
 }
 
 func toggle(c *ui.Context, p palette, on *bool, label string) *ui.Element {
-	e := ui.SwitchBase(c, on).Label(label).Size(32.2, 18.9).Radius(99).Background(p.BorderStrong).Transition(fastMotion)
+	e := ui.SwitchBase(c, on).Label(tr(label)).Size(32.2, 18.9).Radius(99).Background(p.BorderStrong).Transition(fastMotion)
 	if *on {
 		e.Background(p.Accent)
 	}

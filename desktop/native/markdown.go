@@ -376,7 +376,7 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 							}
 							muted(c, p, language).FontSize(p.font(10.64))
 							ui.Spacer(c)
-							if button(c, p, "复制代码", "Copy", false).Height(24).Padding(0, 7).FontSize(p.font(10.36)).Border(0, ui.Transparent).Clicked() {
+							if button(c, p, tr("复制代码"), "Copy", false).Height(24).Padding(0, 7).FontSize(p.font(10.36)).Border(0, ui.Transparent).Clicked() {
 								c.WriteClipboard(block.Text)
 							}
 						})

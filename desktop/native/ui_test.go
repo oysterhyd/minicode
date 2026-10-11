@@ -71,7 +71,7 @@ func clickInput(t *testing.T, tt *ui.Tester, label string) {
 }
 
 func TestNativeSnapshots(t *testing.T) {
-	for _, page := range []string{"home", "attachments", "conversation", "reasoning", "approval", "files", "diff", "settings", "settings-model", "settings-subagents", "settings-about", "settings-permissions", "settings-empty", "model-menu", "permission-menu", "collapsed"} {
+	for _, page := range []string{"home", "attachments", "conversation", "reasoning", "approval", "files", "diff", "settings", "settings-model", "settings-subagents", "settings-about", "settings-permissions", "settings-empty", "settings-instructions", "settings-skills", "settings-mcp", "settings-plugins", "model-menu", "permission-menu", "collapsed"} {
 		t.Run(page, func(t *testing.T) {
 			r := newTestRig(t, page)
 			for _, theme := range []string{"light", "dark"} {
@@ -506,7 +506,8 @@ func TestSettingsAndModalFocus(t *testing.T) {
 		t.Fatal("theme not changed")
 	}
 	click(t, r.ui, "技能")
-	if !r.ui.HasText("当前工作区没有发现 Skills。") {
+	r.settle()
+	if !r.ui.HasText("未发现匹配的本地资源。") {
 		t.Fatal("empty skills state missing")
 	}
 	click(t, r.ui, "模型与预算")

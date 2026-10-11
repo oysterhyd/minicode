@@ -110,10 +110,15 @@ func History(detail Detail) []*FeedItem {
 				if output == "" {
 					output = String(result.Data["error"])
 				}
+				var images []Attachment
+				if Bool(result.Data["success"]) {
+					images = ImageReferences(result.Data["images"])
+				}
 				items = append(items, &FeedItem{ID: callID, Kind: "tool", Name: name, Args: args,
 					ChildSessionID: children[String(args["kind"])+":"+String(args["task"])],
 					ArtifactID:     String(result.Data["artifact_id"]), Output: output,
-					Success: Bool(result.Data["success"]), Pending: false, Interrupted: !ok,
+					Attachments: images,
+					Success:     Bool(result.Data["success"]), Pending: false, Interrupted: !ok,
 					StartedAt: Time(starts[callID].Timestamp), EndedAt: Time(result.Timestamp)})
 			}
 		}
@@ -129,6 +134,26 @@ type FeedRow struct {
 	Item     *FeedItem
 	Tools    []*FeedItem
 	Position int
+}
+
+// Only successful tool results expose persisted image references. Do not infer
+// reads from filenames: failed calls must never display an unread image.
+func ImageReferences(raw any) []Attachment {
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var files []Attachment
+	if json.Unmarshal(encoded, &files) != nil {
+		return nil
+	}
+	var images []Attachment
+	for _, file := range files {
+		if file.Kind == "image" && len(file.AssetID) == 64 && file.Size > 0 {
+			images = append(images, file)
+		}
+	}
+	return images
 }
 
 func GroupFeed(items []*FeedItem) []FeedRow {

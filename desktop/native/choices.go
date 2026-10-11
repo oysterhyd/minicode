@@ -11,7 +11,7 @@ import (
 func permissionChoice(c *ui.Context, p palette, value string, index int, compact bool) *ui.Element {
 	option := permissionOptions[index]
 	selected := value
-	row := ui.RadioBase(c, &selected, option.Value).Label(option.Label).Description(option.Detail).
+	row := ui.RadioBase(c, &selected, option.Value).Label(tr(option.Label)).Description(tr(option.Detail)).
 		FillWidth().Justify(ui.Start).Padding(12).Gap(12).Radius(10).Border(1, p.Border).Transition(fastMotion)
 	if compact {
 		row.Border(0, ui.Transparent).Padding(10).Radius(8)
@@ -30,7 +30,7 @@ func permissionChoice(c *ui.Context, p palette, value string, index int, compact
 		}
 		icon(c, name, 16, color)
 		ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(4).Children(func() {
-			ui.Text(c, option.Label).TextAlign(ui.Start).FontSize(p.font(12.04)).FontWeight(600)
+			ui.Text(c, tr(option.Label)).TextAlign(ui.Start).FontSize(p.font(12.04)).FontWeight(600)
 			muted(c, p, option.Detail).TextAlign(ui.Start).FontSize(p.font(10.92)).LineHeight(1.5)
 		})
 		ui.Box(c).Size(16, 16).Shrink(0).Radius(99).Border(1, color).Center().Children(func() {
@@ -62,16 +62,16 @@ func effortSlider(c *ui.Context, p palette, value string, supported bool, change
 	}
 	root.Children(func() {
 		ui.Row(c).Children(func() {
-			muted(c, p, "思考强度").Grow(1)
+			muted(c, p, tr("思考强度")).Grow(1)
 			label := effortOptions[int(math.Round(state.Value))].Label
 			if !supported {
-				label = "不可用"
+				label = tr("不可用")
 			}
 			badge(c, p, label, p.AccentText, p.AccentSoft)
 		})
 		ui.Column(c).FillWidth().Disabled(!supported).Children(func() {
 			slider := ui.SliderBase(c, &state.Value, 0, float64(len(effortOptions)-1)).Step(1).
-				Label("思考强度滑条").Height(32).FillWidth().PaddingX(12).Radius(8)
+				Label(tr("思考强度滑条")).Height(32).FillWidth().PaddingX(12).Radius(8)
 			position := slider.Animate("effort-position", float32(state.Value)/float32(len(effortOptions)-1), 100*time.Millisecond)
 			slider.Draw(func(canvas *ui.Painter, r ui.Rect) {
 				track := ui.Rect{X: r.X + 12, Y: r.Y + r.H/2 - 3, W: r.W - 24, H: 6}
@@ -103,13 +103,13 @@ func effortSlider(c *ui.Context, p palette, value string, supported bool, change
 			}
 			ui.Row(c).FillWidth().Children(func() {
 				for i, option := range effortOptions {
-					b := ui.ButtonBase(c).Label("思考强度：" + option.Label).Grow(1).Basis(0).Height(26).Radius(6).Center().FontSize(p.font(10.5)).TextColor(p.Text3)
+					b := ui.ButtonBase(c).Label(tr("思考强度：") + tr(option.Label)).Grow(1).Basis(0).Height(26).Radius(6).Center().FontSize(p.font(10.5)).TextColor(p.Text3)
 					if i == int(math.Round(state.Value)) && supported {
 						b.TextColor(p.AccentText).Background(p.AccentSoft)
 					} else if b.Hovered() {
 						b.Background(p.Hover)
 					}
-					b.Children(func() { ui.Text(c, option.Label).NoWrap() })
+					b.Children(func() { ui.Text(c, tr(option.Label)).NoWrap() })
 					if b.Clicked() && supported {
 						state.Value = float64(i)
 						changed(option.Value)
@@ -118,7 +118,7 @@ func effortSlider(c *ui.Context, p palette, value string, supported bool, change
 			})
 		})
 		if !supported {
-			muted(c, p, "选择支持思考强度的模型后可调整").FontSize(p.font(10.36))
+			muted(c, p, tr("选择支持思考强度的模型后可调整")).FontSize(p.font(10.36))
 		}
 	})
 }

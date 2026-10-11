@@ -208,7 +208,8 @@ class ReadTool(BaseTool):
     description = (
         "Read a bounded page of any-size UTF-8 file with line numbers. "
         "Use next_offset and next_cursor from the result to continue, "
-        "including through a single very long line."
+        "including through a single very long line. Also reads PNG, JPEG, GIF and WebP "
+        "images and returns their actual image content when the current model supports images."
     )
     requires_approval = False
     args_model = ReadArgs
@@ -223,6 +224,19 @@ class ReadTool(BaseTool):
             return failure
         if not target.is_file():
             return ToolOutcome.failure(f"path is not a file: {args.path}")
+
+        if target.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            if "image" not in ctx.input_modalities:
+                return ToolOutcome.failure("The current model has no enabled image input capability; enable it in model settings or switch models.")
+            if ctx.attachment_store is None:
+                return ToolOutcome.failure("Image attachment storage is unavailable.")
+            if args.offset != 1 or args.limit is not None or args.cursor is not None:
+                return ToolOutcome.failure("Image reads do not accept text pagination arguments.")
+            try:
+                image = ctx.attachment_store.import_file(str(target))
+            except (OSError, ValueError) as exc:
+                return ToolOutcome.failure(f"Failed to read image: {exc}")
+            return ToolOutcome(output=f"Read image: {args.path} ({image.mime_type}, {image.size} bytes)", images=[image])
 
         page_bytes = min(ctx.limits.max_output_chars - 200,
                          max(20, ctx.limits.max_read_bytes // 4))

@@ -1,8 +1,8 @@
-# MiniCode 1.2.7 Windows 发行版
+# MiniCode 1.3.0 Windows 发行版
 
 Windows 10/11 x64 原生 Desktop + CLI + Ink TUI。Desktop 使用 MyGo 0.2.15 / Go，安装包内含 Python 3.12.12、Git 2.56.0、Node.js 22.22.0 和锁定运行依赖。无需安装 Electron、WebView2、Python、Git 或 Node.js。项目编译器和语言 SDK 仍由项目自行提供。
 
-安装包为 `dist/MiniCode-Setup-1.2.7-win-x64.exe`，SHA256 在 `dist/SHA256SUMS.txt`。发布地址为 [v1.2.7](https://github.com/oysterhyd/minicode/releases/tag/v1.2.7)。安装包未作 Windows 代码签名；自动更新归档使用 Ed25519 签名。
+安装包为 `dist/MiniCode-Setup-1.3.0-win-x64.exe`，SHA256 在 `dist/SHA256SUMS.txt`。发布地址为 [v1.3.0](https://github.com/oysterhyd/minicode/releases/tag/v1.3.0)。安装包未作 Windows 代码签名；自动更新归档使用 Ed25519 签名。
 
 ## 安装和使用
 
@@ -18,13 +18,23 @@ Windows 10/11 x64 原生 Desktop + CLI + Ink TUI。Desktop 使用 MyGo 0.2.15 / 
 
 使用自定义安装目录时替换路径。CLI 不自动添加到系统 PATH。配置和会话继续保存在 `%USERPROFILE%\.minicode`；旧 Electron 界面偏好会导入原生用户数据目录。卸载保留个人配置和会话。
 
-插件仍使用精确宿主版本约束。现有插件需将 `minicode_version` 更新到 `1.2.7` 后重新生成锁文件；仓库 MCP 示例已更新。
+插件仍使用精确宿主版本约束。现有插件需将 `minicode_version` 更新到 `1.3.0` 后重新生成锁文件；仓库 MCP 示例已更新。
 
 ## 附件输入
 
 在模型参数中按实际能力勾选图片、PDF、音频和视频。旧配置与新模型的这些选项默认关闭。输入框的添加附件按钮和文件拖放均支持 PNG / JPEG / GIF / WebP、PDF、WAV / MP3、MP4 / MOV / WebM；每条消息最多 10 个附件，单文件最多 20 MB、合计最多 24 MB。缓存保存在会话数据库旁的 attachments 目录，会话只存引用；备份会话时同时保留该目录。附件消息采用新版数据库格式，读取需要当前版本。
 
 OpenAI 兼容服务使用 [Chat Completions 内容格式](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)发送图片、PDF、音频。视频使用支持 [video_url 的兼容服务](https://www.alibabacloud.com/help/en/model-studio/vision)；需确认网关接受对应文件格式及大小。Anthropic Messages 支持图片和 [PDF](https://platform.claude.com/docs/en/build-with-claude/pdf-support)，不支持原生音频及视频。能力勾选用于请求校验，不改变服务端模型能力。
+
+## 语言、指令与本地扩展
+
+“设置 → 通用 → 界面语言”可即时切换中文／English，语言偏好会保留。模型回复、文件内容和自定义指令保持原文；更新器独立对话框在下次启动使用保存的语言。
+
+“设置 → 指令”编辑 MiniCode 的全局 `~/.minicode/AGENTS.md`，最多 64 KB。保存后下一次模型请求加载，可留空停用。项目根目录与子目录的 AGENTS.md 保留原有目录范围和优先关系。
+
+技能、MCP 与插件设置会扫描本地全局及当前项目资源，显示来源和路径，支持搜索与范围筛选。读取 `.agents/skills`、`.agents/servers/*.json`、Claude / Codex / Pi 的已有配置与安装缓存，以及 Pi Desktop 的已安装插件和 `PI_DESKTOP_AGENTS_DIR`。导入的资源默认关闭，启用记录存入 MiniCode 配置；原应用配置不受修改。已启用技能仅提供目录，正文在模型调用加载工具时读取。插件按其声明的兼容技能与 MCP 启用，外部 JS／界面钩子不能在 MiniCode 执行，会标明不支持。MCP 支持 stdio、Streamable HTTP、SSE；扫描本身不启动服务器或连接网络，可单独测试已启用的服务。
+
+模型启用图片能力后，`read` 工具读取工作区图片以及 MCP 返回的图片会在对话中显示缩略图，并传给模型。点击可打开缓存原图；工具栏折叠后仍可见。图片缓存与附件共用 `attachments` 目录，备份数据库时须同时保留缓存。新版数据库格式为 7，旧版程序会拒绝打开，避免丢失图片结果。
 
 ## 从源码打包
 
@@ -52,10 +62,10 @@ pwsh -NoProfile -File release/smoke-native.ps1
 ## 产物目录
 
 ```text
-dist/MiniCode-Setup-1.2.7-win-x64.exe
+dist/MiniCode-Setup-1.3.0-win-x64.exe
 dist/SHA256SUMS.txt
 dist/update-windows-amd64.json
-dist/minicode-1.2.7-windows-amd64.tar.gz
+dist/minicode-1.3.0-windows-amd64.tar.gz
 dist/native/windows-amd64/
   MiniCode.exe
   minicode.cmd
@@ -71,7 +81,7 @@ dist/native/windows-amd64/
 
 Desktop 使用 MyGo 官方 `updater/native`，默认启动后约 10 秒检查一次，随后每 24 小时检查 GitHub Releases。“设置 → 通用”提供自动检查、自动下载安装和手动检查；“关于”也提供手动检查。自动下载安装默认关闭，开启后下次启动使用新版本。更新不主动中断任务。
 
-MyGo 在可写的正式安装目录启用更新。开发构建或只读目录会显示禁用原因。1.1.0 的 Electron 版需要手动安装一次 1.2.7，此后的原生版本可应用内更新。Python 配置、会话及原生偏好均在安装目录外保留。
+MyGo 在可写的正式安装目录启用更新。开发构建或只读目录会显示禁用原因。1.1.0 的 Electron 版需要手动安装一次 1.3.0，此后的原生版本可应用内更新。Python 配置、会话及原生偏好均在安装目录外保留。
 
 `desktop/native/mygo.json` 只包含公开验证密钥。签名私钥由 `MYGO_UPDATER_PRIVATE_KEY` 环境变量提供，本机构建也可从 `%APPDATA%\mygo\update-keys\mygo-update.key` 读取；私钥不进入仓库或发行包。GitHub Actions 使用同名 repository secret。保留并备份当前密钥，后续版本继续用同一把密钥签名；重新生成密钥会导致现有客户端拒绝更新。
 

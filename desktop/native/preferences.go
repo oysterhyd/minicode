@@ -12,6 +12,7 @@ import (
 )
 
 type preferences struct {
+	Language       string  `json:"language"`
 	Theme          string  `json:"theme"`
 	SendKey        string  `json:"sendKey"`
 	Notifications  bool    `json:"notifications"`
@@ -24,7 +25,7 @@ type preferences struct {
 }
 
 func defaultPreferences() preferences {
-	return preferences{Theme: "system", SendKey: "enter", Notifications: true, FontScale: 1, SidebarWidth: 268, WorkWidth: 400}
+	return preferences{Language: "zh", Theme: "system", SendKey: "enter", Notifications: true, FontScale: 1, SidebarWidth: 268, WorkWidth: 400}
 }
 
 type savedPreferences struct {
@@ -32,6 +33,17 @@ type savedPreferences struct {
 	Workspace   string      `json:"workspace"`
 	Recent      []string    `json:"recent"`
 	History     []string    `json:"history"`
+}
+
+// The updater plugin chooses its own dialog language at startup, before the
+// desktop loads. Read only our saved preference here, with the same fallback.
+func storedUILanguage(dir string) string {
+	var saved savedPreferences
+	data, err := os.ReadFile(filepath.Join(dir, "native-preferences.json"))
+	if err != nil || json.Unmarshal(data, &saved) != nil {
+		return "zh"
+	}
+	return normalizeLanguage(saved.Preferences.Language)
 }
 
 type preferenceStore struct {
@@ -68,7 +80,9 @@ func (d *desktop) loadPreferences(dir string) {
 	}
 	saved.Preferences.SidebarWidth = max(200, min(400, saved.Preferences.SidebarWidth))
 	saved.Preferences.WorkWidth = max(280, min(680, saved.Preferences.WorkWidth))
+	saved.Preferences.Language = normalizeLanguage(saved.Preferences.Language)
 	d.preferences = saved.Preferences
+	setUILanguage(d.preferences.Language)
 	d.root = saved.Workspace
 	d.recent = saved.Recent
 	d.history = saved.History

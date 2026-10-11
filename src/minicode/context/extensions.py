@@ -36,14 +36,28 @@ class Source:
 class ProjectInstructions:
     """Read the root file first; discover nested files only for touched paths."""
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, global_path: Path | None = None):
         self.workspace = workspace.resolve()
+        self.global_path = global_path or Path.home() / ".minicode" / "AGENTS.md"
         self.loaded: dict[Path, Source] = {}
+        self.reload_global()
         root = self.workspace / "AGENTS.md"
         if root.is_file():
             if is_link_or_junction(root):
                 raise ValueError(f"project instructions path is a link: {root}")
             self.loaded[root] = Source.read(root, _MAX_INSTRUCTIONS)
+
+    def reload_global(self) -> bool:
+        from minicode.instructions import GlobalInstructions
+
+        current = GlobalInstructions(self.global_path).read()
+        previous = self.loaded.get(self.global_path)
+        if not current["content"]:
+            self.loaded.pop(self.global_path, None)
+            return previous is not None
+        source = Source.read(self.global_path, _MAX_INSTRUCTIONS)
+        self.loaded[self.global_path] = source
+        return previous is None or source.digest != previous.digest
 
     def discover(self, target: str) -> list[Source]:
         path = (self.workspace / target).resolve()
@@ -66,13 +80,15 @@ class ProjectInstructions:
         return found
 
     def prompt_section(self) -> str:
-        return "\n\n".join(
-            f"项目指令来源：{source.label()}\n{source.content}"
-            for source in self.loaded.values()
+        ordered = sorted(self.loaded.values(), key=lambda s: (s.path != self.global_path, len(s.path.parts)))
+        return "全局指令适用于所有项目；项目指令在其目录范围内优先。\n\n" + "\n\n".join(
+            f"{'全局' if source.path == self.global_path else '项目'}指令来源：{source.label()}\n{source.content}"
+            for source in ordered
         )
 
     def sources(self) -> list[dict[str, str]]:
-        return [{"path": str(s.path), "sha256": s.digest} for s in self.loaded.values()]
+        return [{"path": str(s.path), "sha256": s.digest,
+                 "scope": "global" if s.path == self.global_path else "project"} for s in self.loaded.values()]
 
 
 @dataclass(frozen=True)
@@ -124,6 +140,7 @@ class SkillCatalog:
                  ("project", workspace / ".minicode" / "skills"),
                  *(plugin_roots or [])]
         self.skills: dict[str, Skill] = {}
+        self.disabled_skills: set[str] = set()
         for origin, root in roots:
             if not root.is_dir():
                 continue

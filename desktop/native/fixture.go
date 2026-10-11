@@ -13,12 +13,14 @@ import (
 )
 
 type fixtureClient struct {
-	mu       sync.Mutex
-	State    model.State
-	Sessions []model.Session
-	Models   []model.Model
-	Config   model.Configuration
-	Detail   model.Detail
+	mu           sync.Mutex
+	State        model.State
+	Sessions     []model.Session
+	Models       []model.Model
+	Config       model.Configuration
+	Detail       model.Detail
+	Instructions instructionsDraft
+	Local        localExtensions
 }
 
 func (f *fixtureClient) Request(_ context.Context, method string, params any, target any) error {
@@ -37,6 +39,20 @@ func (f *fixtureClient) Request(_ context.Context, method string, params any, ta
 		result = f.Models
 	case "getConfiguration":
 		result = f.Config
+	case "getInstructions":
+		result = f.Instructions
+	case "saveInstructions":
+		f.Instructions.Content, f.Instructions.Exists = model.String(p["content"]), true
+		result = f.Instructions
+	case "getLocalExtensions", "setLocalExtensionEnabled":
+		if method == "setLocalExtensionEnabled" {
+			for i := range f.Local.Entries {
+				if f.Local.Entries[i].ID == model.String(p["id"]) {
+					f.Local.Entries[i].Enabled, _ = p["enabled"].(bool)
+				}
+			}
+		}
+		result = f.Local
 	case "getSession":
 		detail := f.Detail
 		id := model.String(p["sessionId"])
@@ -65,7 +81,7 @@ func (f *fixtureClient) Request(_ context.Context, method string, params any, ta
 	case "listTasks":
 		result = []model.Task{{ID: "t1", Title: "读取改动文件", Status: "done"}, {ID: "t2", Title: "运行构建", Status: "done"}, {ID: "t3", Title: "整理结论", Status: "running"}}
 	case "getCapabilities":
-		result = model.Capabilities{Agents: []string{"explore", "review"}}
+		result = model.Capabilities{Agents: []string{"explore", "review"}, Skills: []model.Skill{}}
 	case "sendPrompt":
 		result = map[string]string{"sessionId": "test-run"}
 	case "importAttachments":
@@ -278,7 +294,28 @@ func loadFixture(d *desktop, page string) {
 			tab = suffix
 		}
 		d.settings = &settingsState{Tab: tab, Budget: [3]string{"0", "0", "0"}, OpenModels: map[int]bool{}}
+		if tab == "instructions" {
+			a := instructionsDraft{Path: "C:\\Users\\you\\.minicode\\AGENTS.md", Content: "Use clear, concise answers.\nVerify changes before finishing.", Exists: true}
+			a.Saved = a.Content
+			d.settings.Instructions = &a
+			d.client.(*fixtureClient).Instructions = a
+		}
+		if tab == "skills" || tab == "mcp" || tab == "plugins" {
+			catalog := fixtureLocalExtensions()
+			d.settings.Extensions = &extensionsSettingsState{Scope: "all", Catalog: catalog}
+			d.client.(*fixtureClient).Local = catalog
+		}
 	}
+}
+
+func fixtureLocalExtensions() localExtensions {
+	return localExtensions{Entries: []localExtension{
+		{ID: "skill-a", Kind: "skill", Name: "frontend-design", Description: "Build interfaces with a consistent visual style and accessible controls.", Scope: "global", Source: "Agents", Path: "C:\\Users\\you\\.agents\\skills\\frontend-design\\SKILL.md", Supported: true, Enabled: true},
+		{ID: "skill-b", Kind: "skill", Name: "project-review", Description: "Review the current project's changes and report concrete findings.", Scope: "project", Source: "Claude", Path: "D:\\project\\.claude\\skills\\project-review\\SKILL.md", Supported: true},
+		{ID: "mcp-a", Kind: "mcp", Name: "context7", Description: "Read library documentation.", Scope: "global", Source: "Agents", Path: "C:\\Users\\you\\.agents\\servers\\context7.json", Detail: "http", Supported: true},
+		{ID: "plugin-a", Kind: "plugin", Name: "documentation", Description: "Local documentation skills and tools.", Scope: "global", Source: "Codex", Path: "C:\\Users\\you\\.codex\\plugins\\cache\\documentation\\plugin.json", Supported: true, Detail: "Skills: docs; MCP: search"},
+		{ID: "plugin-b", Kind: "plugin", Name: "runtime-hooks", Description: "Plugin requiring another application's runtime.", Scope: "project", Source: "Claude", Path: "D:\\project\\.claude\\plugins\\runtime-hooks\\plugin.json", Status: "unsupported"},
+	}}
 }
 
 type fixtureUpdates struct {

@@ -126,11 +126,18 @@ class ToolRegistry:
                                  "protocol": connector.protocol_version,
                                  "server_version": connector.server_version, "error": None})
             except Exception as exc:  # a failed extension must not hide built-ins
-                error = f"MCP {connector.config.name}: {exc}"
+                detail = str(exc)
+                if hasattr(connector.config, "source_path"):
+                    # HTTP error text may contain authenticated URLs. Only an
+                    # explicitly sanitized configuration error leaves the host.
+                    detail = getattr(connector.config, "configuration_error", "") or type(exc).__name__
+                error = f"MCP {connector.config.name}: {detail}"
                 try:
                     await connector.aclose()
                 except Exception as cleanup_exc:
-                    error += f" (cleanup: {cleanup_exc})"
+                    cleanup_detail = (type(cleanup_exc).__name__ if hasattr(connector.config, "source_path")
+                                      else str(cleanup_exc))
+                    error += f" (cleanup: {cleanup_detail})"
                 self.discovery_errors.append(error)
                 statuses.append({"server": connector.config.name, "plugin": connector.config.plugin,
                                  "protocol": None, "server_version": None, "error": error})

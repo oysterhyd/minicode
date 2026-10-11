@@ -1,8 +1,9 @@
-"""Official-SDK stdio MCP bridge into minicode's normal tool pipeline."""
+"""Official-SDK stdio, HTTP and SSE MCP bridge into the tool pipeline."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 from contextlib import AsyncExitStack
@@ -11,6 +12,9 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from mcp import Client, StdioServerParameters
+from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from minicode.core.models import ToolOutcome, ToolSpec
 from minicode.plugins import McpServerConfig
@@ -89,9 +93,22 @@ class McpConnector:
             return self._client
         stack = AsyncExitStack()
         try:
-            parameters = StdioServerParameters(
-                command=self.config.command, args=list(self.config.args), cwd=self.config.cwd,
-            )
+            transport = getattr(self.config, "transport", "stdio")
+            if transport == "stdio":
+                parameters = StdioServerParameters(
+                    command=self.config.command, args=list(self.config.args), cwd=self.config.cwd,
+                    env=getattr(self.config, "env", None) or None,
+                )
+            elif transport == "http":
+                http_client = await stack.enter_async_context(create_mcp_http_client(
+                    headers=self.config.headers,
+                ))
+                parameters = streamable_http_client(self.config.url, http_client=http_client)
+            elif transport == "sse":
+                parameters = sse_client(self.config.url, headers=self.config.headers,
+                                        timeout=self.config.timeout_s)
+            else:
+                raise ValueError("unsupported MCP transport")
             async with asyncio.timeout(self.config.timeout_s):
                 client = await stack.enter_async_context(Client(
                     parameters, read_timeout_seconds=self.config.timeout_s,
@@ -140,15 +157,15 @@ class McpConnector:
             seen.add(cursor)
         raise ValueError(f"MCP server {self.config.name} exceeded discovery page limit")
 
-    async def call(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+    async def call(self, name: str, arguments: dict[str, Any], ctx: ToolContext | None = None) -> ToolOutcome:
         try:
-            return await self._request("call", name, arguments)
+            return await self._request("call", name, arguments, ctx)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return ToolOutcome.failure(f"MCP server {self.config.name} disconnected or timed out: {exc}")
+            return ToolOutcome.failure(f"MCP server {self.config.name} disconnected or timed out: {self._error_detail(exc)}")
 
-    async def _call(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+    async def _call(self, name: str, arguments: dict[str, Any], ctx: ToolContext | None = None) -> ToolOutcome:
         try:
             self.config.verify()
             client = await self._connect()
@@ -158,11 +175,32 @@ class McpConnector:
             raise
         except Exception as exc:  # connection failures are reported to the model
             await self._disconnect()
-            return ToolOutcome.failure(f"MCP server {self.config.name} disconnected or timed out: {exc}")
+            return ToolOutcome.failure(f"MCP server {self.config.name} disconnected or timed out: {self._error_detail(exc)}")
         parts: list[str] = []
+        images = []
         for block in result.content:
             if block.type == "text":
                 parts.append(block.text)
+            elif block.type == "image" and not result.is_error:
+                if ctx is None or ctx.attachment_store is None or "image" not in ctx.input_modalities:
+                    parts.append("[Image returned by MCP; current model image input is unavailable. Enable image input or switch models.]")
+                    continue
+                try:
+                    from minicode.storage.attachments import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MAX_TOTAL_BYTES, SUFFIXES
+                    if len(images) >= MAX_ATTACHMENTS or len(block.data) > ((MAX_ATTACHMENT_BYTES+2)//3)*4:
+                        raise ValueError("MCP image exceeds attachment limit")
+                    data = base64.b64decode(block.data, validate=True)
+                    if sum(image.size for image in images) + len(data) > MAX_TOTAL_BYTES:
+                        raise ValueError("MCP images exceed total attachment limit")
+                    mime = block.mime_type
+                    if not mime.startswith("image/") or mime not in SUFFIXES:
+                        raise ValueError("Unsupported MCP image format")
+                    image = await asyncio.to_thread(ctx.attachment_store.import_bytes, data,
+                                                   f"{name}-{len(images)+1}{SUFFIXES[mime]}", mime)
+                    images.append(image)
+                    parts.append(f"[Read image: {image.name}]")
+                except (OSError, ValueError) as exc:
+                    parts.append(f"[MCP image could not be loaded: {exc}]")
             elif block.type == "resource_link":
                 parts.append(f"[resource: {block.uri}]")
             else:
@@ -171,7 +209,12 @@ class McpConnector:
             parts.append(json.dumps(result.structured_content, ensure_ascii=False))
         output = "\n".join(parts)
         return (ToolOutcome.failure("MCP tool error", output=output) if result.is_error
-                else ToolOutcome(output=output))
+                else ToolOutcome(output=output, images=images))
+
+    def _error_detail(self, exc: Exception) -> str:
+        if hasattr(self.config, "source_path"):
+            return getattr(self.config, "configuration_error", "") or type(exc).__name__
+        return str(exc)
 
     async def aclose(self) -> None:
         owner = self._owner
@@ -230,7 +273,7 @@ class McpTool(BaseTool):
             Draft202012Validator(self.schema).validate(raw_args)
         except (SchemaError, ValidationError) as exc:
             return ToolOutcome.failure(f"invalid arguments for {self.name}: {exc.message}")
-        return await self.connector.call(self.remote_name, raw_args)
+        return await self.connector.call(self.remote_name, raw_args, ctx)
 
     async def execute(self, args: Any, ctx: ToolContext) -> ToolOutcome:
         raise NotImplementedError("McpTool validates the discovered JSON Schema in run")

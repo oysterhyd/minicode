@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestReasoningHistoryMatchesPreservedMessages(t *testing.T) {
 	detail := Detail{Messages: []Message{
@@ -15,6 +18,26 @@ func TestReasoningHistoryMatchesPreservedMessages(t *testing.T) {
 	items := History(detail)
 	if len(items) != 5 || items[1].Kind != "reasoning" || items[1].Text != "preserved reasoning" || items[3].Text != "tool reasoning" || items[4].ID != "call-new" {
 		t.Fatalf("reasoning not restored before matching answer/tool: %+v", items)
+	}
+}
+
+func TestHistoryAssociatesActualImageReadsWithMatchingTool(t *testing.T) {
+	asset := strings.Repeat("a", 64)
+	file := map[string]any{"asset_id": asset, "kind": "image", "name": "read.png", "mime_type": "image/png", "size": 128}
+	detail := Detail{Messages: []Message{{Role: "assistant", Content: []map[string]any{
+		{"type": "tool_use", "id": "read-picture", "name": "read", "input": map[string]any{"path": "read.png"}},
+		{"type": "tool_use", "id": "read-text", "name": "read", "input": map[string]any{"path": "README.md"}},
+	}}}, Events: []Event{
+		{Type: "tool_call_result", Data: map[string]any{"call_id": "read-picture", "success": true, "images": []any{file}}},
+		{Type: "tool_call_result", Data: map[string]any{"call_id": "read-text", "success": true}},
+	}}
+	items := History(detail)
+	if len(items) != 2 || len(items[0].Attachments) != 1 || items[0].Attachments[0].AssetID != asset || len(items[1].Attachments) != 0 {
+		t.Fatal("actual image was not attached to correct tool")
+	}
+	detail.Events[0].Data["success"] = false
+	if images := History(detail)[0].Attachments; len(images) != 0 {
+		t.Fatal("failed read displayed an image")
 	}
 }
 

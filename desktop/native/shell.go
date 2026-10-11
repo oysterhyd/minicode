@@ -11,6 +11,7 @@ import (
 )
 
 func (d *desktop) view(c *ui.Context) {
+	setUILanguage(d.preferences.Language)
 	p := d.theme(c)
 	ui.Column(c).Fill().Children(func() {
 		d.titlebar(c, p)
@@ -41,12 +42,12 @@ func (d *desktop) view(c *ui.Context) {
 			} else {
 				ui.Box(c).Width(4)
 				ui.Column(c).Key("work-rail").Width(32).AlignItems(ui.Center).Gap(4).Children(func() {
-					if iconButton(c, p, "PanelRightOpen", "展开工作区").Clicked() {
+					if iconButton(c, p, "PanelRightOpen", tr("展开工作区")).Clicked() {
 						d.preferences.RightCollapsed = false
 						d.persist()
 					}
 					for i, entry := range workTabs {
-						if iconButton(c, p, entry.Icon, "查看"+entry.Label).Clicked() {
+						if iconButton(c, p, entry.Icon, tr("查看")+entry.Label).Clicked() {
 							d.tab = i
 							d.preferences.RightCollapsed = false
 							d.persist()
@@ -62,7 +63,7 @@ func (d *desktop) view(c *ui.Context) {
 }
 
 func (d *desktop) splitter(c *ui.Context, p palette, width *float32, minWidth, maxWidth float32, right bool) {
-	e := ui.Box(c).Width(8).FillHeight().Focusable().Label("调整面板宽度").Cursor(ui.CursorResizeEW)
+	e := ui.Box(c).Width(8).FillHeight().Focusable().Label(tr("调整面板宽度")).Cursor(ui.CursorResizeEW)
 	e.Children(func() {
 		line := ui.Box(c).Width(2).FillHeight().Margin(12, 3).Radius(2)
 		if e.Hovered() || e.Pressed() || e.FocusVisible() {
@@ -115,15 +116,15 @@ func (d *desktop) titlebar(c *ui.Context, p palette) {
 			ui.Text(c, basename(v.Workspace)).FontSize(p.font(11.9)).TextColor(p.Text3).SingleLine()
 			icon(c, "ChevronRight", 12, p.Text4)
 			ui.Text(c, v.title(d.sessions)).FontSize(p.font(11.9)).FontWeight(550).MaxWidth(360).SingleLine()
-			status := "就绪"
+			status := tr("就绪")
 			color, bg := p.Text3, p.Hover
 			if v.Busy {
-				status = "运行中"
+				status = tr("运行中")
 				color, bg = p.AccentText, p.AccentSoft
 			}
 			for _, item := range v.Items {
 				if item.ApprovalID != "" {
-					status = "等待确认"
+					status = tr("等待确认")
 					color, bg = p.Warning, p.WarningSoft
 					break
 				}
@@ -144,26 +145,26 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 	v := d.current()
 	if d.preferences.LeftCollapsed {
 		ui.Column(c).Fill().AlignItems(ui.Center).Gap(4).Children(func() {
-			if iconButton(c, p, "PanelLeftOpen", "展开左侧面板").Size(32, 32).Clicked() {
+			if iconButton(c, p, "PanelLeftOpen", tr("展开左侧面板")).Size(32, 32).Clicked() {
 				d.preferences.LeftCollapsed = false
 				d.persist()
 			}
-			if iconButton(c, p, "SquarePen", "新建对话").Size(34, 34).Clicked() {
+			if iconButton(c, p, "SquarePen", tr("新建对话")).Size(34, 34).Clicked() {
 				d.newSession(v.Workspace)
 			}
-			if iconButton(c, p, "FolderOpen", "打开工作区").Size(34, 34).Clicked() {
+			if iconButton(c, p, "FolderOpen", tr("打开工作区")).Size(34, 34).Clicked() {
 				d.chooseWorkspace()
 			}
-			if iconButton(c, p, "Search", "搜索任务").Size(34, 34).Clicked() {
+			if iconButton(c, p, "Search", tr("搜索任务")).Size(34, 34).Clicked() {
 				d.preferences.LeftCollapsed = false
 				d.focusSearch = true
 				d.persist()
 			}
 			ui.Spacer(c)
-			if iconButton(c, p, "Settings2", "设置").Size(34, 34).Clicked() {
+			if iconButton(c, p, "Settings2", tr("设置")).Size(34, 34).Clicked() {
 				d.openSettings("general")
 			}
-			if iconButton(c, p, "Moon", "切换主题").Size(34, 34).Clicked() {
+			if iconButton(c, p, "Moon", tr("切换主题")).Size(34, 34).Clicked() {
 				d.toggleTheme()
 			}
 		})
@@ -172,11 +173,11 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 	ui.Column(c).Fill().Children(func() {
 		ui.Column(c).Padding(2, 8, 8, 10).Gap(6).Children(func() {
 			ui.Row(c).FillWidth().Height(32).Children(func() {
-				if button(c, p, "新建对话", "SquarePen", false).Height(28).Padding(0, 10).Border(0, ui.Transparent).Justify(ui.Start).FontSize(p.font(12.04)).Clicked() {
+				if button(c, p, tr("新建对话"), "SquarePen", false).Height(28).Padding(0, 10).Border(0, ui.Transparent).Justify(ui.Start).FontSize(p.font(12.04)).Clicked() {
 					d.newSession(v.Workspace)
 				}
 				ui.Spacer(c)
-				if iconButton(c, p, "PanelLeft", "收拢左侧面板").Clicked() {
+				if iconButton(c, p, "PanelLeft", tr("收拢左侧面板")).Clicked() {
 					d.preferences.LeftCollapsed = true
 					d.persist()
 				}
@@ -187,12 +188,12 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 			}
 			search.Children(func() {
 				icon(c, "Search", 13, p.Text3)
-				input := ui.TextInputBase(c, &d.search).Grow(1).Placeholder("搜索任务").Label("搜索任务").FontSize(p.font(12.04))
+				input := ui.TextInputBase(c, &d.search).Grow(1).Placeholder(tr("搜索任务")).Label(tr("搜索任务")).FontSize(p.font(12.04))
 				if d.focusSearch {
 					input.Focus()
 					d.focusSearch = false
 				}
-				if d.search != "" && iconButton(c, p, "X", "清除任务搜索").Size(18, 18).Clicked() {
+				if d.search != "" && iconButton(c, p, "X", tr("清除任务搜索")).Size(18, 18).Clicked() {
 					d.search = ""
 				}
 			})
@@ -204,15 +205,15 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 			}
 			pinned := slices.DeleteFunc(slices.Clone(d.sessions), func(s model.Session) bool { return !s.Pinned || !matches(s) })
 			if len(pinned) > 0 {
-				ui.Text(c, "置顶").FontSize(p.font(10.36)).TextColor(p.Text3).Padding(6, 8)
+				ui.Text(c, tr("置顶")).FontSize(p.font(10.36)).TextColor(p.Text3).Padding(6, 8)
 				for _, session := range pinned {
 					d.sessionRow(c, p, session, true)
 				}
 			}
 			ui.Row(c).Height(28).Padding(0, 4, 0, 8).Margin(4, 0, 0, 0).Children(func() {
-				ui.Text(c, "工作空间").FontSize(p.font(10.36)).FontWeight(600).TextColor(p.Text3)
+				ui.Text(c, tr("工作空间")).FontSize(p.font(10.36)).FontWeight(600).TextColor(p.Text3)
 				ui.Spacer(c)
-				if iconButton(c, p, "FolderPlus", "打开工作区").Size(22, 22).Clicked() {
+				if iconButton(c, p, "FolderPlus", tr("打开工作区")).Size(22, 22).Clicked() {
 					d.chooseWorkspace()
 				}
 			})
@@ -232,7 +233,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 			}
 			for _, root := range roots {
 				ui.Column(c).Key("project-" + root).Children(func() {
-					row := ui.ButtonBase(c).Label("工作区 "+root).Height(30).Radius(8).Gap(7).Padding(0, 1).Justify(ui.Start)
+					row := ui.ButtonBase(c).Label(tr("工作区 ")+root).Height(30).Radius(8).Gap(7).Padding(0, 1).Justify(ui.Start)
 					if row.Hovered() {
 						row.Background(p.Hover)
 					}
@@ -245,10 +246,10 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 						icon(c, "FolderOpen", 14, p.Text2)
 						ui.Text(c, basename(root)).NoWrap().FontSize(p.font(12.04)).FontWeight(550)
 						if root == v.Workspace {
-							badge(c, p, "当前", p.AccentText, p.AccentSoft)
+							badge(c, p, tr("当前"), p.AccentText, p.AccentSoft)
 						}
 						ui.Spacer(c)
-						if row.Hovered() && iconButton(c, p, "Plus", "在此工作区新建任务").Size(22, 22).Clicked() {
+						if row.Hovered() && iconButton(c, p, "Plus", tr("在此工作区新建任务")).Size(22, 22).Clicked() {
 							d.newSession(root)
 						}
 					})
@@ -256,13 +257,13 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 						d.collapsedProjects[root] = !d.collapsedProjects[root]
 					}
 					row.ContextMenu(func(menu *ui.Menu) {
-						if menu.Item("打开工作区").Chosen() {
+						if menu.Item(tr("打开工作区")).Chosen() {
 							d.newSession(root)
 						}
-						if menu.Item("在文件夹中显示").Chosen() {
+						if menu.Item(tr("在文件夹中显示")).Chosen() {
 							d.reveal(root, ".")
 						}
-						if menu.Item("从最近工作区移除").Chosen() {
+						if menu.Item(tr("从最近工作区移除")).Chosen() {
 							d.recent = slices.DeleteFunc(d.recent, func(item string) bool { return item == root })
 							d.persist()
 						}
@@ -276,22 +277,22 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 							}
 						}
 						if count == 0 {
-							muted(c, p, "暂无任务").Padding(4, 28).FontSize(p.font(11.2))
+							muted(c, p, tr("暂无任务")).Padding(4, 28).FontSize(p.font(11.2))
 						}
 					}
 				})
 			}
 			if len(roots) == 0 {
-				if button(c, p, "打开本地项目", "FolderOpen", false).FillWidth().Height(64).BorderStyle(ui.BorderDashed).Clicked() {
+				if button(c, p, tr("打开本地项目"), "FolderOpen", false).FillWidth().Height(64).BorderStyle(ui.BorderDashed).Clicked() {
 					d.chooseWorkspace()
 				}
 			}
 		})
 		ui.Row(c).Height(40).Padding(6, 8, 0, 10).Gap(4).BorderWidth(1, 0, 0, 0).BorderColor(p.BorderSubtle).Children(func() {
-			if button(c, p, "设置", "Settings2", false).Grow(1).Height(32).Padding(0, 8).Gap(8).Justify(ui.Start).Border(0, ui.Transparent).Clicked() {
+			if button(c, p, tr("设置"), "Settings2", false).Grow(1).Height(32).Padding(0, 8).Gap(8).Justify(ui.Start).Border(0, ui.Transparent).Clicked() {
 				d.openSettings("general")
 			}
-			if iconButton(c, p, "Moon", "切换主题").Clicked() {
+			if iconButton(c, p, "Moon", tr("切换主题")).Clicked() {
 				d.toggleTheme()
 			}
 		})
@@ -301,7 +302,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 func (d *desktop) sessionRow(c *ui.Context, p palette, session model.Session, pinned bool) {
 	ui.Column(c).Key("session-"+session.ID).Margin(1, 0).Children(func() {
 		if d.renameID == session.ID {
-			input := ui.TextInput(c, &d.renameText).Label("重命名任务").Height(28).AutoFocus()
+			input := ui.TextInput(c, &d.renameText).Label(tr("重命名任务")).Height(28).AutoFocus()
 			if input.Submitted() {
 				d.sessionAction("renameSession", session.ID, map[string]any{"title": d.renameText})
 				d.renameID = ""
@@ -356,7 +357,7 @@ func (d *desktop) sessionRow(c *ui.Context, p palette, session model.Session, pi
 				d.renameText = session.Title
 			}
 			if row.Hovered() {
-				iconButton(c, p, "Ellipsis", "任务操作").Size(26, 26).Menu(func(menu *ui.Menu) { d.sessionMenu(menu, session) })
+				iconButton(c, p, "Ellipsis", tr("任务操作")).Size(26, 26).Menu(func(menu *ui.Menu) { d.sessionMenu(menu, session) })
 			}
 		})
 		row.ContextMenu(func(menu *ui.Menu) { d.sessionMenu(menu, session) })
@@ -364,13 +365,13 @@ func (d *desktop) sessionRow(c *ui.Context, p palette, session model.Session, pi
 }
 
 func (d *desktop) sessionMenu(menu *ui.Menu, session model.Session) {
-	if menu.Item("重命名").Chosen() {
+	if menu.Item(tr("重命名")).Chosen() {
 		d.renameID = session.ID
 		d.renameText = session.Title
 	}
-	label := "置顶"
+	label := tr("置顶")
 	if session.Pinned {
-		label = "取消置顶"
+		label = tr("取消置顶")
 	}
 	if menu.Item(label).Chosen() {
 		d.sessionAction("pinSession", session.ID, map[string]any{"pinned": !session.Pinned})
@@ -382,7 +383,7 @@ func (d *desktop) sessionMenu(menu *ui.Menu, session model.Session) {
 			running = true
 		}
 	}
-	if menu.Item("删除任务").Disabled(running).Chosen() {
+	if menu.Item(tr("删除任务")).Disabled(running).Chosen() {
 		d.deleteID = session.ID
 		d.modal = "delete"
 	}
@@ -394,13 +395,13 @@ func (d *desktop) welcome(c *ui.Context, p palette) {
 	ui.Scroll(c).Fill().Children(func() {
 		ui.Column(c).FillWidth().MinHeight(height - 50).Center().Children(func() {
 			ui.Column(c).FillWidth().MaxWidth(720).Padding(40, 32).Margin(0, ui.Auto).Children(func() {
-				ui.Text(c, "想做些什么？").FontSize(p.font(22)).FontWeight(550).TextAlign(ui.Center).Margin(0, 0, 12, 0)
+				ui.Text(c, tr("想做些什么？")).FontSize(p.font(22)).FontWeight(550).TextAlign(ui.Center).Margin(0, 0, 12, 0)
 				ui.Row(c).Justify(ui.Center).Margin(0, 0, 20, 0).Children(func() {
 					workspace := basename(v.Workspace)
 					if v.Workspace == "" {
-						workspace = "选择工作区"
+						workspace = tr("选择工作区")
 					}
-					project := button(c, p, workspace, "FolderOpen", false).Label("选择工作区").
+					project := button(c, p, workspace, "FolderOpen", false).Label(tr("选择工作区")).
 						Height(28).Border(0, ui.Transparent).FontSize(p.font(11.9)).FontWeight(400).Padding(0, 10)
 					project.Children(func() { icon(c, "ChevronDown", 13, p.Text3) })
 					if project.Clicked() {
@@ -508,15 +509,15 @@ func (d *desktop) toastView(c *ui.Context, p palette) {
 				ui.Column(c).Key(entry.ID).Padding(12, 14).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 28, 0, ui.RGBA(0, 0, 0, 0.25)).Transition(enterMotion).Children(func() {
 					ui.Row(c).Gap(8).Children(func() {
 						icon(c, "CircleCheck", 15, p.Success)
-						ui.Text(c, entry.Title).FontSize(p.font(12.32)).FontWeight(600).Grow(1)
-						if iconButton(c, p, "X", "关闭通知").Size(20, 20).Clicked() {
+						ui.Text(c, tr(entry.Title)).FontSize(p.font(12.32)).FontWeight(600).Grow(1)
+						if iconButton(c, p, "X", tr("关闭通知")).Size(20, 20).Clicked() {
 							d.toasts = slices.DeleteFunc(d.toasts, func(t toast) bool { return t.ID == entry.ID })
 						}
 					})
 					if entry.Detail != "" {
 						muted(c, p, entry.Detail).Margin(5, 0, 0, 0)
 					}
-					if entry.SessionID != "" && button(c, p, "查看任务", "ArrowUpRight", false).Margin(6, 0, 0, 0).Clicked() {
+					if entry.SessionID != "" && button(c, p, tr("查看任务"), "ArrowUpRight", false).Margin(6, 0, 0, 0).Clicked() {
 						for _, s := range d.sessions {
 							if s.ID == entry.SessionID {
 								d.openSession(s)

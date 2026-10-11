@@ -10,6 +10,8 @@ import sys
 import httpx
 from pathlib import Path
 from minicode.configuration import HarnessConfiguration
+from minicode.instructions import GlobalInstructions
+from minicode.local_extensions import LocalExtensionCatalog
 
 from minicode.runtime.services import attach_compactor, workspace_services
 from minicode.context.extensions import ProjectInstructions, SkillCatalog
@@ -196,7 +198,7 @@ class Bridge:
             await close()
 
     def build_registry(self, workspace: Path):
-        bundle = workspace_services(workspace, agents=self.configuration.agents())
+        bundle = workspace_services(workspace, agents=self.configuration.agents(), configuration=self.configuration)
         return bundle.registry, bundle.skills
 
     async def create_runtime(self, workspace: Path, model: str, session_id: str | None):
@@ -257,7 +259,7 @@ class Bridge:
             background_manager=BackgroundManager(),
             goal_checker=goal_checker,
             evidence_ledger=evidence_ledger,
-            project_instructions=ProjectInstructions(workspace),
+            project_instructions=ProjectInstructions(workspace, self.configuration.path.parent / "AGENTS.md"),
             skills=skills,
         )
         if session_id:
@@ -336,6 +338,9 @@ class Bridge:
     def capabilities(self, workspace: Path):
         plugins = PluginCatalog(workspace, check_lock=False)
         skills = SkillCatalog(workspace, plugin_roots=plugins.skill_roots())
+        local = LocalExtensionCatalog(workspace, configuration=self.configuration)
+        local.scan()
+        local.apply_skills(skills)
         active = self.runtime.active_skills if self.runtime and self.runtime.workspace == workspace else {}
         return {"skills": [{"name": s.name, "description": s.description, "origin": s.origin,
                             "active": s.name in active} for s in skills.skills.values()],
@@ -343,7 +348,7 @@ class Bridge:
                              "digest": p.digest[:12], "path": str(p.path.parent),
                              "skills": bool(p.skill_root), "agents": bool(p.agent_root),
                              "servers": [s.name for s in p.servers]} for p in plugins.plugins.values()],
-                "mcp": [{"name": s.name, "plugin": s.plugin} for s in plugins.servers()],
+                "mcp": [{"name": s.name, "plugin": s.plugin} for s in [*plugins.servers(), *local.servers()]],
                 "agents": [a["name"] for a in self.configuration.agents() if a["enabled"]] + plugins.agent_names(),
                 "agentDefinitions": self.configuration.agents()}
 
@@ -459,12 +464,24 @@ class Bridge:
 
     async def handle(self, method: str, params: dict):
         boolean_fields = {"resolveApproval": "granted", "setPluginEnabled": "enabled",
-                          "setAgentEnabled": "enabled", "setSkillActive": "active"}
+                          "setAgentEnabled": "enabled", "setSkillActive": "active",
+                          "setLocalExtensionEnabled": "enabled"}
         field = boolean_fields.get(method)
         if field is not None and not isinstance(params.get(field), bool):
             raise ValueError(f"{field} must be a boolean")
         if method == "getConfiguration":
             return self.configuration.public()
+        if method == "getInstructions":
+            return GlobalInstructions(self.configuration.path.parent / "AGENTS.md").read()
+        if method == "saveInstructions":
+            return GlobalInstructions(self.configuration.path.parent / "AGENTS.md").save(params.get("content"))
+        if method in {"getLocalExtensions", "setLocalExtensionEnabled"}:
+            workspace = Path(params["workspace"]).resolve() if params.get("workspace") else Path.home()
+            catalog = LocalExtensionCatalog(workspace, configuration=self.configuration)
+            entries = catalog.set_enabled(params["id"], params["enabled"]) if method == "setLocalExtensionEnabled" else catalog.scan()
+            if method == "setLocalExtensionEnabled":
+                self.registry_dirty = True
+            return {"entries": entries, "diagnostics": []}
         if method == "listModels":
             return self.configuration.models()
         if method == "saveService":
@@ -641,11 +658,8 @@ class Bridge:
             workspace = Path(params["workspace"]).resolve()
             return str(PluginCatalog(workspace, check_lock=False).write_lock())
         if method == "refreshMcp":
-            workspace = Path(params["workspace"]).resolve()
-            catalog = PluginCatalog(workspace)
-            registry = default_registry()
-            for server in catalog.servers():
-                registry.add_mcp_server(server)
+            workspace = Path(params.get("workspace") or Path.home()).resolve()
+            registry, _ = self.build_registry(workspace)
             try:
                 servers = await registry.prepare()
                 return {"servers": servers, "tools": [s.name for s in registry.specs() if s.name.startswith("mcp__")]}
@@ -857,10 +871,10 @@ class BridgeRouter:
         if not context.busy():
             context.client_key = client_key
         result = await context.handle(method, params)
-        if method in {"setPluginEnabled", "lockPlugins"}:
-            root = Path(params["workspace"]).resolve()
+        if method in {"setPluginEnabled", "lockPlugins", "setLocalExtensionEnabled"}:
+            root = Path(params.get("workspace") or Path.home()).resolve()
             for item in set(self.clients.values()) | set(self.sessions.values()):
-                if item.runtime and item.runtime.workspace == root:
+                if item.runtime and (method == "setLocalExtensionEnabled" or item.runtime.workspace == root):
                     item.registry_dirty = True
         if method in {"saveService", "deleteService"}:
             changed_id = params.get("id") or params.get("service", {}).get("id")

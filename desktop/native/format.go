@@ -17,16 +17,16 @@ func relativeTime(value string) string {
 	then, _ := time.Parse(time.RFC3339Nano, value)
 	diff := time.Since(then)
 	if diff < time.Minute {
-		return "刚刚"
+		return tr("刚刚")
 	}
 	if diff < time.Hour {
-		return fmt.Sprintf("%d 分钟", int(diff.Minutes()))
+		return fmt.Sprintf(tr("%d 分钟"), int(diff.Minutes()))
 	}
 	if diff < 24*time.Hour {
-		return fmt.Sprintf("%d 小时", int(diff.Hours()))
+		return fmt.Sprintf(tr("%d 小时"), int(diff.Hours()))
 	}
 	if diff < 7*24*time.Hour {
-		return fmt.Sprintf("%d 天", int(diff.Hours()/24))
+		return fmt.Sprintf(tr("%d 天"), int(diff.Hours()/24))
 	}
 	return then.Format("01/02")
 }

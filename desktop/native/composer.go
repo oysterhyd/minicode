@@ -107,13 +107,13 @@ func (d *desktop) suggestions(v *conversation, caret int) *completionState {
 				for _, m := range d.models {
 					detail := m.Provider
 					if !m.Available {
-						detail = "未配置"
+						detail = tr("未配置")
 					}
 					items = append(items, suggestion{m.ID, detail, "value"})
 				}
 			case "/effort":
 				for _, e := range effortOptions {
-					items = append(items, suggestion{e.Value, "思考强度", "value"})
+					items = append(items, suggestion{e.Value, tr("思考强度"), "value"})
 				}
 			case "/permissions":
 				for _, p := range permissionOptions {
@@ -132,7 +132,7 @@ func (d *desktop) suggestions(v *conversation, caret int) *completionState {
 		} else {
 			for _, command := range d.commands {
 				if strings.HasPrefix(strings.ToLower(command.Name), verb) {
-					items = append(items, suggestion{command.Name, command.Summary, "command"})
+					items = append(items, suggestion{command.Name, tr(command.Summary), "command"})
 				}
 			}
 		}
@@ -209,8 +209,8 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 		if v.Error != "" {
 			ui.Row(c).Padding(8, 12).Radius(8).Border(1, p.Danger.Alpha(0.3)).Background(p.DangerSoft).Gap(8).Transition(enterMotion).Children(func() {
 				icon(c, "CircleAlert", 15, p.Danger)
-				ui.Text(c, v.Error).Grow(1).FontSize(p.font(11.76)).MaxHeight(100).Selectable()
-				if iconButton(c, p, "X", "关闭提示").Size(20, 20).Clicked() {
+				ui.Text(c, localizeNotice(v.Error)).Grow(1).FontSize(p.font(11.76)).MaxHeight(100).Selectable()
+				if iconButton(c, p, "X", tr("关闭提示")).Size(20, 20).Clicked() {
 					v.Error = ""
 				}
 			})
@@ -219,9 +219,9 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			ui.Row(c).Justify(ui.Center).Children(func() {
 				ui.Row(c).Height(30).Shrink(0).Padding(0, 4, 0, 12).Gap(8).Radius(99).Background(p.Elevated).Border(1, p.Border).Children(func() {
 					spinner(c, p)
-					ui.Text(c, "任务处理中").NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(p.Text2)
+					ui.Text(c, tr("任务处理中")).NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(p.Text2)
 					ui.Text(c, formatDuration(time.Since(v.StartedAt))).NoWrap().Shrink(0).FontSize(p.font(10.64)).TextColor(p.Text3)
-					if button(c, p, "停止", "Square", false).Height(22).Radius(99).Padding(0, 9).FontSize(p.font(10.36)).Clicked() {
+					if button(c, p, tr("停止"), "Square", false).Height(22).Radius(99).Padding(0, 9).FontSize(p.font(10.36)).Clicked() {
 						d.cancel(v)
 					}
 				})
@@ -230,17 +230,17 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 		}
 		if len(v.Queue) > 0 {
 			ui.Column(c).Gap(4).Children(func() {
-				muted(c, p, fmt.Sprintf("等待执行 · %d", len(v.Queue))).FontSize(p.font(10.36))
+				muted(c, p, fmt.Sprintf(tr("等待执行 · %d"), len(v.Queue))).FontSize(p.font(10.36))
 				remove := -1
 				for i, prompt := range v.Queue {
 					ui.Row(c).Key(fmt.Sprintf("queue-%d-%s", i, prompt.Text)).Height(32).Padding(0, 4, 0, 10).Gap(8).Border(1, p.BorderStrong).BorderStyle(ui.BorderDashed).Radius(8).Background(p.Panel).Transition(enterMotion).Children(func() {
 						icon(c, "ListPlus", 13, p.Text3)
 						text := prompt.Text
 						if len(prompt.Attachments) > 0 {
-							text += fmt.Sprintf(" · %d 个附件", len(prompt.Attachments))
+							text += fmt.Sprintf(tr(" · %d 个附件"), len(prompt.Attachments))
 						}
 						ui.Text(c, text).Grow(1).Basis(0).SingleLine().FontSize(p.font(11.76)).TextColor(p.Text2)
-						if iconButton(c, p, "X", fmt.Sprintf("取消排队消息 %d", i+1)).Size(24, 24).Clicked() {
+						if iconButton(c, p, "X", fmt.Sprintf(tr("取消排队消息 %d"), i+1)).Size(24, 24).Clicked() {
 							remove = i
 						}
 					})
@@ -256,7 +256,7 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 		}
 		composer.Children(func() {
 			if v.Uploading {
-				ui.Row(c).Padding(10, 18, 0, 18).Gap(8).Children(func() { spinner(c, p); muted(c, p, "正在添加附件…") })
+				ui.Row(c).Padding(10, 18, 0, 18).Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在添加附件…")) })
 			}
 			if len(v.Attachments) > 0 {
 				ui.Column(c).Padding(12, 14, 0, 14).Gap(6).Children(func() {
@@ -266,14 +266,14 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 					}
 				})
 			}
-			placeholder := "描述任务，输入 / 使用命令，@ 引用文件"
+			placeholder := tr("描述任务，输入 / 使用命令，@ 引用文件")
 			if v.Workspace == "" {
-				placeholder = "先打开工作区，再描述你想完成的任务…"
+				placeholder = tr("先打开工作区，再描述你想完成的任务…")
 			} else if v.Busy {
-				placeholder = "追加指令，将在当前回合结束后执行…"
+				placeholder = tr("追加指令，将在当前回合结束后执行…")
 			}
 			lines := strings.Count(v.Draft, "\n") + 1
-			input := ui.TextAreaBase(c, &v.Draft).Label("任务输入").Placeholder(placeholder).FillWidth().Height(min(220, float32(lines)*21.7+26)).MinHeight(64).
+			input := ui.TextAreaBase(c, &v.Draft).Label(tr("任务输入")).Placeholder(placeholder).FillWidth().Height(min(220, float32(lines)*21.7+26)).MinHeight(64).
 				Padding(14, 18, 4, 18).FontSize(p.font(14)).LineHeight(1.55)
 			if d.focusPrompt {
 				input.Focus()
@@ -341,10 +341,10 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				}
 			}
 			ui.Row(c).Wrap().Padding(6, 8, 8, 8).Gap(4).Children(func() {
-				if iconButton(c, p, "FileUp", "添加附件").Size(30, 30).Radius(99).Disabled(v.Workspace == "" || v.Uploading).Clicked() {
+				if iconButton(c, p, "FileUp", tr("添加附件")).Size(30, 30).Radius(99).Disabled(v.Workspace == "" || v.Uploading).Clicked() {
 					d.chooseAttachments(v)
 				}
-				if iconButton(c, p, "AtSign", "引用文件").Size(30, 30).Radius(99).Disabled(v.Workspace == "").Clicked() {
+				if iconButton(c, p, "AtSign", tr("引用文件")).Size(30, 30).Radius(99).Disabled(v.Workspace == "").Clicked() {
 					anchor, caret := input.TextSelection()
 					v.Draft = input.ReplaceSelection(anchor, caret, "@")
 					d.focusPrompt = true
@@ -355,12 +355,12 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				d.contextMeter(c, p, home)
 				stopping := v.Busy && strings.TrimSpace(v.Draft) == "" && len(v.Attachments) == 0
 				ready := stopping || ((strings.TrimSpace(v.Draft) != "" || len(v.Attachments) > 0) && (v.Workspace != "" || strings.HasPrefix(v.Draft, "/")) && !v.Loading && !v.Uploading && d.attachmentProblem(v, v.Attachments) == "")
-				name, label := "ArrowUp", "发送任务"
+				name, label := "ArrowUp", tr("发送任务")
 				if v.Busy {
-					name, label = "ListPlus", "加入队列"
+					name, label = "ListPlus", tr("加入队列")
 				}
 				if stopping {
-					name, label = "Square", "停止任务"
+					name, label = "Square", tr("停止任务")
 				}
 				send := ui.ButtonBase(c).Label(label).Size(32, 32).Radius(99).Center().Disabled(!ready).Transition(fastMotion)
 				bg, color := p.Active, p.Text4
@@ -419,14 +419,14 @@ func (d *desktop) suggestionOverlay(c *ui.Context, p palette, anchor, input *ui.
 		if home {
 			at, self = ui.AnchorBottomLeft, ui.AnchorTopLeft
 		}
-		ui.Column(c).AttachTo(anchor, at, self).Width(anchor.Bounds().W).Margin(8, 0).Padding(4).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2)).Transition(enterMotion).Role(ui.RoleList).Label("输入建议").Children(func() {
-			label := "命令建议"
+		ui.Column(c).AttachTo(anchor, at, self).Width(anchor.Bounds().W).Margin(8, 0).Padding(4).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2)).Transition(enterMotion).Role(ui.RoleList).Label(tr("输入建议")).Children(func() {
+			label := tr("命令建议")
 			if state.Items[0].Kind == "file" {
-				label = "引用本地文件"
+				label = tr("引用本地文件")
 			}
 			ui.Row(c).Padding(5, 8).Children(func() {
 				muted(c, p, label).Grow(1).FontSize(p.font(10.08))
-				muted(c, p, "↑↓ 选择 · Tab 插入").FontSize(p.font(10.08))
+				muted(c, p, tr("↑↓ 选择 · Tab 插入")).FontSize(p.font(10.08))
 			})
 			for i, item := range state.Items {
 				row := ui.ButtonBase(c).Label(item.Value+" "+item.Detail).Height(32).Radius(6).Padding(0, 10).Gap(10).Role(ui.RoleListItem)
@@ -468,9 +468,9 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 		}
 	}
 	if label == "" {
-		label = "配置模型"
+		label = tr("配置模型")
 	}
-	chip := styleButton(ui.ButtonBase(c).Label("切换模型"), p, false).Height(30).Radius(99).Border(0, ui.Transparent).FontSize(p.font(11.2)).MaxWidth(260)
+	chip := styleButton(ui.ButtonBase(c).Label(tr("切换模型")), p, false).Height(30).Radius(99).Border(0, ui.Transparent).FontSize(p.font(11.2)).MaxWidth(260)
 	chip.Children(func() {
 		icon(c, "Cpu", 14, p.Text3)
 		textWidth, _ := c.MeasureText(0, ui.Span{Text: label, Size: p.font(11.2), Weight: 550})
@@ -498,9 +498,9 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 		available := composerPopover(c, panel, chip, 340, home)
 		panel.Key("model-popup").Padding(8).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2))
 		panel.FocusGroup(ui.Vertical)
-		muted(c, p, "切换模型").Padding(4, 8, 8, 8).FontSize(p.font(10.36))
+		muted(c, p, tr("切换模型")).Padding(4, 8, 8, 8).FontSize(p.font(10.36))
 		if len(d.models) == 0 {
-			muted(c, p, "尚未配置模型，添加你的 AI 服务后开始使用。").Padding(8).FontSize(p.font(11.2))
+			muted(c, p, tr("尚未配置模型，添加你的 AI 服务后开始使用。")).Padding(8).FontSize(p.font(11.2))
 		} else {
 			ui.Scroll(c).FillWidth().Height(min(240, float32(len(d.models))*52, available-190*p.Scale)).MinHeight(52).Children(func() {
 				for _, m := range d.models {
@@ -509,7 +509,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 						name = m.ID
 					}
 					selected := m.ID == v.State.Model
-					row := ui.ButtonBase(c).Label("切换至 "+m.ID).FillWidth().Height(52).Padding(8, 10).Gap(10).Justify(ui.Start).Radius(8).
+					row := ui.ButtonBase(c).Label(tr("切换至 ")+m.ID).FillWidth().Height(52).Padding(8, 10).Gap(10).Justify(ui.Start).Radius(8).
 						Role(ui.RoleRadio).Checked(selected).Disabled(!m.Available).Transition(fastMotion)
 					if selected {
 						row.Background(p.AccentSofter).AutoFocus()
@@ -522,7 +522,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 							detail := m.Provider
 							detail += " · " + capabilityLabel(m.InputCapabilities)
 							if !m.Available {
-								detail += " · 未配置或未启用"
+								detail += tr(" · 未配置或未启用")
 							}
 							muted(c, p, detail).SingleLine().FontSize(p.font(10.36))
 						})
@@ -539,7 +539,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 				effortSlider(c, p, v.State.Effort, supports, func(value string) { d.changeState("setEffort", map[string]any{"effort": value}) })
 			})
 		}
-		if button(c, p, "管理模型与服务", "Settings2", false).FillWidth().Justify(ui.Start).Border(0, ui.Transparent).Margin(4, 0, 0, 0).Clicked() {
+		if button(c, p, tr("管理模型与服务"), "Settings2", false).FillWidth().Justify(ui.Start).Border(0, ui.Transparent).Margin(4, 0, 0, 0).Clicked() {
 			d.modelOpen = false
 			d.openSettings("model")
 		}
@@ -563,13 +563,13 @@ func composerPopover(c *ui.Context, panel, anchor *ui.Element, width float32, ho
 
 func (d *desktop) permissionMenu(c *ui.Context, p palette, home bool) {
 	v := d.current()
-	label := "逐项确认"
+	label := tr("逐项确认")
 	for _, option := range permissionOptions {
 		if option.Value == v.State.PermissionMode {
-			label = option.Label
+			label = tr(option.Label)
 		}
 	}
-	chip := button(c, p, label, "Shield", false).Label("权限模式").Height(30).Radius(99).Border(0, ui.Transparent).FontSize(p.font(11.2))
+	chip := button(c, p, label, "Shield", false).Label(tr("权限模式")).Height(30).Radius(99).Border(0, ui.Transparent).FontSize(p.font(11.2))
 	chip.Children(func() {
 		if svg := icons["ChevronDown"]; svg != nil {
 			arrow := ui.Icon(c, svg).FontSize(12).TextColor(p.Text3)
@@ -608,7 +608,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 	if v.State.ContextWindow > 0 {
 		percent = int(math.Round(min(1, float64(v.State.ContextTokens)/float64(v.State.ContextWindow)) * 100))
 	}
-	chip := ui.ButtonBase(c).Label("上下文窗口详情").Height(30).Radius(99).Padding(0, 6).Gap(5).TextColor(p.Text3).Transition(fastMotion)
+	chip := ui.ButtonBase(c).Label(tr("上下文窗口详情")).Height(30).Radius(99).Padding(0, 6).Gap(5).TextColor(p.Text3).Transition(fastMotion)
 	if chip.Hovered() {
 		chip.Background(p.Hover)
 	}
@@ -627,13 +627,13 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 		panel.Padding(14).Radius(12).Border(1, p.Border).Background(p.Elevated)
 		ui.Scroll(c).FillWidth().MaxHeight(available - 28).Children(func() {
 			ui.Row(c).Children(func() {
-				ui.Text(c, "上下文窗口").FontSize(p.font(11.76)).Grow(1)
+				ui.Text(c, tr("上下文窗口")).FontSize(p.font(11.76)).Grow(1)
 				ui.Text(c, fmt.Sprintf("%s / %s", number(v.State.ContextTokens), number(v.State.ContextWindow))).FontSize(p.font(11.76)).Bold()
 			})
 			parts := []struct {
 				Key, Label string
 				Color      ui.Color
-			}{{"system", "系统提示词", ui.Hex("#8b7cf6")}, {"tools", "工具定义", ui.Hex("#3aa0d8")}, {"messages", "对话消息", p.Accent}}
+			}{{"system", tr("系统提示词"), ui.Hex("#8b7cf6")}, {"tools", tr("工具定义"), ui.Hex("#3aa0d8")}, {"messages", tr("对话消息"), p.Accent}}
 			ui.Row(c).Height(6).Margin(10, 0, 12, 0).Gap(2).Radius(99).Clip().Background(p.Active).Children(func() {
 				for _, part := range parts {
 					ui.Box(c).WidthPercent(min(100, 100*float32(v.State.Breakdown[part.Key])/float32(max(1, v.State.ContextWindow)))).FillHeight().Background(part.Color)
@@ -649,16 +649,16 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 			usage := v.State.Usage
 			known := usage != nil && usage.Available
 			if usage != nil {
-				value := "未报告"
+				value := tr("未报告")
 				if known {
 					value = fmt.Sprintf("↑ %s　↓ %s", number(usage.Input), number(usage.Output))
 				}
 				ui.Row(c).Margin(10, 0, 0, 0).Children(func() {
-					muted(c, p, "本会话累计").Grow(1)
+					muted(c, p, tr("本会话累计")).Grow(1)
 					ui.Text(c, value).FontSize(p.font(10.92)).FontWeight(550)
 				})
 			}
-			metrics := []struct{ Label, Value string }{{"缓存命中率", "未报告"}, {"最近生成 TPS", "未记录"}, {"缓存读取 / 写入", "未报告"}, {"平均生成 TPS", "未记录"}, {"请求整体速度", "未记录"}}
+			metrics := []struct{ Label, Value string }{{tr("缓存命中率"), tr("未报告")}, {tr("最近生成 TPS"), tr("未记录")}, {tr("缓存读取 / 写入"), tr("未报告")}, {tr("平均生成 TPS"), tr("未记录")}, {tr("请求整体速度"), tr("未记录")}}
 			if known {
 				if usage.Input > 0 {
 					metrics[0].Value = fmt.Sprintf("%.1f%%", min(100, float64(usage.CacheRead)/float64(usage.Input)*100))
@@ -678,7 +678,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 				if len(stats.Samples) > 0 {
 					last := stats.Samples[len(stats.Samples)-1]
 					if last.FirstTokenSeconds != nil {
-						metrics = append(metrics, struct{ Label, Value string }{"最近首字等待", fmt.Sprintf("%.2f 秒", *last.FirstTokenSeconds)})
+						metrics = append(metrics, struct{ Label, Value string }{tr("最近首字等待"), fmt.Sprintf(tr("%.2f 秒"), *last.FirstTokenSeconds)})
 					}
 				}
 			}
@@ -692,7 +692,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 					}
 				})
 			}
-			if percent >= 40 && button(c, p, "立即压缩上下文", "Layers", false).FillWidth().Margin(8, 0, 0, 0).Disabled(v.SessionID == "" || v.Busy).Clicked() {
+			if percent >= 40 && button(c, p, tr("立即压缩上下文"), "Layers", false).FillWidth().Margin(8, 0, 0, 0).Disabled(v.SessionID == "" || v.Busy).Clicked() {
 				d.contextOpen = false
 				d.slash("/compact", v)
 			}

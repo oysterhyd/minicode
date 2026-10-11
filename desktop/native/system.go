@@ -21,14 +21,14 @@ func relativeWorkspace(root, path string) (string, error) {
 		return "", err
 	}
 	if relative == "." {
-		return "", errors.New("请选择工作区中的文件")
+		return "", errors.New(tr("请选择工作区中的文件"))
 	}
 	return filepath.ToSlash(relative), nil
 }
 
 func (d *desktop) chooseWorkspace() {
 	go func() {
-		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: d.window, Title: "选择工作区", Directory: true})
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: d.window, Title: tr("选择工作区"), Directory: true})
 		d.schedule(func() {
 			if err != nil {
 				d.error(d.current(), err)
@@ -50,7 +50,7 @@ func (d *desktop) chooseWorkspace() {
 
 func (d *desktop) chooseAcceptance(s *settingsState) {
 	go func() {
-		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: d.window, Title: "选择验收配置", Filters: []mygo.FileFilter{{Name: "YAML acceptance", Extensions: []string{"yaml", "yml"}}}})
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: d.window, Title: tr("选择验收配置"), Filters: []mygo.FileFilter{{Name: "YAML acceptance", Extensions: []string{"yaml", "yml"}}}})
 		d.schedule(func() {
 			if err != nil {
 				s.Error = err.Error()
@@ -68,7 +68,7 @@ func (d *desktop) reveal(root, path string) {
 			mygo.Shell.ShowItemInFolder(target)
 		}
 		if err != nil {
-			d.schedule(func() { d.toast("无法打开文件", err.Error(), "error") })
+			d.schedule(func() { d.toast(tr("无法打开文件"), err.Error(), "error") })
 		}
 	}()
 }
@@ -79,7 +79,7 @@ func (d *desktop) openPath(root, path string) {
 			err = mygo.Shell.OpenPath(target)
 		}
 		if err != nil {
-			d.schedule(func() { d.toast("无法打开文件", err.Error(), "error") })
+			d.schedule(func() { d.toast(tr("无法打开文件"), err.Error(), "error") })
 		}
 	}()
 }

@@ -101,6 +101,8 @@ class ToolContext:
     task_store: Any | None = None
     project_memory: Any | None = None
     on_output: Callable[[str], Awaitable[None]] | None = None
+    attachment_store: Any | None = None
+    input_modalities: tuple[str, ...] = ()
 
 
 def truncate_output(text: str, limit: int) -> str:

@@ -876,6 +876,9 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 				item.Output += err
 			}
 			item.ArtifactID = model.String(data["artifact_id"])
+			if item.Success {
+				item.Attachments = model.ImageReferences(data["images"])
+			}
 			item.Version++
 		}
 		if !v.refreshPending {
@@ -1004,12 +1007,12 @@ func (v *conversation) title(sessions []model.Session) string {
 			return title
 		}
 	}
-	return "新建任务"
+	return tr("新建任务")
 }
 
 func (d *desktop) signal(v *conversation, title, body string) {
 	if d.notify != nil && d.preferences.Notifications {
-		d.notify(title, body, v.SessionID)
+		d.notify(tr(title), body, v.SessionID)
 	}
 	if d.active != v.Key {
 		d.toasts = append(d.toasts, toast{ID: d.next.Add(1), Title: title, Detail: body, Tone: "info", SessionID: v.SessionID, At: time.Now()})

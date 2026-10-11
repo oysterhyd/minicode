@@ -60,6 +60,7 @@ class ToolResultBlock(BaseModel):
     tool_use_id: str
     content: str
     is_error: bool = False
+    images: list[MediaBlock] = Field(default_factory=list)
 
 
 Block = Annotated[
@@ -152,6 +153,7 @@ class ToolOutcome(BaseModel):
 
     success: bool = True
     output: str = ""
+    images: list[MediaBlock] = Field(default_factory=list)
     # Built-in tools may expose a bounded preview in ``output`` while keeping
     # the unabridged text here for the runtime to archive before model-facing
     # truncation.  It is an execution-only field and is never serialized.

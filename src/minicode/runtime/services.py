@@ -19,15 +19,21 @@ class WorkspaceServices:
     plugins: PluginCatalog
 
 
-def workspace_services(workspace: Path, *, agents: list[dict] | None = None) -> WorkspaceServices:
+def workspace_services(workspace: Path, *, agents: list[dict] | None = None,
+                       configuration=None) -> WorkspaceServices:
+    from minicode.configuration import HarnessConfiguration
+    from minicode.local_extensions import LocalExtensionCatalog
+    configuration = configuration or HarnessConfiguration()
     if agents is None:
-        from minicode.configuration import HarnessConfiguration
-        agents = HarnessConfiguration().agents()
+        agents = configuration.agents()
     workspace = workspace.resolve()
     if not workspace.is_dir():
         raise ValueError(f"workspace does not exist: {workspace}")
     plugins = PluginCatalog(workspace)
     skills = SkillCatalog(workspace, plugin_roots=plugins.skill_roots())
+    local = LocalExtensionCatalog(workspace, configuration=configuration)
+    local.scan()
+    local.apply_skills(skills)
     registry = default_registry(skills=skills, delegation=True, tasks=True, memory=True,
                                 agent_kinds=plugins.agent_names())
     registry.plugin_catalog = plugins
@@ -35,7 +41,10 @@ def workspace_services(workspace: Path, *, agents: list[dict] | None = None) -> 
         registry.set_agents(agents, plugins.agent_names())
     for server in plugins.servers():
         registry.add_mcp_server(server)
-    return WorkspaceServices(registry, skills, ProjectInstructions(workspace), plugins)
+    for server in local.servers():
+        registry.add_mcp_server(server)
+    return WorkspaceServices(registry, skills, ProjectInstructions(
+        workspace, global_path=configuration.path.parent / "AGENTS.md"), plugins)
 
 
 def attach_compactor(runtime, artifact_store) -> None:

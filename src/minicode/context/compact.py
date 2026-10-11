@@ -586,6 +586,7 @@ class ContextCompactor:
                             tool_use_id=block.tool_use_id,
                             content=block.content[:preview] + suffix,
                             is_error=block.is_error,
+                            images=block.images,
                         )
                     )
                     shrunk += 1

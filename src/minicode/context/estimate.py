@@ -42,7 +42,7 @@ def _block_tokens(block: TextBlock | ToolUseBlock | ToolResultBlock) -> int:
     if isinstance(block, MediaBlock):
         return 1536 if block.kind == "image" else 1024 + block.size // 256
     if isinstance(block, ToolResultBlock):
-        return estimate_tokens(block.content)
+        return estimate_tokens(block.content) + sum(_block_tokens(image) for image in block.images)
     if isinstance(block, ToolUseBlock):
         # The provider sees the call name plus the serialized input JSON.
         try:

@@ -124,6 +124,10 @@ def restore_runtime(
                                 if event.type is EventType.PROJECT_INSTRUCTIONS)
         for saved in expected_sources:
             path = Path(saved["path"])
+            # Personal instructions are intentionally editable between requests.
+            # Project instruction fingerprints still protect resumed scope.
+            if saved.get("scope") == "global" or path == project_instructions.global_path:
+                continue
             if path != resolved_workspace / "AGENTS.md":
                 relative = path.relative_to(resolved_workspace)
                 project_instructions.discover(str(relative.parent / "_scope_probe"))
@@ -138,6 +142,8 @@ def restore_runtime(
         elif event.type is EventType.SKILL_DEACTIVATED:
             active_skills.pop(str(event.data["name"]), None)
     for name, digest in active_skills.items():
+        if skills is not None and name in getattr(skills, "disabled_skills", set()):
+            continue
         if skills is None or skills.load(name).digest != digest:
             raise ValueError(f"activated skill changed since session start: {name}")
         runtime.activate_skill(name)
