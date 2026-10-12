@@ -1,4 +1,20 @@
-# v1.3.1 核验
+# v1.3.2 核验
+
+2026-10-12，发行代码 `7802b9d5d5acf131b0705eeb3286695d974a6ca2`。逐功能审查、代码简化与前后指标见 [1.3.2 性能报告](../docs/performance-1.3.2.md)。
+
+- 本地 Python 617 通过、3 跳过；TUI 82 通过、0 跳过，含实际 Python 桥接；TypeScript 构建通过。
+- Go 全量测试、`go vet ./...`、vendor UI 专项与 Windows 编译通过。20 个主要状态、浅／深色共 40 张原生软件快照中，38 张完全一致；两张关于页差异仅位于版本字符区域。
+- [主分支 CI](https://github.com/oysterhyd/minicode/actions/runs/38209612252)与[发行标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38209612121)各七个任务全部通过。
+- [Windows 完整发行构建](https://github.com/oysterhyd/minicode/actions/runs/38209612131)通过：干净发行 Python 618 通过、2 跳过；TUI 82 通过；Go 全量与 vendor 专项通过，未跳过完整测试。
+- 生产 TUI 删除 2,556 个类型声明／source-map 文件，4,728,511 B。包内真实 TUI 主入口、Python 桥接、CLI / Git、B0/B2 离线评测、空白配置及原生窗口烟测通过。
+- 中文路径 NSIS 安装、Unicode 开始菜单、实际安装后运行与卸载通过。SDK 签名更新、篡改拒绝、相同版本忽略、更新后烟测及保留已加载 SSL / SQLite 的旧 Python 进程通过。
+- 发行源码及历史审计通过，完整运行目录 12,855 文件的个人文件／已知凭据审计通过。
+- 七个公开资产实际下载并核对大小和 SHA256；完整归档及 1.2.7 / 1.3.0 / 1.3.1 三个差分包均通过原公钥 Ed25519 核验。
+- 包内 bridge、版本、Python 输出裁剪／搜索／SQLite／压缩模块及 TUI 编译模块与发行源码逐文件一致（规范化 CRLF / LF）；TUI 开发元数据确已移除。
+- 公开 latest 更新清单与已验证清单摘要相同，版本为 1.3.2。[v1.3.2 已公开发布](https://github.com/oysterhyd/minicode/releases/tag/v1.3.2)。
+- 安装包 86,275,104 B（82.2784 MiB），较 1.3.1 下降 0.3835%；安装内容 344,713,612 B（328.7445 MiB），下降 1.3508%。安装包 SHA256：`f4ad03da60ef502adcf06cc8e27252c26640a469eaed704eaf94d13a404a673c`。
+
+## v1.3.1 核验
 
 2026-10-12，代码简化与性能优化；完整测量见 [性能报告](../docs/performance-1.3.1.md)。
 

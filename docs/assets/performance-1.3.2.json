@@ -590,5 +590,112 @@
       "removed": 14,
       "file": "tui/src/feed.ts"
     }
-  ]
+  ],
+  "release_before": {
+    "file_count": 15323,
+    "installed_bytes": 349433664,
+    "archive_bytes": 131488174,
+    "installer_bytes": 86607285,
+    "installer_sha256": "b2ed0b11f1b2ad67a46c8102da27a247a980c7ee85b746f16c662efab86bb23c"
+  },
+  "release_after": {
+    "installed_bytes": 344713612,
+    "file_count": 12767,
+    "installer_bytes": 86275104,
+    "installer_sha256": "f4ad03da60ef502adcf06cc8e27252c26640a469eaed704eaf94d13a404a673c",
+    "archive_bytes": 130854606
+  },
+  "artifact_verification": {
+    "assets": [
+      {
+        "name": "minicode-1.2.7-to-1.3.2-windows-amd64.delta",
+        "size": 2297439,
+        "sha256": "bccf8f61f947d299d58604f80e314c8e1899fe45a197acbc75ada76c4125476e"
+      },
+      {
+        "name": "minicode-1.3.0-to-1.3.2-windows-amd64.delta",
+        "size": 1757587,
+        "sha256": "d1a46cf25d1098aa54275a2d5c1054ddbd107280ca0c7d2f7e5814e690bbaa77"
+      },
+      {
+        "name": "minicode-1.3.1-to-1.3.2-windows-amd64.delta",
+        "size": 1081762,
+        "sha256": "1f30b95958fcbd7da87cd05553694441417c15bebdcd83422016e521e0f342f8"
+      },
+      {
+        "name": "minicode-1.3.2-windows-amd64.tar.gz",
+        "size": 130854606,
+        "sha256": "e2d1f822be387c8a3dd427439490d95dfbce054a65a263f90c8c79c742d4cd38"
+      },
+      {
+        "name": "MiniCode-Setup-1.3.2-win-x64.exe",
+        "size": 86275104,
+        "sha256": "f4ad03da60ef502adcf06cc8e27252c26640a469eaed704eaf94d13a404a673c"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "size": 100,
+        "sha256": "cd279666500cba35a1ef121515c3ce77ba504e28af72561be11db986962290a3"
+      },
+      {
+        "name": "update-windows-amd64.json",
+        "size": 2486,
+        "sha256": "4abf661a76db8b42b13d982b331c9de3698a3e828b4b143b4afd52698d9daa17"
+      }
+    ],
+    "signed_archives": 4,
+    "sources_match_after_newline_normalization": [
+      "runtime/bridge.py",
+      "runtime/python/Lib/site-packages/minicode/__init__.py",
+      "runtime/python/Lib/site-packages/minicode/tools/base.py",
+      "runtime/python/Lib/site-packages/minicode/tools/search.py",
+      "runtime/python/Lib/site-packages/minicode/storage/sqlite_store.py",
+      "runtime/python/Lib/site-packages/minicode/context/compact.py",
+      "runtime/tui/dist/index.js",
+      "runtime/tui/dist/feed.js",
+      "runtime/tui/dist/bridge.js",
+      "runtime/tui/dist/launch.js"
+    ],
+    "tui_development_metadata_absent": true
+  },
+  "about_differences": [
+    {
+      "file": "settings-about-light-1x.png",
+      "difference_bbox": [
+        1157,
+        277,
+        1181,
+        286
+      ]
+    },
+    {
+      "file": "settings-about-dark-1x.png",
+      "difference_bbox": [
+        1157,
+        277,
+        1181,
+        286
+      ]
+    }
+  ],
+  "release_verification": {
+    "source_commit": "7802b9d5d5acf131b0705eeb3286695d974a6ca2",
+    "release_run": 38209612131,
+    "main_ci": 38209612252,
+    "tag_ci": 38209612121,
+    "all_success": true,
+    "local_python": {
+      "passed": 617,
+      "skipped": 3
+    },
+    "release_python": {
+      "passed": 618,
+      "skipped": 2
+    },
+    "tui": {
+      "passed": 82,
+      "skipped": 0
+    },
+    "public_latest_manifest_matches": true
+  }
 }
