@@ -104,11 +104,12 @@ func highlight(source, language string) []codeLine {
 	}
 	lines := []codeLine{{}}
 	for token := it(); token != chroma.EOF; token = it() {
-		parts := strings.Split(token.Value, "\n")
-		for i, part := range parts {
-			if i > 0 {
+		first := true
+		for part := range strings.SplitSeq(token.Value, "\n") {
+			if !first {
 				lines = append(lines, codeLine{})
 			}
+			first = false
 			if part != "" {
 				lines[len(lines)-1] = append(lines[len(lines)-1], codeSpan{part, token.Type})
 			}
@@ -177,9 +178,11 @@ func codeText(c *ui.Context, p palette, line codeLine) {
 	ui.RichText(c, spans...).Font("Cascadia Code, Cascadia Mono, Consolas").FontSize(p.font(12.32)).NoWrap().Selectable().LineHeight(1.65)
 }
 
+var markdownParser = goldmark.New(goldmark.WithExtensions(extension.GFM)).Parser()
+
 func parseMarkdown(source string) *document {
 	data := []byte(source)
-	root := goldmark.New(goldmark.WithExtensions(extension.GFM)).Parser().Parse(text.NewReader(data))
+	root := markdownParser.Parse(text.NewReader(data))
 	doc := &document{}
 	var blocks func(ast.Node, int)
 	blocks = func(parent ast.Node, indent int) {

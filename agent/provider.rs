@@ -291,11 +291,16 @@ impl Provider {
             if captured > 64_000_000 {
                 bail!("SSE stream exceeds the capture limit")
             }
-            for byte in bytes {
-                if byte == b'\r' || byte == b'\n' {
-                    let line = String::from_utf8(std::mem::take(&mut pending))
-                        .context("invalid SSE UTF-8")?;
+            for part in bytes.split_inclusive(|b| *b == b'\r' || *b == b'\n') {
+                let finished = matches!(part.last(), Some(b'\r' | b'\n'));
+                pending.extend_from_slice(&part[..part.len() - usize::from(finished)]);
+                if pending.len() > 16_000_000 {
+                    bail!("SSE line exceeds the capture limit")
+                }
+                if finished {
+                    let line = std::str::from_utf8(&pending).context("invalid SSE UTF-8")?;
                     let Some(data) = line.strip_prefix("data:") else {
+                        pending.clear();
                         continue;
                     };
                     let data = data.trim_start();
@@ -304,10 +309,12 @@ impl Provider {
                         break 'stream;
                     }
                     if data.is_empty() {
+                        pending.clear();
                         continue;
                     }
                     let value: Value =
                         serde_json::from_str(data).context("invalid provider SSE JSON")?;
+                    pending.clear();
                     let mut text = None;
                     let mut thought = None;
                     if self.style == "anthropic" {
@@ -460,11 +467,6 @@ impl Provider {
                     if self.style == "anthropic" && ended {
                         break 'stream;
                     }
-                } else {
-                    pending.push(byte);
-                    if pending.len() > 16_000_000 {
-                        bail!("SSE line exceeds the capture limit")
-                    }
                 }
             }
         }
@@ -550,15 +552,24 @@ impl Provider {
                             images,
                         } => {
                             attachments.check(images, &self.modalities, &self.style)?;
-                            let mut result = vec![json!({"type":"text","text":text})];
-                            for image in images {
-                                result.push(media_part(image, attachments, &self.style)?);
-                            }
-                            content.push(json!({"type":"tool_result","tool_use_id":tool_use_id,"content":if images.is_empty(){json!(text)}else{json!(result)},"is_error":is_error}));
+                            let result = if images.is_empty() {
+                                Value::String(text.clone())
+                            } else {
+                                let mut parts = vec![json!({"type":"text","text":text})];
+                                for image in images {
+                                    parts.push(media_part(image, attachments, &self.style)?);
+                                }
+                                Value::Array(parts)
+                            };
+                            let mut entry = json!({"type":"tool_result","tool_use_id":tool_use_id,"content":null,"is_error":is_error});
+                            entry["content"] = result;
+                            content.push(entry);
                         }
                     }
                 }
-                chat.push(json!({"role":message.role,"content":content}));
+                let mut entry = json!({"role":message.role,"content":null});
+                entry["content"] = Value::Array(content);
+                chat.push(entry);
                 continue;
             }
             if message.role == "assistant" {
@@ -566,7 +577,7 @@ impl Provider {
                 let calls=message.content.iter().filter_map(|b|if let Block::ToolUse{id,name,input}=b{Some(json!({"id":id,"type":"function","function":{"name":name,"arguments":input.to_string()}}))}else{None}).collect::<Vec<_>>();
                 let mut entry = json!({"role":"assistant","content":if text.is_empty(){Value::Null}else{json!(text)}});
                 if !calls.is_empty() {
-                    entry["tool_calls"] = json!(calls)
+                    entry["tool_calls"] = Value::Array(calls)
                 }
                 chat.push(entry);
             } else {
@@ -599,14 +610,16 @@ impl Provider {
                 }
                 if results == 0 || !text.is_empty() || !content.is_empty() {
                     let value = if content.is_empty() {
-                        json!(text)
+                        Value::String(text)
                     } else {
                         if !text.is_empty() {
                             content.push(json!({"type":"text","text":text}));
                         }
-                        json!(content)
+                        Value::Array(content)
                     };
-                    chat.push(json!({"role":"user","content":value}));
+                    let mut entry = json!({"role":"user","content":null});
+                    entry["content"] = value;
+                    chat.push(entry);
                 }
             }
         }
@@ -617,7 +630,8 @@ impl Provider {
                     + 1024,
             )
             .max(1);
-        let mut body = json!({"model":self.model,"messages":chat,"stream":true,"max_tokens":self.max_output.min(available)});
+        let mut body = json!({"model":self.model,"messages":null,"stream":true,"max_tokens":self.max_output.min(available)});
+        body["messages"] = Value::Array(chat);
         if self.style == "anthropic" {
             body["system"] = json!(system);
             if !tools.is_empty() {

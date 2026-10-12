@@ -995,8 +995,8 @@ impl Statistics {
             };
         }
         if let Some(id) = session {
-            for e in store.events(id, self.after)? {
-                self.after = e.seq;
+            let (until, events) = store.statistics_events(id, self.after)?;
+            for e in events {
                 if e.r#type == "tool_call_start" {
                     self.calls += 1
                 } else if e.r#type == "assistant_message" {
@@ -1026,6 +1026,7 @@ impl Statistics {
                     }
                 }
             }
+            self.after = until;
         }
         Ok(
             json!({"toolCalls":self.calls,"requests":self.requests,"modelSeconds":self.seconds,"tps":if self.generation>0.0{Some(self.generated as f64/self.generation)}else{None},"requestTps":if self.seconds>0.0{Some(self.measured as f64/self.seconds)}else{None},"lastTps":self.samples.back().map(|v|v["tps"].clone()).unwrap_or(Value::Null),"samples":self.samples}),
@@ -1094,11 +1095,11 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
     Ok(json!({"message":format!("已连接，发现 {} 个模型",models.len()),"models":models}))
 }
 pub async fn serve(store: Store) -> Result<()> {
-    let sink: Sink = Arc::new(|value| {
+    let output = Mutex::new(std::io::BufWriter::new(std::io::stdout()));
+    let sink: Sink = Arc::new(move |value| {
         use std::io::Write;
-        let out = std::io::stdout();
-        let mut out = out.lock();
-        if serde_json::to_writer(&mut out, &value).is_ok() {
+        let mut out = output.lock().unwrap();
+        if serde_json::to_writer(&mut *out, &value).is_ok() {
             let _ = out.write_all(b"\n");
             let _ = out.flush();
         }
@@ -1200,10 +1201,12 @@ pub async fn serve(store: Store) -> Result<()> {
             } else {
                 router.lock().await.handle(&method, &params).await
             };
-            sink(match value {
-                Ok(value) => json!({"id":id,"result":value}),
-                Err(error) => json!({"id":id,"error":error.to_string()}),
-            });
+            let mut reply = json!({"id":id});
+            match value {
+                Ok(value) => reply["result"] = value,
+                Err(error) => reply["error"] = json!(error.to_string()),
+            }
+            sink(reply);
             ids.lock().unwrap().remove(&serialized);
         });
         while tasks.try_join_next().is_some() {}

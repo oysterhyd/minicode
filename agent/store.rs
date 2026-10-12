@@ -128,33 +128,7 @@ impl Store {
     })
     }
     pub fn update(&self, id: &str, changes: &Value) -> Result<()> {
-        self.with(|c| {
-            for (key, value) in changes.as_object().context("invalid counters")? {
-                if ![
-                    "status",
-                    "exit_reason",
-                    "rounds",
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_read_tokens",
-                    "cache_write_tokens",
-                    "usage_available",
-                    "model",
-                    "provider",
-                    "workspace",
-                ]
-                .contains(&key.as_str())
-                {
-                    bail!("invalid session column")
-                }
-                let data = sql_value(value);
-                c.execute(
-                    &format!("UPDATE sessions SET {key}=? WHERE session_id=?"),
-                    params![data, id],
-                )?;
-            }
-            Ok(())
-        })
+        self.with(|c| update_session(c, id, changes, false))
     }
     pub fn checkpoint(
         &self,
@@ -176,26 +150,7 @@ impl Store {
                 )?;
             }
             if let Some(counters) = counters {
-                for (key, v) in counters.as_object().context("invalid counters")? {
-                    if ![
-                        "rounds",
-                        "input_tokens",
-                        "output_tokens",
-                        "cache_read_tokens",
-                        "cache_write_tokens",
-                        "usage_available",
-                        "status",
-                        "exit_reason",
-                    ]
-                    .contains(&key.as_str())
-                    {
-                        bail!("invalid counter")
-                    }
-                    c.execute(
-                        &format!("UPDATE sessions SET {key}=? WHERE session_id=?"),
-                        params![sql_value(v), id],
-                    )?;
-                }
+                update_session(c, id, counters, true)?;
             }
             let seq: i64 = c.query_row(
                 "SELECT COALESCE(MAX(seq),-1)+1 FROM events WHERE session_id=?",
@@ -240,8 +195,14 @@ impl Store {
     pub fn replace_messages(&self, id: &str, messages: &[Message]) -> Result<()> {
         self.transaction(|c| {
             c.execute("DELETE FROM messages WHERE session_id=?", [id])?;
-            for m in messages {
-                append_message(c, id, m)?;
+            let mut insert = c.prepare_cached("INSERT INTO messages VALUES(?,?,?,?)")?;
+            for (seq, m) in messages.iter().enumerate() {
+                insert.execute(params![
+                    id,
+                    seq as i64,
+                    m.role,
+                    serde_json::to_string(&m.content)?
+                ])?;
             }
             Ok(())
         })
@@ -251,6 +212,21 @@ impl Store {
         let mut q=c.prepare("SELECT seq,type,timestamp,data FROM events WHERE session_id=? AND seq>? ORDER BY seq")?;
         let mut rows=q.query(params![id,after])?;let mut events=Vec::new();while let Some(row)=rows.next()? {events.push(Event{seq:row.get(0)?,r#type:row.get(1)?,timestamp:row.get(2)?,data:serde_json::from_str(&row.get::<_,String>(3)?)?});}Ok(events)
     })
+    }
+    pub fn statistics_events(&self, id: &str, after: i64) -> Result<(i64, Vec<Event>)> {
+        self.with(|c| {
+            // Capture an upper bound so concurrent writers cannot advance the
+            // cursor past events that this poll has not processed.
+            let until = c.prepare_cached("SELECT COALESCE(MAX(seq),-1) FROM events WHERE session_id=?")?.query_row([id], |r| r.get(0))?;
+            if until <= after { return Ok((until, Vec::new())); }
+            let mut q = c.prepare_cached("SELECT seq,type,timestamp,CASE WHEN type='assistant_message' THEN json_object('usage',json_extract(data,'$.usage'),'request_seconds',json_extract(data,'$.request_seconds'),'generation_seconds',json_extract(data,'$.generation_seconds'),'first_token_seconds',json_extract(data,'$.first_token_seconds')) ELSE '{}' END FROM events WHERE session_id=? AND seq>? AND seq<=? AND type IN ('assistant_message','tool_call_start') ORDER BY seq")?;
+            let mut rows = q.query(params![id, after, until])?;
+            let mut events = Vec::new();
+            while let Some(row) = rows.next()? {
+                events.push(Event { seq: row.get(0)?, r#type: row.get(1)?, timestamp: row.get(2)?, data: serde_json::from_str(&row.get::<_, String>(3)?)? });
+            }
+            Ok((until, events))
+        })
     }
     pub fn tool_results(&self, id: &str) -> Result<std::collections::HashMap<String, Block>> {
         self.with(|c| {
@@ -508,6 +484,48 @@ fn sql_value(v: &Value) -> rusqlite::types::Value {
         Value::String(s) => rusqlite::types::Value::Text(s.clone()),
         _ => rusqlite::types::Value::Text(v.to_string()),
     }
+}
+fn update_session(c: &Connection, id: &str, changes: &Value, counters_only: bool) -> Result<()> {
+    let changes = changes.as_object().context("invalid counters")?;
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let mut sql = String::with_capacity(
+        64 + changes.keys().map(String::len).sum::<usize>() + changes.len() * 3,
+    );
+    sql.push_str("UPDATE sessions SET ");
+    let mut values = Vec::with_capacity(changes.len() + 1);
+    for (key, value) in changes {
+        if !matches!(
+            key.as_str(),
+            "status"
+                | "exit_reason"
+                | "rounds"
+                | "input_tokens"
+                | "output_tokens"
+                | "cache_read_tokens"
+                | "cache_write_tokens"
+                | "usage_available"
+        ) && (counters_only || !matches!(key.as_str(), "model" | "provider" | "workspace"))
+        {
+            bail!(if counters_only {
+                "invalid counter"
+            } else {
+                "invalid session column"
+            });
+        }
+        if !values.is_empty() {
+            sql.push(',');
+        }
+        sql.push_str(key);
+        sql.push_str("=?");
+        values.push(sql_value(value));
+    }
+    values.push(rusqlite::types::Value::Text(id.into()));
+    sql.push_str(" WHERE session_id=?");
+    c.prepare_cached(&sql)?
+        .execute(rusqlite::params_from_iter(values))?;
+    Ok(())
 }
 fn append_message(c: &Connection, id: &str, m: &Message) -> Result<()> {
     let seq: i64 = c.query_row(

@@ -1,6 +1,6 @@
 [package]
 name = "minicode"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2024"
 rust-version = "1.88"
 description = "MiniCode native agent runtime, CLI and NDJSON bridge"
@@ -40,7 +40,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = true
 

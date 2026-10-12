@@ -558,3 +558,196 @@ fn html_report_escapes_untrusted_content() {
     assert!(html.contains("时间线"));
     assert!(html.contains("<style>"));
 }
+
+#[test]
+fn context_estimate_matches_serialized_unicode_and_escapes() {
+    fn chars(value: &serde_json::Value) -> u64 {
+        match value {
+            serde_json::Value::Array(a) => {
+                2 + a.iter().map(chars).sum::<u64>() + a.len().saturating_sub(1) as u64 * 2
+            }
+            serde_json::Value::Object(o) => {
+                2 + o
+                    .iter()
+                    .map(|(k, v)| chars(&json!(k)) + 2 + chars(v))
+                    .sum::<u64>()
+                    + o.len().saturating_sub(1) as u64 * 2
+            }
+            _ => value.to_string().chars().count() as u64,
+        }
+    }
+    let text = (0..=0x1f)
+        .map(|n| char::from_u32(n).unwrap())
+        .collect::<String>()
+        + "中文😀\"\\/\u{85}\u{2028}";
+    let input = json!({text.clone():[text,null,true,false,-12,0,1.25,{},[],{"nested":"value"}]});
+    let messages = vec![Message {
+        role: "assistant".into(),
+        content: vec![Block::ToolUse {
+            id: "one".into(),
+            name: "test".into(),
+            input: input.clone(),
+        }],
+    }];
+    let mut specs = tools::builtins().clone();
+    specs.push(crate::models::ToolSpec {
+        name: text.clone(),
+        description: text,
+        input_schema: input.clone(),
+        requires_approval: false,
+    });
+    let expected = context::tokens("test")
+        + (chars(&input) / 3).max(1)
+        + specs
+            .iter()
+            .map(|s| (chars(&serde_json::to_value(s).unwrap()) / 3).max(1))
+            .sum::<u64>();
+    assert_eq!(context::estimate("", &messages, &specs), expected);
+}
+
+#[test]
+fn replacement_and_counter_updates_preserve_atomic_checkpoints() {
+    let (_dir, ctx) = fixture();
+    let messages = (0..2000)
+        .map(|i| Message::user(format!("message {i} 中文")))
+        .collect::<Vec<_>>();
+    ctx.store.replace_messages(&ctx.session, &messages).unwrap();
+    ctx.store
+        .append(&ctx.session, &Message::user("last"))
+        .unwrap();
+    assert_eq!(ctx.store.messages(&ctx.session).unwrap().len(), 2001);
+    ctx.store
+        .replace_messages(&ctx.session, &messages[..3])
+        .unwrap();
+    assert_eq!(ctx.store.messages(&ctx.session).unwrap(), messages[..3]);
+    assert!(
+        ctx.store
+            .update(&ctx.session, &json!({"rounds":10,"invalid":1}))
+            .is_err()
+    );
+    assert_eq!(ctx.store.require(&ctx.session).unwrap()["rounds"], 0);
+    assert!(
+        ctx.store
+            .checkpoint(
+                &ctx.session,
+                "invalid",
+                &json!({}),
+                Some(&Message::user("rollback")),
+                None,
+                Some(&json!({"rounds":10,"model":"forbidden"}))
+            )
+            .is_err()
+    );
+    assert_eq!(ctx.store.messages(&ctx.session).unwrap(), messages[..3]);
+    assert!(ctx.store.events(&ctx.session, -1).unwrap().is_empty());
+    ctx.store.replace_messages(&ctx.session, &[]).unwrap();
+    ctx.store
+        .append(&ctx.session, &Message::user("new first"))
+        .unwrap();
+    assert_eq!(
+        ctx.store.messages(&ctx.session).unwrap(),
+        vec![Message::user("new first")]
+    );
+}
+
+#[test]
+fn statistics_projection_preserves_usage_and_advances_over_ignored_events() {
+    let (_dir, ctx) = fixture();
+    let data = json!({"text":"x".repeat(100000),"reasoning":"ignored","usage":{"output_tokens":42,"available":false},"request_seconds":2.5,"generation_seconds":1.5,"first_token_seconds":0.3});
+    ctx.store
+        .event(&ctx.session, "assistant_message", &data)
+        .unwrap();
+    ctx.store
+        .event(
+            &ctx.session,
+            "tool_call_start",
+            &json!({"arguments":"large"}),
+        )
+        .unwrap();
+    ctx.store
+        .event(
+            &ctx.session,
+            "tool_call_result",
+            &json!({"output_detail":"x".repeat(100000)}),
+        )
+        .unwrap();
+    let (until, events) = ctx.store.statistics_events(&ctx.session, -1).unwrap();
+    assert_eq!(until, 2);
+    assert_eq!(events.len(), 2);
+    for key in [
+        "usage",
+        "request_seconds",
+        "generation_seconds",
+        "first_token_seconds",
+    ] {
+        assert_eq!(events[0].data[key], data[key]);
+    }
+    assert!(events[0].data.get("text").is_none());
+    assert_eq!(events[1].data, json!({}));
+    assert!(
+        ctx.store
+            .statistics_events(&ctx.session, until)
+            .unwrap()
+            .1
+            .is_empty()
+    );
+    ctx.store
+        .event(&ctx.session, "assistant_message", &json!({}))
+        .unwrap();
+    let (next, events) = ctx.store.statistics_events(&ctx.session, until).unwrap();
+    assert_eq!(next, 3);
+    assert_eq!(events.len(), 1);
+    assert!(events[0].data["usage"].is_null());
+}
+
+#[test]
+fn provider_payload_ownership_keeps_both_wire_formats_exact() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    provider.max_output = 32;
+    let messages = vec![
+        Message::user("hello 中文"),
+        Message {
+            role: "assistant".into(),
+            content: vec![
+                Block::text("answer"),
+                Block::ToolUse {
+                    id: "one".into(),
+                    name: "read".into(),
+                    input: json!({"path":"file"}),
+                },
+            ],
+        },
+        Message {
+            role: "user".into(),
+            content: vec![Block::ToolResult {
+                tool_use_id: "one".into(),
+                content: "result".into(),
+                is_error: false,
+                images: vec![],
+            }],
+        },
+    ];
+    let openai = provider
+        .payload("system", &messages, &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(
+        openai,
+        json!({"model":"fake","messages":[{"role":"system","content":"system"},{"role":"user","content":"hello 中文"},{"role":"assistant","content":"answer","tool_calls":[{"id":"one","type":"function","function":{"name":"read","arguments":"{\"path\":\"file\"}"}}]},{"role":"tool","tool_call_id":"one","content":"result"}],"stream":true,"max_tokens":32,"stream_options":{"include_usage":true}})
+    );
+    provider.style = "anthropic".into();
+    let anthropic = provider
+        .payload("system", &messages, &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(
+        anthropic,
+        json!({"model":"fake","messages":[{"role":"user","content":[{"type":"text","text":"hello 中文"}]},{"role":"assistant","content":[{"type":"text","text":"answer"},{"type":"tool_use","id":"one","name":"read","input":{"path":"file"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"one","content":"result","is_error":false}]}],"stream":true,"max_tokens":32,"system":"system"})
+    );
+}

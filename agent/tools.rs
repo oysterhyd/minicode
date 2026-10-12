@@ -343,11 +343,12 @@ fn read_file(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     }
     let mut budget = 50 * 1024 - 200;
     let mut lines = vec![];
+    let mut bytes = vec![];
     while lines.len() < limit && budget > 8 {
         let prefix = format!("{line_number}\t");
         let allowed = budget - prefix.len() - 1;
         let start = reader.stream_position()?;
-        let mut bytes = vec![];
+        bytes.clear();
         let mut complete = false;
         while bytes.len() < allowed {
             let buf = reader.fill_buf()?;
@@ -375,11 +376,11 @@ fn read_file(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             break;
         }
         let valid = match std::str::from_utf8(&bytes) {
-            Ok(s) => s.to_string(),
+            Ok(s) => s,
             Err(e) if e.error_len().is_none() => {
                 let fitted = &bytes[..e.valid_up_to()];
                 reader.seek(SeekFrom::Start(start + fitted.len() as u64))?;
-                String::from_utf8(fitted.to_vec())?
+                std::str::from_utf8(fitted)?
             }
             Err(_) => bail!("binary or non-UTF-8 file"),
         };
@@ -592,11 +593,12 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             }
             number += 1;
             if regex.is_match(line)? {
-                let snippet = line.chars().take(500).collect::<String>();
+                let mut chars = line.chars();
+                let snippet = chars.by_ref().take(500).collect::<String>();
                 lines.push(format!(
                     "{relative}:{}: {snippet}{}",
                     number,
-                    if line.chars().count() > 500 {
+                    if chars.next().is_some() {
                         "...[行已截断]"
                     } else {
                         ""

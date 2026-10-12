@@ -28,6 +28,8 @@ try {
     Copy-Item -LiteralPath "$root/tui/dist","$root/tui/package.json","$root/tui/package-lock.json" -Destination "$stage/runtime/tui" -Recurse
     Run 'npm.cmd' @('ci','--prefix',"$stage/runtime/tui",'--omit=dev','--no-audit','--no-fund')
     Run 'node' @("$PSScriptRoot/prune-runtime.mjs","$stage/runtime")
+    New-Item -ItemType Directory -Force "$root/output" | Out-Null
+    Run 'node' @("$PSScriptRoot/test-tui-runtime.mjs","$stage/runtime")
     Run 'node' @("$PSScriptRoot/collect-rust-licenses.mjs","$stage/runtime/licenses/rust")
     New-Item -ItemType Directory -Force "$stage/runtime/evals" | Out-Null
     Copy-Item -LiteralPath "$root/evals/tasks" -Destination "$stage/runtime/evals/tasks" -Recurse

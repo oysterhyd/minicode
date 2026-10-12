@@ -170,10 +170,13 @@ impl Connector {
                 if pending.len() > 16_000_000 {
                     break;
                 }
-                while let Some(end) = pending.iter().position(|b| *b == b'\n') {
-                    let Ok(line) = String::from_utf8(pending.drain(..=end).collect()) else {
+                let mut start = 0;
+                while let Some(end) = pending[start..].iter().position(|b| *b == b'\n') {
+                    let end = start + end + 1;
+                    let Ok(line) = std::str::from_utf8(&pending[start..end]) else {
                         return;
                     };
+                    start = end;
                     let line = line.trim_end_matches(['\r', '\n']);
                     if line.is_empty() {
                         if event == "endpoint" {
@@ -199,6 +202,7 @@ impl Connector {
                         event = s.trim().into();
                     }
                 }
+                pending.drain(..start);
             }
         }));
         let first = tokio::time::timeout(Duration::from_secs_f64(self.config.timeout), rx.recv())
@@ -310,8 +314,11 @@ impl Connector {
                     bail!("MCP response exceeds the size limit")
                 }
                 if sse {
-                    while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                        let line = String::from_utf8(buffer.drain(..=end).collect())?;
+                    let mut start = 0;
+                    while let Some(end) = buffer[start..].iter().position(|b| *b == b'\n') {
+                        let end = start + end + 1;
+                        let line = std::str::from_utf8(&buffer[start..end])?;
+                        start = end;
                         let line = line.trim_end_matches(['\r', '\n']);
                         if line.is_empty() {
                             if let Ok(v) = serde_json::from_str::<Value>(&event_data)
@@ -330,6 +337,7 @@ impl Connector {
                             }
                         }
                     }
+                    buffer.drain(..start);
                 }
             }
             if sse {

@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink'
 import { marked, type Token, type Tokens } from 'marked'
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { displayWidth, terminalText } from './format.js'
 import { useTerminalSize } from './terminal.js'
 
@@ -249,7 +249,9 @@ export function splitBlocks(text: string): string[] {
 
 export function MarkdownView({ text }: { text: string }) {
   const { columns } = useTerminalSize()
-  const source = closeOpenFence(preprocessMath(terminalText(text, 4)))
-  const tokens = marked.lexer(source, { gfm: true, breaks: false })
+  const tokens = useMemo(() => {
+    const source = closeOpenFence(preprocessMath(terminalText(text, 4)))
+    return marked.lexer(source, { gfm: true, breaks: false })
+  }, [text])
   return <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>{tokens.map((token, index) => block(token, index, columns - 2))}</Box>
 }

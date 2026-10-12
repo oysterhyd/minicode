@@ -39,8 +39,26 @@ pub fn estimate(system: &str, messages: &[Message], specs: &[ToolSpec]) -> u64 {
             .sum::<u64>()
         + specs
             .iter()
-            .map(|s| json_tokens(&serde_json::to_value(s).unwrap_or_default()))
+            .map(|s| {
+                // Object delimiters, four field names and Python-style separators.
+                let chars = 68
+                    + json_string_chars(&s.name)
+                    + json_string_chars(&s.description)
+                    + json_chars(&s.input_schema)
+                    + if s.requires_approval { 4 } else { 5 };
+                (chars / 3).max(1)
+            })
             .sum::<u64>()
+}
+fn json_string_chars(text: &str) -> u64 {
+    2 + text
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+            '\0'..='\u{1f}' => 6,
+            _ => 1,
+        })
+        .sum::<u64>()
 }
 fn json_chars(value: &Value) -> u64 {
     match value {
@@ -50,11 +68,14 @@ fn json_chars(value: &Value) -> u64 {
         Value::Object(o) => {
             2 + o
                 .iter()
-                .map(|(k, v)| json_chars(&Value::String(k.clone())) + 2 + json_chars(v))
+                .map(|(k, v)| json_string_chars(k) + 2 + json_chars(v))
                 .sum::<u64>()
                 + o.len().saturating_sub(1) as u64 * 2
         }
-        _ => value.to_string().chars().count() as u64,
+        Value::String(s) => json_string_chars(s),
+        Value::Null | Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(n) => n.to_string().len() as u64,
     }
 }
 fn json_tokens(value: &Value) -> u64 {
@@ -163,7 +184,7 @@ pub fn compact(
         for m in archive {
             for b in &m.content {
                 match b {
-                    Block::Text { text } if m.role == "user" => {
+                    Block::Text { text } if m.role == "user" && goals.len() < 12 => {
                         goals.push(text.chars().take(240).collect::<String>())
                     }
                     Block::ToolUse { input, .. } => {
@@ -175,16 +196,16 @@ pub fn compact(
                         content,
                         is_error: true,
                         ..
-                    } => findings.push(content.chars().take(240).collect::<String>()),
+                    } if findings.len() < 12 => {
+                        findings.push(content.chars().take(240).collect::<String>())
+                    }
                     _ => {}
                 }
             }
         }
-        goals.truncate(12);
         refs.sort();
         refs.dedup();
         refs.truncate(40);
-        findings.truncate(12);
         let summary = Message::user(format!(
             "此前历史已归档，完整消息见 [artifact:{artifact}]。\n目标：\n{}\n关键文件：{}\n失败与待解决问题：\n{}",
             goals.join("\n"),

@@ -4,6 +4,28 @@ import path from 'node:path'
 import http from 'node:http'
 import {test} from 'node:test'
 import {fixture} from './helpers.mjs'
+
+test('coalesced MCP SSE consumes notifications and fragmented Unicode without losing the result',async t=>{
+  const f=await fixture(t)
+  const server=http.createServer((req,res)=>{
+    let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+      const r=JSON.parse(body)
+      if(r.id===undefined){res.writeHead(202);res.end();return}
+      const result=r.method==='initialize'?{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'coalesced',version:'1.0.0'}}:{tools:[{name:'echo',inputSchema:{type:'object'}}]}
+      const notification='data: '+JSON.stringify({jsonrpc:'2.0',method:'notifications/progress',params:{message:'中文😀'}})+'\r\n\r\n'
+      const payload=Buffer.from(notification.repeat(1000)+'data: '+JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\r\n\r\n')
+      res.writeHead(200,{'content-type':'text/event-stream'})
+      const split=payload.indexOf(Buffer.from('😀'))+1
+      res.write(payload.subarray(0,split));setTimeout(()=>res.end(payload.subarray(split)),2)
+    })
+  })
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)))
+  fs.writeFileSync(path.join(f.workspace,'.mcp.json'),JSON.stringify({mcpServers:{batch:{url:`http://127.0.0.1:${server.address().port}/mcp`,transport:'http'}}}))
+  const entry=(await f.request('getLocalExtensions',{workspace:f.workspace})).entries.find(e=>e.kind==='mcp')
+  await f.request('setLocalExtensionEnabled',{workspace:f.workspace,id:entry.id,enabled:true})
+  const result=await f.request('refreshMcp',{workspace:f.workspace})
+  assert.equal(result.servers[0].error,null);assert.equal(result.tools.length,1)
+})
 test('unavailable MCP stays diagnostic and does not fail an unrelated conversation',async t=>{
   const f=await fixture(t,[{text:'completed without MCP'}]);const root=path.join(f.workspace,'.minicode/plugins/unavailable');fs.mkdirSync(root,{recursive:true});
   fs.writeFileSync(path.join(root,'plugin.json'),JSON.stringify({name:'unavailable',version:'1.0.0',minicode_version:'2.0.0',enabled:true,mcp_servers:[{name:'offline',command:'minicode-missing-mcp-test-executable'}]}));

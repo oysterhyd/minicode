@@ -23,8 +23,9 @@ function eventTime(value: unknown) {
 }
 
 function replaceItem(items: FeedItem[], index: number, update: (item: FeedItem) => FeedItem): FeedItem[] {
+  if (index < 0) return items
   const next = items.slice()
-  if (index >= 0) next[index] = update(items[index])
+  next[index] = update(items[index])
   return next
 }
 
@@ -37,17 +38,24 @@ function upsertAssistant(items: FeedItem[], text: string): FeedItem[] {
 }
 
 function sealAssistant(items: FeedItem[]): FeedItem[] {
-  return items.map(item => item.kind === 'assistant' && item.pending ? { ...item, pending: false } : item)
+  let next = items
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind === 'assistant' && items[i].pending) {
+      if (next === items) next = items.slice()
+      next[i] = { ...items[i], pending: false }
+    }
+  }
+  return next
 }
 
 function finishRun(state: FeedState, event: DesktopEvent): FeedState {
   const ended = Date.now()
   const reason = event.result?.exit_reason
-  const items = state.items.map(item => ({
+  const items = state.items.map(item => item.approvalId || item.pending ? ({
     ...item,
     ...(item.approvalId ? { approvalId: undefined, granted: false } : {}),
     ...(item.pending ? { pending: false, interrupted: item.kind === 'tool', endedAt: item.endedAt || ended } : {}),
-  }))
+  }) : item)
   if (event.event === 'run_error') {
     return {
       ...state,

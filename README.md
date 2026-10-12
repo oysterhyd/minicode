@@ -53,6 +53,8 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
 
 2.0.0 起整个 Agent 后端、CLI、评测和报告生成改为 Rust，保持现有 Ink TUI 与 MyGo Desktop。代码简化、安装体积和 Agent 性能实测见 [Rust 迁移报告](docs/rust-agent-2.0.0.md)。
 
+2.0.2 进一步优化长会话、模型请求组装、SSE 与 Markdown，缩小发行包；逐功能审查、代码简化和同机实测见 [2.0.2 性能报告](docs/performance-2.0.2.md)。
+
 发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未作 Windows 代码签名，更新归档使用 Ed25519 签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
 
@@ -190,6 +192,7 @@ Windows 安装包的构建入口位于 [`release/`](release/README.md)，桌面�
 | [Rust 迁移报告](docs/rust-agent-2.0.0.md) | 全后端迁移、旧实现清理、兼容性及体积与性能实测。 |
 | [原生迁移报告](docs/native-desktop-report.md) | 安装包体积、实测响应、Diff 性能与验收范围。 |
 | [1.3.2 优化报告](docs/performance-1.3.2.md) | 功能审查、代码简化、耗时、分配及发行体积。 |
+| [2.0.2 优化报告](docs/performance-2.0.2.md) | Rust / Desktop / TUI 功能审查、前后实测与发行验证。 |
 | [架构](docs/architecture.md) | 运行核心、工具、会话存储与扩展契约。 |
 | [MCP 示例](examples/mcp_docs/plugin.json) | 本地文档工具插件的 manifest 与示例实现。 |
 | [许可证](LICENSE) | MIT 许可证。 |

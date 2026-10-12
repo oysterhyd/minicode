@@ -256,16 +256,23 @@ impl Runtime {
             .iter()
             .filter(|e| e.r#type == "subagent_start")
             .filter_map(|e| e.data["child_session_id"].as_str())
+            .map(str::to_owned)
             .collect::<HashSet<_>>();
-        let mut recovery_events = events.clone();
+        let resume_fake = runtime.provider.fake.is_some()
+            && events
+                .iter()
+                .find(|e| e.r#type == "session_start")
+                .and_then(|e| e.data["provider_resume_identity"].as_str())
+                .is_some_and(|id| Some(id.to_string()) == runtime.provider.identity());
         let mut recovered_usage = Usage::default();
         for event in events.iter().filter(|e| e.r#type == "assistant_message") {
             if let Ok(usage) = serde_json::from_value::<Usage>(event.data["usage"].clone()) {
                 recovered_usage.add(&usage);
             }
         }
+        let mut recovery_events = events;
         for child_id in child_ids {
-            let child_events = runtime.store.events(child_id, -1)?;
+            let child_events = runtime.store.events(&child_id, -1)?;
             let mut usage = Usage::default();
             for event in child_events
                 .iter()
@@ -277,7 +284,7 @@ impl Runtime {
                     usage.add(&response_usage);
                 }
             }
-            if let Some(summary) = runtime.store.session(child_id)? {
+            if let Some(summary) = runtime.store.session(&child_id)? {
                 usage.input_tokens = usage
                     .input_tokens
                     .max(summary["input_tokens"].as_u64().unwrap_or(0));
@@ -298,13 +305,7 @@ impl Runtime {
         if recovered_usage.total() > runtime.usage.total() {
             runtime.usage = recovered_usage;
         }
-        if runtime.provider.fake.is_some()
-            && events
-                .iter()
-                .find(|e| e.r#type == "session_start")
-                .and_then(|e| e.data["provider_resume_identity"].as_str())
-                .is_some_and(|id| Some(id.to_string()) == runtime.provider.identity())
-        {
+        if resume_fake {
             runtime.provider.index = recovery_events
                 .iter()
                 .filter(|e| e.r#type == "assistant_message")
