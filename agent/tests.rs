@@ -67,6 +67,87 @@ fn utf8_bounds() {
     }
 }
 #[test]
+fn small_context_windows_do_not_compact_short_histories() {
+    let (_dir, ctx) = fixture();
+    let mut messages = vec![Message::user("keep recent file results")];
+    for i in 0..4 {
+        messages.push(Message {
+            role: "user".into(),
+            content: vec![Block::ToolResult {
+                tool_use_id: format!("read-{i}"),
+                content: "file contents\n".repeat(30),
+                is_error: false,
+                images: vec![],
+            }],
+        });
+    }
+    let original = messages.clone();
+    assert!(
+        context::compact(
+            &ctx.store,
+            &ctx.session,
+            "",
+            &[],
+            &mut messages,
+            8192,
+            false
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(messages, original);
+    assert!(
+        context::compact(&ctx.store, &ctx.session, "", &[], &mut messages, 512, false)
+            .unwrap()
+            .is_some()
+    );
+    assert!(context::estimate("", &messages, &[]) < context::estimate("", &original, &[]));
+    assert_eq!(&messages[3..], &original[3..]);
+}
+#[test]
+fn patch_updates_keep_existing_plugins_compatible() {
+    for (required, installed, compatible) in [
+        ("2.0.0", "2.0.1", true),
+        ("2.0.1", "2.0.1", true),
+        ("2.0.2", "2.0.1", false),
+        ("2.1.0", "2.0.1", false),
+        ("1.3.2", "2.0.1", false),
+        ("invalid", "2.0.1", false),
+    ] {
+        assert_eq!(
+            crate::extensions::compatible_version(required, installed),
+            compatible
+        );
+    }
+}
+#[tokio::test]
+async fn duplicate_imported_mcp_servers_have_one_diagnostic() {
+    let (_dir, ctx) = fixture();
+    let source = ctx.workspace.join(".mcp.json");
+    fs::write(&source, "{}").unwrap();
+    let server = crate::extensions::Server {
+        name: "same-source".into(),
+        command: "minicode-missing-mcp-test-executable".into(),
+        args: vec![],
+        cwd: ctx.workspace.clone(),
+        timeout: 1.0,
+        plugin: "local:test".into(),
+        version: "local".into(),
+        digest: util::hash(b"{}"),
+        source,
+        transport: "stdio".into(),
+        url: String::new(),
+        env: std::collections::HashMap::new(),
+        headers: std::collections::HashMap::new(),
+        local: true,
+        configuration_error: String::new(),
+    };
+    let registry = McpRegistry::prepare(vec![server.clone(), server]).await;
+    assert_eq!(registry.statuses.len(), 1);
+    assert!(registry.statuses[0]["error"].is_string());
+    assert!(registry.tools.is_empty());
+}
+#[test]
 fn report_preserves_released_html_layout_and_diff_colours() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../tests/agent/fixtures/report.json")).unwrap();

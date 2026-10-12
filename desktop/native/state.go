@@ -934,11 +934,6 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 	}
 	notice, tone := "", "info"
 	switch event.Type {
-	case "mcp_discovery":
-		if model.String(data["error"]) != "" {
-			notice = model.String(data["error"])
-			tone = "warning"
-		}
 	case "context_compacted":
 		notice = "上下文已自动压缩，较早的内容已归档"
 	case "goal_check":

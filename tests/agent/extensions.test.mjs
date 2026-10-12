@@ -4,6 +4,19 @@ import path from 'node:path'
 import http from 'node:http'
 import {test} from 'node:test'
 import {fixture} from './helpers.mjs'
+test('unavailable MCP stays diagnostic and does not fail an unrelated conversation',async t=>{
+  const f=await fixture(t,[{text:'completed without MCP'}]);const root=path.join(f.workspace,'.minicode/plugins/unavailable');fs.mkdirSync(root,{recursive:true});
+  fs.writeFileSync(path.join(root,'plugin.json'),JSON.stringify({name:'unavailable',version:'1.0.0',minicode_version:'2.0.0',enabled:true,mcp_servers:[{name:'offline',command:'minicode-missing-mcp-test-executable'}]}));
+  const r=await f.run();assert.equal(r.result.exit_reason,'completed');
+  const diagnostics=r.detail.events.filter(e=>e.type==='mcp_discovery');assert.equal(diagnostics.length,1);assert.ok(diagnostics[0].data.error);
+  const checked=await f.request('refreshMcp',{workspace:f.workspace});assert.equal(checked.servers.length,1);assert.ok(checked.servers[0].error);assert.deepEqual(checked.tools,[]);
+})
+test('missing imported MCP environment variables report names without starting a server',async t=>{
+  const f=await fixture(t);const command=path.join(f.root,'must-not-start.mjs'),marker=path.join(f.root,'started');fs.writeFileSync(command,'import fs from "node:fs";fs.writeFileSync('+JSON.stringify(marker)+',"started")');
+  fs.writeFileSync(path.join(f.workspace,'.mcp.json'),JSON.stringify({mcpServers:{missing:{command:process.execPath,args:[command],env:{TOKEN:'${MINICODE_MCP_MISSING_VARIABLE_FIXTURE}'}}}}));
+  const entry=(await f.request('getLocalExtensions',{workspace:f.workspace})).entries.find(e=>e.kind==='mcp');await f.request('setLocalExtensionEnabled',{workspace:f.workspace,id:entry.id,enabled:true});
+  const checked=await f.request('refreshMcp',{workspace:f.workspace});assert.equal(checked.servers.length,1);assert.match(checked.servers[0].error,/MINICODE_MCP_MISSING_VARIABLE_FIXTURE/);assert.equal(fs.existsSync(marker),false);
+})
 test('cancelling MCP initialization reaps its server and retains the prompt',async t=>{
   const f=await fixture(t,[{text:'completed after cancellation'}]);const script=path.join(f.root,'hanging.mjs'),pidFile=path.join(f.root,'server.pid');fs.writeFileSync(script,`import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`);const root=path.join(f.workspace,'.minicode/plugins/hanging');fs.mkdirSync(root,{recursive:true});fs.writeFileSync(path.join(root,'plugin.json'),JSON.stringify({name:'hanging',version:'1.0.0',minicode_version:'2.0.0',enabled:true,mcp_servers:[{name:'waiting',command:'node',args:[script],timeout_s:30}]}));
   const started=await f.request('sendPrompt',{workspace:f.workspace,model:'fake',text:'retain this prompt'});for(let i=0;i<500&&!fs.existsSync(pidFile);i++)await new Promise(r=>setTimeout(r,10));assert.ok(fs.existsSync(pidFile));const pid=Number(fs.readFileSync(pidFile));const start=Date.now();await f.request('cancelTurn',{sessionId:started.sessionId});const done=await f.wait(e=>e.event==='run_done');assert.equal(done.result.exit_reason,'cancelled');assert.ok(Date.now()-start<3000);const detail=await f.request('getSession',{sessionId:started.sessionId});assert.ok(detail.messages.some(m=>m.content.some(b=>b.text==='retain this prompt')));assert.equal((await f.request('getState',{sessionId:started.sessionId})).taskPending,true);let alive=true;for(let i=0;i<100&&alive;i++){try{process.kill(pid,0)}catch{alive=false}if(alive)await new Promise(r=>setTimeout(r,10))}assert.equal(alive,false);await f.request('setPluginEnabled',{workspace:f.workspace,name:'hanging',enabled:false});const from=f.events.length;await f.request('runSlash',{text:'/continue',workspace:f.workspace,sessionId:started.sessionId});assert.equal((await f.wait(e=>e.event==='run_done',from)).result.exit_reason,'completed');

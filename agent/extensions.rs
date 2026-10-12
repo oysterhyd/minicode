@@ -90,6 +90,23 @@ pub struct Catalog {
     pub pending_scopes: std::collections::HashSet<PathBuf>,
     pub configuration: Configuration,
 }
+pub(crate) fn compatible_version(required: &str, installed: &str) -> bool {
+    fn parse(version: &str) -> Option<[u64; 3]> {
+        let mut parts = version.split('.');
+        let values = [
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        ];
+        parts.next().is_none().then_some(values)
+    }
+    match (parse(required), parse(installed)) {
+        (Some(required), Some(installed)) => {
+            required[..2] == installed[..2] && required[2] <= installed[2]
+        }
+        _ => false,
+    }
+}
 fn json_file(path: &Path, limit: u64) -> Result<Value> {
     let source = Source::read(path, limit)?;
     if path.extension().is_some_and(|x| x == "toml") {
@@ -268,7 +285,10 @@ impl Catalog {
             if !valid_name.is_match(name) || dir.file_name().unwrap_or_default() != name {
                 bail!("invalid plugin name")
             }
-            if raw["minicode_version"] != crate::VERSION {
+            if !compatible_version(
+                raw["minicode_version"].as_str().unwrap_or_default(),
+                crate::VERSION,
+            ) {
                 bail!(
                     "plugin {name} requires minicode {}; installed {}",
                     raw["minicode_version"],
@@ -678,7 +698,7 @@ impl Catalog {
                 env,
                 headers,
                 local: true,
-                configuration_error: String::new(),
+                configuration_error: errors.into_inner().join("; "),
             });
         }
         Ok(())

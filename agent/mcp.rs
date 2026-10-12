@@ -417,7 +417,11 @@ pub struct McpRegistry {
 impl McpRegistry {
     pub async fn prepare(servers: Vec<Server>) -> Self {
         let mut r = Self::default();
+        let mut seen = std::collections::HashSet::new();
         for server in servers {
+            if !seen.insert(server.name.clone()) {
+                continue;
+            }
             let mut c = match Connector::new(server.clone()) {
                 Ok(c) => c,
                 Err(_) => {
@@ -438,7 +442,14 @@ impl McpRegistry {
                 }
                 Err(e) => {
                     c.close().await;
-                    r.statuses.push(json!({"server":server.name,"plugin":server.plugin,"protocol":null,"server_version":null,"error":if server.local{"MCP connection failed".to_string()}else{e.to_string()}}));
+                    let error = if !server.configuration_error.is_empty() {
+                        server.configuration_error.clone()
+                    } else if server.local {
+                        "MCP connection failed".to_string()
+                    } else {
+                        e.to_string()
+                    };
+                    r.statuses.push(json!({"server":server.name,"plugin":server.plugin,"protocol":null,"server_version":null,"error":error}));
                 }
             }
         }

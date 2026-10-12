@@ -1,6 +1,6 @@
 {
   "name": "minicode-release",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "MiniCode Desktop and CLI Windows distribution",
   "scripts": {

@@ -45,8 +45,8 @@ type renderCache struct {
 }
 
 type cachedDiff struct {
-	Before, After string
-	Lines         []content.DiffLine
+	Before, After, Output string
+	Lines                 []content.DiffLine
 }
 
 func newRenderCache() *renderCache {
@@ -464,13 +464,32 @@ func markdownChunks(source string) []string {
 func (d *desktop) itemDiff(item *model.FeedItem) []content.DiffLine {
 	key := d.current().Key + ":" + item.ID
 	before, after := model.String(item.Args["old_text"]), model.String(item.Args["new_text"])
-	if cached, ok := d.renderCache.diffs[key]; ok && cached.Before == before && cached.After == after {
+	if item.Name == "write" {
+		after = model.String(item.Args["content"])
+	}
+	if cached, ok := d.renderCache.diffs[key]; ok && cached.Before == before && cached.After == after && cached.Output == item.Output {
 		return cached.Lines
 	}
-	lines := content.DiffTexts(before, after)
+	var lines []content.DiffLine
+	if item.Success {
+		parsed := content.ParseDiff(item.Output)
+		for _, line := range parsed {
+			if line.Type == "hunk" {
+				for _, line := range parsed {
+					if line.Type != "meta" {
+						lines = append(lines, line)
+					}
+				}
+				break
+			}
+		}
+	}
+	if lines == nil {
+		lines = content.DiffTexts(before, after)
+	}
 	if len(d.renderCache.diffs) > 256 {
 		clear(d.renderCache.diffs)
 	}
-	d.renderCache.diffs[key] = cachedDiff{before, after, lines}
+	d.renderCache.diffs[key] = cachedDiff{before, after, item.Output, lines}
 	return lines
 }

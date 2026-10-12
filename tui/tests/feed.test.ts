@@ -2,6 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { applyDesktopEvent, emptyFeed, isLive, pendingApproval } from '../src/feed.js'
 
+test('MCP startup diagnostics stay out of chat while tool failures remain visible', () => {
+  let state = emptyFeed()
+  state = applyDesktopEvent(state, { event: 'agent_event', item: { seq: 1, type: 'mcp_discovery', data: { server: 'offline', error: 'MCP connection failed' } } })
+  assert.equal(state.items.length, 0)
+  state = applyDesktopEvent(state, { event: 'agent_event', item: { seq: 2, type: 'tool_call_start', data: { call_id: 'mcp-call', name: 'mcp__online__echo', arguments: {} } } })
+  state = applyDesktopEvent(state, { event: 'agent_event', item: { seq: 3, type: 'tool_call_result', data: { call_id: 'mcp-call', success: false, output_detail: 'connection lost', error: 'connection lost' } } })
+  assert.equal(state.items.length, 1)
+  assert.equal(state.items[0].success, false)
+  assert.match(state.items[0].output || '', /connection lost/)
+})
+
 test('single-row updates preserve old state and completed row identities', () => {
   let state = emptyFeed()
   state.items.push({ id: 'history', kind: 'assistant', text: 'completed' })

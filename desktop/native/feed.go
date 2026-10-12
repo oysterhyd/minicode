@@ -339,17 +339,11 @@ func (d *desktop) tool(c *ui.Context, p palette, item *model.FeedItem, force boo
 				switch item.Name {
 				case "bash":
 					d.terminal(c, p, model.String(item.Args["command"]), item.Output)
-				case "edit":
-					lines := d.itemDiff(item)
-					d.diffView(c, p, lines, item.ID, 40)
-				case "write":
-					source := model.String(item.Args["content"])
-					lines := strings.Split(source, "\n")
-					if len(lines) > 40 {
-						source = strings.Join(lines[:40], "\n")
-					}
-					for _, line := range highlight(source, "."+strings.TrimPrefix(filepathExt(toolTarget(item)), ".")) {
-						codeText(c, p, line)
+				case "edit", "write":
+					if item.Success || item.Pending {
+						d.diffView(c, p, d.itemDiff(item), item.ID, 40)
+					} else if item.Output != "" {
+						logText(c, p, item.Output, 180)
 					}
 				default:
 					if item.Output != "" {
@@ -358,9 +352,6 @@ func (d *desktop) tool(c *ui.Context, p palette, item *model.FeedItem, force boo
 						data, _ := json.MarshalIndent(item.Args, "", "  ")
 						logText(c, p, string(data), 220)
 					}
-				}
-				if item.Name != "bash" && item.Name != "read" && item.Output != "" {
-					logText(c, p, item.Output, 180)
 				}
 				if item.ChildSessionID != "" && button(c, p, tr("查看子助手会话"), "ArrowUpRight", false).Clicked() {
 					for _, session := range d.sessions {

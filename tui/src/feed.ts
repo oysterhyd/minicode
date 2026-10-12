@@ -195,8 +195,7 @@ function applyAgentEvent(
       }],
     }
   }
-  const notice = type === 'mcp_discovery' && data.error ? String(data.error)
-    : type === 'context_compacted' ? '上下文已自动压缩，较早的内容已归档'
+  const notice = type === 'context_compacted' ? '上下文已自动压缩，较早的内容已归档'
     : type === 'goal_check' ? `验收检查：${data.passed ? '通过' : '仍需改进'}`
     : type === 'background_job_completed' || type === 'background_job_lost'
       ? `后台命令 ${data.job_id}：${type === 'background_job_completed' ? '已完成' : '结果丢失'}`
@@ -209,7 +208,7 @@ function applyAgentEvent(
         id: `notice-${seq}`,
         kind: 'notice',
         text: notice,
-        tone: type === 'mcp_discovery' || type === 'side_effect_unknown' || type === 'background_job_lost' ? 'warning' : 'info',
+        tone: type === 'side_effect_unknown' || type === 'background_job_lost' ? 'warning' : 'info',
       }],
     }
   }

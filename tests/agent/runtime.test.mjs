@@ -5,6 +5,15 @@ import {test} from 'node:test'
 import {setTimeout as delay} from 'node:timers/promises'
 import {spawnSync} from 'node:child_process'
 import {fixture,connect,profile,executable} from './helpers.mjs'
+test('fresh large file results stay intact below the context threshold',async t=>{
+  const content='.bar { color: red; }\n'.repeat(1300)+'FINAL_LINE_MARKER\n';
+  const f=await fixture(t,[{tool_calls:[{name:'write',arguments:{path:'page.css',content}}]},{tool_calls:[{name:'read',arguments:{path:'page.css',limit:2000}}]},{text:'verified'}]);
+  await f.request('setPermissionMode',{mode:'bypass'});const r=await f.run();
+  assert.equal(r.result.exit_reason,'completed');assert.equal(fs.readFileSync(path.join(f.workspace,'page.css'),'utf8'),content);
+  assert.equal(r.detail.events.filter(e=>e.type==='context_compacted').length,0);
+  const results=r.detail.messages.flatMap(m=>m.content).filter(b=>b.type==='tool_result');
+  assert.equal(results.length,2);assert.ok(results.every(b=>b.content.length>16000&&b.content.includes('FINAL_LINE_MARKER')&&!b.content.includes('[已压缩')));
+})
 test('continuing a failed acceptance slice resets its fix attempts',async t=>{
   const f=await fixture(t,[{text:'first premature finish'},{text:'second premature finish'},{text:'another attempt before the fix'},{tool_calls:[{name:'write',arguments:{path:'fixed.txt',content:'done'}}]},{text:'fixed'}]);const spec=path.join(f.root,'acceptance.json');fs.writeFileSync(spec,JSON.stringify({max_fix_attempts:2,items:[{id:'exists',type:'artifact',path:'fixed.txt'}]}));await f.request('setPermissionMode',{mode:'bypass'});await f.request('setAcceptance',{path:spec});const first=await f.run();assert.equal(first.result.exit_reason,'goal_not_met');const from=f.events.length;await f.request('runSlash',{text:'/continue',workspace:f.workspace,sessionId:first.id});const done=await f.wait(e=>e.event==='run_done',from);assert.equal(done.result.exit_reason,'completed');assert.equal(fs.readFileSync(path.join(f.workspace,'fixed.txt'),'utf8'),'done')
 })

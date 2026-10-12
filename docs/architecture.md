@@ -35,9 +35,13 @@ Rust Agent 是 Desktop、CLI 与 Ink TUI 共用的运行核心。Desktop 仍采�
 
 插件位于 `.minicode/plugins/<name>/plugin.json`，声明 minicode_version、技能、子助手及 MCP。`minicode plugins lock` 锁定指纹。示例见 examples/mcp_docs。本地导入资源默认关闭，不改写原应用配置；外部 UI / JS 钩子保持不支持的标记。
 
+从 2.0.1 起，minicode_version 表示同一主／次版本系列中所需的最低补丁版本；例如 2.0.0 插件可用于 2.0.1，要求未来补丁或不同主／次版本的插件仍拒绝加载。
+
 MCP 支持 stdio、Streamable HTTP、旧 SSE；初始化、分页、schema、审批和连接生命周期由 Rust 管理。输入有大小限制，UTF-8 按字节边界组装，公共配置不返回密钥。
 
 上下文按完整交互单元归档，工具调用与结果成对保留；旧结果留下预览与 artifact 引用，最近约 20k token 和最近两个结果保留。长命令输出写磁盘，UI 只保留预览。归档缓存最多 16 文件 × 64 个稀疏游标。
+
+自动压缩在上下文接近窗口上限时触发，预留量为窗口的 10%，最多 16,384 token。大块工具结果只有在正常压缩后仍超出硬上限时才归档；文件结果超过 16KB 不会单独触发压缩。MCP 启动探测状态持久保存并可通过连接检测查看，对话只显示实际调用失败。
 
 ## 评测与发行
 

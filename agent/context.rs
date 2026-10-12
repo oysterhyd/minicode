@@ -117,7 +117,7 @@ pub fn compact(
     force: bool,
 ) -> Result<Option<Value>> {
     let before = estimate(system, messages, specs);
-    let trigger = window.saturating_sub(16_384);
+    let trigger = window.saturating_sub((window / 10).min(16_384));
     if !force && before <= trigger {
         return Ok(None);
     }

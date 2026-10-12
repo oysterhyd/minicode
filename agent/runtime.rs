@@ -723,19 +723,6 @@ impl Runtime {
                 let system = self.system(&catalog, &specs)?;
                 (specs, system)
             };
-            let offloaded = if self.compaction {
-                context::offload_large(&self.store, &self.session, &mut self.messages)?
-            } else {
-                0
-            };
-            if offloaded > 0 {
-                self.store.replace_messages(&self.session, &self.messages)?;
-                self.event(
-                    hooks,
-                    "context_compacted",
-                    json!({"offloaded_blocks":offloaded}),
-                )?;
-            }
             if self.compaction
                 && let Some(stats) = context::compact(
                     &self.store,
@@ -749,11 +736,25 @@ impl Runtime {
             {
                 self.event(hooks, "context_compacted", stats)?;
             }
-            if (context::estimate(&system, &self.messages, &specs) as f64
-                * self.provider.prompt_scale) as u64
-                + 1024
-                >= self.provider.window
-            {
+            let mut context_tokens = (context::estimate(&system, &self.messages, &specs) as f64
+                * self.provider.prompt_scale) as u64;
+            // Offloading is a last resort after normal compaction. A large tool
+            // result alone must not truncate a fresh, otherwise small context.
+            if self.compaction && context_tokens.saturating_add(1024) >= self.provider.window {
+                let offloaded =
+                    context::offload_large(&self.store, &self.session, &mut self.messages)?;
+                if offloaded > 0 {
+                    self.store.replace_messages(&self.session, &self.messages)?;
+                    self.event(
+                        hooks,
+                        "context_compacted",
+                        json!({"offloaded_blocks":offloaded}),
+                    )?;
+                    context_tokens = (context::estimate(&system, &self.messages, &specs) as f64
+                        * self.provider.prompt_scale) as u64;
+                }
+            }
+            if context_tokens.saturating_add(1024) >= self.provider.window {
                 return Ok("context_limit".into());
             }
             {
