@@ -1,12 +1,14 @@
 # v2.0.0 Rust 迁移核验
 
-Rust 单元 25 项、真实后端集成 43 项、Ink TUI 82 项均通过，Clippy 无警告。Go 全量、vendor UI 专项及 go vet 通过。[Windows / Linux CI](https://github.com/oysterhyd/minicode/actions/runs/38250639010)五个任务全部通过。20 题 B0/B1/B2 共 60 次通过，3 个补充场景结果符合预期（7 通过、2 个预设首修失败）。
+Rust 单元 25 项、真实后端集成 43 项、Ink TUI 82 项均通过，Clippy 无警告。Go 全量、vendor UI 专项及 go vet 通过。[main CI](https://github.com/oysterhyd/minicode/actions/runs/38253516602) 和 [v2.0.0 标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38253521389)各五个任务全部通过。20 题 B0/B1/B2 共 60 次通过，3 个补充场景结果符合预期（7 通过、2 个预设首修失败）。
 
-20 个状态、浅／深色共 40 张原生快照中，38 张逐像素一致；两张关于页仅版本字符不同，差异框为 [1155,277]–[1180,285]，各 161 像素。HTML 报告与旧版固定样本一致。源码及 5288 个 Git 历史 blob 凭据审计通过。
+20 个状态、浅／深色共 40 张原生快照中，38 张逐像素一致；两张关于页仅版本字符不同，差异框为 [1155,277]–[1180,285]，各 161 像素。HTML 报告与旧版固定样本一致。源码及 Git 历史凭据审计通过。
 
-[完整 Windows 发行构建](https://github.com/oysterhyd/minicode/actions/runs/38250639239)通过全套测试、包内实际窗口 / CLI / Git / TUI / 评测烟测、中文路径 NSIS 安装 / Unicode 快捷方式 / 卸载，以及真实 SDK 签名更新、篡改拒绝、同版本忽略。完整归档和三个差分包的原 Ed25519 公钥签名均已核验。实际 v1.3.2 Python 运行环境到 2.0.0 的更新对照通过；旧 bridge 继续响应，新版启动后清除旧运行目录。
+[完整 Windows 发行构建](https://github.com/oysterhyd/minicode/actions/runs/38253521384)通过全套测试、包内实际窗口 / CLI / Git / TUI / 评测烟测、中文路径 NSIS 安装 / Unicode 快捷方式 / 卸载，以及真实 SDK 签名更新、篡改拒绝、同版本忽略。完整归档和三个差分包的原 Ed25519 公钥签名均已核验。实际 v1.3.2 Python 运行环境到 2.0.0 的更新对照通过；旧 bridge 继续响应，新版启动后清除旧运行目录。
 
-安装器 57,941,796 B（55.2576 MiB），较 v1.3.2 减少 32.84%；安装内容 221,227,365 B（210.9789 MiB），减少 35.82%。Agent 空闲工作集减少 90.33%，25 轮离线执行耗时减少 50.88%；全部条件、指标和原始样本见 [迁移报告](../docs/rust-agent-2.0.0.md)。
+安装器 57,924,627 B（55.2412 MiB），较 v1.3.2 减少 32.86%；安装内容 221,227,365 B（210.9789 MiB），减少 35.82%。Agent 空闲工作集减少 90.33%，25 轮离线执行耗时减少 50.31%；全部条件、指标和原始样本见 [迁移报告](../docs/rust-agent-2.0.0.md)。
+
+公开 [v2.0.0](https://github.com/oysterhyd/minicode/releases/tag/v2.0.0) 七个资产已下载核对，GitHub 资产大小与 SHA256、完整／差分签名及匿名 latest 清单一致。公开 Agent SHA256 为 `0b61cbcda6ae6505368ba692da300850893c025e85a5929f41b143573d5830e9`，已直接重测全部七次样本。安装器 SHA256 为 `d827c81afedfbc9b980e8139c51a999fb82e5586a1998a734dca87e7d7c1b168`。
 
 以下保留旧发行历史核验。
 
