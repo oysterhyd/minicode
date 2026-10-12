@@ -184,6 +184,7 @@ Windows 安装包的构建入口位于 [`release/`](release/README.md)，桌面�
 | [安装与发行](release/README.md) | 安装说明、CLI 入口、构建和校验。 |
 | [桌面端](desktop/README.md) | 工作台、模型管理、权限、快捷键与开发。 |
 | [原生迁移报告](docs/native-desktop-report.md) | 安装包体积、实测响应、Diff 性能与验收范围。 |
+| [1.3.2 优化报告](docs/performance-1.3.2.md) | 功能审查、代码简化、耗时、分配及发行体积。 |
 | [架构](docs/architecture.md) | 运行核心、工具、会话存储与扩展契约。 |
 | [MCP 示例](examples/mcp_docs/plugin.json) | 本地文档工具插件的 manifest 与示例实现。 |
 | [许可证](LICENSE) | MIT 许可证。 |

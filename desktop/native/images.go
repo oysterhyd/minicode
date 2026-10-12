@@ -134,12 +134,27 @@ func thumbnailPixel(source image.Image, x, y, width, height int) color.RGBA {
 		x, y   int
 		weight float64
 	}{{x0, y0, (1 - rx) * (1 - ry)}, {x1, y0, rx * (1 - ry)}, {x0, y1, (1 - rx) * ry}, {x1, y1, rx * ry}} {
-		r, g, b, a := source.At(bounds.Min.X+sample.x, bounds.Min.Y+sample.y).RGBA()
+		r, g, b, a := imageChannels(source, bounds.Min.X+sample.x, bounds.Min.Y+sample.y)
 		for i, value := range []uint32{r, g, b, a} {
 			channels[i] += float64(value) * sample.weight / 257
 		}
 	}
 	return color.RGBA{uint8(channels[0] + 0.5), uint8(channels[1] + 0.5), uint8(channels[2] + 0.5), uint8(channels[3] + 0.5)}
+}
+
+// Concrete color values avoid boxing four samples per thumbnail pixel. Keep
+// their RGBA conversion so alpha premultiplication and rounding stay identical.
+func imageChannels(source image.Image, x, y int) (r, g, b, a uint32) {
+	switch source := source.(type) {
+	case *image.NRGBA:
+		return source.NRGBAAt(x, y).RGBA()
+	case *image.RGBA:
+		return source.RGBAAt(x, y).RGBA()
+	case *image.YCbCr:
+		return source.YCbCrAt(x, y).RGBA()
+	default:
+		return source.At(x, y).RGBA()
+	}
 }
 
 func thumbnailSize(width, height int) (int, int) {

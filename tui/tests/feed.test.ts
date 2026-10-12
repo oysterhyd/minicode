@@ -2,6 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { applyDesktopEvent, emptyFeed, isLive, pendingApproval } from '../src/feed.js'
 
+test('single-row updates preserve old state and completed row identities', () => {
+  let state = emptyFeed()
+  state.items.push({ id: 'history', kind: 'assistant', text: 'completed' })
+  state = applyDesktopEvent(state, { event: 'text_delta', text: 'stream' })
+  const next = applyDesktopEvent(state, { event: 'text_delta', text: ' appended' })
+  assert.notEqual(next.items, state.items)
+  assert.equal(next.items[0], state.items[0])
+  assert.equal(state.items[1].text, 'stream')
+  assert.equal(next.items[1].text, 'stream appended')
+})
+
 test('text delta then assistant message becomes one reply', () => {
   let state = emptyFeed()
   state = applyDesktopEvent(state, { event: 'text_delta', text: '我会先' })

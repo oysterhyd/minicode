@@ -22,10 +22,16 @@ function eventTime(value: unknown) {
   return Number.isNaN(parsed) ? Date.now() : parsed
 }
 
+function replaceItem(items: FeedItem[], index: number, update: (item: FeedItem) => FeedItem): FeedItem[] {
+  const next = items.slice()
+  if (index >= 0) next[index] = update(items[index])
+  return next
+}
+
 function upsertAssistant(items: FeedItem[], text: string): FeedItem[] {
   const index = items.findLastIndex(item => item.kind === 'assistant' && item.pending)
   if (index >= 0) {
-    return items.map((item, i) => i === index ? { ...item, text: (item.text || '') + text } : item)
+    return replaceItem(items, index, item => ({ ...item, text: (item.text || '') + text }))
   }
   return [...items, { id: `stream-${items.length}`, kind: 'assistant', text, pending: true }]
 }
@@ -100,7 +106,7 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
     if (index < 0) return state
     return {
       ...state,
-      items: state.items.map((item, i) => i === index ? { ...item, auto: true } : item),
+      items: replaceItem(state.items, index, item => ({ ...item, auto: true })),
     }
   }
   if (event.event !== 'agent_event' || !event.item) return state
@@ -121,7 +127,7 @@ function applyAgentEvent(
     const final: FeedItem = { id: pending?.id || `assistant-${seq}`, kind: 'assistant', text: String(data.text) }
     return {
       ...state,
-      items: index < 0 ? [...state.items, final] : state.items.map((item, i) => i === index ? final : item),
+      items: index < 0 ? [...state.items, final] : replaceItem(state.items, index, () => final),
     }
   }
   if (type === 'tool_call_start') {
@@ -144,23 +150,21 @@ function applyAgentEvent(
     const error = data.error !== output ? data.error : undefined
     return {
       ...state,
-      items: state.items.map((item, i) => i === index ? {
+      items: replaceItem(state.items, index, item => ({
         ...item,
         pending: false,
         success: Boolean(data.success),
         endedAt: eventTime(timestamp),
         output: [output, error].filter(Boolean).join('\n'),
         artifactId: data.artifact_id ? String(data.artifact_id) : undefined,
-      } : item),
+      })),
     }
   }
   if (type === 'tool_output') {
     const index = state.items.findLastIndex(item => item.kind === 'tool' && item.pending && (item.callId || item.id) === String(data.call_id))
     return {
       ...state,
-      items: state.items.map((item, i) => i === index
-        ? { ...item, output: String(data.output_preview || '') }
-        : item),
+      items: replaceItem(state.items, index, item => ({ ...item, output: String(data.output_preview || '') })),
     }
   }
   if (type === 'approval_request') return { ...state, approvalCallId: String(data.call_id) }
@@ -169,9 +173,7 @@ function applyAgentEvent(
       && (!item.callId || item.callId === String(data.call_id)))
     return {
       ...state,
-      items: state.items.map((item, i) => i === index
-        ? { ...item, approvalId: undefined, granted: Boolean(data.granted) }
-        : item),
+      items: replaceItem(state.items, index, item => ({ ...item, approvalId: undefined, granted: Boolean(data.granted) })),
     }
   }
   if (type === 'subagent_start') {
@@ -179,9 +181,7 @@ function applyAgentEvent(
       && item.args?.kind === data.kind && item.args?.task === data.task)
     return {
       ...state,
-      items: state.items.map((item, i) => i === index
-        ? { ...item, childSessionId: String(data.child_session_id) }
-        : item),
+      items: replaceItem(state.items, index, item => ({ ...item, childSessionId: String(data.child_session_id) })),
     }
   }
   if (type === 'provider_retry') {

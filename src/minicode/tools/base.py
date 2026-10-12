@@ -49,13 +49,17 @@ def utf8_prefix(text: str, max_bytes: int) -> str:
     """Return the longest UTF-8 prefix that fits without splitting a character."""
     if max_bytes <= 0:
         return ""
-    raw = text.encode("utf-8")
+    # A UTF-8 character needs at least one byte. No later character can fit.
+    raw = text[:max_bytes].encode("utf-8")
     return raw[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def tail_output(text: str, max_bytes: int = 50 * 1024, max_lines: int = 2000) -> str:
     """Keep the end of command output within both line and UTF-8 byte limits."""
-    lines = text.splitlines(keepends=True)
+    # The byte-limited suffix is contained in the final max_bytes characters.
+    # Bound splitting/encoding too, even for a multi-megabyte captured log.
+    suffix = text[-max_bytes:] if max_bytes > 0 and max_lines >= 0 else text
+    lines = suffix.splitlines(keepends=True)
     tail = "".join(lines[-max_lines:])
     raw = tail.encode("utf-8")
     if len(raw) > max_bytes:

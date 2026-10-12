@@ -194,6 +194,42 @@ def _pairing_ok(messages: list[Message], lo: int, hi: int,
                for call_id, count in inside_uses.items())
 
 
+def _paired_prefix(messages: list[Message], units: list[tuple[int, int]]) -> int:
+    """Largest removable prefix, updating only the unit dropped each time."""
+    if not units:
+        return 0
+    uses, results = _pairing_counts(messages)
+    if results.keys() - uses.keys():
+        return 0
+    inside_uses, inside_results = _pairing_counts(messages[units[0][0]:units[-1][1]])
+
+    def invalid(call_id: str) -> bool:
+        return bool((inside_results[call_id] and not inside_uses[call_id]) or
+                    (inside_uses[call_id] and uses[call_id] == inside_uses[call_id]
+                     and results[call_id] != inside_results[call_id]))
+
+    broken = {call_id for call_id in inside_uses.keys() | inside_results.keys() if invalid(call_id)}
+    count = len(units)
+    while broken and count:
+        start, end = units[count - 1]
+        for message in messages[start:end]:
+            for block in message.content:
+                if isinstance(block, ToolUseBlock):
+                    call_id = block.id
+                    inside_uses[call_id] -= 1
+                elif isinstance(block, ToolResultBlock):
+                    call_id = block.tool_use_id
+                    inside_results[call_id] -= 1
+                else:
+                    continue
+                if invalid(call_id):
+                    broken.add(call_id)
+                else:
+                    broken.discard(call_id)
+        count -= 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Deterministic summary rendering
 # ---------------------------------------------------------------------------
@@ -455,10 +491,7 @@ class ContextCompactor:
             return messages, 0
 
         # Largest prefix whose removal keeps every use/result pair together.
-        lo = early[0][0]
-        k = len(early)
-        while k > 0 and not _pairing_ok(messages, lo, early[k - 1][1]):
-            k -= 1
+        k = _paired_prefix(messages, early)
         if k <= 0:
             return messages, 0
 
@@ -614,10 +647,7 @@ class ContextCompactor:
             return messages, 0
 
         # Same pairing safety net as step A; need at least two mergeable units.
-        lo = early[0][0]
-        m = len(early)
-        while m >= 2 and not _pairing_ok(messages, lo, early[m - 1][1]):
-            m -= 1
+        m = _paired_prefix(messages, early)
         if m < 2:
             return messages, 0
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import io
 import os
 import re
 import shutil
@@ -202,7 +203,8 @@ class GrepTool(BaseTool):
         # stdlib re cannot interrupt a single catastrophic backtracking match.
         # The fallback must remain cancellable even without ripgrep installed.
         matcher = bounded_regex.compile(regex.pattern, regex.flags)
-        roots = os.walk(base) if base.is_dir() else [(str(base.parent), [], [base.name])]
+        is_directory = base.is_dir()
+        roots = os.walk(base) if is_directory else [(str(base.parent), [], [base.name])]
         for dirpath, dirnames, filenames in roots:
             if time.monotonic() >= deadline:
                 raise TimeoutError("python search timed out")
@@ -224,14 +226,11 @@ class GrepTool(BaseTool):
                         continue
                 except OSError:
                     continue
-                text = self._read_text(fpath, ctx)
-                if text is None:
-                    continue
                 try:
-                    rel = fpath.relative_to(base).as_posix() if base.is_dir() else base.name
+                    rel = fpath.relative_to(base).as_posix() if is_directory else base.name
                 except ValueError:  # pragma: no cover - walk stays below base
                     rel = fpath.as_posix()
-                for lineno, line in enumerate(text.splitlines(), start=1):
+                for lineno, line in enumerate(self._lines(fpath, ctx), start=1):
                     if time.monotonic() >= deadline:
                         raise TimeoutError("python search timed out")
                     if matcher.search(line, timeout=max(0.001, deadline - time.monotonic())) is None:
@@ -249,16 +248,30 @@ class GrepTool(BaseTool):
         return matches
 
     @staticmethod
-    def _read_text(fpath: Path, ctx: ToolContext) -> str | None:
-        """Read *fpath* for searching; None when skipped (binary/too large/unreadable)."""
+    def _lines(fpath: Path, ctx: ToolContext):
+        """Stream logical lines with the same separators as str.splitlines()."""
         try:
-            if fpath.stat().st_size > ctx.limits.search_max_file_bytes:
-                return None
             with open(fpath, "rb") as fh:
-                head = fh.read(_BINARY_SNIFF_BYTES)
-                if b"\x00" in head:
-                    return None
-                body = head + fh.read()
+                if os.fstat(fh.fileno()).st_size > ctx.limits.search_max_file_bytes:
+                    return
+                if b"\x00" in fh.read(_BINARY_SNIFF_BYTES):
+                    return
+                fh.seek(0)
+                # Universal newlines remove CR/CRLF before chunk boundaries;
+                # splitlines retains its other Unicode separator semantics.
+                with io.TextIOWrapper(fh, encoding="utf-8", errors="replace") as text:
+                    fragments: list[str] = []
+                    while chunk := text.read(16 * 1024):
+                        lines = chunk.splitlines()
+                        partial = lines.pop() if chunk[-1] not in "\n\v\f\x1c\x1d\x1e\x85\u2028\u2029" else ""
+                        if lines:
+                            if fragments:
+                                lines[0] = "".join(fragments) + lines[0]
+                                fragments.clear()
+                            yield from lines
+                        if partial:
+                            fragments.append(partial)
+                    if fragments:
+                        yield "".join(fragments)
         except OSError:
-            return None
-        return body.decode("utf-8", errors="replace")
+            return

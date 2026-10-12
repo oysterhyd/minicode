@@ -449,7 +449,7 @@ class SqliteStore:
         # "newest first" stays deterministic even for identical created_at.
         rows = self._conn.execute(
             f"SELECT {_SESSION_COLUMNS} FROM sessions ORDER BY created_at DESC, rowid DESC"
-        ).fetchall()
+        )
         return [self._summary(row) for row in rows]
 
     def first_user_texts(self) -> dict[str, str]:
@@ -458,14 +458,14 @@ class SqliteStore:
             "SELECT s.session_id, (SELECT m.content FROM messages m "
             "WHERE m.session_id = s.session_id AND m.role = 'user' "
             "ORDER BY m.seq LIMIT 1) AS content FROM sessions s"
-        ).fetchall()
+        )
         titles: dict[str, str] = {}
         for row in rows:
             if row["content"] is None:
                 continue
             for block in json.loads(row["content"]):
                 if block.get("type") == "text" and str(block.get("text", "")).strip():
-                    titles[row["session_id"]] = str(block["text"]).strip().splitlines()[0][:72]
+                    titles[row["session_id"]] = str(block["text"]).strip()[:72].splitlines()[0]
                     break
         return titles
 
@@ -490,7 +490,7 @@ class SqliteStore:
             )
 
     def session_meta(self) -> dict[str, dict[str, Any]]:
-        rows = self._conn.execute("SELECT session_id, title, pinned FROM session_meta").fetchall()
+        rows = self._conn.execute("SELECT session_id, title, pinned FROM session_meta")
         return {row["session_id"]: {"title": row["title"], "pinned": bool(row["pinned"])}
                 for row in rows}
 
@@ -499,7 +499,7 @@ class SqliteStore:
         rows = self._conn.execute(
             "SELECT s.session_id, (SELECT MAX(e.timestamp) FROM events e "
             "WHERE e.session_id = s.session_id) AS latest FROM sessions s"
-        ).fetchall()
+        )
         return {row["session_id"]: row["latest"] for row in rows if row["latest"]}
 
     def delete_session(self, session_id: str) -> None:
@@ -564,7 +564,7 @@ class SqliteStore:
         rows = self._conn.execute(
             "SELECT role, content FROM messages WHERE session_id = ? ORDER BY seq ASC",
             (session_id,),
-        ).fetchall()
+        )
         # pydantic validates the discriminated block union on the way in.
         return [
             Message(role=row["role"], content=json.loads(row["content"])) for row in rows
@@ -618,7 +618,7 @@ class SqliteStore:
             "SELECT artifact_id, kind, relpath, created_at FROM artifacts"
             " WHERE session_id = ? ORDER BY created_at ASC, artifact_id ASC",
             (session_id,),
-        ).fetchall()
+        )
         return [
             {
                 "artifact_id": row["artifact_id"],
@@ -677,7 +677,7 @@ class SqliteStore:
         if limit is not None:
             query += " LIMIT ?"
             params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        rows = self._conn.execute(query, params)
         return [
             Event(
                 seq=row["seq"],

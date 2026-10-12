@@ -128,7 +128,7 @@ func (s *Service) Files(ctx context.Context, root, query string) ([]string, erro
 	seen := make(map[string]bool)
 	needle := strings.ToLower(query)
 	if err == nil {
-		for _, file := range strings.Split(output, "\x00") {
+		for file := range strings.SplitSeq(output, "\x00") {
 			if file != "" && !seen[file] && strings.Contains(strings.ToLower(file), needle) {
 				files = append(files, file)
 				seen[file] = true
@@ -176,18 +176,19 @@ func (s *Service) Files(ctx context.Context, root, query string) ([]string, erro
 }
 
 func ParseStatus(output string) []model.Change {
-	fields := strings.Split(output, "\x00")
-	result := make([]model.Change, 0, len(fields))
-	for i := 0; i < len(fields); i++ {
-		record := fields[i]
+	result := make([]model.Change, 0, strings.Count(output, "\x00")+1)
+	skipSource := false
+	for record := range strings.SplitSeq(output, "\x00") {
+		if skipSource {
+			skipSource = false
+			continue
+		}
 		if len(record) < 4 {
 			continue
 		}
 		status := record[:2]
 		result = append(result, model.Change{Status: status, Path: record[3:]})
-		if strings.ContainsAny(status, "RC") {
-			i++
-		}
+		skipSource = strings.ContainsAny(status, "RC")
 	}
 	return result
 }
@@ -195,27 +196,37 @@ func ParseStatus(output string) []model.Change {
 type Stat struct{ Additions, Deletions int }
 
 func ParseNumstat(output string) map[string]Stat {
-	fields := strings.Split(output, "\x00")
 	result := make(map[string]Stat)
-	for i := 0; i < len(fields); i++ {
-		record := fields[i]
-		parts := strings.SplitN(record, "\t", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		path := parts[2]
-		if path == "" {
-			i += 2
-			if i >= len(fields) {
-				break
+	skip := 0
+	var pending Stat
+	for record := range strings.SplitSeq(output, "\x00") {
+		if skip > 0 {
+			skip--
+			if skip == 0 && record != "" {
+				old := result[record]
+				result[record] = Stat{old.Additions + pending.Additions, old.Deletions + pending.Deletions}
 			}
-			path = fields[i]
-		}
-		if path == "" {
 			continue
 		}
-		a, _ := strconv.Atoi(parts[0])
-		d, _ := strconv.Atoi(parts[1])
+		additions, rest, ok := strings.Cut(record, "\t")
+		if !ok {
+			continue
+		}
+		deletions, path, ok := strings.Cut(rest, "\t")
+		if !ok {
+			continue
+		}
+		a, d := 0, 0
+		if additions != "-" {
+			a, _ = strconv.Atoi(additions)
+		}
+		if deletions != "-" {
+			d, _ = strconv.Atoi(deletions)
+		}
+		if path == "" {
+			skip, pending = 2, Stat{a, d}
+			continue
+		}
 		old := result[path]
 		result[path] = Stat{old.Additions + a, old.Deletions + d}
 	}

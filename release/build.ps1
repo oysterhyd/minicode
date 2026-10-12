@@ -38,6 +38,7 @@ try {
     $wheel = @(Get-ChildItem "$stage/wheels/minicode-*.whl")
     if ($wheel.Count -ne 1 -or $wheel[0].Name -notlike "minicode-$version-*") { throw 'Wheel/release versions differ' }
     Run 'uv' @('pip', 'install', '--python', $python, '--break-system-packages', '--no-deps', $wheel[0].FullName)
+    Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/prune-runtime.py", "$stage/runtime")
     Copy-Item -LiteralPath "$root/desktop/bridge.py", "$root/LICENSE", "$PSScriptRoot/requirements.lock", "$PSScriptRoot/THIRD-PARTY-NOTICES.md" -Destination "$stage/runtime"
     $gitZip = "$cache/MinGit-2.56.0-64-bit.zip"
     if (-not (Test-Path $gitZip)) {

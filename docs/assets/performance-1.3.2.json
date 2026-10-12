@@ -1,0 +1,594 @@
+{
+  "baseline_commit": "89543a8a44e475d9875f847aa05bfbc5bcc66e59",
+  "baseline_version": "1.3.1",
+  "new_version": "1.3.2",
+  "python_before": {
+    "python": "3.12.4",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "source_root": "D:\\miniclaudecode\\output\\performance-1.3.2\\baseline",
+    "benchmarks": {
+      "command_tail_20MB": {
+        "median_ms": 69.14,
+        "samples_ms": [
+          64.8928,
+          67.9256,
+          77.1712,
+          74.3392,
+          73.5881,
+          67.0552,
+          69.14
+        ],
+        "peak_bytes": 69528886
+      },
+      "utf8_prefix_13MB": {
+        "median_ms": 10.2655,
+        "samples_ms": [
+          9.894,
+          10.1547,
+          11.629,
+          11.066,
+          10.9005,
+          10.2655,
+          9.9605
+        ],
+        "peak_bytes": 24000033
+      },
+      "messages_2000_10KB": {
+        "median_ms": 58.8858,
+        "samples_ms": [
+          50.4376,
+          51.4019,
+          68.3372,
+          63.0792,
+          57.5948,
+          58.8858,
+          61.2422
+        ],
+        "peak_bytes": 42572182
+      },
+      "events_2000_10KB": {
+        "median_ms": 55.1367,
+        "samples_ms": [
+          56.4848,
+          54.4694,
+          59.7406,
+          55.1367,
+          55.5706,
+          54.3935,
+          54.3189
+        ],
+        "peak_bytes": 42154918
+      },
+      "compaction_crossing_1200_units": {
+        "median_ms": 2213.4256,
+        "samples_ms": [
+          2420.2009,
+          2273.1063,
+          2200.4245,
+          2217.8172,
+          2198.3657,
+          2213.4256,
+          2183.326
+        ],
+        "peak_bytes": 232340
+      },
+      "compaction_normal_1200_units": {
+        "median_ms": 7.6217,
+        "samples_ms": [
+          9.0341,
+          9.5724,
+          7.6217,
+          5.4122,
+          5.3801,
+          5.5937,
+          10.1688
+        ],
+        "peak_bytes": 523193
+      },
+      "fallback_search_first_100_of_80000": {
+        "median_ms": 5.8679,
+        "samples_ms": [
+          5.6115,
+          5.26,
+          6.0017,
+          4.2233,
+          7.0997,
+          6.0858,
+          5.8679
+        ],
+        "peak_bytes": 5844828
+      },
+      "fallback_search_no_match_80000": {
+        "median_ms": 98.2265,
+        "samples_ms": [
+          105.0953,
+          97.5929,
+          96.6337,
+          82.8391,
+          102.1482,
+          98.2265,
+          111.1478
+        ],
+        "peak_bytes": 5837406
+      }
+    }
+  },
+  "python_after": {
+    "python": "3.12.4",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "source_root": "D:\\miniclaudecode",
+    "benchmarks": {
+      "command_tail_20MB": {
+        "median_ms": 0.1626,
+        "samples_ms": [
+          0.1412,
+          0.5335,
+          0.1626,
+          0.3561,
+          0.5474,
+          0.1565,
+          0.1538
+        ],
+        "peak_bytes": 308095
+      },
+      "utf8_prefix_13MB": {
+        "median_ms": 0.1405,
+        "samples_ms": [
+          0.1405,
+          0.1424,
+          0.1352,
+          0.1349,
+          0.1389,
+          0.1439,
+          0.1428
+        ],
+        "peak_bytes": 469519
+      },
+      "messages_2000_10KB": {
+        "median_ms": 43.1616,
+        "samples_ms": [
+          44.5251,
+          43.6967,
+          42.1313,
+          43.1616,
+          44.358,
+          42.6549,
+          41.5299
+        ],
+        "peak_bytes": 22126322
+      },
+      "events_2000_10KB": {
+        "median_ms": 40.6326,
+        "samples_ms": [
+          42.2682,
+          40.255,
+          38.8191,
+          40.8216,
+          41.5129,
+          40.2046,
+          40.6326
+        ],
+        "peak_bytes": 21695065
+      },
+      "compaction_crossing_1200_units": {
+        "median_ms": 3.6821,
+        "samples_ms": [
+          3.6675,
+          3.6821,
+          3.6709,
+          3.6552,
+          4.8082,
+          6.7158,
+          5.6534
+        ],
+        "peak_bytes": 274536
+      },
+      "compaction_normal_1200_units": {
+        "median_ms": 5.4265,
+        "samples_ms": [
+          6.0126,
+          6.0057,
+          5.3564,
+          5.4011,
+          6.4071,
+          5.4265,
+          5.2798
+        ],
+        "peak_bytes": 523265
+      },
+      "fallback_search_first_100_of_80000": {
+        "median_ms": 0.6826,
+        "samples_ms": [
+          0.6592,
+          0.7661,
+          0.7716,
+          0.6847,
+          0.6772,
+          0.6826,
+          0.6737
+        ],
+        "peak_bytes": 137697
+      },
+      "fallback_search_no_match_80000": {
+        "median_ms": 80.3619,
+        "samples_ms": [
+          76.5783,
+          76.996,
+          79.3475,
+          81.6526,
+          82.8803,
+          80.3619,
+          81.4624
+        ],
+        "peak_bytes": 212213
+      }
+    }
+  },
+  "go_before": "goos: windows\ngoarch: amd64\npkg: minicode.desktop\ncpu: AMD Ryzen 7 8845H w/ Radeon 780M Graphics      \nBenchmarkThumbnail132-16    \t     100\t   5877806 ns/op\t 1090666 B/op\t  272640 allocs/op\nBenchmarkThumbnail132-16    \t     100\t   5970371 ns/op\t 1090563 B/op\t  272640 allocs/op\nBenchmarkThumbnail132-16    \t     100\t   5916553 ns/op\t 1090564 B/op\t  272640 allocs/op\nBenchmarkThumbnail132-16    \t     100\t   5874937 ns/op\t 1090564 B/op\t  272640 allocs/op\nBenchmarkThumbnail132-16    \t     100\t   5894734 ns/op\t 1090565 B/op\t  272640 allocs/op\nPASS\nok  \tminicode.desktop\t4.405s\ngoos: windows\ngoarch: amd64\npkg: minicode.desktop/internal/workspace\ncpu: AMD Ryzen 7 8845H w/ Radeon 780M Graphics      \nBenchmarkGitStatus132-16     \t     100\t   1845049 ns/op\t 5767374 B/op\t       2 allocs/op\nBenchmarkGitStatus132-16     \t     100\t   1949927 ns/op\t 5767170 B/op\t       2 allocs/op\nBenchmarkGitStatus132-16     \t     100\t   1892083 ns/op\t 5767168 B/op\t       2 allocs/op\nBenchmarkGitStatus132-16     \t     100\t   1794239 ns/op\t 5767169 B/op\t       2 allocs/op\nBenchmarkGitStatus132-16     \t     100\t   1772906 ns/op\t 5767168 B/op\t       2 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   6443129 ns/op\t 7745499 B/op\t  180004 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   6426241 ns/op\t 7745500 B/op\t  180004 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   6453714 ns/op\t 7745502 B/op\t  180004 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   6684290 ns/op\t 7745503 B/op\t  180004 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   6288303 ns/op\t 7745497 B/op\t  180004 allocs/op\nPASS\nok  \tminicode.desktop/internal/workspace\t4.555s\ngoos: windows\ngoarch: amd64\npkg: minicode.desktop/internal/content\ncpu: AMD Ryzen 7 8845H w/ Radeon 780M Graphics      \nBenchmarkDiffParser132-16    \t     100\t    233245 ns/op\t  647934 B/op\t       4 allocs/op\nBenchmarkDiffParser132-16    \t     100\t    224411 ns/op\t  647822 B/op\t       4 allocs/op\nBenchmarkDiffParser132-16    \t     100\t    216562 ns/op\t  647830 B/op\t       4 allocs/op\nBenchmarkDiffParser132-16    \t     100\t    215446 ns/op\t  647826 B/op\t       4 allocs/op\nBenchmarkDiffParser132-16    \t     100\t    235628 ns/op\t  647826 B/op\t       4 allocs/op\nPASS\nok  \tminicode.desktop/internal/content\t0.548s\n",
+  "go_after": "goos: windows\ngoarch: amd64\npkg: minicode.desktop\ncpu: AMD Ryzen 7 8845H w/ Radeon 780M Graphics      \nBenchmarkThumbnail132-16    \t     100\t   2668548 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkThumbnail132-16    \t     100\t   2700160 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkThumbnail132-16    \t     100\t   2821670 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkThumbnail132-16    \t     100\t   2632666 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkThumbnail132-16    \t     100\t   2665398 ns/op\t       0 B/op\t       0 allocs/op\nPASS\nok  \tminicode.desktop\t2.859s\ngoos: windows\ngoarch: amd64\npkg: minicode.desktop/internal/workspace\ncpu: AMD Ryzen 7 8845H w/ Radeon 780M Graphics      \nBenchmarkGitStatus132-16     \t     100\t   1245901 ns/op\t 4325481 B/op\t       1 allocs/op\nBenchmarkGitStatus132-16     \t     100\t   1285603 ns/op\t 4325378 B/op\t       1 allocs/op\nBenchmarkGitStatus132-16     \t     100\t   1214066 ns/op\t 4325377 B/op\t       1 allocs/op\nBenchmarkGitStatus132-16     \t     100\t   1255334 ns/op\t 4325380 B/op\t       1 allocs/op\nBenchmarkGitStatus132-16     \t     100\t   1342904 ns/op\t 4325431 B/op\t       1 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   2660295 ns/op\t     336 B/op\t       2 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   3024947 ns/op\t     336 B/op\t       2 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   3345215 ns/op\t     336 B/op\t       2 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   2827858 ns/op\t     336 B/op\t       2 allocs/op\nBenchmarkGitNumstat132-16    \t     100\t   2593576 ns/op\t     336 B/op\t       2 allocs/op\nPASS\nok  \tminicode.desktop/internal/workspace\t2.318s\ngoos: windows\ngoarch: amd64\npkg: minicode.desktop/internal/content\ncpu: AMD Ryzen 7 8845H w/ Radeon 780M Graphics      \nBenchmarkDiffParser132-16    \t     100\t    214380 ns/op\t  483938 B/op\t       3 allocs/op\nBenchmarkDiffParser132-16    \t     100\t    206970 ns/op\t  483890 B/op\t       3 allocs/op\nBenchmarkDiffParser132-16    \t     100\t    185093 ns/op\t  483886 B/op\t       3 allocs/op\nBenchmarkDiffParser132-16    \t     100\t    193427 ns/op\t  483880 B/op\t       3 allocs/op\nBenchmarkDiffParser132-16    \t     100\t    190341 ns/op\t  483891 B/op\t       3 allocs/op\nPASS\nok  \tminicode.desktop/internal/content\t0.325s\n",
+  "tui_before": {
+    "node": "v22.22.0",
+    "root": "D:\\miniclaudecode\\output\\performance-1.3.2\\baseline",
+    "samples_ms": [
+      0.27509000000000017,
+      0.2931240000000003,
+      0.2759539999999998,
+      0.2889270000000005,
+      0.28089500000000045,
+      0.2760360000000003,
+      0.2836220000000003
+    ],
+    "median_ms": 0.28089500000000045,
+    "calls_per_sample": 100
+  },
+  "tui_after": {
+    "node": "v22.22.0",
+    "root": "D:\\miniclaudecode",
+    "samples_ms": [
+      0.09878100000000017,
+      0.095702,
+      0.10699000000000013,
+      0.08923400000000015,
+      0.10757300000000043,
+      0.09945299999999975,
+      0.0959190000000001
+    ],
+    "median_ms": 0.09878100000000017,
+    "calls_per_sample": 100
+  },
+  "snapshots": [
+    {
+      "file": "approval-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "approval-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "attachments-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "attachments-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "collapsed-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "collapsed-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "collapsed-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "collapsed-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "conversation-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "conversation-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "diff-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "diff-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "files-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "files-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "final-window-dark.png",
+      "same": true
+    },
+    {
+      "file": "home-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "home-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "home-dark.png",
+      "same": true
+    },
+    {
+      "file": "home-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "home-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "model-menu-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "model-menu-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "model-menu-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "model-menu-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "permission-menu-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "permission-menu-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "permission-menu-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "permission-menu-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "read-image-preview-light.png",
+      "same": true
+    },
+    {
+      "file": "reasoning-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "reasoning-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "reasoning-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "reasoning-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-about-dark-1x.png",
+      "same": false
+    },
+    {
+      "file": "settings-about-light-1x.png",
+      "same": false
+    },
+    {
+      "file": "settings-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-empty-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-empty-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-instructions-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-instructions-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-instructions-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-instructions-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-mcp-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-mcp-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-mcp-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-mcp-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-model-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-model-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-model-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-model-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-permissions-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-permissions-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-permissions-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-permissions-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-plugins-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-plugins-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-plugins-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-plugins-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-service-large-text.png",
+      "same": true
+    },
+    {
+      "file": "settings-skills-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-skills-dark-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-skills-light-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-skills-light-en-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-subagents-dark-1x.png",
+      "same": true
+    },
+    {
+      "file": "settings-subagents-light-1x.png",
+      "same": true
+    }
+  ],
+  "pruned_tui": {
+    "files": 2556,
+    "bytes": 4728511
+  },
+  "code_changes": [
+    {
+      "added": 16,
+      "removed": 1,
+      "file": "desktop/native/images.go"
+    },
+    {
+      "added": 1,
+      "removed": 1,
+      "file": "desktop/native/internal/content/diff.go"
+    },
+    {
+      "added": 33,
+      "removed": 22,
+      "file": "desktop/native/internal/workspace/workspace.go"
+    },
+    {
+      "added": 1,
+      "removed": 0,
+      "file": "release/build.ps1"
+    },
+    {
+      "added": 28,
+      "removed": 0,
+      "file": "release/prune-runtime.py"
+    },
+    {
+      "added": 4,
+      "removed": 1,
+      "file": "release/smoke-native.ps1"
+    },
+    {
+      "added": 38,
+      "removed": 8,
+      "file": "src/minicode/context/compact.py"
+    },
+    {
+      "added": 8,
+      "removed": 8,
+      "file": "src/minicode/storage/sqlite_store.py"
+    },
+    {
+      "added": 6,
+      "removed": 2,
+      "file": "src/minicode/tools/base.py"
+    },
+    {
+      "added": 29,
+      "removed": 16,
+      "file": "src/minicode/tools/search.py"
+    },
+    {
+      "added": 14,
+      "removed": 14,
+      "file": "tui/src/feed.ts"
+    }
+  ]
+}

@@ -18,7 +18,7 @@ var hunkPattern = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @
 func ParseDiff(text string) []DiffLine {
 	lines := make([]DiffLine, 0, strings.Count(text, "\n")+1)
 	oldLine, newLine, oldRemaining, newRemaining := 0, 0, 0, 0
-	for _, raw := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+	for raw := range strings.SplitSeq(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if hunk := hunkPattern.FindStringSubmatch(raw); hunk != nil {
 			oldLine, _ = strconv.Atoi(hunk[1])
 			newLine, _ = strconv.Atoi(hunk[3])
