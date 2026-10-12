@@ -6,7 +6,12 @@
 - 原生 Go 完整测试、静态检查、Windows 编译及 vendor 动效专项测试通过。该专项进入跨平台 CI 和发行构建。
 - 开始页、对话、模型设置、权限设置、模型菜单的浅色／深色共 10 组前后窗口截图像素一致。
 - 真实原生窗口三个动画场景各测量三次；运行指示场景 3 秒内重建次数中位数 170 → 3，长流式场景绘制间隔 p95 20.58 → 17.56 ms。不是显示器 FPS 测量。
-- 后续发行构建、安装／更新检查与实际 GitHub 产物摘要核验在完成后记录。
+- [Windows 完整发行构建](https://github.com/oysterhyd/minicode/actions/runs/38196634183)通过：干净发行环境 Python 606 通过、2 跳过，TUI 81 通过；原生完整测试与 vendor 动效专项通过。
+- 包内空白配置、真实原生窗口、Python 桥接、CLI / Git / TUI 运行，中文路径 NSIS 安装、Unicode 快捷方式与卸载通过；签名更新、拒绝篡改、相同版本忽略及更新后运行检查通过。
+- [跨平台 CI](https://github.com/oysterhyd/minicode/actions/runs/38196634202)七个任务全部通过；同一发行标签的 [CI](https://github.com/oysterhyd/minicode/actions/runs/38196634211)也全部通过。
+- 本机源码 1558 文件及 Git 历史已审计；发行环境 15411 文件的个人文件／已知凭据审计通过。包内 bridge、统计、SQLite、附件、任务图、技能元数据与版本源码和发行标签逐文件核对一致。
+- 安装包、完整更新归档及 1.2.3 / 1.2.7 / 1.3.0 → 1.3.1 三个差分包已实际下载，大小与 SHA256 均和 GitHub 资产摘要一致；完整／差分包的 Ed25519 签名均通过原有公钥核验。
+- [v1.3.1 已公开发布](https://github.com/oysterhyd/minicode/releases/tag/v1.3.1)并设为最新版本；公开 latest 更新清单与已核验的清单逐字节摘要一致。安装包 SHA256：`b2ed0b11f1b2ad67a46c8102da27a247a980c7ee85b746f16c662efab86bb23c`。
 
 ## v1.3.0 核验
 
