@@ -6,14 +6,14 @@ $manifestPath = Join-Path $installationPath 'update-windows-amd64.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $archivePath = Join-Path $installationPath ([IO.Path]::GetFileName(([uri]$manifest.url).AbsolutePath))
 $configPath = Join-Path $root 'desktop/native/mygo.json'
-$python = Join-Path $installationPath 'runtime/python/python.exe'
-& $python -I -X utf8 (Join-Path $PSScriptRoot 'verify-update.py') $manifestPath $configPath
+$node = Join-Path $installationPath 'runtime/node/node.exe'
+& $node (Join-Path $PSScriptRoot 'verify-update.mjs') $manifestPath $configPath
 if ($LASTEXITCODE -ne 0) { throw 'Update signature verification failed' }
 $qaTarget = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ('.cache/update-qa-本地 升级-' + [guid]::NewGuid().ToString('N'))))
 $qaCache = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '.cache'))
 if (-not $qaTarget.StartsWith($qaCache+[IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid update QA directory' }
 New-Item -ItemType Directory -Force $qaTarget | Out-Null
-& $python -I -X utf8 -c 'import sys,tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2],filter="data")' $archivePath $qaTarget
+& tar.exe -xf $archivePath -C $qaTarget
 if ($LASTEXITCODE -ne 0) { throw 'Update archive extraction failed' }
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $listener.Start()
@@ -26,24 +26,25 @@ try {
     go build -trimpath -ldflags $ldflags -o (Join-Path $qaTarget 'MiniCode.exe') ./tools/updatecheck
     if ($LASTEXITCODE -ne 0) { throw 'Update SDK probe build failed' }
 } finally { Pop-Location }
-$liveStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $qaTarget 'runtime/python/python.exe'))
+$liveStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $qaTarget 'runtime/minicode.exe'))
 $liveStart.UseShellExecute = $false
 $liveStart.CreateNoWindow = $true
 $liveStart.RedirectStandardInput = $true
 $liveStart.RedirectStandardOutput = $true
-$liveStart.ArgumentList.Add('-I')
-$liveStart.ArgumentList.Add('-c')
-$liveStart.ArgumentList.Add("import sys,ssl,sqlite3; print('ready',flush=True); sys.stdin.readline(); print(sqlite3.connect(':memory:').execute('select 42').fetchone()[0],flush=True)")
+$liveStart.ArgumentList.Add('bridge')
+$liveStart.Environment['MINICODE_DB_PATH'] = Join-Path $qaTarget 'live-session.db'
 $liveRuntime = [Diagnostics.Process]::Start($liveStart)
 try {
+    $liveRuntime.StandardInput.WriteLine('{"id":1,"method":"getState","params":{}}')
+    $liveRuntime.StandardInput.Flush()
     $ready = $liveRuntime.StandardOutput.ReadLineAsync()
-    if (-not $ready.Wait(5000) -or $ready.Result -ne 'ready') { throw 'Existing Python runtime did not initialize' }
+    if (-not $ready.Wait(5000) -or ($ready.Result | ConvertFrom-Json).result.protocolVersion -ne 2) { throw 'Existing Rust runtime did not initialize' }
     & (Join-Path $qaTarget 'MiniCode.exe') -manifest $manifestPath -archive $archivePath -target $qaTarget -expected (Join-Path $installationPath 'MiniCode.exe') -port $qaPort
     if ($LASTEXITCODE -ne 0) { throw 'Update SDK install/tamper probe failed' }
-    $liveRuntime.StandardInput.WriteLine('continue')
+    $liveRuntime.StandardInput.WriteLine('{"id":2,"method":"getState","params":{}}')
     $liveRuntime.StandardInput.Flush()
     $response = $liveRuntime.StandardOutput.ReadLineAsync()
-    if (-not $response.Wait(5000) -or $response.Result -ne '42') { throw 'Update interrupted the existing Python runtime' }
+    if (-not $response.Wait(5000) -or ($response.Result | ConvertFrom-Json).result.protocolVersion -ne 2) { throw 'Update interrupted the existing Rust runtime' }
 } finally {
     $liveRuntime.StandardInput.Close()
     if (-not $liveRuntime.WaitForExit(5000)) { $liveRuntime.Kill(); $liveRuntime.WaitForExit() }

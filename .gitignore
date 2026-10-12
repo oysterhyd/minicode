@@ -70,3 +70,4 @@ provider_config.json
 .zcode/
 .claude/
 .codex/
+/target/

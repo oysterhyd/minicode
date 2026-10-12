@@ -1,0 +1,29 @@
+{
+  "deepseek/deepseek-v4.1-flash": {
+    "name": "deepseek/deepseek-v4.1-flash",
+    "provider": "commandcode",
+    "context_window": 1000000,
+    "max_output_tokens": 384000,
+    "supports_effort": true,
+    "input_modalities": []
+  },
+  "z.ai/glm-5.3-flash": {
+    "name": "z.ai/glm-5.3-flash",
+    "provider": "commandcode",
+    "context_window": 1048576,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": []
+  },
+  "claude-sonnet-4-5": {
+    "name": "claude-sonnet-4-5",
+    "provider": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 64000,
+    "supports_effort": false,
+    "input_modalities": [
+      "image",
+      "pdf"
+    ]
+  }
+}

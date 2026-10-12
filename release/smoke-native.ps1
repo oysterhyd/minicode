@@ -3,13 +3,13 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $installationPath = [IO.Path]::GetFullPath($Installation)
 $runtime = Join-Path $installationPath 'runtime'
-$python = Join-Path $runtime 'python/python.exe'
+$agent = Join-Path $runtime 'minicode.exe'
 $node = Join-Path $runtime 'node/node.exe'
 $version = (Get-Content (Join-Path $PSScriptRoot 'package.json') -Raw | ConvertFrom-Json).version
 $scratch = Join-Path $PSScriptRoot ('.cache/native-smoke-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force $scratch | Out-Null
 $original = @{}
-foreach ($key in @('USERPROFILE','HOME','APPDATA','LOCALAPPDATA','PATH','PYTHONHOME','PYTHONPATH','PYTHONUTF8','PYTHONIOENCODING','MINICODE_RESOURCES','MINICODE_PYTHON','MINICODE_BRIDGE')) {
+foreach ($key in @('USERPROFILE','HOME','APPDATA','LOCALAPPDATA','PATH','MINICODE_RESOURCES','MINICODE_AGENT')) {
     $original[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
 }
 function Run([string]$Program,[string[]]$Arguments) {
@@ -22,24 +22,19 @@ try {
     $env:APPDATA = Join-Path $scratch 'AppData/Roaming'
     $env:LOCALAPPDATA = Join-Path $scratch 'AppData/Local'
     New-Item -ItemType Directory -Force $env:APPDATA,$env:LOCALAPPDATA | Out-Null
-    $env:PYTHONHOME = ''
-    $env:PYTHONPATH = ''
-    $env:PYTHONUTF8 = '1'
-    $env:PYTHONIOENCODING = 'utf-8'
     $env:MINICODE_RESOURCES = $installationPath
-    $env:PATH = "$runtime/python;$runtime/python/Scripts;$runtime/git/cmd;$env:SystemRoot/System32;$env:SystemRoot/System32/WindowsPowerShell/v1.0"
+    $env:PATH = "$runtime/node;$runtime/git/cmd;$env:SystemRoot/System32;$env:SystemRoot/System32/WindowsPowerShell/v1.0"
     Push-Location $scratch
     try {
-        $actual = (& $python -I -c 'import minicode; print(minicode.__version__)').Trim()
-        if ($LASTEXITCODE -ne 0 -or $actual -ne $version) { throw "Packaged Python version mismatch: $actual" }
-        Run $python @('-I','-X','utf8','-m','minicode','--help')
+        $actual = (& $agent --version).Trim().Split(' ')[-1]
+        if ($LASTEXITCODE -ne 0 -or $actual -ne $version) { throw "Packaged Rust version mismatch: $actual" }
+        Run $agent @('--help')
         Run (Join-Path $installationPath 'minicode.cmd') @('--help')
         Run (Join-Path $runtime 'git/cmd/git.exe') @('--version')
-        Run $python @('-I','-X','utf8','-m','minicode','eval','--task','pagination_bounds','--baselines','b0,b2','--output','results')
+        Run $agent @('eval','--task','pagination_bounds','--baselines','b0,b2','--output','results')
         $results = Get-Content (Join-Path $scratch 'results/results.json') -Raw | ConvertFrom-Json
         if ($results.run_count -ne 2 -or $results.passed -ne 2) { throw 'Installed CLI evaluation failed' }
-        $env:MINICODE_PYTHON = $python
-        $env:MINICODE_BRIDGE = Join-Path $runtime 'bridge.py'
+        $env:MINICODE_AGENT = $agent
         $tuiProbe = "const {BridgeClient}=await import('./dist/bridge.js');const {spawnBridge}=await import('./dist/launch.js');const c=new BridgeClient(spawnBridge({}));try{const state=await c.request('getState');if(state.protocolVersion!==2)throw Error('protocol');const config=await c.request('getConfiguration');const models=await c.request('listModels');if(state.model!==''||config.services.length!==0||config.defaultModel!==''||models.length!==0)throw Error('fresh model configuration must be empty');await c.request('setTuiProvider',{provider:'fake',model:'fake'});}finally{await c.close();}console.log('Packaged TUI bridge and empty model configuration passed');"
         Push-Location (Join-Path $runtime 'tui')
         try {
@@ -56,7 +51,7 @@ try {
         if (-not $native.native -or $native.protocol -ne 2 -or $native.capture_bytes -le 0) { throw 'Installed native window/bridge failed' }
         if (-not $native.updates_enabled) { throw 'Installed native updater is not enabled' }
         if ($native.PSObject.Properties.Name -contains 'error') { throw $native.error }
-        Write-Host "Native window capture, bundled Python bridge, CLI, Git and TUI verified: $report"
+        Write-Host "Native window capture, bundled Rust bridge, CLI, Git and TUI verified: $report"
     } finally { Pop-Location }
 } finally {
     foreach ($key in $original.Keys) { [Environment]::SetEnvironmentVariable($key, $original[$key], 'Process') }

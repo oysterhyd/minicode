@@ -1,0 +1,2 @@
+# Preserve the original terminal banner's intentional padding.
+agent/assets/banner.txt whitespace=-blank-at-eol

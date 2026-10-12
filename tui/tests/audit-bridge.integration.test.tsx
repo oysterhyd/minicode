@@ -45,7 +45,7 @@ function fixture(turns: unknown[]) {
   } }
 }
 
-test('real Ink + Python: script selection, approvals, pause/continue, persisted history and graceful exit', { skip: !enabled, timeout: 30000 }, async t => {
+test('real Ink + Rust: script selection, approvals, pause/continue, persisted history and graceful exit', { skip: !enabled, timeout: 30000 }, async t => {
   const f = fixture([
     { text: '先读取项目，再完成修改。', tool_calls: [
       { name: 'read', arguments: { path: 'README.md' } },
@@ -90,7 +90,7 @@ test('real Ink + Python: script selection, approvals, pause/continue, persisted 
   assert.equal(f.child.exitCode, 0)
 })
 
-test('real Python: cancellation while waiting for approval does not write the file and permits recovery', { skip: !enabled, timeout: 30000 }, async t => {
+test('real Rust: cancellation while waiting for approval does not write the file and permits recovery', { skip: !enabled, timeout: 30000 }, async t => {
   const f = fixture([{ tool_calls: [{ name: 'write', arguments: { path: 'cancelled.txt', content: 'must not be written' } }] }])
   t.after(() => f.close())
   await f.client.request('initialize', { workspace: f.workspace })
@@ -108,7 +108,7 @@ test('real Python: cancellation while waiting for approval does not write the fi
   assert.equal(await f.client.request('resolveApproval', { sessionId: started.sessionId, approvalId: approvals[0].approvalId, granted: true }), false)
 })
 
-test('real Python: explicit providers cannot silently switch to another provider', { skip: !enabled, timeout: 30000 }, async t => {
+test('real Rust: explicit providers cannot silently switch to another provider', { skip: !enabled, timeout: 30000 }, async t => {
   const f = fixture([{ text: 'offline' }])
   t.after(() => f.close())
   await f.client.request('initialize', { workspace: f.workspace })
@@ -117,7 +117,7 @@ test('real Python: explicit providers cannot silently switch to another provider
   assert.equal(state.model, 'fake')
 })
 
-test('real Python: TUI scripts reject misspelled option, turn and tool-call fields', { skip: !enabled, timeout: 30000 }, async t => {
+test('real Rust: TUI scripts reject misspelled option, turn and tool-call fields', { skip: !enabled, timeout: 30000 }, async t => {
   const f = fixture([])
   t.after(() => f.close())
   await f.client.request('initialize', { workspace: f.workspace })

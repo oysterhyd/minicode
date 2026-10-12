@@ -1,0 +1,52 @@
+[package]
+name = "minicode"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.88"
+description = "MiniCode native agent runtime, CLI and NDJSON bridge"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
+fancy-regex = "0.16"
+futures-util = "0.3"
+globset = "0.4"
+jsonschema = { version = "0.37", default-features = false }
+memmap2 = "0.9"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls", "gzip"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+sha2 = "0.10"
+similar = "2"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "process", "sync", "time", "signal", "fs"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.9"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lib]
+path = "agent/lib.rs"
+
+[[bin]]
+name = "minicode"
+path = "agent/main.rs"

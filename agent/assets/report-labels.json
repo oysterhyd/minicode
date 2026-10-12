@@ -1,0 +1,117 @@
+{
+  "exit": {
+    "completed": "已完成",
+    "max_tokens": "模型输出被截断",
+    "max_rounds": "达到最大轮数",
+    "token_budget": "Token 预算耗尽",
+    "time_budget": "时长预算耗尽",
+    "context_limit": "上下文超过模型窗口",
+    "cancelled": "已取消",
+    "goal_not_met": "验收未通过",
+    "provider_error": "模型调用失败",
+    "internal_error": "内部错误",
+    "stalled": "重复工具循环"
+  },
+  "status": {
+    "running": "运行中",
+    "paused": "已暂停，可继续"
+  },
+  "events": {
+    "session_start": [
+      "会话开始",
+      "start"
+    ],
+    "budget_changed": [
+      "预算更新",
+      "round"
+    ],
+    "round_start": [
+      "轮开始",
+      "round"
+    ],
+    "assistant_message": [
+      "助手消息",
+      "assistant"
+    ],
+    "tool_call_start": [
+      "工具调用",
+      "tool"
+    ],
+    "tool_call_result": [
+      "工具结果",
+      "tool"
+    ],
+    "tool_output": [
+      "工具实时输出",
+      "tool"
+    ],
+    "approval_request": [
+      "审批请求",
+      "approval"
+    ],
+    "approval_decision": [
+      "审批决定",
+      "approval"
+    ],
+    "round_end": [
+      "轮结束",
+      "round"
+    ],
+    "session_end": [
+      "会话结束",
+      "end"
+    ],
+    "context_compacted": [
+      "上下文压缩",
+      "compact"
+    ],
+    "goal_check": [
+      "目标验收",
+      "goal"
+    ],
+    "side_effect_unknown": [
+      "副作用未知",
+      "warn"
+    ],
+    "background_job_started": [
+      "后台任务启动",
+      "bg"
+    ],
+    "background_job_completed": [
+      "后台任务完成",
+      "bg"
+    ],
+    "background_job_lost": [
+      "后台任务丢失",
+      "warn"
+    ],
+    "project_instructions": [
+      "项目指令",
+      "compact"
+    ],
+    "skill_activated": [
+      "技能激活",
+      "compact"
+    ],
+    "skill_deactivated": [
+      "技能停用",
+      "compact"
+    ],
+    "subagent_start": [
+      "子任务启动",
+      "bg"
+    ],
+    "subagent_result": [
+      "子任务结果",
+      "bg"
+    ],
+    "mcp_discovery": [
+      "MCP 发现",
+      "bg"
+    ],
+    "provider_retry": [
+      "模型请求重试",
+      "warn"
+    ]
+  }
+}

@@ -5,7 +5,7 @@
         {
           "name": "read",
           "arguments": {
-            "path": "picker.py"
+            "path": "picker.mjs"
           }
         }
       ]
@@ -15,9 +15,9 @@
         {
           "name": "edit",
           "arguments": {
-            "path": "picker.py",
-            "old_text": "    return items[0]  # BUG: IndexError on empty list",
-            "new_text": "    return items[0] if items else default"
+            "path": "picker.mjs",
+            "old_text": "return items[0]",
+            "new_text": "return items.length?items[0]:fallback"
           }
         }
       ]
@@ -27,15 +27,13 @@
         {
           "name": "bash",
           "arguments": {
-            "command": "python -m pytest test_picker.py -q"
+            "command": "node --test test_picker.test.mjs"
           }
         }
       ]
     },
     {
-      "text": "修复完成：改为 items[0] if items else default。重新运行 pytest，全部用例通过。"
+      "text": "已修复并通过测试。"
     }
-  ],
-  "default_input_tokens": 120,
-  "default_output_tokens": 40
+  ]
 }

@@ -5,7 +5,7 @@
         {
           "name": "read",
           "arguments": {
-            "path": "job_queue.py"
+            "path": "job_queue.mjs"
           }
         }
       ]
@@ -15,9 +15,9 @@
         {
           "name": "edit",
           "arguments": {
-            "path": "job_queue.py",
-            "old_text": "        order.append(jobs.pop())  # BUG: pop() takes from the end (LIFO)",
-            "new_text": "        order.append(jobs.pop(0))"
+            "path": "job_queue.mjs",
+            "old_text": "jobs.pop()",
+            "new_text": "jobs.shift()"
           }
         }
       ]
@@ -27,15 +27,13 @@
         {
           "name": "bash",
           "arguments": {
-            "command": "python -m pytest test_job_queue.py -q"
+            "command": "node --test test_job_queue.test.mjs"
           }
         }
       ]
     },
     {
-      "text": "修复完成：把 jobs.pop() 改为 jobs.pop(0)。重新运行 pytest，全部用例通过。"
+      "text": "已修复并通过测试。"
     }
-  ],
-  "default_input_tokens": 120,
-  "default_output_tokens": 40
+  ]
 }

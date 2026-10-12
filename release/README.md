@@ -1,96 +1,38 @@
-# MiniCode 1.3.2 Windows 发行版
+# MiniCode 2.0.0 Windows 发行版
 
-Windows 10/11 x64 原生 Desktop + CLI + Ink TUI。Desktop 使用 MyGo 0.2.15 / Go，安装包内含 Python 3.12.12、Git 2.56.0、Node.js 22.22.0 和锁定运行依赖。无需安装 Electron、WebView2、Python、Git 或 Node.js。项目编译器和语言 SDK 仍由项目自行提供。
+Windows 10/11 x64：Go / MyGo Desktop、Rust Agent / CLI、TypeScript + Ink TUI。内置 Git 2.56.0、Node.js 22.22.0；后端及内置评测不依赖 Python。项目自己的 SDK 和测试依赖由项目提供。
 
-安装包为 `dist/MiniCode-Setup-1.3.2-win-x64.exe`，SHA256 在 `dist/SHA256SUMS.txt`。发布地址为 [v1.3.2](https://github.com/oysterhyd/minicode/releases/tag/v1.3.2)。安装包未作 Windows 代码签名；自动更新归档使用 Ed25519 签名。
-
-## 安装和使用
-
-首次启动的服务与模型列表为空。在“设置 → 模型与预算”添加自己的 OpenAI 兼容或 Anthropic 服务，填写地址、密钥和模型 ID，测试连接并选择默认模型。打开本地项目后即可开始任务。升级保留已有个人配置。发行包不提供模型账号或服务密钥。
-
-安装目录包含 `minicode.cmd`：
-
-```powershell
-& "$env:LOCALAPPDATA\Programs\MiniCode\minicode.cmd" --help
-& "$env:LOCALAPPDATA\Programs\MiniCode\minicode.cmd" run "修复失败的测试" --workspace D:\my-project
-& "$env:LOCALAPPDATA\Programs\MiniCode\minicode.cmd" tui --workspace D:\my-project
-```
-
-使用自定义安装目录时替换路径。CLI 不自动添加到系统 PATH。配置和会话继续保存在 `%USERPROFILE%\.minicode`；旧 Electron 界面偏好会导入原生用户数据目录。卸载保留个人配置和会话。
-
-插件仍使用精确宿主版本约束。现有插件需将 `minicode_version` 更新到 `1.3.2` 后重新生成锁文件；仓库 MCP 示例已更新。
-
-## 附件输入
-
-在模型参数中按实际能力勾选图片、PDF、音频和视频。旧配置与新模型的这些选项默认关闭。输入框的添加附件按钮和文件拖放均支持 PNG / JPEG / GIF / WebP、PDF、WAV / MP3、MP4 / MOV / WebM；每条消息最多 10 个附件，单文件最多 20 MB、合计最多 24 MB。缓存保存在会话数据库旁的 attachments 目录，会话只存引用；备份会话时同时保留该目录。附件消息采用新版数据库格式，读取需要当前版本。
-
-OpenAI 兼容服务使用 [Chat Completions 内容格式](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)发送图片、PDF、音频。视频使用支持 [video_url 的兼容服务](https://www.alibabacloud.com/help/en/model-studio/vision)；需确认网关接受对应文件格式及大小。Anthropic Messages 支持图片和 [PDF](https://platform.claude.com/docs/en/build-with-claude/pdf-support)，不支持原生音频及视频。能力勾选用于请求校验，不改变服务端模型能力。
-
-## 语言、指令与本地扩展
-
-“设置 → 通用 → 界面语言”可即时切换中文／English，语言偏好会保留。模型回复、文件内容和自定义指令保持原文；更新器独立对话框在下次启动使用保存的语言。
-
-“设置 → 指令”编辑 MiniCode 的全局 `~/.minicode/AGENTS.md`，最多 64 KB。保存后下一次模型请求加载，可留空停用。项目根目录与子目录的 AGENTS.md 保留原有目录范围和优先关系。
-
-技能、MCP 与插件设置会扫描本地全局及当前项目资源，显示来源和路径，支持搜索与范围筛选。读取 `.agents/skills`、`.agents/servers/*.json`、Claude / Codex / Pi 的已有配置与安装缓存，以及 Pi Desktop 的已安装插件和 `PI_DESKTOP_AGENTS_DIR`。导入的资源默认关闭，启用记录存入 MiniCode 配置；原应用配置不受修改。已启用技能仅提供目录，正文在模型调用加载工具时读取。插件按其声明的兼容技能与 MCP 启用，外部 JS／界面钩子不能在 MiniCode 执行，会标明不支持。MCP 支持 stdio、Streamable HTTP、SSE；扫描本身不启动服务器或连接网络，可单独测试已启用的服务。
-
-模型启用图片能力后，`read` 工具读取工作区图片以及 MCP 返回的图片会在对话中显示缩略图，并传给模型。点击可打开缓存原图；工具栏折叠后仍可见。图片缓存与附件共用 `attachments` 目录，备份数据库时须同时保留缓存。新版数据库格式为 7，旧版程序会拒绝打开，避免丢失图片结果。
+下载 [v2.0.0](https://github.com/oysterhyd/minicode/releases/tag/v2.0.0) 的 MiniCode-Setup-2.0.0-win-x64.exe；摘要见 SHA256SUMS.txt。首次启动在“设置 → 模型与预算”添加自己的服务。升级保留配置、schema 7 会话、附件和记忆。
 
 ## 从源码打包
 
-需要 Windows x64、PowerShell 7、Go 1.27.1、uv、Git 和 Node.js 22+。Node.js 在构建时负责 Ink TUI。
+需要 Windows x64、PowerShell 7、Rust stable（MSVC 目标与 C++ Build Tools）、Go 1.27.1、Git、Node.js 22+。
 
 ```powershell
 go install github.com/egoist/mygo/cmd/mygo@v0.2.15
 pwsh -NoProfile -File release/build.ps1
 ```
 
-构建脚本创建干净 staging，安装带 SHA256 的 Python 锁定依赖和当前源码 wheel，构建 TUI，只携带其生产依赖。MinGit 和 Node.js 下载均核对 SHA256。最后调用 MyGo 创建 Windows 安装包和签名更新归档，运行包内运行环境烟测、产物审计及真实 SDK 升级验收。
+提供既有 MYGO_UPDATER_PRIVATE_KEY；本地也可读取 `%APPDATA%\mygo\update-keys\mygo-update.key`。GitHub Actions 使用同名 secret。公钥不变，私钥不进入仓库或产物。
 
-1.3.2 起发行包去掉 TUI 依赖中的类型声明与 source map，运行代码、WASM、包数据与许可保留。烟测直接加载发行包内的 TUI 主入口及 Python 桥接。逐项审查、代码简化与实测性能见 [1.3.2 优化报告](../docs/performance-1.3.2.md)。
+脚本从干净 staging 构建锁定 Cargo 依赖，静态链接 MSVC CRT；构建 Ink，仅安装生产依赖，裁剪声明和 source map，保留运行资源与许可。Git / Node 下载核对 SHA256；Cargo metadata 收集 Rust 依赖许可。
 
-默认检查 Go 原生 UI / 桥接 / 文件服务、完整 Python 测试及 TUI 单元与真实桥接测试。包内烟测使用空白用户目录；PATH 只包含包内工具和 Windows 系统目录，检查 CLI、Git、B0/B2 离线分页评测、TUI → Python NDJSON，以及原生窗口截图和协议。Windows 自带 PowerShell 用于命令工具。
+默认运行 Rust 单元与 Clippy、协议 / HTTP / MCP / 恢复测试、TUI 与 Go 完整测试、20 题及 3 场景评测。包内烟测使用空白用户目录和仅含包内工具及系统目录的 PATH，检查 CLI、评测、Git、TUI、真实窗口与更新能力。
 
-```powershell
-pwsh -NoProfile -File release/smoke-native.ps1
-```
+test-installer.ps1 将实际 NSIS 包安装到中文和空格路径，验证 Unicode 快捷方式、登记、运行与卸载。test-updater.ps1 调用真实 MyGo SDK，验证签名、篡改拒绝、同版本忽略及完整 runtime 替换；旧 Rust 进程继续响应，更新后再做烟测。-SkipTests 仅用于已经完整检查后的重新打包，安装 / 更新验收仍运行。
 
-`-SkipTests` 仅用于已经单独完成测试后的重新打包；运行环境烟测和产物审计仍执行。完整构建不依赖 Electron 或 electron-builder。源码、个人目录、虚拟环境和用户数据不会被复制进安装包。
-
-手动触发 GitHub Windows installer workflow 时可选择 `skip_tests`，默认关闭；tag 发布始终执行完整测试。该选项对应上述 `-SkipTests`，不跳过签名、运行环境、更新或实际安装验收。
-
-构建还执行 `release/test-installer.ps1`：将实际 NSIS 安装包静默安装到中文和空格路径，核对可执行文件、开始菜单及卸载登记，运行包内烟测，然后卸载。测试前备份已有同名快捷方式和登记，结束后恢复。
-
-## 产物目录
+## 产物
 
 ```text
-dist/MiniCode-Setup-1.3.2-win-x64.exe
+dist/MiniCode-Setup-2.0.0-win-x64.exe
 dist/SHA256SUMS.txt
 dist/update-windows-amd64.json
-dist/minicode-1.3.2-windows-amd64.tar.gz
+dist/minicode-2.0.0-windows-amd64.tar.gz
 dist/native/windows-amd64/
-  MiniCode.exe
-  minicode.cmd
-  LICENSE, THIRD-PARTY-NOTICES.md, licenses/
-  runtime/python/, git/, node/, tui/, bridge.py
+  MiniCode.exe, minicode.cmd, LICENSE, THIRD-PARTY-NOTICES.md, licenses/
+  runtime/minicode.exe, git/, node/, tui/, evals/, licenses/
 ```
 
-`dist/native/windows-amd64` 是打包布局目录；其中也保存 MyGo 生成的安装器。测试截图、临时用户目录和离线评测保存在 `.cache/`，不进入 Git。许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)，核验结果见 [VERIFICATION.md](VERIFICATION.md)，体积及性能对比见 [迁移报告](../docs/native-desktop-report.md)。
+发布需上传安装器、摘要、更新清单及其引用的归档和差分包。MyGo 官方 updater/native 在下次启动应用更新，自动下载默认关闭。Windows 代码签名与更新归档签名分别处理；本发行包沿用 Ed25519 更新签名。
 
-发布前按项目已有凭据审计流程检查 Git 历史、源码快照及最终产物。API 密钥配置逻辑和测试假密钥可以进入源码，个人配置与真实凭据不能进入发行包。自动发布 workflow 已改用固定版本 MyGo CLI。
-
-## 自动更新与签名
-
-Desktop 使用 MyGo 官方 `updater/native`，默认启动后约 10 秒检查一次，随后每 24 小时检查 GitHub Releases。“设置 → 通用”提供自动检查、自动下载安装和手动检查；“关于”也提供手动检查。自动下载安装默认关闭，开启后下次启动使用新版本。更新不主动中断任务。
-
-MyGo 在可写的正式安装目录启用更新。开发构建或只读目录会显示禁用原因。1.1.0 的 Electron 版需要手动安装一次 1.3.2，此后的原生版本可应用内更新。Python 配置、会话及原生偏好均在安装目录外保留。
-
-`desktop/native/mygo.json` 只包含公开验证密钥。签名私钥由 `MYGO_UPDATER_PRIVATE_KEY` 环境变量提供，本机构建也可从 `%APPDATA%\mygo\update-keys\mygo-update.key` 读取；私钥不进入仓库或发行包。GitHub Actions 使用同名 repository secret。保留并备份当前密钥，后续版本继续用同一把密钥签名；重新生成密钥会导致现有客户端拒绝更新。
-
-每次发布必须同时上传安装包、`SHA256SUMS.txt`、`update-windows-amd64.json` 和清单引用的 `.tar.gz`（有差分包时也上传）。SDK 先验证归档摘要的 Ed25519 签名，再替换程序和完整运行环境。Windows 代码签名与更新归档签名分别处理。
-
-```powershell
-pwsh -NoProfile -File release/test-updater.ps1
-```
-
-此验收在 `.cache/` 的中文和空格路径里调用真实 MyGo SDK，确认篡改签名被拒绝且原程序未变、正确签名能替换完整运行环境、相同版本不重复更新。升级过程中保留已加载 SSL / SQLite 的包内 Python 进程，更新后继续执行查询，确认进程未被中断；再对更新后的实际 Desktop / CLI / TUI 做烟测。正常构建自动执行该验收。
+源码、个人目录、会话数据库和旧实现不进入安装包。验收及指标见 [核验记录](VERIFICATION.md) 和 [Rust 迁移报告](../docs/rust-agent-2.0.0.md)。

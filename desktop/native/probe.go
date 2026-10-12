@@ -33,7 +33,7 @@ func runInstalledProbe(d *desktop, path string, started time.Time) {
 	}
 	var state model.State
 	if d.client == nil {
-		report["error"] = "Python bridge unavailable"
+		report["error"] = "Rust agent bridge unavailable"
 	} else if err := d.client.Request(ctx, "getState", map[string]any{"clientKey": "installed-probe"}, &state); err != nil {
 		report["error"] = err.Error()
 	} else {

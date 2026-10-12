@@ -1,270 +1,46 @@
-# minicode 当前架构
+# MiniCode 2.0 架构
 
-本文描述模块划分、一次 run 的事件流与关键执行语义。核心重构的完整契约与迁移见 [Harness 重构审计](harness-hardening.md)。2026-10-08 的 Desktop 原生迁移与验证见 [迁移报告](native-desktop-report.md)。
-[plan.md](../plan.md) 是原始设计目标；后续优化见 [探索与优化方案](optimization-design.md)。
-交互界面以中文为主，部分工具错误为英文。共享模型位于 `core/models.py`，运行时也直接依赖
-工具、存储与 Goal 实现；本地 Plugin 已加载，任务图通过模型工具接入，共享工作区的写入型子助手在父会话内按序执行。
+Rust Agent 是 Desktop、CLI 与 Ink TUI 共用的运行核心。Desktop 仍采用 Go / MyGo / Direct3D 11；TUI 仍采用 TypeScript / React / Ink。前端经原有 NDJSON v2 请求和事件协议连接 `minicode bridge`，界面组件与主题未改写。
 
-## 1. 模块图
+## 运行链路
 
-```text
-                 ┌──────────────────────────────────────────────┐
-                 │                cli.py (Typer/Rich)           │
-                 │  run / chat / sessions list / report         │
-                 │  选项解析、流式渲染、审批提示、报告展示          │
-                 └───────────────┬──────────────────────────────┘
-                                 │ 装配并驱动
-                                 ▼
-                 ┌──────────────────────────────────────────────┐
-                 │           runtime/  (AgentRuntime)           │
-                 │  loop.py    对话循环、工具调度、终止/取消       │
-                 │  budget.py  轮数/token/时长预算               │
-                 │  events.py  EventRecorder（持久化+回调）       │
-                 │  prompt.py  系统提示词                        │
-                 └───┬──────────────┬──────────────┬────────────┘
-                     ▼              ▼              ▼
-        ┌──────────────────┐ ┌────────────────┐ ┌──────────────────────┐
-        │ providers/       │ │ tools/         │ │ security/            │
-        │ base.py    契约   │ │ registry.py    │ │ policy.py            │
-        │ anthropic adapter│ │ files.py       │ │ ModePolicy           │
-        │ commandcode.py   │ │                │ │                      │
-        │ fake.py          │ │ search.py      │ │ DefaultPolicy        │
-        └──────────────────┘ │ command.py     │ └──────────────────────┘
-                             └────────────────┘
-                     ┌──────────────────────────────┐
-                     │ storage/  SqliteStore        │
-                     │ sessions / messages / events │
-                     └──────────────────────────────┘
+`Desktop / Ink TUI → NDJSON v2 → Rust Runtime → Provider / Tools / SQLite`。CLI 直接调用同一个 Runtime。Tokio 使用两个异步工作线程，文件操作在阻塞任务中执行。
 
-        core/  models.py（Message、ModelResponse、ToolOutcome、Event、
-               Budget、RunResult …）+ paths.py（工作区边界解析）
-               —— 所有模块的共享契约，无业务逻辑
-```
-
-主调用方向：`CLI / Ink TUI / Desktop → runtime → {providers, tools, security, storage, goals}`，共享 `core` 契约。
-
-Desktop 1.2 使用 `desktop/native` 的 MyGo 原生窗口和 Go 控制器，经 NDJSON v2 连接
-`desktop/bridge.py`。Go 负责多会话状态、GPU 视图、文件/Git 与系统集成；Python 继续负责
-模型、权限、插件和 SQLite。CLI 与 Ink TUI 的入口及运行契约保持共用。旧 Electron/React
-源码仅作为对照，不进入新发行包。
-`cli.py` 装配 `run` / `chat` / `resume`；`minicode tui` 拉起 `tui/`（React + Ink），经 `desktop/bridge.py` 的 NDJSON 协议驱动同一个 `AgentRuntime`。P1 模块见 §5。
-
-## 2. 一次 run 的事件流
-
-`minicode run "任务"` 的正常工具循环对应以下 `EventType` 序列（可从 `storage.get_events`
-读取事件；事件中的工具输出仅为预览，不等于完整原始输出）：
-
-```text
-SESSION_START                          # 首个 run_turn 时创建会话行
-│
-│  每轮循环，直到模型不再调用工具或预算耗尽：
-├─ ROUND_START {round}
-├─ ASSISTANT_MESSAGE {text, tool_calls, usage, stop_reason}
-├─ TOOL_CALL_START {call_id, name, arguments}     # 连续只读调用可并发
-│    ├─（若权限门判定 ASK 且配置了审批处理器）
-│    ├─ APPROVAL_REQUEST {call_id, tool_name, summary}
-│    ├─ APPROVAL_DECISION {call_id, granted, reason}
-│    └─
-├─ TOOL_CALL_RESULT {call_id, name, success, exit_code, error, output_preview}
-├─ ROUND_END {round}
-│
-└─ SESSION_END {exit_reason, rounds, total_usage[, error]}
-```
-
-对应关系：文本增量不产生事件（流式渲染走 `on_text_delta` 回调，只有装配完成的
-`ASSISTANT_MESSAGE` 落库）；未知工具、参数不合法、审批拒绝、工具内部异常都会以
-`TOOL_CALL_RESULT`（success=false）回填给模型并继续循环，而不是终止会话。
-
-## 3. 关键语义
-
-**权限门**。当前顺序为「记录 TOOL_CALL_START → 查找工具 → 按 schema 校验并规范化参数
-→ 对规范化参数执行强制权限判定/审批 → 执行」。无效参数不触发审批；MCP 按发现的 JSON Schema
-校验，内置工具按 Pydantic 模型校验。
-`ModePolicy` 按三态权限模式判定：default 下只读工具（read / ls / grep）ALLOW、
-edit / write / bash ASK、未配置工具默认 DENY；accept_edits 额外自动允许文件编辑；
-bypass 全部 ALLOW。`/permissions` 命令可在运行时切换模式并同步到状态栏
-（`--yes` 初始采用 bypass）。ASK 时审批处理器拿到的是调用的**规范化参数**（`ApprovalRequest.arguments`），
-CLI 在终端中用异步输入展示工具名与摘要，批处理输入使用 Rich `Confirm`；拒绝则以错误 tool_result 回填模型，工具不执行。
-参数变化即视为新调用，重新过权限门。
-
-**预算顺序**。`run_turn` 是可恢复的执行切片，内部可包含多个模型轮次。墙钟 deadline
-在每次执行开始时重置，轮数按本次执行计数；默认的轮数、时长与累计 token 预算均为 0（不限）。
-显式轮次或时长切片到期后暂停，用户可通过 `/continue` 续跑；
-token 预算在**助手响应已计入、但其工具尚未执行之前**检查——预算已耗尽时不再产生任何
-副作用。未执行的 tool_use 会收到明确的错误 tool_result，避免恢复时误判为副作用未知。
-正常完成和暂停均经由 `_finalize`，取消经由专门的清理与持久化路径。
-
-**token 默认不限制**。`Budget.max_total_tokens` 为 0（或负）时 token 检查恒不触发，
-默认不以预算暂停。它统计**各轮输入与输出 token 的累计值**（每轮重发上下文，
-所以 20 轮 × 20k 输入 ≈ 400k 输入 token，另加输出），不是当前上下文占用。
-`--max-tokens N` 是 token 量上限，不区分缓存折扣，不能直接等同于货币成本上限。
-
-**取消**。Ctrl+C 时 asyncio.run 取消主任务；AgentRuntime 在 `CancelledError` 处理中
-**先**把会话落库为 `paused`、原因记为 `cancelled`（含 SESSION_END 事件），
-**再**向上传播取消。CLI 捕获 KeyboardInterrupt 映射为退出码 130。chat 模式下保持一个事件循环，回合内 Ctrl+C 只取消当前激活并回到提示符；等待终端输入时后台任务继续运行。
-
-**持久化与恢复边界**。SQLite WAL/FULL 写事务内分配序号；助手消息、用量与事件原子提交；工具结果先进入持久 outbox，再按模型调用顺序交付。
-恢复时从事件补齐可能滞后的计数。暂停任务通过 `continue_turn` 无需重复输入；`resume` 可跨进程续跑。
-`report` 只展示已有记录，不执行工具。
-不能将压缩后的消息表或事件预览当作完整原始历史。
-
-## 4. 与 plan.md 的映射（P0 六条能力 → 实现位置）
-
-| plan.md §3 P0 能力 | 实现位置 |
+| 模块 | 职责 |
 | --- | --- |
-| CLI 单轮执行、交互会话、流式展示、Ctrl+C 取消 | `src/minicode/cli.py`（run / chat / `_run_one_turn` / `_StreamPrinter`） |
-| 真实模型适配器 + Fake Provider | `src/minicode/providers/commandcode.py`、`providers/anthropic_provider.py`、`providers/fake.py`（契约 `providers/base.py`） |
-| 六个内置工具：read / bash / edit / write / ls / grep | `src/minicode/tools/files.py`、`tools/search.py`、`tools/command.py`、`tools/registry.py` |
-| 参数校验、工作区边界、审批、超时与输出限制 | `tools/base.py`（args 校验 + ToolLimits）、`core/paths.py`（越界解析）、`security/policy.py`、`tools/command.py`（超时/进程树终止）、`cli.py`（交互审批） |
-| 会话持久化、事件追踪、diff 与退出码报告 | `storage/sqlite_store.py`、`runtime/events.py`、`cli.py`（`report` / `_print_diff_summary`） |
-| 轮数 / token / 时长预算，退出原因可区分 | `core/models.py`（Budget / ExitReason / RunResult）、`runtime/budget.py`、`runtime/loop.py`（结束与取消路径） |
+| agent/bridge.rs | clientKey / sessionId 路由、多会话、取消、审批、设置、统计缓存 |
+| agent/runtime.rs | 轮次、工具顺序、预算、恢复、后台命令、子助手与验收 |
+| agent/provider.rs | OpenAI、Anthropic、SSE、重试、用量、离线脚本 |
+| agent/tools.rs | 文件、命令、归档、技能、任务与记忆工具 |
+| agent/command_process.rs | Windows Job Object / Unix 进程组回收 |
+| agent/store.rs | SQLite schema 7、事务检查点、会话锁、任务 DAG、记忆 |
+| agent/paging.rs / context.rs | UTF-8 分页、稀疏游标、token 估计、配对、归档与压缩 |
+| agent/extensions.rs / mcp.rs | 指令、技能、插件指纹、本地资源及三种 MCP 传输 |
+| agent/attachments.rs / goals.rs | 内容寻址媒体、能力校验、受保护文件和验收证据 |
+| agent/cli.rs / eval.rs / report.rs | 命令、持续会话、原生评测、HTML / 文本报告 |
 
-P0 演示闭环：`examples/pagination/`（带 bug 的仓库 + 失败测试）与
-`examples/pagination/scripts/fix_pagination.json`（FakeProvider 脚本），
-端到端测试见 `tests/test_cli.py`。
+## 执行与恢复
 
-## 5. P1：可靠性能力（实际实现）
+工具保持「记录调用 → schema 校验 → 工作区及指令预检 → 权限审批 → 执行 → 原子记录结果」。无效参数不触发审批。连续内置只读工具最多并发 4 个；连续只读子助手最多并发 2 个；写入与未知工具保留顺序屏障。
 
-工作区、模型与压缩服务由 `runtime/services.py` 与 `providers/factory.py` 统一装配，`cli.py` 的 `_build_services` 只添加宿主呈现与审批，Runtime 驱动
-压缩、验收、恢复及后台结果投递。部分接口采用鸭子类型，Goal 恢复与验收路径则直接导入
-`goals` 中的类型并作类型判断。
+模型响应及用量先落库，再检查累计 token 预算并执行工具。轮数与墙钟预算用于每次可恢复切片；取消回收命令与 MCP 进程并记录状态。`/continue` 不添加重复用户输入。后台结果在轮次边界交付，执行结束时取消剩余任务并标记失联。
 
-### 5.1 模块增量
+恢复先读取工具结果日志并补齐送达。缺失日志的只读调用可重试；编辑、命令及其他副作用标记状态未知，先核实再继续。子助手用量按 child session 去重，离线脚本计数包含子助手响应。
 
-```text
-runtime/loop.py      P1 钩子：压缩 / Goal 门 / 后台投递 / 恢复 / artifact 转存
-context/             estimate（保守 token 估算）、compact（归档→压缩→摘要）
-goals/               spec（验收 YAML）、checker（指纹/快照/检查）、evidence（证据账本）
-tasks/               background（已接入）、taskstore（会话任务图，经工具使用）
-tools/command.py     bash 增加 background 参数
-storage/artifacts.py ArtifactStore：会话工件目录 + 清单表（当前数据库 schema v5，新增 tool_results）
-reports/             render_session_html：单文件离线 HTML 报告
-tui/                 React + Ink 终端 UI（minicode tui，经 desktop/bridge.py）
-providers/           commandcode.py + zcode_config.py：OpenAI 兼容默认适配器
-evals/               20 任务离线评测集 + 真实模型重复评测（独立验收）
-```
+数据库保持 schema 7 和原字段格式；schema 3–6 补齐迁移，未来 schema 拒绝打开。配置、会话、附件与记忆仍位于用户 `.minicode` 目录，Windows 身份摘要继续使用 DOS / UNC 路径。OS 文件锁限制一个会话的单写者，崩溃后自动释放。
 
-### 5.2 上下文压缩与归档
+## 扩展与上下文
 
-两段式：
+项目 AGENTS.md 正文与摘要在会话中固定；全局指令在后续模型轮次刷新。进入新子目录加载指令后，当前响应中的同范围工具暂停，下一轮按新指令重试。技能发现只读 YAML 头部，正文按需加载并验证摘要。
 
-1. **工具结果转存**（loop 内，逐调用）：各工具先按自身的行数和 50 KiB UTF-8 边界分页或截断；
-   截断原文写入 `ArtifactStore`（`<db 目录>/artifacts/<session>/<id>.txt` + 清单表），模型看到工具提供的可读部分与
-   `[artifact:<id>]`。`read_artifact` 只在当前 session manifest 中查找，并按字符 offset/limit 分页回读。
-2. **轮前压缩**（`ContextCompactor`）：估算 prompt 超过当前模型窗口减去 16,384 token 预留时依次执行；
-   小于 81,920 token 的窗口预留 20%；模型切换后窗口立即重读。优先保留最近约 20,000 token，按 user 请求归档早期
-   历史；若整个长任务只有一条初始 user 消息，则改按已闭合的 assistant/tool-result 交互组归档。
-   归档摘要逐字带回 user 文本，原始初始请求保持独立；随后缩短较旧工具结果
-   → 满足条件时合并早期单元为确定性摘要；归档/合并前检查调用结果配对。归档原文落 artifact，压缩后的
-   消息列表通过 `store.replace_messages` 原子重写持久化，并发出 `CONTEXT_COMPACTED` 事件。缩短结果时
-   会从全文提取并保留 artifact 引用；仍超限时归档单个超长文本并提供分页引用。服务端实际
-   拒绝上下文时再进行有界缩减重试，无法容纳时以 `context_limit` 暂停并保留任务。
+插件位于 `.minicode/plugins/<name>/plugin.json`，声明 minicode_version、技能、子助手及 MCP。`minicode plugins lock` 锁定指纹。示例见 examples/mcp_docs。本地导入资源默认关闭，不改写原应用配置；外部 UI / JS 钩子保持不支持的标记。
 
-现有限制：
+MCP 支持 stdio、Streamable HTTP、旧 SSE；初始化、分页、schema、审批和连接生命周期由 Rust 管理。输入有大小限制，UTF-8 按字节边界组装，公共配置不返回密钥。
 
-- `read_artifact` 按字符分页，读取页面时只保持有限缓冲；大型命令输出流式落盘归档。
-- 固定系统提示或工具 schema 本身超出模型窗口时无法无损缩减；任务会暂停，需换模型或调整配置。
-- 字符数 / 3 不是严格上界，服务端 tokenizer 仍可能与本地估算有偏差。
+上下文按完整交互单元归档，工具调用与结果成对保留；旧结果留下预览与 artifact 引用，最近约 20k token 和最近两个结果保留。长命令输出写磁盘，UI 只保留预览。归档缓存最多 16 文件 × 64 个稀疏游标。
 
-### 5.3 Goal 验收与证据（plan.md §6.4 → s17）
+## 评测与发行
 
-验收 YAML 三类检查项：`command`（退出码 0）、`artifact`（文件存在于工作区内，越界拒绝）、
-`protected`（路径内容与会话开始时的快照一致）。执行顺序：
+`minicode eval` 支持 B0（基本循环）、B1（压缩）、B2（压缩与验收失败续跑）。默认离线脚本，--model 选择真实服务；--repeats、--concurrency、--schedule 控制调度。每次尝试从干净工作区开始，宿主独立检查测试、允许修改路径及受保护文件，再运行工作区外隐藏测试。完成记录不会隐式重跑。
 
-```text
-模型回答（无工具调用）
-  → 证据快路径：通过证据的指纹 == 当前工作区指纹 → 直接 COMPLETED
-  → GoalChecker.run()：逐项检查 → GOAL_CHECK 事件
-      通过 → 记录证据（EvidenceLedger，绑定指纹）→ COMPLETED
-      失败 → 结构化失败报告回填为 user 消息 → 继续循环
-             （超过 max_fix_attempts → GOAL_NOT_MET 暂停，可继续）
-```
-
-受保护路径快照在会话首个回合开始时捕获（模型改动之前），随验收配置保存到 SQLite
-`session_goals`（schema v3）；resume 恢复原基线，旧会话缺失基线时检查失败而非重新采样。
-保护检查放在全部验收命令之后，最终指纹也在检查完成后计算。配置了验收门时，模型自述
-“完成”不会跳过验收逻辑；参与指纹计算的工作区内容变化会使旧证据失效。
-
-### 5.4 会话恢复（plan.md §6.3）
-
-`AgentRuntime.resume(store, session_id, ...)`：校验会话存在与工作区存在 → 加载消息、
-用量、轮数及保存的 provider/model/workspace（CLI/TUI 共用恢复配置）→ 找出**有 tool_use 但无对应 tool_result** 的悬空调用（中断窗口）。悬空调用
-在下次 `run_turn` 开始时结算：
-
-| 悬空调用类型 | 结算方式 |
-| --- | --- |
-| outbox 中已有结果 | 直接回填完整结果，不再次执行 |
-| 本地明确声明可重放的工具 | 重新检查当前权限后执行，发出带 `recovered: true` 的新 START/RESULT 事件，结果回填原始 call id |
-| 写 / Shell（edit / write / bash / 未知工具） | **不重放**：`SIDE_EFFECT_UNKNOWN` 事件 + 提示性 tool_result（"副作用状态未知，先核实再继续"） |
-
-已落库的结果永不重复执行；后台任务无进程可继承（一律不凭旧 PID 管理）。
-
-### 5.5 后台命令（plan.md §6.5）
-
-- `bash(background=true)`：`BackgroundManager.start` 立即返回 job id；完成事件
-  `BACKGROUND_JOB_COMPLETED`；结果在下一轮开始时作为 **user 消息**投递（每个 job 恰好
-  投递一次，原 tool call 不产生第二个 tool result）；轮次或时长切片自动续跑期间保持进程，
-  其他暂停或取消时 `cancel_all()` 清理进程树；启动记录 `BACKGROUND_JOB_STARTED`，
-  被终止的任务记录 `BACKGROUND_JOB_LOST` 并向用户和模型投递，之后才发出 `SESSION_END`。
-### 5.6 评测与报告
-
-- `evals/`：20 个本地任务（repo fixture + task.yaml + FakeProvider 修复脚本），离线 runner
-  （`minicode eval`）在干净副本上运行；b1 接入压缩，b2 在 runner 外层验收失败后续跑。
-  `run_real_eval.py` 使用 CommandCode 在干净副本上重复运行 B0/B2；B2 装配运行时 Goal 门，
-  两组都由 runner 独立检查验收命令、受保护文件和允许修改范围。每次运行保留 SQLite trace。
-  FakeProvider 的 usage 来自脚本/默认值，不度量真实模型能力、缓存或 token 节省；恢复等边界另由 tests 覆盖。
-- `minicode report <id> --format html`：单文件 HTML（零外链、可离线打开），时间线、
-  工具记录与 diff、验收证据表、用量；所有动态文本经 HTML 转义。
-- `minicode tui`：React + Ink 终端界面——线性 transcript、用户消息盒子、工具一行、
-  底部横线输入框、内联审批块。斜杠命令经桥下发（/help /model /effort
-  /permissions /clear /new /sessions /resume /compact /skill /continue /exit），
-  状态行显示模型 · 权限模式 · 上下文占用。Ctrl+C 取消当前回合；空闲时连按两次退出。
-  源码安装需 Node.js 22+ 并构建 `tui/`；进程退出时关闭 Python 桥。
-  Windows 安装版内置 Node.js 与 TUI 生产依赖；滚轮或 PageUp/PageDown 查看历史，
-  点击“返回最新”或 Ctrl+End 恢复跟随输出。
-  `minicode chat` 仍是无 Node 的 Rich + prompt_toolkit REPL。
-
-### 5.7 P1 → 实现位置映射
-
-| plan.md §3 P1 能力 | 实现位置 |
-| --- | --- |
-| 分层上下文压缩 + 输出归档与分页回读 | `context/`、`storage/artifacts.py`、`tools/artifacts.py`、`loop._maybe_spill/_compact_if_needed` |
-| 会话恢复及未确认副作用处理 | `runtime/recovery.py` 与 `loop._settle_recovery`、`cli.py`（`resume` 命令） |
-| Goal 验收器 + 失败续跑 + 证据绑定 | `goals/`、`loop._goal_gate`、`--acceptance` 装配 |
-| 后台命令；任务依赖存储 | `tasks/background.py`、`tasks/taskstore.py`、`tools/tasks.py`、`tools/command.py`、`loop._deliver_finished_jobs` |
-| 评测集、基线、失败分析 | `evals/`（离线 b0/b1/b2 与真实模型 B0/B2 重复运行） |
-| 可离线查看的 HTML 执行报告 | `reports/html.py`、`cli.py`（`report --format html`） |
-| 类 Claude Code TUI | `tui/`（React + Ink，经 `desktop/bridge.py`） |
-
-## 6. Provider、缓存及扩展边界
-
-- `Provider.stream` 目前只提供 `TextDelta` 与终结 `ResponseDone`，没有工具参数增量、
-  阶段反馈或细粒度 usage 事件。CommandCode 忽略 reasoning-only 文本增量。
-- CommandCode 在同一事件循环内复用 `httpx.AsyncClient`；CLI 每个 `asyncio.run` 回合结束前
-  显式关闭，Ink TUI / Desktop 退出时关闭桥进程及其 provider client。Anthropic 持有 SDK client。
-- 缓存统计：CommandCode 解析 `prompt_tokens_details.cached_tokens`；Anthropic 将普通输入、
-  缓存创建和缓存读取合并到输入总数。`Usage` 单独记录 cache-read/cache-write 和 available；轮次事件、
-  SQLite schema v5 与 resume 保存并恢复这些累计值，缺失 usage 不再冒充真实的零。
-- Anthropic 请求没有设置 `cache_control`；兼容网关是否支持缓存、返回哪些 usage 字段，
-  必须实际核验，不能由 API 格式兼容推断。
-- `_build_provider` 与 `_provider_for_model` 都把目录最大输出传给 provider；CommandCode 每次请求按
-  估算 prompt 占用与窗口剩余额度下调 `max_tokens`，并用实际 usage 校准下一次估算。Runtime 与压缩器
-  用相同的估算比例；上下文拒绝仍保留归档重试兜底。
-  `/effort off` 省略字段，表示采用网关默认行为，不等于明确关闭推理。
-- 基础工具表含七个内置工具（含 `read_artifact`）；CLI/TUI 另注册本地 Skills 目录/加载/资源读取与 `delegate`。
-  子会话使用独立的四工具只读注册表和默认拒绝策略，不能继承父会话的 bypass 权限；
-  子会话用量计入父会话累计值，父会话事件记录子会话 ID，取消沿等待链传递。
-  项目 `AGENTS.md` 来源及 SHA-256 随会话保存，目录级指令在首次访问对应范围时加载；
-  Skills 元数据启动扫描，正文激活时读取，可显式停用，恢复时检查最终激活版本。
-  本地插件 manifest 校验版本、启停、来源指纹和可选锁文件；插件 Skills 与只读子助手采用命名空间。
-  MCP 使用官方 SDK 的 stdio client，发现分页后注册 `mcp__server__tool`，工具调用仍经过默认审批、
-  事件记录与归档；断连与超时作为工具失败返回，不自动重放。独立子任务最多两个并行；显式
-  累计 token 上限下串行执行。持久任务图通过 `task_create/list/claim/complete` 工具接入，
-  `memory_list` 只读访问用户显式保存的项目事实；远程 MCP 尚未提供；自定义子助手可以写入，但遵守父权限，并在共享工作区中串行执行。
-
-## 7. 固定 review workflow
-
-`workflow/review.py` 把 Git 快照、宿主检查命令和只读模型审查按固定顺序记录在原子更新的
-`journal.json` 中。检查命令开始后若进程退出，下一次运行将其标记为 `unknown`，不会静默重试；
-用户核实后可显式重试。模型审查仅注册 `read`、`ls`、`grep`、`read_artifact`，自身的 SQLite
-会话可续跑。工作区内容指纹变化时阻止沿用旧 journal。该 workflow 不提供任意节点编排或写入型代理。
+Windows 发行包包含一个 Rust Agent、原生 Desktop、Git、Node.js、Ink 生产依赖和评测夹具。构建不需要 Python。MyGo 沿用原 Ed25519 公钥，更新替换整个 runtime，个人数据留在安装目录外。

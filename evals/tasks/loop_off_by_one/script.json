@@ -5,7 +5,7 @@
         {
           "name": "read",
           "arguments": {
-            "path": "sum_to_n.py"
+            "path": "sum_to_n.mjs"
           }
         }
       ]
@@ -15,9 +15,9 @@
         {
           "name": "edit",
           "arguments": {
-            "path": "sum_to_n.py",
-            "old_text": "    for i in range(1, n):  # BUG: excludes n itself",
-            "new_text": "    for i in range(1, n + 1):"
+            "path": "sum_to_n.mjs",
+            "old_text": "i<n;",
+            "new_text": "i<=n;"
           }
         }
       ]
@@ -27,15 +27,13 @@
         {
           "name": "bash",
           "arguments": {
-            "command": "python -m pytest test_sum_to_n.py -q"
+            "command": "node --test test_sum_to_n.test.mjs"
           }
         }
       ]
     },
     {
-      "text": "修复完成：把 range(1, n) 改为 range(1, n + 1)。重新运行 pytest，全部用例通过。"
+      "text": "已修复并通过测试。"
     }
-  ],
-  "default_input_tokens": 120,
-  "default_output_tokens": 40
+  ]
 }

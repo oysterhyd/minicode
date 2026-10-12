@@ -1,0 +1,1008 @@
+use crate::{
+    attachments::Attachments,
+    extensions::Catalog,
+    mcp::McpRegistry,
+    models::{Outcome, ToolSpec},
+    store::Store,
+    util,
+};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
+use std::{
+    fs::{self, File},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
+use tokio::{process::Command, sync::Mutex};
+use tokio_util::sync::CancellationToken;
+
+pub type Sink = Arc<dyn Fn(Value) + Send + Sync>;
+#[derive(Clone)]
+pub struct ToolContext {
+    pub workspace: PathBuf,
+    pub session: String,
+    pub store: Store,
+    pub attachments: Attachments,
+    pub modalities: Vec<String>,
+    pub catalog: Arc<Mutex<Catalog>>,
+    pub mcp: Arc<McpRegistry>,
+    pub cancel: CancellationToken,
+    pub output: Option<Sink>,
+    pub deadline: Option<Instant>,
+}
+pub fn builtins() -> &'static Vec<ToolSpec> {
+    static TOOLS: OnceLock<Vec<ToolSpec>> = OnceLock::new();
+    TOOLS.get_or_init(|| {
+        serde_json::from_str(include_str!("assets/tools.json")).expect("built-in tool schemas")
+    })
+}
+pub fn read_only(name: &str) -> bool {
+    [
+        "read",
+        "ls",
+        "grep",
+        "read_artifact",
+        "skills_list",
+        "skill_load",
+        "skill_unload",
+        "skill_resource",
+        "delegate",
+        "task_list",
+        "memory_list",
+    ]
+    .contains(&name)
+}
+pub fn replay_safe(name: &str) -> bool {
+    [
+        "read",
+        "ls",
+        "grep",
+        "read_artifact",
+        "skills_list",
+        "skill_resource",
+        "task_list",
+        "memory_list",
+    ]
+    .contains(&name)
+}
+pub fn parallel_read(name: &str) -> bool {
+    replay_safe(name)
+}
+pub fn policy(name: &str, mode: &str) -> &'static str {
+    if mode == "bypass"
+        || read_only(name)
+        || ["task_create", "task_claim", "task_complete"].contains(&name)
+    {
+        "allow"
+    } else if ["write", "edit"].contains(&name) {
+        if mode == "accept_edits" {
+            "allow"
+        } else {
+            "ask"
+        }
+    } else if name == "bash" || name.starts_with("mcp__") {
+        "ask"
+    } else {
+        "deny"
+    }
+}
+pub fn specs(
+    catalog: &Catalog,
+    mcp: &McpRegistry,
+    agents: &[Value],
+    allow_delegate: bool,
+) -> Vec<ToolSpec> {
+    let mut specs = builtins().clone();
+    if !allow_delegate {
+        specs.retain(|s| s.name != "delegate");
+    }
+    if let Some(spec) = specs.iter_mut().find(|s| s.name == "delegate") {
+        spec.description="Delegate a bounded task to an assistant with its configured tools and the parent permission policy. Available kinds: ".into();
+        let mut names = agents
+            .iter()
+            .filter(|a| a["enabled"] == true)
+            .filter_map(|a| a["name"].as_str())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.extend(catalog.agents.keys().cloned());
+        spec.description.push_str(&names.join(", "));
+    }
+    let mut external = mcp
+        .tools
+        .values()
+        .map(|(s, _, _)| s.clone())
+        .collect::<Vec<_>>();
+    external.sort_by(|a, b| a.name.cmp(&b.name));
+    specs.extend(external);
+    specs
+}
+pub fn validate(spec: &ToolSpec, input: &Value) -> Result<()> {
+    static VALIDATORS: OnceLock<std::collections::HashMap<String, jsonschema::Validator>> =
+        OnceLock::new();
+    let cached = VALIDATORS.get_or_init(|| {
+        builtins()
+            .iter()
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    jsonschema::validator_for(&s.input_schema).expect("built-in schema"),
+                )
+            })
+            .collect()
+    });
+    let compiled;
+    let validator = if let Some(value) = cached.get(&spec.name) {
+        value
+    } else {
+        compiled = jsonschema::validator_for(&spec.input_schema)?;
+        &compiled
+    };
+    if !validator.is_valid(input) {
+        let errors = validator
+            .iter_errors(input)
+            .take(4)
+            .map(|e| format!("{}: {}", e.instance_path(), e))
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!("invalid tool arguments: {errors}")
+    };
+    Ok(())
+}
+pub async fn execute(name: &str, args: &Value, ctx: &ToolContext) -> Outcome {
+    match execute_inner(name, args, ctx).await {
+        Ok(o) => o,
+        Err(e) => Outcome::failure(e.to_string()),
+    }
+}
+async fn execute_inner(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+    if ctx.cancel.is_cancelled() {
+        bail!("tool cancelled")
+    }
+    if let Some((_, original, connector)) = ctx.mcp.tools.get(name) {
+        let mut connector = connector.lock().await;
+        return tokio::select! {_ = ctx.cancel.cancelled()=>Err(anyhow::anyhow!("tool cancelled")),value=connector.call(original,args.clone(),&ctx.attachments)=>value};
+    }
+    match name {
+        "bash" => {
+            let command = util::string(args, "command")?;
+            let cwd = util::in_workspace(&ctx.workspace, args["cwd"].as_str().unwrap_or("."))?;
+            if !cwd.is_dir() {
+                bail!("path is not a directory")
+            }
+            run_command(
+                command,
+                &cwd,
+                args["timeout_s"]
+                    .as_f64()
+                    .unwrap_or(300.0)
+                    .clamp(1.0, 3600.0),
+                ctx,
+            )
+            .await
+        }
+        "skill_load" => {
+            let name = util::string(args, "name")?;
+            let s = ctx.catalog.lock().await.load(name)?;
+            Ok(Outcome::ok(format!(
+                "Activated skill {name} (sha256:{})\n{}",
+                s.digest, s.content
+            )))
+        }
+        "skill_unload" => {
+            let name = util::string(args, "name")?;
+            ctx.catalog.lock().await.unload(name)?;
+            Ok(Outcome::ok(format!("Deactivated skill {name}")))
+        }
+        "skills_list" => Ok(Outcome::ok(ctx.catalog.lock().await.listing())),
+        "skill_resource" => {
+            let catalog = ctx.catalog.lock().await;
+            let source =
+                catalog.resource(util::string(args, "name")?, util::string(args, "path")?)?;
+            Ok(bounded(source.content))
+        }
+        "task_create" => {
+            ctx.store.task_create(&ctx.session, args)?;
+            Ok(Outcome::ok(format!(
+                "created task {}",
+                util::string(args, "task_id")?
+            )))
+        }
+        "task_claim" => {
+            let task = util::string(args, "task_id")?;
+            ctx.store.task_claim(&ctx.session, task, "agent")?;
+            Ok(Outcome::ok(format!("claimed task {task}")))
+        }
+        "task_complete" => {
+            let task = util::string(args, "task_id")?;
+            let ok = args["ok"].as_bool().context("ok must be a boolean")?;
+            ctx.store.task_complete(&ctx.session, task, ok)?;
+            Ok(Outcome::ok(format!(
+                "task {task}: {}",
+                if ok { "done" } else { "failed" }
+            )))
+        }
+        "task_list" => Ok(Outcome::ok(serde_json::to_string(
+            &ctx.store.tasks(&ctx.session)?,
+        )?)),
+        "memory_list" => {
+            let mut memories = ctx.store.memories(&ctx.workspace.to_string_lossy())?;
+            if let Some(path) = args["path"].as_str() {
+                let p = util::in_workspace(&ctx.workspace, path)?;
+                let relative = p
+                    .strip_prefix(&ctx.workspace)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                memories.retain(|m| {
+                    let scope = m["scope"].as_str().unwrap_or(".");
+                    scope == "." || scope == relative || relative.starts_with(&format!("{scope}/"))
+                });
+            }
+            Ok(bounded(serde_json::to_string(&memories)?))
+        }
+        _ => {
+            let name = name.to_string();
+            let args = args.clone();
+            let ctx = ctx.clone();
+            tokio::task::spawn_blocking(move || execute_sync(&name, &args, &ctx)).await?
+        }
+    }
+}
+fn execute_sync(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+    match name {
+        "read" => read_file(args, ctx),
+        "ls" => list(args, ctx),
+        "grep" => grep(args, ctx),
+        "write" | "edit" => edit(name, args, ctx),
+        "read_artifact" => {
+            let id = util::string(args, "artifact_id")?;
+            let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+            let limit = args["limit"].as_u64().unwrap_or(20_000).min(20_000) as usize;
+            let page = ctx.store.artifact_page(&ctx.session, id, offset, limit)?;
+            let mut text = page["text"].as_str().unwrap_or_default().to_string();
+            if page["hasMore"] == true {
+                text.push_str(&format!(
+                    "\n...[更多内容：next_offset={}]",
+                    offset + text.chars().count()
+                ));
+            }
+            Ok(Outcome::ok(text))
+        }
+        _ => bail!("unknown tool: {name}"),
+    }
+}
+fn bounded(text: String) -> Outcome {
+    if text.len() <= 50 * 1024 {
+        Outcome::ok(text)
+    } else {
+        let mut o = Outcome::ok(format!(
+            "{}\n...[output truncated: {} chars total]",
+            util::prefix(&text, 50 * 1024),
+            text.chars().count()
+        ));
+        o.full_output = Some(text);
+        o
+    }
+}
+fn read_file(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+    let raw = util::string(args, "path")?;
+    let target = util::in_workspace(&ctx.workspace, raw)?;
+    if !target.is_file() {
+        bail!("path is not a file: {raw}")
+    }
+    if target.extension().is_some_and(|s| {
+        ["png", "jpg", "jpeg", "gif", "webp"].contains(&s.to_string_lossy().to_lowercase().as_str())
+    }) {
+        if !ctx.modalities.iter().any(|s| s == "image") {
+            bail!(
+                "The current model has no enabled image input capability; enable it in model settings or switch models."
+            )
+        }
+        if args["offset"].as_u64().unwrap_or(1) != 1
+            || !args["limit"].is_null()
+            || !args["cursor"].is_null()
+        {
+            bail!("Image reads do not accept text pagination arguments.")
+        }
+        let image = ctx.attachments.import(&target)?;
+        let mut o = Outcome::ok(format!("Read image: {raw}"));
+        o.images.push(image);
+        return Ok(o);
+    }
+    let offset = args["offset"].as_u64().unwrap_or(1) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(2000).min(2000) as usize;
+    let mut reader = BufReader::new(File::open(&target)?);
+    let mut line_number = offset;
+    if let Some(cursor) = args["cursor"].as_u64() {
+        reader.seek(SeekFrom::Start(cursor))?;
+    } else {
+        let mut skipped = 0;
+        while skipped < offset.saturating_sub(1) {
+            let buf = reader.fill_buf()?;
+            if buf.is_empty() {
+                bail!("offset {offset} beyond end of file ({skipped} lines)")
+            }
+            let mut cr = false;
+            let size = if let Some(pos) = buf.iter().position(|b| *b == b'\n' || *b == b'\r') {
+                cr = buf[pos] == b'\r';
+                skipped += 1;
+                pos + 1
+            } else {
+                buf.len()
+            };
+            reader.consume(size);
+            if cr && reader.fill_buf()?.first() == Some(&b'\n') {
+                reader.consume(1);
+            }
+            if ctx.cancel.is_cancelled() {
+                bail!("tool cancelled")
+            }
+        }
+    }
+    let mut budget = 50 * 1024 - 200;
+    let mut lines = vec![];
+    while lines.len() < limit && budget > 8 {
+        let prefix = format!("{line_number}\t");
+        let allowed = budget - prefix.len() - 1;
+        let start = reader.stream_position()?;
+        let mut bytes = vec![];
+        let mut complete = false;
+        while bytes.len() < allowed {
+            let buf = reader.fill_buf()?;
+            if buf.is_empty() {
+                break;
+            }
+            let n = buf
+                .iter()
+                .position(|b| *b == b'\n' || *b == b'\r')
+                .map(|p| p + 1)
+                .unwrap_or(buf.len())
+                .min(allowed - bytes.len());
+            let cr = buf[n - 1] == b'\r';
+            complete = buf[n - 1] == b'\n' || cr;
+            bytes.extend_from_slice(&buf[..n]);
+            reader.consume(n);
+            if cr && reader.fill_buf()?.first() == Some(&b'\n') {
+                reader.consume(1);
+            }
+            if complete {
+                break;
+            }
+        }
+        if bytes.is_empty() {
+            break;
+        }
+        let valid = match std::str::from_utf8(&bytes) {
+            Ok(s) => s.to_string(),
+            Err(e) if e.error_len().is_none() => {
+                let fitted = &bytes[..e.valid_up_to()];
+                reader.seek(SeekFrom::Start(start + fitted.len() as u64))?;
+                String::from_utf8(fitted.to_vec())?
+            }
+            Err(_) => bail!("binary or non-UTF-8 file"),
+        };
+        if valid.contains('\0') {
+            bail!("binary or non-UTF-8 file")
+        }
+        let line = prefix + valid.trim_end_matches(['\r', '\n']);
+        budget -= line.len() + 1;
+        lines.push(line);
+        if complete { line_number += 1 } else { break }
+    }
+    if lines.is_empty() {
+        bail!(
+            "offset {offset} beyond end of file ({})",
+            offset.saturating_sub(1)
+        )
+    }
+    let cursor = reader.stream_position()?;
+    let more = !reader.fill_buf()?.is_empty();
+    let mut text = lines.join("\n");
+    if more {
+        text.push_str(&format!(
+            "\n...[更多内容：next_offset={line_number}, next_cursor={cursor}]"
+        ));
+    }
+    Ok(Outcome::ok(text))
+}
+fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+    let path = args["path"].as_str().unwrap_or(".");
+    let base = util::in_workspace(&ctx.workspace, path)?;
+    if !base.is_dir() {
+        bail!("path is not a directory: {path}")
+    }
+    let recursive = args["recursive"] == true;
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(500).min(500) as usize;
+    let mut entries = vec![];
+    let mut seen = 0;
+    let mut used = 0;
+    let mut more = false;
+    let mut dirs = vec![base.clone()];
+    'walk: while let Some(dir) = dirs.pop() {
+        if ctx.cancel.is_cancelled() {
+            bail!("tool cancelled")
+        }
+        let mut children = fs::read_dir(&dir)?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        children.sort_by_key(|e| e.file_name());
+        let mut subdirs = vec![];
+        let mut files = vec![];
+        for e in children {
+            let kind = e.file_type()?;
+            if kind.is_dir() {
+                if util::SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref()) {
+                    continue;
+                }
+                if !util::is_link(&e.path()) {
+                    subdirs.push(e.path());
+                }
+            } else {
+                files.push(e.path());
+            }
+        }
+        for entry in subdirs
+            .iter()
+            .map(|p| (p, true))
+            .chain(files.iter().map(|p| (p, false)))
+        {
+            let relative = entry
+                .0
+                .strip_prefix(&base)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = if entry.1 {
+                format!("{relative}/")
+            } else {
+                relative
+            };
+            if seen >= offset {
+                if entries.len() >= limit || used + text.len() + 1 > 50 * 1024 - 100 {
+                    more = true;
+                    break 'walk;
+                }
+                used += text.len() + 1;
+                entries.push(text);
+            }
+            seen += 1;
+        }
+        if recursive {
+            dirs.extend(subdirs.into_iter().rev());
+        } else {
+            break;
+        }
+    }
+    entries.sort();
+    let mut text = entries.join("\n");
+    if recursive && text.len() > 8192 {
+        let mut rendered = vec![];
+        let mut previous: Vec<&str> = vec![];
+        for entry in &entries {
+            let parts = entry.trim_end_matches('/').split('/').collect::<Vec<_>>();
+            let n = if entry.ends_with('/') {
+                parts.len()
+            } else {
+                parts.len() - 1
+            };
+            let common = previous
+                .iter()
+                .zip(parts[..n].iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            for (depth, part) in parts.iter().enumerate().take(n).skip(common) {
+                rendered.push(format!("{}{part}/", "  ".repeat(depth)));
+            }
+            if n < parts.len() {
+                rendered.push(format!("{}{}", "  ".repeat(n), parts[n]));
+            }
+            previous = parts[..n].to_vec();
+        }
+        text = format!("目录树（缩进表示路径层级）：\n{}", rendered.join("\n"));
+    }
+    if more {
+        text.push_str(&format!(
+            "\n...[达到列表页上限；next_offset={}]",
+            offset + entries.len()
+        ));
+    }
+    Ok(bounded(text))
+}
+fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+    let pattern = util::string(args, "pattern")?;
+    let pattern = if args.get("case_sensitive").is_some_and(|v| v == false) {
+        format!("(?i){pattern}")
+    } else {
+        pattern.into()
+    };
+    let regex = fancy_regex::RegexBuilder::new(&pattern)
+        .backtrack_limit(1_000_000)
+        .build()
+        .context("invalid regex")?;
+    let raw = args["path"].as_str().unwrap_or(".");
+    let base = util::in_workspace(&ctx.workspace, raw)?;
+    if !base.is_dir() && !base.is_file() {
+        bail!("path is not a file or directory: {raw}")
+    }
+    let glob = args["glob"]
+        .as_str()
+        .map(globset::Glob::new)
+        .transpose()?
+        .map(|g| g.compile_matcher());
+    let max = args["max_results"].as_i64().unwrap_or(100).max(1) as usize;
+    let mut lines = vec![];
+    let start = Instant::now();
+    let files = util::walk(&base).filter(|e| e.file_type().is_file());
+    'files: for entry in files {
+        if ctx.cancel.is_cancelled() {
+            bail!("tool cancelled")
+        }
+        if start.elapsed().as_secs() > 30 {
+            bail!("search timed out; narrow path or glob and retry")
+        }
+        let path = entry.path();
+        let relative = if base.is_file() {
+            base.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            path.strip_prefix(&base)?
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        if glob.as_ref().is_some_and(|g| {
+            !g.is_match(&relative) && !g.is_match(path.file_name().unwrap_or_default())
+        }) {
+            continue;
+        }
+        if util::is_link(path) {
+            continue;
+        }
+        let Ok(file) = File::open(path) else { continue };
+        if file.metadata()?.len() == 0 {
+            continue;
+        }
+        // File-backed pages avoid copying an entire large file into the heap.
+        let mapped = unsafe { memmap2::Mmap::map(&file)? };
+        if mapped[..mapped.len().min(8192)].contains(&0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&mapped);
+        let mut number = 0;
+        let mut previous_cr = false;
+        for line in text.split([
+            '\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}',
+        ]) {
+            if ctx.cancel.is_cancelled() {
+                bail!("tool cancelled")
+            }
+            if start.elapsed().as_secs() > 30 {
+                bail!("search timed out; narrow path or glob and retry")
+            }
+            // CRLF counts as one line, as in the original universal-newline reader.
+            let start_offset = line.as_ptr() as usize - text.as_ptr() as usize;
+            let skipped_lf =
+                previous_cr && line.is_empty() && text.as_bytes().get(start_offset) == Some(&b'\n');
+            previous_cr = text.as_bytes().get(start_offset + line.len()) == Some(&b'\r');
+            if skipped_lf {
+                continue;
+            }
+            number += 1;
+            if regex.is_match(line)? {
+                let snippet = line.chars().take(500).collect::<String>();
+                lines.push(format!(
+                    "{relative}:{}: {snippet}{}",
+                    number,
+                    if line.chars().count() > 500 {
+                        "...[行已截断]"
+                    } else {
+                        ""
+                    }
+                ));
+                if lines.len() >= max {
+                    lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
+                    break 'files;
+                }
+            }
+        }
+    }
+    if lines.is_empty() {
+        Ok(Outcome::ok("(no matches)"))
+    } else {
+        Ok(bounded(lines.join("\n")))
+    }
+}
+fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+    let raw = util::string(args, "path")?;
+    let path = util::in_workspace(&ctx.workspace, raw)?;
+    let relative = path
+        .strip_prefix(&ctx.workspace)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if name == "edit" && !path.is_file() {
+        bail!("path is not a file: {relative} (use write to create a new file)")
+    }
+    if path.exists() && !path.is_file() {
+        bail!("path exists and is not a file: {relative}")
+    }
+    let size = if path.exists() {
+        path.metadata()?.len()
+    } else {
+        0
+    };
+    if name == "edit" && size > 256_000 {
+        return edit_large(&path, &relative, args, ctx);
+    }
+    let before = if path.exists() && size <= 256_000 {
+        fs::read_to_string(&path).context("binary or non-UTF-8 file")?
+    } else {
+        String::new()
+    };
+    let after = if name == "write" {
+        util::string(args, "content")?.to_string()
+    } else {
+        let old = util::string(args, "old_text")?;
+        let new = util::string(args, "new_text")?;
+        if old.is_empty() {
+            bail!("old_text must be nonempty")
+        }
+        let count = before.matches(old).count();
+        if count == 0 {
+            bail!("old_text not found in {relative}: file may have changed; re-read the file first")
+        }
+        if count > 1 && args["replace_all"] != true {
+            bail!(
+                "old_text matches {count} locations in {relative}; include more surrounding context to make it unique, or pass replace_all=true"
+            )
+        }
+        if args["replace_all"] == true {
+            before.replace(old, new)
+        } else {
+            before.replacen(old, new, 1)
+        }
+    };
+    if ctx.cancel.is_cancelled() {
+        bail!("tool cancelled")
+    }
+    util::atomic_write(&path, after.as_bytes())?;
+    if size > 256_000 || after.len() > 256_000 {
+        return Ok(Outcome::ok(format!(
+            "Applied write to {relative}; old={size} bytes, new={} bytes. Large diff omitted; use read pages to inspect.",
+            after.len()
+        )));
+    }
+    let lines = |text: &str| {
+        let text = text.replace("\r\n", "\n");
+        let rows = text
+            .split_terminator([
+                '\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}',
+                '\u{2029}',
+            ])
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            String::new()
+        } else {
+            rows.join("\n") + "\n"
+        }
+    };
+    let before_lines = lines(&before);
+    let after_lines = lines(&after);
+    let diff = similar::TextDiff::configure()
+        .algorithm(similar::Algorithm::Patience)
+        .timeout(Duration::from_secs(1))
+        .diff_lines(&before_lines, &after_lines);
+    let adds = diff
+        .iter_all_changes()
+        .filter(|c| c.tag() == similar::ChangeTag::Insert)
+        .count();
+    let dels = diff
+        .iter_all_changes()
+        .filter(|c| c.tag() == similar::ChangeTag::Delete)
+        .count();
+    let body = diff
+        .unified_diff()
+        .header(&format!("a/{relative}"), &format!("b/{relative}"))
+        .missing_newline_hint(false)
+        .to_string();
+    Ok(bounded(format!(
+        "Applied change to {relative} (+{adds} -{dels})\n{body}"
+    )))
+}
+fn edit_large(path: &Path, relative: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+    let old = util::string(args, "old_text")?;
+    let new = util::string(args, "new_text")?;
+    if old.is_empty() {
+        bail!("old_text must be nonempty")
+    }
+    let input = File::open(path)?;
+    let original = input.metadata()?;
+    // The mapped source is borrowed; no second heap copy of a large file.
+    let mapped = unsafe { memmap2::MmapOptions::new().map(&input)? };
+    let text = std::str::from_utf8(&mapped).context("binary or non-UTF-8 file")?;
+    let count = text.matches(old).count();
+    if count == 0 {
+        bail!("old_text not found in {relative}: file may have changed; re-read the file first")
+    }
+    if count > 1 && args["replace_all"] != true {
+        bail!(
+            "old_text matches {count} locations in {relative}; include more surrounding context to make it unique, or pass replace_all=true"
+        )
+    }
+    let parent = path.parent().context("invalid file path")?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    let mut position = 0;
+    let mut replacements = 0;
+    for (index, _) in text.match_indices(old) {
+        if ctx.cancel.is_cancelled() {
+            bail!("tool cancelled")
+        }
+        temp.write_all(&mapped[position..index])?;
+        temp.write_all(new.as_bytes())?;
+        position = index + old.len();
+        replacements += 1;
+        if args["replace_all"] != true {
+            break;
+        }
+    }
+    temp.write_all(&mapped[position..])?;
+    temp.as_file().sync_all()?;
+    temp.as_file().set_permissions(original.permissions())?;
+    drop(mapped);
+    drop(input);
+    let current = path.metadata()?;
+    if current.len() != original.len() || current.modified()? != original.modified()? {
+        bail!("file changed while editing {relative}; re-read and retry")
+    }
+    if ctx.cancel.is_cancelled() {
+        bail!("tool cancelled")
+    }
+    temp.persist(path).map_err(|e| e.error)?;
+    Ok(Outcome::ok(format!(
+        "Applied change to large file {relative} ({replacements} replacement(s)); old={} bytes, new={} bytes.",
+        original.len(),
+        path.metadata()?.len()
+    )))
+}
+pub fn shell(command: &str, cwd: &Path) -> Command {
+    #[cfg(windows)]
+    let mut cmd = {
+        let shell = if std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("pwsh.exe").exists()))
+        {
+            "pwsh"
+        } else {
+            "powershell"
+        };
+        let mut c = Command::new(shell);
+        static NULL_REDIRECT: OnceLock<regex::Regex> = OnceLock::new();
+        let command = NULL_REDIRECT
+            .get_or_init(|| regex::Regex::new(r"([12]?>>|[12]?>)\s*/dev/null\b").unwrap())
+            .replace_all(command, "${1}$$null");
+        c.args(["-NoProfile","-NonInteractive","-Command",&format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;{command}")]);
+        c.creation_flags(0x08000000);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("bash");
+        c.args(["-c", command]);
+        c.process_group(0);
+        c
+    };
+    if let Some(path) = util::bundled_path() {
+        cmd.env("PATH", path);
+    }
+    cmd.current_dir(cwd).stdin(Stdio::null()).kill_on_drop(true);
+    cmd
+}
+pub async fn kill_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        #[cfg(windows)]
+        {
+            let mut cmd = Command::new("taskkill.exe");
+            cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x08000000);
+            let _ = tokio::time::timeout(Duration::from_secs(5), cmd.status()).await;
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+pub async fn run_command(
+    command: &str,
+    cwd: &Path,
+    timeout: f64,
+    ctx: &ToolContext,
+) -> Result<Outcome> {
+    // Both handles share the same append-only disk capture. Child output cannot
+    // consume unbounded agent heap, and descendants cannot keep a pipe open.
+    let mut captured = tempfile::NamedTempFile::new()?;
+    let out = captured.as_file().try_clone()?;
+    let err = captured.as_file().try_clone()?;
+    let mut cmd = shell(command, cwd);
+    cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    let mut child = cmd.spawn().context("failed to start command")?;
+    let tree = match crate::command_process::ProcessTree::attach(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            kill_tree(&mut child).await;
+            return Err(error.context("failed to own command process tree"));
+        }
+    };
+    let started = Instant::now();
+    let mut live_position = 0u64;
+    let mut timed_out = false;
+    let mut quota = false;
+    let mut cancelled = false;
+    let mut exited = None;
+    let mut lingered = false;
+    let mut last_emit = Instant::now();
+    let status = loop {
+        if exited.is_none()
+            && let Some(status) = child.try_wait()?
+        {
+            exited = Some((Instant::now(), status));
+        }
+        if let Some((time, status)) = exited {
+            if !tree.active() {
+                break Some(status);
+            }
+            if time.elapsed() >= Duration::from_secs(2) {
+                lingered = true;
+                break Some(status);
+            }
+        }
+        if ctx.cancel.is_cancelled() {
+            cancelled = true;
+            kill_tree(&mut child).await;
+            break None;
+        }
+        if (timeout > 0.0 && started.elapsed().as_secs_f64() >= timeout)
+            || ctx.deadline.is_some_and(|d| Instant::now() >= d)
+        {
+            timed_out = true;
+            kill_tree(&mut child).await;
+            break None;
+        }
+        let size = captured.as_file().metadata()?.len();
+        if size > 100_000_000 {
+            quota = true;
+            kill_tree(&mut child).await;
+            break None;
+        }
+        if size > live_position && last_emit.elapsed() >= Duration::from_millis(250) {
+            if let Some(emit) = &ctx.output {
+                let mut f = File::open(captured.path())?;
+                f.seek(SeekFrom::Start(size.saturating_sub(8000)))?;
+                let mut bytes = vec![];
+                f.take(8000).read_to_end(&mut bytes)?;
+                let text = decode(&bytes);
+                emit(json!({"text":util::suffix(&text,2000)}));
+            }
+            live_position = size;
+            last_emit = Instant::now();
+        }
+        tokio::select! {_ = tokio::time::sleep(Duration::from_millis(50))=>{},_ = ctx.cancel.cancelled()=>{}}
+    };
+    drop(tree);
+    if cancelled {
+        bail!("tool cancelled")
+    }
+    let total = captured.as_file().metadata()?.len().min(100_000_000);
+    captured
+        .as_file_mut()
+        .seek(SeekFrom::Start(total.saturating_sub(256_000)))?;
+    let mut bytes = vec![];
+    captured
+        .as_file_mut()
+        .take(256_000)
+        .read_to_end(&mut bytes)?;
+    let decoded = decode(&bytes);
+    let preview = util::tail(&decoded, 2000, 50 * 1024 - 200);
+    let truncated = total > 256_000 || preview != decoded;
+    let mut outcome = Outcome::ok(preview);
+    if truncated {
+        let artifact = record_capture(&captured, ctx, total)?;
+        outcome.output = format!(
+            "...[output truncated; 完整输出见 [artifact:{artifact}]]\n{}",
+            outcome.output
+        );
+    }
+    outcome.exit_code = status.and_then(|s| s.code());
+    outcome.success = outcome.exit_code == Some(0) && !timed_out && !quota && !lingered;
+    if timed_out {
+        outcome.error = Some(format!("command timed out after {timeout}s and was killed"));
+    } else if lingered {
+        outcome.error = Some("shell exited but a descendant kept output open; capture was stopped and the command tree was killed".into());
+    } else if quota {
+        outcome.error = Some(
+            "command output exceeded capture quota and was killed; narrow or redirect output"
+                .into(),
+        );
+    } else if !outcome.success {
+        outcome.error = Some(format!(
+            "command exited with code {}",
+            outcome.exit_code.unwrap_or(-1)
+        ));
+    }
+    Ok(outcome)
+}
+fn record_capture(
+    captured: &tempfile::NamedTempFile,
+    ctx: &ToolContext,
+    total: u64,
+) -> Result<String> {
+    let artifact = format!("command_output_{}", &util::id()[..12]);
+    let dir = ctx.store.root().join("artifacts").join(&ctx.session);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{artifact}.txt"));
+    let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+    let mut source = captured.as_file().try_clone()?;
+    source.seek(SeekFrom::Start(0))?;
+    let mut source = source.take(total);
+    let mut buffer = vec![];
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = source.read(&mut chunk)?;
+        buffer.extend_from_slice(&chunk[..n]);
+        let mut end = 0;
+        while end < buffer.len() {
+            match std::str::from_utf8(&buffer[end..]) {
+                Ok(_) => {
+                    temp.write_all(&buffer[end..])?;
+                    end = buffer.len();
+                }
+                Err(error) => {
+                    let valid = end + error.valid_up_to();
+                    temp.write_all(&buffer[end..valid])?;
+                    end = valid;
+                    if let Some(length) = error.error_len() {
+                        temp.write_all("�".as_bytes())?;
+                        end += length;
+                    } else if n == 0 {
+                        temp.write_all("�".as_bytes())?;
+                        end = buffer.len();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        buffer.drain(..end);
+        if n == 0 {
+            break;
+        }
+    }
+    temp.as_file().sync_all()?;
+    temp.persist(&path).map_err(|e| e.error)?;
+    ctx.store.with(|c| {
+        c.execute(
+            "INSERT INTO artifacts VALUES(?,?,?,?,?)",
+            rusqlite::params![
+                ctx.session,
+                artifact,
+                "command_output",
+                format!("{artifact}.txt"),
+                util::now()
+            ],
+        )?;
+        Ok(())
+    })?;
+    Ok(artifact)
+}
+fn decode(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+    static ANSI: OnceLock<regex::Regex> = OnceLock::new();
+    ANSI.get_or_init(|| regex::Regex::new("\u{1b}\\[[0-9;]*m").unwrap())
+        .replace_all(&text, "")
+        .into_owned()
+}

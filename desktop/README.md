@@ -1,18 +1,17 @@
-# MiniCode Native Desktop 1.2
+# MiniCode Native Desktop 2.0
 
-MyGo 原生三栏 Coding Agent 工作台。窗口和控件由 Go 构建，Windows 使用 Direct3D 11 绘制；Python Agent 通过 NDJSON v2 继续提供模型、工具、权限、Skills、MCP 和持久会话。生产桌面端不启动 Electron、Chromium 或 WebView2。
+MyGo 原生三栏 Coding Agent 工作台。窗口和控件由 Go 构建，Windows 使用 Direct3D 11 绘制；Rust Agent 通过 NDJSON v2 继续提供模型、工具、权限、Skills、MCP 和持久会话。生产桌面端不启动 Electron、Chromium 或 WebView2。
 
-Windows 安装包包含 Python、Git，以及 CLI / Ink TUI 所用的 Node.js。安装、构建和校验见 [发行说明](../release/README.md)，实测数据见 [迁移验收与性能报告](../docs/native-desktop-report.md)。
+Windows 安装包包含 Rust Agent、Git，以及 CLI / Ink TUI 所用的 Node.js。安装、构建和校验见 [发行说明](../release/README.md)，实测数据见 [迁移验收与性能报告](../docs/native-desktop-report.md)。
 
 ## 源码运行
 
-需要 Windows、PowerShell 7、Go 1.27.1，以及安装了项目依赖的 Python。原生桌面端开发不需要 Node.js 或 Bun；开发终端 TUI 时仍需 Node.js。
+需要 Windows、PowerShell 7、Go 1.27.1，以及Rust stable。原生桌面端开发不需要 Node.js 或 Bun；开发终端 TUI 时仍需 Node.js。
 
 在仓库根目录执行：
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+cargo build --release --locked
 pwsh -NoProfile -File desktop/native/dev.ps1
 ```
 
@@ -40,7 +39,7 @@ pwsh -NoProfile -File desktop/native/build.ps1
 
 ## 数据与升级
 
-Python 配置和会话继续位于 `%USERPROFILE%\.minicode`，服务密钥仅由 Python 持久保存。旧版 Electron 的 workspace.json 和 Chromium Local Storage 偏好会从临时 LevelDB 副本导入，不改写旧文件。主题、缩放、面板状态、发送方式和输入历史随之迁移。
+Agent 配置和会话继续位于 `%USERPROFILE%\.minicode`，服务密钥仅由 Rust Agent 持久保存。旧版 Electron 的 workspace.json 和 Chromium Local Storage 偏好会从临时 LevelDB 副本导入，不改写旧文件。主题、缩放、面板状态、发送方式和输入历史随之迁移。
 
 原生偏好保存在 MyGo 用户数据目录中的 `native-preferences.json`，窗口位置、尺寸和最大化状态由 MyGo 保存。写入合并后落盘。安装包不携带个人配置或会话。
 
@@ -71,7 +70,7 @@ go test -count=1 ./...
 go vet ./...
 ```
 
-测试覆盖原生组件输入、组合状态、补全与撤销、排队移除、取消、弹层、菜单、会话路由、流式更新、Markdown、图片边界、Git 服务、更新设置和真实 Python 桥接。快照测试生成 28 张浅色/深色截图到 `output/native/`；模型滑条、权限选项、空白配置、最小窗口和 150% 缩放另有布局与交互检查。
+测试覆盖原生组件输入、组合状态、补全与撤销、排队移除、取消、弹层、菜单、会话路由、流式更新、Markdown、图片边界、Git 服务、更新设置和真实 Rust 桥接。快照测试生成 28 张浅色/深色截图到 `output/native/`；模型滑条、权限选项、空白配置、最小窗口和 150% 缩放另有布局与交互检查。
 
 实际窗口的隔离 fixture 和性能入口：
 
@@ -80,7 +79,7 @@ output/native/MiniCode.exe --fixture --fixture-page conversation --theme dark --
 output/native/MiniCode.exe --benchmark output/native/ui-latency.json
 ```
 
-`--fixture` 使用独立临时偏好和测试数据，不请求真实模型。`--benchmark` 测量状态/事件进入到原生视图构建的耗时；不代表模型响应或屏幕最终显示时间。最终包内 Python、CLI、Git、TUI 和窗口烟测使用 `release/smoke-native.ps1`。
+`--fixture` 使用独立临时偏好和测试数据，不请求真实模型。`--benchmark` 测量状态/事件进入到原生视图构建的耗时；不代表模型响应或屏幕最终显示时间。最终包内 Rust Agent、CLI、Git、TUI 和窗口烟测使用 `release/smoke-native.ps1`。
 
 ## 实现目录
 
@@ -94,13 +93,13 @@ native/markdown.go           Markdown、代码高亮与渲染缓存
 native/work.go               Git、文件树、预览与用量统计
 native/settings.go           服务、模型、权限与扩展设置
 native/updates.go            官方原生更新窗口和更新偏好
-native/internal/bridge       Go → Python NDJSON 客户端与进程生命周期
+native/internal/bridge       Go → Rust NDJSON 客户端与进程生命周期
 native/internal/workspace    Git 与文件服务
 native/internal/content      Myers Diff 与统一差异解析
 native/toolkit               可重放的 MyGo 编辑、动效与帧调度扩展
-bridge.py                    共享 Python AgentRuntime 桥接
+../agent/bridge.rs           共享 Rust AgentRuntime 桥接
 ```
 
 升级 MyGo 时运行 `native/toolkit/refresh-vendor.ps1`，审查扩展插入点并重新测试。该脚本恢复 caret 补全、按压缩放、列表横向滚动及 Windows 响应帧；动画按显示器刷新率调度，DWM 完成窗口合成，UI 线程不等待垂直空白。
 
-旧 `electron/`、`src/` 和 Vite 依赖保留用于迁移对照，`dev:legacy`、`build:legacy`、`test:legacy` 显式运行旧实现。它们不进入原生安装包。
+旧 Electron、Python 后端和 Python TUI 已清除，当前仓库只保留现用实现。

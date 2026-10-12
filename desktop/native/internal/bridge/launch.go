@@ -9,36 +9,32 @@ import (
 )
 
 func Launch(project, resources, userData string) *exec.Cmd {
-	env := environment("PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
+	env := os.Environ()
 	packaged := filepath.Join(resources, "runtime")
-	if _, err := os.Stat(filepath.Join(packaged, "bridge.py")); err == nil {
-		python := filepath.Join(packaged, "python")
-		exe := filepath.Join(python, "python.exe")
-		if runtime.GOOS != "windows" {
-			exe = filepath.Join(python, "bin", "python3")
-		}
-		cmd := exec.Command(exe, "-I", "-X", "utf8", "-u", filepath.Join(packaged, "bridge.py"))
+	name := "minicode"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if _, err := os.Stat(filepath.Join(packaged, name)); err == nil {
+		cmd := exec.Command(filepath.Join(packaged, name), "bridge")
 		cmd.Dir = userData
-		cmd.Env = without(env, "PYTHONHOME", "PYTHONPATH", "PATH")
+		cmd.Env = without(env, "PATH")
 		cmd.Env = append(cmd.Env, "PATH="+strings.Join([]string{
-			python, filepath.Join(python, "Scripts"), filepath.Join(packaged, "git", "cmd"), os.Getenv("PATH"),
+			filepath.Join(packaged, "git", "cmd"), filepath.Join(packaged, "node"), os.Getenv("PATH"),
 		}, string(os.PathListSeparator)))
 		hideWindow(cmd)
 		return cmd
 	}
-	python := filepath.Join(project, ".venv", "Scripts", "python.exe")
-	if runtime.GOOS != "windows" {
-		python = filepath.Join(project, ".venv", "bin", "python")
-	}
-	if _, err := os.Stat(python); err != nil {
-		python = os.Getenv("MINICODE_PYTHON")
-		if python == "" {
-			python = "python"
+	exe := os.Getenv("MINICODE_AGENT")
+	if exe == "" {
+		exe = filepath.Join(project, "target", "release", name)
+		if _, err := os.Stat(exe); err != nil {
+			exe = filepath.Join(project, "target", "debug", name)
 		}
 	}
-	cmd := exec.Command(python, "-u", filepath.Join(project, "desktop", "bridge.py"))
+	cmd := exec.Command(exe, "bridge")
 	cmd.Dir = project
-	cmd.Env = append(without(env, "PYTHONPATH"), "PYTHONPATH="+filepath.Join(project, "src"))
+	cmd.Env = env
 	hideWindow(cmd)
 	return cmd
 }

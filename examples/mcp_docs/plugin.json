@@ -1,13 +1,13 @@
 {
   "name": "docs",
   "version": "0.1.0",
-  "minicode_version": "1.3.2",
+  "minicode_version": "2.0.0",
   "enabled": true,
   "mcp_servers": [
     {
       "name": "docs",
-      "command": "$PYTHON",
-      "args": ["server.py", "../../../docs"],
+      "command": "node",
+      "args": ["server.mjs", "../../../docs"],
       "timeout_s": 20
     }
   ]

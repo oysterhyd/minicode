@@ -5,7 +5,7 @@
         {
           "name": "read",
           "arguments": {
-            "path": "user_profile.py"
+            "path": "user_profile.mjs"
           }
         }
       ]
@@ -15,9 +15,9 @@
         {
           "name": "edit",
           "arguments": {
-            "path": "user_profile.py",
-            "old_text": "        \"name\": user[\"nmae\"],  # BUG: typo, the real key is \"name\"",
-            "new_text": "        \"name\": user[\"name\"],"
+            "path": "user_profile.mjs",
+            "old_text": "user.nmae",
+            "new_text": "user.name"
           }
         }
       ]
@@ -27,15 +27,13 @@
         {
           "name": "bash",
           "arguments": {
-            "command": "python -m pytest test_user_profile.py -q"
+            "command": "node --test test_user_profile.test.mjs"
           }
         }
       ]
     },
     {
-      "text": "修复完成：把 user[\"nmae\"] 改为 user[\"name\"]。重新运行 pytest，全部用例通过。"
+      "text": "已修复并通过测试。"
     }
-  ],
-  "default_input_tokens": 120,
-  "default_output_tokens": 40
+  ]
 }

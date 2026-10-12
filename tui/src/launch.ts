@@ -13,7 +13,7 @@ export type LaunchSpec = {
 export function projectRootFrom(start: string): string | null {
   let current = start.startsWith('file:') ? path.dirname(fileURLToPath(start)) : start
   for (let depth = 0; depth < 8; depth++) {
-    if (fs.existsSync(path.join(current, 'desktop', 'bridge.py')) && fs.existsSync(path.join(current, 'src', 'minicode'))) {
+    if (fs.existsSync(path.join(current, 'Cargo.toml')) && fs.existsSync(path.join(current, 'agent', 'main.rs'))) {
       return current
     }
     const parent = path.dirname(current)
@@ -29,30 +29,25 @@ export function bridgeLaunch(options: {
   userData?: string
   environment?: NodeJS.ProcessEnv
 }): LaunchSpec {
-  const env: NodeJS.ProcessEnv = { ...options.environment, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }
+  const env: NodeJS.ProcessEnv = { ...options.environment }
   const resourcesPath = options.resourcesPath || env.MINICODE_RESOURCES
   if (resourcesPath) {
     const runtime = path.join(resourcesPath, 'runtime')
-    const python = path.join(runtime, 'python')
     const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') || 'PATH'
-    env[pathKey] = [python, path.join(python, 'Scripts'), path.join(runtime, 'git', 'cmd'), env[pathKey] || ''].join(path.delimiter)
-    delete env.PYTHONHOME
-    delete env.PYTHONPATH
+    env[pathKey] = [path.join(runtime, 'git', 'cmd'), path.join(runtime, 'node'), env[pathKey] || ''].join(path.delimiter)
     return {
-      file: path.join(python, process.platform === 'win32' ? 'python.exe' : 'python'),
-      args: ['-I', '-X', 'utf8', '-u', path.join(runtime, 'bridge.py')],
+      file: path.join(runtime, process.platform === 'win32' ? 'minicode.exe' : 'minicode'),
+      args: ['bridge'],
       cwd: options.userData || process.cwd(),
       env,
     }
   }
   const here = options.projectRoot || projectRootFrom(fileURLToPath(import.meta.url)) || process.cwd()
-  const venv = process.platform === 'win32'
-    ? path.join(here, '.venv', 'Scripts', 'python.exe')
-    : path.join(here, '.venv', 'bin', 'python')
-  env.PYTHONPATH = path.join(here, 'src')
+  const name = process.platform === 'win32' ? 'minicode.exe' : 'minicode'
+  const release = path.join(here, 'target', 'release', name)
   return {
-    file: env.MINICODE_PYTHON || (fs.existsSync(venv) ? venv : process.platform === 'win32' ? 'python' : 'python3'),
-    args: ['-u', path.join(here, 'desktop', 'bridge.py')],
+    file: env.MINICODE_AGENT || (fs.existsSync(release) ? release : path.join(here, 'target', 'debug', name)),
+    args: ['bridge'],
     cwd: here,
     env,
   }

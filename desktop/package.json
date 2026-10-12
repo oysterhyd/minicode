@@ -1,36 +1,11 @@
 {
   "name": "minicode-desktop",
-  "version": "1.3.2",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "test": "cd native && go test ./...",
     "dev": "pwsh -NoProfile -File native/dev.ps1",
     "build": "pwsh -NoProfile -File native/build.ps1",
-    "start": "pwsh -NoProfile -File native/dev.ps1",
-    "test:legacy": "node --test tests/*.test.cjs",
-    "dev:legacy": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron electron/main.cjs --dev\"",
-    "build:legacy": "tsc --noEmit && vite build"
-  },
-  "dependencies": {
-    "lowlight": "3.3.0",
-    "lucide-react": "^0.468.0",
-    "motion": "^13.4.2",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.0",
-    "@types/node": "^22.0.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.7.0",
-    "concurrently": "^9.1.0",
-    "electron": "^44.2.0",
-    "tailwindcss": "^4.1.0",
-    "typescript": "^5.8.0",
-    "vite": "^6.2.0",
-    "wait-on": "^8.0.0"
+    "start": "pwsh -NoProfile -File native/dev.ps1"
   }
 }

@@ -1,10 +1,17 @@
-id: pagination-demo
-title: 修复分页边界并保护测试
-max_fix_attempts: 3
-items:
-  - id: tests-pass
-    type: command
-    command: python -m pytest test_paginate.py -q
-  - id: tests-unchanged
-    type: protected
-    path: test_paginate.py
+{
+  "id": "pagination",
+  "title": "分页验收",
+  "max_fix_attempts": 3,
+  "items": [
+    {
+      "id": "tests",
+      "type": "command",
+      "command": "node --test test_paginate.test.mjs"
+    },
+    {
+      "id": "protected",
+      "type": "protected",
+      "path": "test_paginate.test.mjs"
+    }
+  ]
+}

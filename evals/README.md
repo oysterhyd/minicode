@@ -1,174 +1,18 @@
-# evals —— 本地任务评测集（20 任务，可离线运行）
+# 原生评测
 
-> 2026-09-23 更新：b1 已接入分层压缩与归档，b2 在此基础上增加验收失败续跑。
-> FakeProvider 的脚本 token 数仍不能衡量真实压缩收益。
+Rust 宿主 minicode eval 使用 20 个 Node.js 微型缺陷仓库及 3 个补充场景。Node.js 同时服务现有 Ink TUI，发行包没有额外解释器或 Python 评测依赖。
 
-这是一套完全离线的评测：20 个带 bug 的微型 Python 仓库，由 FakeProvider 重放
-确定性修复脚本驱动 `AgentRuntime`，runner 自己做验收（子进程跑验收命令、
-对比受保护文件哈希与允许修改范围、执行工作区外的隐藏测试），不依赖 goals 包、不需要模型密钥。
-
-## 目录结构
-
-```
-evals/
-├── generate_tasks.py        # 程序化生成全部 20 个任务（模板字典 → 任务目录）
-├── run_eval.py              # 三基线评测 runner
-├── README.md
-└── tasks/<task_id>/         # 提交在仓库里的生成产物（可再生）
-    ├── repo/                # 带 bug 的微型仓库：<module>.py + test_<module>.py
-    ├── task.yaml            # 任务定义（schema 见下，goals 模块兼容此格式）
-    └── script.json          # FakeProvider 修复脚本（read → edit → bash → 总结）
-hidden_tests/<task_id>/test_hidden.py  # 宿主侧验收，不复制到 Agent 工作区
+```powershell
+cargo build --release --locked
+.\target\release\minicode.exe eval --baselines b0,b1,b2 --concurrency 3 --output output/eval
+.\target\release\minicode.exe eval --tasks-dir evals/scenarios --baselines b0,b1,b2 --output output/scenarios
+node evals/verify-results.mjs output/eval output/scenarios
 ```
 
-每个任务的仓库刻意保持极小（每文件 < 40 行）：测试**先失败**（红），
-修复后全部通过（绿）。`generate_tasks.py` 从同一份模板字典同时生成源码与
-脚本的 `old_text`，保证 `edit` 精确命中；`python evals/generate_tasks.py
---verify` 会在临时目录里对每个任务做红→绿自检。
+B0 运行基本循环，B1 增加压缩，B2 收到独立验收失败反馈后继续修复。20 题各基线均应通过；counter_retry 在 B0/B1 失败、B2 通过，其余场景通过。
 
-## 运行方式
+--model <配置模型 ID> 启用真实模型；--repeats 3 --concurrency 1 --schedule alternating 控制重复与调度。真实调用使用用户配置的服务。每次尝试复制干净夹具，宿主独立检查测试、受保护文件和允许修改路径，最后执行工作区外隐藏断言。runs/.../record.json 保存完成记录；同配置重跑复用记录，配置或夹具变化拒绝混用。
 
-```bash
-# 全量三个标签（60 次运行，耗时取决于本机环境）
-PYTHONPATH=src .venv/Scripts/python.exe -m evals.run_eval
+输出 config.json、results.json、summary.md、每次尝试的工作区及 SQLite 日志。`node evals/generate-tasks.mjs --verify` 验证 20 题红→绿，generate-hidden.mjs 再生隐藏断言，scenarios/generate-trace.mjs 再生长日志。
 
-# 只跑部分基线 / 指定任务（两种调用方式等价）
-PYTHONPATH=src .venv/Scripts/python.exe -m evals.run_eval --baselines b0,b2 --output reports/eval-smoke
-.venv/Scripts/python.exe evals/run_eval.py --task pagination_bounds --task fib_seed
-
-# 调试：保留每个组合的工作区副本（输出在 <output>/workspaces/）
-PYTHONPATH=src .venv/Scripts/python.exe -m evals.run_eval --task queue_fifo --keep-workspaces
-```
-
-参数：`--tasks-dir`（默认 `evals/tasks`）、`--task <id>`（可重复，缺省全部）、
-`--baselines b0,b1,b2`、`--output`（默认 `reports/eval`）、`--keep-workspaces`。
-
-runner 会把启动解释器所在目录（venv 的 `Scripts/`）前置到子进程 PATH，
-保证 `bash` 与验收子进程里的 `python` / `pytest` 解析到同一套环境。
-
-## task.yaml schema
-
-```yaml
-id: pagination_bounds
-title: 分页边界：……
-prompt: |
-  <给模型的任务描述：现象 + 验收标准>
-allowed_paths: [paginate.py]
-protected_paths: [test_paginate.py]
-items:
-  - id: tests-pass
-    type: command
-    command: python -m pytest test_paginate.py -q
-  - id: tests-unchanged
-    type: protected
-    path: test_paginate.py
-budget: {max_rounds: 10, max_tokens: 80000, max_seconds: 120}
-max_fix_attempts: 3
-script: script.json
-```
-
-## 20 个任务
-
-| 任务 id | bug 类型 | 被测模块 | 验收命令 |
-|---|---|---|---|
-| pagination_bounds | 分页边界 | paginate.py | `python -m pytest test_paginate.py -q` |
-| loop_off_by_one | 循环差一 | sum_to_n.py | `python -m pytest test_sum_to_n.py -q` |
-| comparison_reversed | 比较运算符写反 | in_range.py | `python -m pytest test_in_range.py -q` |
-| string_format | 字符串格式化错误 | greeting.py | `python -m pytest test_greeting.py -q` |
-| dict_key_typo | dict 键名笔误 | user_profile.py | `python -m pytest test_user_profile.py -q` |
-| division_guard | 除零缺保护 | ratio.py | `python -m pytest test_ratio.py -q` |
-| weekday_math | 日期星期计算错 | weekday.py | `python -m pytest test_weekday.py -q` |
-| mutable_default | 可变默认参数 | cart.py | `python -m pytest test_cart.py -q` |
-| sort_key | 排序 key 错 | leaderboard.py | `python -m pytest test_leaderboard.py -q` |
-| missing_return | 缺 return | finder.py | `python -m pytest test_finder.py -q` |
-| float_rounding | 浮点舍入 | money.py | `python -m pytest test_money.py -q` |
-| empty_list_bounds | 空列表越界 | picker.py | `python -m pytest test_picker.py -q` |
-| regex_mismatch | 正则写错 | validator.py | `python -m pytest test_validator.py -q` |
-| unit_conversion | 单位换算错 | temperature.py | `python -m pytest test_temperature.py -q` |
-| dedup_logic | 去重逻辑错 | dedup.py | `python -m pytest test_dedup.py -q` |
-| min_max_reversed | min/max 写反 | boundary.py | `python -m pytest test_boundary.py -q` |
-| fib_seed | 斐波那契种子错 | fib.py | `python -m pytest test_fib.py -q` |
-| queue_fifo | 队列 FIFO 顺序错 | job_queue.py | `python -m pytest test_job_queue.py -q` |
-| slugify_unicode | slugify 中文/unicode 处理错 | slugify.py | `python -m pytest test_slugify.py -q` |
-| cache_ttl | 缓存 TTL 判断错 | cache_ttl.py | `python -m pytest test_cache_ttl.py -q` |
-
-## 基线定义
-
-每个 (task, baseline) 组合都从 `repo/` 的**干净副本**开始（禁止复用工作区），
-各自使用独立的 SqliteStore。所有基线共用任务 `budget` 与 `max_fix_attempts`。
-
-- **b0 —— 基础循环**：一次 `run_turn(prompt)`，无上下文压缩、无验收门。
-  结束后 runner 验收：验收命令退出码 0 且受保护文件哈希与运行前一致。
-- **b1 —— b0 + 上下文压缩**：按 CLI 的配置归档旧交互并保留可回读引用；每条结果记录
-  压缩次数和估算上下文缩减量。微型任务通常不会达到压缩阈值，因此 b0/b1 的结果可能相同。
-- **b2 —— b1 + 验收失败续跑**：`run_turn` 结束后 runner 验收；若失败且未超
-  `max_fix_attempts` 与预算（rounds/tokens），把失败详情（每个失败项 + 退出码 +
-  “必须修复，不得改受保护文件”）作为新一轮 `run_turn` 输入继续跑，每次续跑后
-  重新验收，最多 `max_fix_attempts` 次。这是 runner 的外层逻辑，没有装配运行时的
-  `GoalChecker` 或 `EvidenceLedger`；压缩器已接入 b1/b2，验收仍是 runner 外层逻辑。
-
-### 成功定义
-
-一次运行记为 **pass** 当且仅当：Agent 以 `completed` 结束、全部 `type: command`
-验收项退出码为 0、全部 `type: protected` 文件哈希未变、工作区改动只在
-`allowed_paths` 内，且宿主侧隐藏测试通过。隐藏测试仅在模型执行结束后运行，
-失败详情不会回填给 Agent。任务失败、超时、预算耗尽及续跑耗尽均计入分母。
-
-## 结果目录结构
-
-```
-<output>/
-├── results.json   # 结构化结果：generated_at / baselines / run_count / passed / records[]
-│                  # 每条 record: task, baseline, pass, exit_reason, attempts,
-│                  #             rounds, input_tokens, output_tokens, compactions,
-│                  #             estimated_context_reduction, seconds, error, hidden_pass
-├── summary.md     # 基线对照表 + 逐任务结果表 + 失败任务与退出原因 + 确定性失败分析
-└── workspaces/    # 仅 --keep-workspaces 时存在：<task>__<baseline>/workspace/
-```
-
-## 诚实说明：FakeProvider 评测度量的是 harness 机制，不是模型智力
-
-FakeProvider 按脚本重放固定的 `read → edit → bash → 总结`
-序列，模型"决定"的环节是被排除的。因此这套评测能回答的问题仅限于 harness
-层：脚本重放是否稳定、工作区是否干净隔离、预算是否生效、验收命令与受保护
-文件哈希是否被如实执行、b2 的续跑分支是否按预期触发、退出原因是否可区分。
-它**不能**回答"模型能不能独立修好 bug"——那需要接真实模型的在线评测。
-FakeProvider 的 usage 来自脚本或固定默认值，不随实际请求长度计算，因此这里的 token
-结果也不能证明上下文压缩、工具输出裁剪或缓存带来了费用下降。
-在当前脚本保证一次修复成功的设定下，b0/b1/b2 的成功率和轮数必然一致，b2 的
-续跑分支只在验收失败时才会产生差异（runner 的失败分析模板也照此措辞）。
-
-## 真实模型重复评测
-
-`python -m evals.run_real_eval --baselines b0,b2 --repeats 3 --output reports/eval-real`
-使用当前 CommandCode 配置和默认模型。运行会产生 API 用量；`--task <id>` 可先试跑单题。
-每次运行都复制干净的 `repo/`，保留独立 SQLite 会话、工作区、原始判分记录和汇总。
-默认一次仅运行一个任务，以减少网关并发排队对时长预算的干扰；可显式设置 `--concurrency`
-做吞吐实验，并在 `config.json` 记录它。B0/B2 按重复次数交替排列以减轻顺序偏差。
-已有 `record.json` 且模型与 fixture 指纹相同的运行不会重做；不完整运行目录会报错，
-避免在未知状态下覆盖 trace。
-
-真实模型 B0 使用基础循环；B2 增加与 CLI 相同的上下文压缩和 Runtime Goal 门。
-两组用相同模型、工具、自动允许策略、任务预算和独立宿主评分。宿主评分要求 Runtime
-返回 `completed`、验收命令通过、受保护文件未变化、修改只发生在 `allowed_paths`，
-并通过宿主侧隐藏测试。
-基础设施错误和未完成运行保留在分母。每条记录含退出原因、Token、耗时、会话 ID、
-任务与 prompt 指纹、Git 提交和失败原因。网关不提供 seed 时不宣称可逐 token 复现；
-没有经核实的当日价格表时费用记为未知，不用 token 量编造金额。
-
-这 20 个 fixture 都是微型单文件 bug，适合比较基本修复闭环；它们不测大仓库、
-跨文件功能开发或真实生产故障。另有 [补充场景](scenarios/README.md) 覆盖跨文件修复、
-长日志与验收失败续跑；恢复、路径边界、压缩和外部工具失败由独立机制测试覆盖。
-
-已保存的真实模型工作区可运行
-`python -m evals.rescore_hidden --output reports/eval-real-20260923`
-追加隐藏判分，不重复调用 API。逐条结果保留 `visible_pass`、`hidden_pass`、
-隐藏测试指纹和最终 `pass`；`hidden-rescore.json` 记录原始汇总摘要与本次测试集指纹。
-
-## 再生成
-
-```bash
-python evals/generate_tasks.py --verify   # 重新生成 20 个任务并跑红→绿自检
-```
-
-任务目录已提交；`generate_tasks.py` 幂等（覆盖式重写），可随时再生。
+Node 夹具保留原缺陷类别，旧 Python 真实模型分数不能当成新版分数。历史报告仅描述当时版本；本次证据见 [Rust 迁移报告](../docs/rust-agent-2.0.0.md)。

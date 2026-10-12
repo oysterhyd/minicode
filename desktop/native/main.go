@@ -16,7 +16,7 @@ import (
 	"minicode.desktop/internal/workspace"
 )
 
-const appVersion = "1.3.2"
+const appVersion = "2.0.0"
 
 func projectRoot() string {
 	if override := os.Getenv("MINICODE_PROJECT_ROOT"); override != "" {
@@ -24,7 +24,7 @@ func projectRoot() string {
 	}
 	dir, _ := os.Getwd()
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "desktop", "bridge.py")); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err == nil {
 			return dir
 		}
 		parent := filepath.Dir(dir)
@@ -43,7 +43,7 @@ func main() {
 	benchmark := flag.String("benchmark", "", "measure isolated native controller-to-view updates")
 	animationBenchmark := flag.String("animation-benchmark", "", "measure isolated native animation frame cadence")
 	capture := flag.String("capture", "", "capture the native window to a PNG and exit")
-	probe := flag.String("probe", "", "verify the installed native window and Python bridge")
+	probe := flag.String("probe", "", "verify the installed native window and Rust bridge")
 	fixturePage := flag.String("fixture-page", "home", "fixture state: home, conversation, approval, settings, files, diff")
 	theme := flag.String("theme", "", "override appearance for regression checks")
 	flag.Parse()

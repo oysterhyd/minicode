@@ -1,0 +1,62 @@
+[
+  {
+    "name": "/help",
+    "usage": "/help",
+    "summary": "显示本帮助"
+  },
+  {
+    "name": "/model",
+    "usage": "/model [名称]",
+    "summary": "查看或切换活跃模型（z.ai/glm-5.3-flash 等）"
+  },
+  {
+    "name": "/effort",
+    "usage": "/effort [off|low|medium|high|xhigh|max]",
+    "summary": "调整推理预算（reasoning effort，六档）"
+  },
+  {
+    "name": "/permissions",
+    "usage": "/permissions [default|accept_edits|bypass]",
+    "summary": "查看或切换权限模式"
+  },
+  {
+    "name": "/clear",
+    "usage": "/clear",
+    "summary": "清空屏幕显示（保留会话上下文）"
+  },
+  {
+    "name": "/new",
+    "usage": "/new",
+    "summary": "彻底重置上下文，开启全新会话"
+  },
+  {
+    "name": "/compact",
+    "usage": "/compact",
+    "summary": "手动压缩当前会话上下文"
+  },
+  {
+    "name": "/skill",
+    "usage": "/skill [名称|off 名称]",
+    "summary": "列出、激活或停用本地技能"
+  },
+  {
+    "name": "/sessions",
+    "usage": "/sessions",
+    "summary": "列出历史会话"
+  },
+  {
+    "name": "/resume",
+    "usage": "/resume <会话ID8>",
+    "summary": "恢复一个历史会话"
+  },
+  {
+    "name": "/continue",
+    "usage": "/continue",
+    "summary": "从上次暂停处继续未完成任务"
+  },
+  {
+    "name": "/exit",
+    "usage": "/exit",
+    "summary": "退出（或 Ctrl+Q / Ctrl+C 两次）"
+  }
+]

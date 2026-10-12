@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="desktop/public/app-mark.svg" width="88" alt="MiniCode logo" />
+<img src="desktop/native/assets/app-mark.svg" width="88" alt="MiniCode logo" />
 
 # MiniCode
 
@@ -44,7 +44,7 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
    API key 和模型 ID，测试连接并选择默认模型。
 3. 打开本地项目，输入任务描述。按提示审查修改或命令，并查看执行结果。
 
-安装版适用于 **Windows 10/11 x64**，内置 Python、Git、Node.js 和桌面端/终端界面依赖，
+安装版适用于 **Windows 10/11 x64**，内置 Rust Agent、Git、Node.js 和桌面端/终端界面依赖，
 `minicode chat` / `run` / `tui` 均可直接使用。项目需要的编译器、语言 SDK
 和测试依赖仍由项目自身提供。
 
@@ -70,7 +70,7 @@ Windows 安装版在安装目录提供 `minicode.cmd`。在该目录打开 Power
 .\minicode.cmd tui --workspace "C:\projects\my-app"
 ```
 
-CLI 与桌面端共用已添加的 AI 服务和会话。通过 Python 安装后，使用 `minicode` 调用同样的命令。
+CLI 与桌面端共用已添加的 AI 服务和会话。源码构建后，使用 `target/release/minicode`（Windows 为 `.exe`）调用同样的命令。
 
 ## 功能介绍
 
@@ -125,26 +125,26 @@ MiniCode 在所选工作区内运行代码工具，并在本机保存会话、�
 ## 平台与支持范围
 
 - **Windows**：提供 Desktop + CLI 安装包。
-- **Windows / Linux**：CLI 通过 Python 安装，CI 覆盖 Python 3.11 与 3.12。
+- **Windows / Linux**：原生 Rust CLI 与 Ink TUI，CI 覆盖两种平台。
 - **macOS**：目前没有发行安装包或专门的 CI 验证。
-- **MCP**：当前支持本地 stdio 工具；远程 HTTP、OAuth 和插件自动安装尚未提供。
+- **MCP**：支持 stdio、Streamable HTTP、SSE；OAuth 和插件自动安装尚未提供。
 - **后台任务**：支持当前进程内的后台命令；跨进程持久后台服务和多 worker worktree 调度尚未提供。
 
 ## 源码安装与开发
 
-CLI 要求 **Python 3.11+**；TUI 开发需要 **Node.js 22+**；原生 Desktop 开发需要 **Go 1.27.1 和 PowerShell 7**。
+CLI 要求 **Rust stable**；TUI 开发需要 **Node.js 22+**；原生 Desktop 开发需要 **Go 1.27.1 和 PowerShell 7**。
 
 ```bash
 git clone https://github.com/oysterhyd/minicode.git
 cd minicode
-python -m venv .venv
+cargo build --release --locked
 ```
 
-激活虚拟环境后安装依赖：
+构建后的原生 CLI：
 
 ```bash
-python -m pip install -e ".[dev]"
-minicode --help
+./target/release/minicode --help
+# Windows: .\target\release\minicode.exe --help
 ```
 
 启动终端 TUI 开发环境：
@@ -152,7 +152,7 @@ minicode --help
 ```bash
 npm ci --prefix tui
 npm run build --prefix tui
-minicode tui --provider fake
+./target/release/minicode tui --provider fake
 ```
 
 TUI 使用紧凑对话布局和底部输入区。`Ctrl+J` 换行，`Ctrl+O` 展开工具输出，
@@ -168,7 +168,9 @@ pwsh -NoProfile -File desktop/native/dev.ps1
 运行测试：
 
 ```bash
-python -m pytest tests
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+node --test tests/agent/*.test.mjs
 npm test --prefix tui
 cd desktop/native
 go test -count=1 ./...
@@ -183,6 +185,7 @@ Windows 安装包的构建入口位于 [`release/`](release/README.md)，桌面�
 | --- | --- |
 | [安装与发行](release/README.md) | 安装说明、CLI 入口、构建和校验。 |
 | [桌面端](desktop/README.md) | 工作台、模型管理、权限、快捷键与开发。 |
+| [Rust 迁移报告](docs/rust-agent-2.0.0.md) | 全后端迁移、旧实现清理、兼容性及体积与性能实测。 |
 | [原生迁移报告](docs/native-desktop-report.md) | 安装包体积、实测响应、Diff 性能与验收范围。 |
 | [1.3.2 优化报告](docs/performance-1.3.2.md) | 功能审查、代码简化、耗时、分配及发行体积。 |
 | [架构](docs/architecture.md) | 运行核心、工具、会话存储与扩展契约。 |

@@ -1,0 +1,68 @@
+[
+  {
+    "name": "explore",
+    "label": "探索者",
+    "description": "调查项目结构，定位文件和实现，报告证据。",
+    "tools": [
+      "read",
+      "ls",
+      "grep",
+      "read_artifact"
+    ],
+    "instructions": "查找与任务相关的实现，给出文件路径和发现。"
+  },
+  {
+    "name": "review",
+    "label": "代码审查员",
+    "description": "审查具体改动的正确性、边界情况和回归风险。",
+    "tools": [
+      "read",
+      "ls",
+      "grep",
+      "read_artifact"
+    ],
+    "instructions": "审查指定代码，只报告可验证的问题和证据。"
+  },
+  {
+    "name": "test-runner",
+    "label": "测试执行者",
+    "description": "执行指定测试或构建，分析失败原因。",
+    "tools": [
+      "read",
+      "ls",
+      "grep",
+      "bash"
+    ],
+    "instructions": "运行与任务相关的测试或构建，报告命令、结果和失败原因。"
+  },
+  {
+    "name": "fixer",
+    "label": "修复者",
+    "description": "根据具体任务实现完整的代码修复。",
+    "tools": [
+      "read",
+      "ls",
+      "grep",
+      "read_artifact",
+      "bash",
+      "edit",
+      "write"
+    ],
+    "instructions": "先检查相关代码，完成最小完整修复，验证后报告改动和证据。"
+  },
+  {
+    "name": "ui-designer",
+    "label": "UI 设计师",
+    "description": "实现界面和交互，检查布局、可访问性与状态。",
+    "tools": [
+      "read",
+      "ls",
+      "grep",
+      "read_artifact",
+      "bash",
+      "edit",
+      "write"
+    ],
+    "instructions": "沿用项目视觉风格，实现任务要求的界面和交互，并验证布局。"
+  }
+]

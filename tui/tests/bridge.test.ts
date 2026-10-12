@@ -7,24 +7,23 @@ import { spawn } from 'node:child_process'
 import { BridgeClient } from '../src/bridge.js'
 import { bridgeLaunch } from '../src/launch.js'
 
-test('packaged launch uses isolated python and writable cwd', () => {
-  const environment = { Path: 'system-tools', PYTHONHOME: 'foreign-python', PYTHONPATH: 'foreign-modules', ANTHROPIC_API_KEY: 'test-key' }
+test('packaged launch uses the native agent and writable cwd', () => {
+  const environment = { Path: 'system-tools', ANTHROPIC_API_KEY: 'test-key' }
   const launch = bridgeLaunch({ resourcesPath: '/installed/resources', userData: '/profile', environment })
-  assert.equal(launch.file, path.join('/installed/resources/runtime/python', process.platform === 'win32' ? 'python.exe' : 'python'))
+  assert.equal(launch.file, path.join('/installed/resources/runtime', process.platform === 'win32' ? 'minicode.exe' : 'minicode'))
   assert.equal(launch.cwd, '/profile')
-  assert.deepEqual(launch.args.slice(0, 4), ['-I', '-X', 'utf8', '-u'])
-  assert.equal(launch.env.PYTHONHOME, undefined)
-  assert.equal(launch.env.PYTHONPATH, undefined)
+  assert.deepEqual(launch.args, ['bridge'])
+  assert.deepEqual(launch.env.Path?.split(path.delimiter), [path.join('/installed/resources/runtime', 'git', 'cmd'), path.join('/installed/resources/runtime', 'node'), 'system-tools'])
   assert.equal(launch.env.ANTHROPIC_API_KEY, 'test-key')
 })
 
-test('source launch uses the Python interpreter selected by the CLI', () => {
+test('source launch uses the native backend selected by the CLI', () => {
   const launch = bridgeLaunch({
     projectRoot: '/checkout',
-    environment: { MINICODE_PYTHON: '/selected/python' },
+    environment: { MINICODE_AGENT: '/selected/minicode' },
   })
-  assert.equal(launch.file, '/selected/python')
-  assert.equal(launch.env.PYTHONPATH, path.join('/checkout', 'src'))
+  assert.equal(launch.file, '/selected/minicode')
+  assert.deepEqual(launch.args, ['bridge'])
 })
 
 test('NDJSON client maps ids and events', async () => {

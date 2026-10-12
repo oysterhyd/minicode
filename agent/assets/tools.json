@@ -1,0 +1,473 @@
+[
+  {
+    "name": "read",
+    "description": "Read a bounded page of any-size UTF-8 file with line numbers. Use next_offset and next_cursor from the result to continue, including through a single very long line. Also reads PNG, JPEG, GIF and WebP images and returns their actual image content when the current model supports images.",
+    "input_schema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "offset": {
+          "default": 1,
+          "description": "1-based line number of the first line to return",
+          "minimum": 1,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "maximum number of lines to return",
+          "title": "Limit"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "opaque next_cursor from a previous page",
+          "title": "Cursor"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "bash",
+    "description": "Run a shell command inside the workspace (PowerShell on Windows, bash elsewhere) and return its combined output and exit code. Foreground commands are killed after timeout_s (default 300s, capped at 3600s) so a stuck shell cannot block the turn; set timeout_s to raise the bound. Set background=true to start the command as a background job instead: it returns a job_id immediately, runs without the default bound (timeout_s still applies when given) and its result is delivered by the system once the job completes. Output shows the last 2,000 lines or 50 KiB, with complete output in an artifact. Requires approval.",
+    "input_schema": {
+      "properties": {
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "timeout_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout S"
+        },
+        "cwd": {
+          "default": ".",
+          "title": "Cwd",
+          "type": "string"
+        },
+        "background": {
+          "default": false,
+          "title": "Background",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "requires_approval": true
+  },
+  {
+    "name": "edit",
+    "description": "Replace exact text in an existing file and return a unified diff. Refuses missing matches and (unless replace_all) ambiguous matches instead of guessing.",
+    "input_schema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "old_text": {
+          "description": "exact text to replace; must match the file exactly",
+          "minLength": 1,
+          "title": "Old Text",
+          "type": "string"
+        },
+        "new_text": {
+          "description": "replacement text",
+          "title": "New Text",
+          "type": "string"
+        },
+        "replace_all": {
+          "default": false,
+          "description": "replace every occurrence instead of failing on ambiguous matches",
+          "title": "Replace All",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ],
+      "type": "object"
+    },
+    "requires_approval": true
+  },
+  {
+    "name": "write",
+    "description": "Create a new file or overwrite an existing one with the given content, returning a unified diff against the previous state. Prefer edit for changing existing files.",
+    "input_schema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "content": {
+          "description": "full file content; overwrites existing files",
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "requires_approval": true
+  },
+  {
+    "name": "ls",
+    "description": "List up to 500 entries in one directory (50 KiB UTF-8 maximum). Set recursive=true to descend; large recursive results use an indented tree to avoid repeating path prefixes. Use next_offset to continue.",
+    "input_schema": {
+      "properties": {
+        "path": {
+          "default": ".",
+          "title": "Path",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "description": "zero-based entry offset for paging",
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "limit": {
+          "default": 500,
+          "description": "entries in one page",
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "recursive": {
+          "default": false,
+          "description": "descend into subdirectories (default: false)",
+          "title": "Recursive",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "grep",
+    "description": "Search file contents in the workspace with a regular expression and return 'path:line: text' match lines (100 by default, 50 KiB maximum). Path may be a file or directory; case-sensitive by default. Set case_sensitive=false for case-insensitive search.",
+    "input_schema": {
+      "properties": {
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "path": {
+          "default": ".",
+          "title": "Path",
+          "type": "string"
+        },
+        "glob": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Glob"
+        },
+        "max_results": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Results"
+        },
+        "case_sensitive": {
+          "default": true,
+          "title": "Case Sensitive",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "read_artifact",
+    "description": "Read a page from a session artifact referenced as [artifact:<id>]. Use offset from the previous page's next_offset to continue. Artifacts from other sessions are never accessible.",
+    "input_schema": {
+      "properties": {
+        "artifact_id": {
+          "description": "artifact id from [artifact:<id>]",
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "description": "zero-based character offset",
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "limit": {
+          "default": 4000,
+          "description": "characters to return",
+          "maximum": 20000,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_id"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "skills_list",
+    "description": "List available local skills by name and description. Skill bodies are not loaded.",
+    "input_schema": {
+      "properties": {},
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "skill_load",
+    "description": "Activate a named skill and read its instructions. Activation does not grant tool permissions.",
+    "input_schema": {
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "skill_unload",
+    "description": "Deactivate a previously loaded skill for this session.",
+    "input_schema": {
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "skill_resource",
+    "description": "Read a file inside a registered skill directory; scripts still require normal bash approval.",
+    "input_schema": {
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "delegate",
+    "description": "Delegate a bounded task to an assistant with its configured tools and the parent permission policy. Available kinds: explore, review",
+    "input_schema": {
+      "properties": {
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "task": {
+          "minLength": 1,
+          "title": "Task",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "task"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "task_create",
+    "description": "Add a durable session task; dependencies must already exist.",
+    "input_schema": {
+      "properties": {
+        "task_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "title": "Depends On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "task_id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "task_list",
+    "description": "List durable tasks, dependencies, owners and statuses in this session.",
+    "input_schema": {
+      "properties": {},
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "task_claim",
+    "description": "Claim one ready task for the current agent; blocked dependencies cannot be claimed.",
+    "input_schema": {
+      "properties": {
+        "task_id": {
+          "minLength": 1,
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "task_complete",
+    "description": "Finish a task claimed by this agent; success unblocks dependents.",
+    "input_schema": {
+      "properties": {
+        "task_id": {
+          "minLength": 1,
+          "title": "Task Id",
+          "type": "string"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "task_id",
+        "ok"
+      ],
+      "type": "object"
+    },
+    "requires_approval": false
+  },
+  {
+    "name": "memory_list",
+    "description": "Recall user-saved stable project facts with their sources and scopes. Optional path filters relevant facts.",
+    "input_schema": {
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        }
+      },
+      "type": "object"
+    },
+    "requires_approval": false
+  }
+]

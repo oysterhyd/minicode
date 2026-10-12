@@ -1,0 +1,67 @@
+
+:root{--bg:#0d1117;--panel:#161b22;--deep:#010409;--border:#30363d;
+--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--green:#3fb950;
+--red:#f85149;--yellow:#d29922;--purple:#bc8cff;--cyan:#39c5cf;}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--text);
+font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",
+"PingFang SC","Microsoft YaHei",sans-serif;}
+.wrap{max-width:980px;margin:0 auto;padding:24px 16px 48px;}
+h1{font-size:20px;margin:0 0 12px;}
+h2{font-size:16px;margin:0 0 10px;color:var(--accent);}
+h3{font-size:14px;margin:12px 0 6px;color:var(--text);}
+.panel{background:var(--panel);border:1px solid var(--border);
+border-radius:8px;padding:14px 16px;margin:0 0 16px;}
+table{border-collapse:collapse;width:100%;}
+th,td{text-align:left;padding:4px 12px 4px 0;vertical-align:top;}
+.meta th{color:var(--muted);font-weight:400;white-space:nowrap;width:90px;}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono",
+"Courier New",monospace;font-size:12.5px;background:var(--deep);
+border:1px solid var(--border);border-radius:4px;padding:1px 5px;
+word-break:break-all;}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono",
+"Courier New",monospace;font-size:12.5px;word-break:break-all;}
+.muted{color:var(--muted);}
+.badge{display:inline-block;border-radius:10px;padding:1px 9px;
+font-size:12px;font-weight:600;border:1px solid;white-space:nowrap;}
+.b-start{color:var(--accent);border-color:var(--accent);}
+.b-round{color:var(--muted);border-color:var(--border);}
+.b-assistant{color:var(--purple);border-color:var(--purple);}
+.b-tool{color:var(--accent);border-color:var(--accent);}
+.b-ok{color:var(--green);border-color:var(--green);}
+.b-fail{color:var(--red);border-color:var(--red);}
+.b-approval{color:var(--yellow);border-color:var(--yellow);}
+.b-end{color:var(--purple);border-color:var(--purple);}
+.b-compact{color:var(--cyan);border-color:var(--cyan);}
+.b-goal{color:var(--green);border-color:var(--green);}
+.b-warn{color:var(--yellow);border-color:var(--yellow);}
+.b-bg{color:var(--cyan);border-color:var(--cyan);}
+.timeline{display:flex;flex-direction:column;gap:8px;}
+.event{background:var(--panel);border:1px solid var(--border);
+border-left:3px solid var(--border);border-radius:6px;padding:8px 12px;}
+.event.ok{border-left-color:var(--green);}
+.event.fail{border-left-color:var(--red);}
+.ev-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+.ev-type{color:var(--muted);background:none;border:none;padding:0;}
+.ev-time{color:var(--muted);font-size:12px;}
+.ev-body{margin-top:6px;}
+.kv{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;}
+.kv .k{color:var(--muted);min-width:60px;}
+.pass{color:var(--green);font-weight:600;}
+.notpass{color:var(--red);font-weight:600;}
+.err{color:var(--red);}
+.msg-text{white-space:pre-wrap;word-break:break-word;}
+pre{background:var(--deep);border:1px solid var(--border);
+border-radius:6px;padding:8px 10px;overflow-x:auto;white-space:pre;
+margin:6px 0;font-family:ui-monospace,SFMono-Regular,Consolas,
+"Cascadia Mono","Courier New",monospace;font-size:12.5px;}
+details{margin-top:6px;}
+summary{cursor:pointer;color:var(--accent);}
+summary:hover{text-decoration:underline;}
+.d-add{color:var(--green);}
+.d-del{color:var(--red);}
+.d-hunk{color:var(--cyan);}
+.d-meta{color:var(--muted);font-weight:600;}
+.goal-table th{color:var(--muted);font-weight:400;
+border-bottom:1px solid var(--border);}
+.goal-table td{border-bottom:1px solid var(--border);}

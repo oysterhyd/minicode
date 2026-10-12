@@ -1,0 +1,1 @@
+export function finalStatus(lines,id){const marker=`request=${id} `;for(const line of lines){if(line.includes(marker)&&line.includes("status="))return line.split("status=")[1].split(/\s/)[0]}return null}

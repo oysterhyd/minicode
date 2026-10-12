@@ -127,7 +127,7 @@ func run() error {
 	if actual != expected {
 		return fmt.Errorf("installed executable does not match signed release")
 	}
-	if _, err = os.Stat(filepath.Join(target, "runtime", "python", "python.exe")); err != nil {
+	if _, err = os.Stat(filepath.Join(target, "runtime", "minicode.exe")); err != nil {
 		return err
 	}
 	mygo.App.SetVersion(good.Version)

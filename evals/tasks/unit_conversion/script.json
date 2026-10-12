@@ -5,7 +5,7 @@
         {
           "name": "read",
           "arguments": {
-            "path": "temperature.py"
+            "path": "temperature.mjs"
           }
         }
       ]
@@ -15,9 +15,9 @@
         {
           "name": "edit",
           "arguments": {
-            "path": "temperature.py",
-            "old_text": "    return celsius * 9 / 5 + 30  # BUG: offset should be 32",
-            "new_text": "    return celsius * 9 / 5 + 32"
+            "path": "temperature.mjs",
+            "old_text": "c*9/5+30",
+            "new_text": "c*9/5+32"
           }
         }
       ]
@@ -27,15 +27,13 @@
         {
           "name": "bash",
           "arguments": {
-            "command": "python -m pytest test_temperature.py -q"
+            "command": "node --test test_temperature.test.mjs"
           }
         }
       ]
     },
     {
-      "text": "修复完成：把 + 30 改为 + 32。重新运行 pytest，全部用例通过。"
+      "text": "已修复并通过测试。"
     }
-  ],
-  "default_input_tokens": 120,
-  "default_output_tokens": 40
+  ]
 }

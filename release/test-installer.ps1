@@ -30,13 +30,12 @@ try {
     $setup = Start-Process -FilePath $installer -ArgumentList "/S /D=$target" -WindowStyle Hidden -PassThru
     if (-not $setup.WaitForExit(60000)) { $setup.Kill(); throw 'Silent install timed out' }
     if ($setup.ExitCode -ne 0) { throw "Silent install failed ($($setup.ExitCode))" }
-    foreach ($file in @('MiniCode.exe','Uninstall.exe','minicode.cmd','runtime/python/python.exe','runtime/node/node.exe')) {
+    foreach ($file in @('MiniCode.exe','Uninstall.exe','minicode.cmd','runtime/minicode.exe','runtime/node/node.exe')) {
         if (-not (Test-Path -LiteralPath (Join-Path $target $file))) { throw "Installer missing $file" }
     }
     if ((Get-FileHash (Join-Path $target 'MiniCode.exe')).Hash -ne (Get-FileHash (Join-Path $source 'MiniCode.exe')).Hash) { throw 'Installed executable differs' }
     if ((Get-ItemProperty -LiteralPath $registry).InstallLocation -ne $target) { throw 'Incorrect uninstall registration' }
-    $python = Join-Path $source 'runtime/python/python.exe'
-    & $python -I -X utf8 (Join-Path $PSScriptRoot 'verify-shortcut.py') $shortcuts[0] (Join-Path $target 'MiniCode.exe')
+    & (Join-Path $PSScriptRoot 'verify-shortcut.ps1') -Shortcut $shortcuts[0] -Expected (Join-Path $target 'MiniCode.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Incorrect Start Menu shortcut' }
     & (Join-Path $PSScriptRoot 'smoke-native.ps1') -Installation $target
     [pscustomobject]@{version=$version; unicode_space_path=$true; executable_matches=$true; start_menu=$true; uninstall_registration=$true; runtime_smoke=$true} | ConvertTo-Json | Set-Content (Join-Path $scratch 'installer-verification.json') -Encoding utf8

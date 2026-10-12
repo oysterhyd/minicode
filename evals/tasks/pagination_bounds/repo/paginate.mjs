@@ -1,0 +1,1 @@
+export function slicePage(items,page=1,pageSize=10){if(page<1)throw Error("page must be >= 1");const start=(page-1)*pageSize;const end=start+pageSize+1;return [items.slice(start,end),end<items.length]}

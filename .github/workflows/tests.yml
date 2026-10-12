@@ -4,44 +4,45 @@ on:
   push:
   pull_request:
 
-env:
-  PYTHONUTF8: '1'
-  PYTHONIOENCODING: utf-8
+defaults:
+  run:
+    shell: pwsh
 
 jobs:
-  pytest:
+  agent:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ['3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install verified Windows dependency snapshot
-        if: matrix.os == 'windows-latest' && matrix.python-version == '3.12'
-        run: python -m pip install -r requirements-windows-py312.lock
-      - name: Install package and test dependencies
-        if: matrix.os != 'windows-latest' || matrix.python-version != '3.12'
-        run: python -m pip install -e ".[dev]"
-      - name: Run deterministic tests
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.0'
+      - name: Check and build native agent
         run: |
-          python -c "from pathlib import Path; Path('.pytest_cache').mkdir(exist_ok=True)"
-          python -m pytest tests --basetemp .pytest_cache/ci-temp -q
-      - name: Verify evaluation fixtures
-        run: python evals/generate_tasks.py --verify
-      - name: Verify long-log fixture is reproducible
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --locked
+      - name: Integration and portable evaluation
+        env:
+          MINICODE_AGENT: ${{ github.workspace }}/target/debug/minicode${{ runner.os == 'Windows' && '.exe' || '' }}
         run: |
-          python evals/scenarios/generate_trace.py
-          git diff --exit-code -- evals/scenarios/log_context/repo/trace.log
-      - name: Build installable wheel
-        run: python -m pip wheel . --no-deps --wheel-dir dist
-      - name: Verify bundled evaluation outside checkout
-        if: matrix.os == 'windows-latest' && matrix.python-version == '3.12'
-        run: python tests/wheel_smoke.py
+          $PSNativeCommandUseErrorActionPreference = $true
+          node --test tests/agent/*.test.mjs
+          node evals/generate-tasks.mjs --verify
+          node evals/scenarios/generate-trace.mjs
+          git diff --exit-code -- evals/tasks evals/scenarios/log_context/repo/trace.log
+          ${{ github.workspace }}/target/debug/minicode${{ runner.os == 'Windows' && '.exe' || '' }} eval --baselines b0,b1,b2 --concurrency 3 --output output/eval
+          ${{ github.workspace }}/target/debug/minicode${{ runner.os == 'Windows' && '.exe' || '' }} eval --tasks-dir evals/scenarios --baselines b0,b1,b2 --concurrency 3 --output output/scenarios
+          node evals/verify-results.mjs output/eval output/scenarios
 
   tui:
     runs-on: ${{ matrix.os }}
@@ -51,17 +52,18 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-      - name: Install and test Ink TUI
+          node-version: '22.22.0'
+      - name: Build and test Ink with real Rust bridge
         env:
           MINICODE_TUI_BRIDGE_TEST: '1'
+          MINICODE_AGENT: ${{ github.workspace }}/target/debug/minicode${{ runner.os == 'Windows' && '.exe' || '' }}
         run: |
-          python -m pip install -e ".[dev]"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo build --locked
           npm ci --prefix tui
           npm run build --prefix tui
           npm test --prefix tui
@@ -70,19 +72,23 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27.1'
           cache-dependency-path: desktop/native/go.sum
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install shared Agent runtime
-        run: python -m pip install -e ".[dev]"
-      - name: Verify native UI, workspace and Python bridge
+      - name: Build shared Rust agent
+        run: cargo build --locked
+      - name: Verify native UI, workspace and Rust bridge
+        env:
+          MINICODE_AGENT: ${{ github.workspace }}/target/debug/minicode.exe
         working-directory: desktop/native
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           go test -count=1 ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go vet ./...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -count=1 ./vendor/github.com/egoist/mygo/ui
       - name: Build native Windows executable

@@ -605,8 +605,8 @@ test('prompts submitted during a slow slash command drain after the command comp
 test('bundled launch uses the supplied environment resource path', () => {
   const resources = 'D:/minicode-audit-resources'
   const launch = bridgeLaunch({ environment: { MINICODE_RESOURCES: resources }, userData: 'D:/minicode-audit-data' })
-  assert.equal(launch.file, pathJoin(resources, 'runtime', 'python', process.platform === 'win32' ? 'python.exe' : 'python'))
-  assert.equal(launch.args.at(-1), pathJoin(resources, 'runtime', 'bridge.py'))
+  assert.equal(launch.file, pathJoin(resources, 'runtime', process.platform === 'win32' ? 'minicode.exe' : 'minicode'))
+  assert.deepEqual(launch.args, ['bridge'])
 })
 
 test('forced Windows shutdown terminates descendants when a bridge ignores EOF', { skip: process.platform !== 'win32', timeout: 12000 }, async () => {

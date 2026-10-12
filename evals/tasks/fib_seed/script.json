@@ -5,7 +5,7 @@
         {
           "name": "read",
           "arguments": {
-            "path": "fib.py"
+            "path": "fib.mjs"
           }
         }
       ]
@@ -15,9 +15,9 @@
         {
           "name": "edit",
           "arguments": {
-            "path": "fib.py",
-            "old_text": "    a, b = 0, 0  # BUG: seed should be 0, 1",
-            "new_text": "    a, b = 0, 1"
+            "path": "fib.mjs",
+            "old_text": "let a=0,b=0",
+            "new_text": "let a=0,b=1"
           }
         }
       ]
@@ -27,15 +27,13 @@
         {
           "name": "bash",
           "arguments": {
-            "command": "python -m pytest test_fib.py -q"
+            "command": "node --test test_fib.test.mjs"
           }
         }
       ]
     },
     {
-      "text": "修复完成：把种子 a, b = 0, 0 改为 a, b = 0, 1。重新运行 pytest，全部用例通过。"
+      "text": "已修复并通过测试。"
     }
-  ],
-  "default_input_tokens": 120,
-  "default_output_tokens": 40
+  ]
 }

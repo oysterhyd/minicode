@@ -5,7 +5,7 @@
         {
           "name": "read",
           "arguments": {
-            "path": "leaderboard.py"
+            "path": "leaderboard.mjs"
           }
         }
       ]
@@ -15,9 +15,9 @@
         {
           "name": "edit",
           "arguments": {
-            "path": "leaderboard.py",
-            "old_text": "    ranked = sorted(players, key=lambda p: p[\"score\"])  # BUG: ascending order",
-            "new_text": "    ranked = sorted(players, key=lambda p: p[\"score\"], reverse=True)"
+            "path": "leaderboard.mjs",
+            "old_text": "a.score-b.score",
+            "new_text": "b.score-a.score"
           }
         }
       ]
@@ -27,15 +27,13 @@
         {
           "name": "bash",
           "arguments": {
-            "command": "python -m pytest test_leaderboard.py -q"
+            "command": "node --test test_leaderboard.test.mjs"
           }
         }
       ]
     },
     {
-      "text": "修复完成：给 sorted 加上 reverse=True。重新运行 pytest，全部用例通过。"
+      "text": "已修复并通过测试。"
     }
-  ],
-  "default_input_tokens": 120,
-  "default_output_tokens": 40
+  ]
 }

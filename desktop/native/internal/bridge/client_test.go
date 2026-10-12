@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -17,20 +16,8 @@ func realClient(t *testing.T, script string) (*Client, chan Event, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	python := filepath.Join(root, ".venv", "Scripts", "python.exe")
-	if _, err := os.Stat(python); err != nil {
-		python = os.Getenv("MINICODE_PYTHON")
-		if python == "" {
-			python = "python"
-		}
-		python, err = exec.LookPath(python)
-		if err != nil {
-			t.Skip("Python interpreter not installed")
-		}
-	}
 	profile := t.TempDir()
 	cmd := Launch(root, "", profile)
-	cmd.Path, cmd.Args[0] = python, python
 	cmd.Env = append(without(cmd.Env, "HOME", "USERPROFILE", "MINICODE_DB_PATH", "MINICODE_FAKE_SCRIPT", "ANTHROPIC_API_KEY", "COMMANDCODE_API_KEY"), "HOME="+profile, "USERPROFILE="+profile, "MINICODE_DB_PATH="+filepath.Join(profile, "sessions.db"))
 	if script != "" {
 		file := filepath.Join(profile, "script.json")

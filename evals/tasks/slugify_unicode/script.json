@@ -5,7 +5,7 @@
         {
           "name": "read",
           "arguments": {
-            "path": "slugify.py"
+            "path": "slugify.mjs"
           }
         }
       ]
@@ -15,9 +15,9 @@
         {
           "name": "edit",
           "arguments": {
-            "path": "slugify.py",
-            "old_text": "_INVALID = re.compile(r\"[^a-z0-9-]\")  # BUG: char-by-char, CJK becomes \"----\"\n\n\ndef slugify(text: str) -> str:\n    \"\"\"Lowercase, map every disallowed character run to one hyphen.\"\"\"\n    lowered = text.lower()\n    return _INVALID.sub(\"-\", lowered)",
-            "new_text": "_INVALID = re.compile(r\"[^a-z0-9]+\")\n\n\ndef slugify(text: str) -> str:\n    \"\"\"Lowercase, map every disallowed character run to one hyphen.\"\"\"\n    lowered = text.lower()\n    return _INVALID.sub(\"-\", lowered).strip(\"-\")"
+            "path": "slugify.mjs",
+            "old_text": "replace(/[^a-z0-9-]/g,\"-\")",
+            "new_text": "replace(/[^a-z0-9]+/g,\"-\").replace(/^-+|-+$/g,\"\")"
           }
         }
       ]
@@ -27,15 +27,13 @@
         {
           "name": "bash",
           "arguments": {
-            "command": "python -m pytest test_slugify.py -q"
+            "command": "node --test test_slugify.test.mjs"
           }
         }
       ]
     },
     {
-      "text": "修复完成：正则改为 [^a-z0-9]+（按连续片段折叠），并在结尾 strip('-')。重新运行 pytest，全部用例通过。"
+      "text": "已修复并通过测试。"
     }
-  ],
-  "default_input_tokens": 120,
-  "default_output_tokens": 40
+  ]
 }
