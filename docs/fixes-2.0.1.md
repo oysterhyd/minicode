@@ -9,3 +9,7 @@ MCP 需要初始化以发现可提供给模型的工具。启动探测失败仍�
 补丁升级继续接受同一主／次版本中较早补丁版本的插件；例如原有 2.0.0 插件可在 2.0.1 使用，未来补丁及不同主／次版本仍拒绝。
 
 回归覆盖：Rust 28 项单元测试；原生集成 46 项；Ink 83 项；Go 全量、静态检查与文件预览浅／深色布局检查。新增大文件首轮回归同时断言：没有压缩事件、最近结果完整保留、文件尾标记仍可读取。MCP 的连接诊断和实际调用错误分别验证。
+
+[main CI](https://github.com/oysterhyd/minicode/actions/runs/38261358664) 和 [标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38261365208) 各五个任务通过。[正式发行构建](https://github.com/oysterhyd/minicode/actions/runs/38261364660)通过全套回归、离线评测、中文路径安装／快捷方式／卸载、包内运行与真实 SDK 签名更新验收。
+
+[v2.0.1](https://github.com/oysterhyd/minicode/releases/tag/v2.0.1) 的七个资产已实际下载，大小及 SHA256 与 GitHub 摘要一致；完整更新归档、三个差分包的原 Ed25519 公钥签名通过，匿名 latest 清单为 2.0.1。安装器为 57,944,024 B（55.26 MiB）；资产摘要见 [发布记录](assets/fixes-2.0.1.json)。升级后重启 Desktop 生效，原会话可继续恢复。

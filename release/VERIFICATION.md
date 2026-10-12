@@ -1,3 +1,11 @@
+# v2.0.1 回归修复核验
+
+Rust 28 项、后端集成 46 项、Ink 83 项、Go 全量与 go vet、文件预览浅／深色布局回归通过。[main CI](https://github.com/oysterhyd/minicode/actions/runs/38261358664) 与 [标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38261365208)各五个任务通过。
+
+[完整发行构建](https://github.com/oysterhyd/minicode/actions/runs/38261364660)通过全套回归及离线评测、中文路径安装／快捷方式／卸载、包内实际窗口／CLI／TUI／评测运行，以及真实 SDK 签名更新、篡改拒绝与同版本忽略。
+
+公开七个资产已实际下载，大小／SHA256 与 GitHub 摘要一致；完整归档及三个差分包的原公钥签名通过，匿名 latest 更新清单为 2.0.1。安装器 57,944,024 B，SHA256：`444030e66d575464683b9d3ea974a8a6ecefbd95d75eb55d3375f38430d9da00`。修复原因、范围及资产记录见 [2.0.1 说明](../docs/fixes-2.0.1.md)。
+
 # v2.0.0 Rust 迁移核验
 
 Rust 单元 25 项、真实后端集成 43 项、Ink TUI 82 项均通过，Clippy 无警告。Go 全量、vendor UI 专项及 go vet 通过。[main CI](https://github.com/oysterhyd/minicode/actions/runs/38253516602) 和 [v2.0.0 标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38253521389)各五个任务全部通过。20 题 B0/B1/B2 共 60 次通过，3 个补充场景结果符合预期（7 通过、2 个预设首修失败）。
