@@ -67,7 +67,46 @@ Rust / Go 的“分配字节”是一次操作累计请求的堆内存，包括 
 
 同机 Agent 文件为 10,612,736 → 10,025,984 B，减少 5.53%。发行 TUI 压缩 2251 个 JS 文件，减少 2,630,667 B；另外删除一个 344,546 B 的 Flow 类型文件。旧版已有的声明／source-map 裁剪收益不重复计入本次改进，Git / Node 和运行依赖保持完整。公开安装器体积按正式发行资产单独核验，不用源文件缩减量推算压缩包大小。
 
-全部原始样本见 [指标 JSON](assets/performance-2.0.2.json)。正式安装资产完成签名构建和下载核验后，在本页补记发行体积与 CI 链接。
+全部原始样本见 [指标 JSON](assets/performance-2.0.2.json)。上面是同工具链源码构建的结果，公开发行二进制的重测另列，避免把不同构建机器生成的文件混为一项测量。
+
+## 正式发行与安装体积
+
+[v2.0.2](https://github.com/oysterhyd/minicode/releases/tag/v2.0.2) 的运行源码提交为 `d7cc31e0aae20896ac652c9bc4f270e75bbd4c96`。原生 Rust 基准程序在主分支的后续提交补入；它不进入安装包。[main CI](https://github.com/oysterhyd/minicode/actions/runs/38273721751) 和 [标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38273725828)各五项全部通过。[完整发行构建](https://github.com/oysterhyd/minicode/actions/runs/38273725954)通过全套测试、包内运行、Unicode 安装／快捷方式／卸载，以及真实 SDK 更新、篡改拒绝与同版本忽略。
+
+| 公开发行资产 | 2.0.1 | 2.0.2 | 缩减 |
+| --- | ---: | ---: | ---: |
+| Windows 安装器 | 57,944,024 B（55.26 MiB） | 57,711,411 B（55.04 MiB） | 0.40% |
+| 安装内容，不含安装器／更新包 | 221,233,903 B（210.99 MiB），3321 文件 | 217,748,604 B（207.66 MiB），3320 文件 | 1.58% |
+| 完整更新归档 | 90,015,598 B | 89,573,655 B | 0.49% |
+| 包内 Rust Agent | 12,668,416 B | 12,156,416 B | 4.04% |
+
+公开七个资产已实际下载，文件大小／SHA256 与 GitHub 摘要一致；完整更新归档及三个差分包用原 Ed25519 公钥验证通过，匿名 latest 更新清单与所核验清单摘要相同。安装器 SHA256：`e37c29603924851b94338e4732cc97a60624a83fdc9a7f58363f51e44685b01d`。包内 Agent SHA256：`4972b4e1f58b773012d995432e8b5f61f88335bd9d84625c0df6c68f29dc3a92`。3320 个安装文件的个人数据／已知凭据检查通过。本地安装包在 `release/dist/MiniCode-Setup-2.0.2-win-x64.exe`。
+
+源码与打包范围一致；压缩 TUI 的模块路径、运行分支和许可保留。安装器体积改善较小，因为 Git、Node 和其他运行资源仍占主要部分；不能用单项累计分配下降推算安装包体积。
+
+## 公开发行二进制重测
+
+对实际下载的 2.0.1 与 2.0.2 包内 Agent，在同机按交替顺序各测 7 次。没有改写或重编译发行文件；文件摘要和所有样本在指标 JSON 的 `public_agent` 下。
+
+| 操作／夹具 | 公开 2.0.1 | 公开 2.0.2 | 下降 |
+| --- | ---: | ---: | ---: |
+| 2000 条消息读取 | 107.918 ms | 81.201 ms | 24.76% |
+| 长会话恢复与首次统计 | 129.328 ms | 106.621 ms | 17.56% |
+| 恢复峰值工作集 | 75.10 MiB | 53.05 MiB | 29.36% |
+| 25 轮、48 次读取 | 173.925 ms | 167.784 ms | 3.53% |
+| 冷启动到 getState | 28.868 ms | 27.675 ms | 4.13% |
+| 状态热轮询 | 0.0632 ms | 0.0560 ms | 11.39% |
+
+公开长会话恢复后的最终工作集为 35,090,432 → 35,123,200 B，基本持平；最终私有字节为 30,928,896 → 29,855,744 B。峰值改善不能当作常驻内存降幅，短操作的微小绝对差值也不能代表所有任务。
+
+## 复现入口
+
+- Rust：`cargo run --release --locked --example performance_hotpaths -- output/hotpaths.json`。
+- Go：在 `desktop/native` 执行 `go test -run '^$' -bench '^BenchmarkOptimization202$' -benchmem -benchtime=500ms -count=7 .`。
+- TUI：`node tui/node_modules/tsx/dist/cli.mjs tui/scripts/benchmark_202.ts . output/tui.json`。
+- Agent：`node scripts/benchmark-agent.mjs --baseline <旧版程序> --agent <新版程序> --samples 7 --kinds cold,turns,history,poll,stats --output output/agent.json`。
+
+源码对照把同一份 `examples/performance_hotpaths.rs` 和 `desktop/native/performance_202_test.go` 复制到 2.0.1 的独立工作树再构建。临时工作区、假模型脚本和数据库由驱动生成。Rust 示例与 UI 基准只属于开发／验证工具，不进入安装包。
 
 ## 回归验证
 

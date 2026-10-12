@@ -1,3 +1,11 @@
+# v2.0.2 性能与发行核验
+
+运行源码 `d7cc31e0aae20896ac652c9bc4f270e75bbd4c96`。[main CI](https://github.com/oysterhyd/minicode/actions/runs/38273721751) 与 [标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38273725828)各五项通过。[完整 Windows 发行构建](https://github.com/oysterhyd/minicode/actions/runs/38273725954)通过 Rust 32 项、后端 47 项、Ink 84 项；压缩发行 JS 的同一套 84 项也全部通过。Go 全量、vendor UI 专项、静态检查、60 次任务与 9 次场景评测符合预期。
+
+包内窗口、CLI / Git / TUI、空白模型配置，Unicode NSIS 安装／快捷方式／卸载，以及真实 SDK 签名更新、篡改拒绝、同版本忽略和更新后运行均通过。40 张浅／深色软件快照中，38 张逐像素一致；两张关于页差异只在版本字符区域。
+
+公开七个资产已下载核对大小和 SHA256；完整归档与三个差分包通过原公钥签名，匿名 latest 清单一致。安装器 57,711,411 B（55.04 MiB），安装内容 217,748,604 B（207.66 MiB）。安装器 SHA256：`e37c29603924851b94338e4732cc97a60624a83fdc9a7f58363f51e44685b01d`。[完整审查、测量口径与结果](../docs/performance-2.0.2.md)，[原始记录](../docs/assets/performance-2.0.2.json)。
+
 # v2.0.1 回归修复核验
 
 Rust 28 项、后端集成 46 项、Ink 83 项、Go 全量与 go vet、文件预览浅／深色布局回归通过。[main CI](https://github.com/oysterhyd/minicode/actions/runs/38261358664) 与 [标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38261365208)各五个任务通过。

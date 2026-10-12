@@ -2115,5 +2115,1219 @@
       "scenario_passed": 7
     }
   },
-  "release": null
+  "release": {
+    "source_commit": "d7cc31e0aae20896ac652c9bc4f270e75bbd4c96",
+    "release_url": "https://github.com/oysterhyd/minicode/releases/tag/v2.0.2",
+    "published_at": "2026-10-12T16:10:18Z",
+    "assets": [
+      {
+        "name": "minicode-1.3.2-to-2.0.2-windows-amd64.delta",
+        "bytes": 6817268,
+        "sha256": "3ca76d2bedd19c773ac426e5690e9e3c9ff4d9735bc745389a9e28b5ad93efcf"
+      },
+      {
+        "name": "minicode-2.0.0-to-2.0.2-windows-amd64.delta",
+        "bytes": 3727343,
+        "sha256": "602d368d965f31937e426350b68dc9fa65e920766be626509bf3ecc95aa1976f"
+      },
+      {
+        "name": "minicode-2.0.1-to-2.0.2-windows-amd64.delta",
+        "bytes": 3694368,
+        "sha256": "76dba726df9c39e9056a75851a1cef45521d50e58f00e495dcff9189141df819"
+      },
+      {
+        "name": "minicode-2.0.2-windows-amd64.tar.gz",
+        "bytes": 89573655,
+        "sha256": "24669ebdd4d028b81f9fa2f2e07b331e2411e59c01ddf2fc4db95000fcf3a9d0"
+      },
+      {
+        "name": "MiniCode-Setup-2.0.2-win-x64.exe",
+        "bytes": 57711411,
+        "sha256": "e37c29603924851b94338e4732cc97a60624a83fdc9a7f58363f51e44685b01d"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "bytes": 100,
+        "sha256": "4573534406a47736f27f01e6d9ca7c497a95b6a69d1a0a4fba1c12526212b588"
+      },
+      {
+        "name": "update-windows-amd64.json",
+        "bytes": 2625,
+        "sha256": "7cc5b445fe25cbfd560a82e27b4e179695d83473214a4ad5220a5d6b3d3cd28d"
+      }
+    ],
+    "signature_verified": [
+      "minicode-2.0.2-windows-amd64.tar.gz",
+      "minicode-2.0.1-to-2.0.2-windows-amd64.delta",
+      "minicode-2.0.0-to-2.0.2-windows-amd64.delta",
+      "minicode-1.3.2-to-2.0.2-windows-amd64.delta"
+    ],
+    "all_public_digests_match": true,
+    "anonymous_latest_matches": true,
+    "ci": {
+      "main": "https://github.com/oysterhyd/minicode/actions/runs/38273721751",
+      "tag": "https://github.com/oysterhyd/minicode/actions/runs/38273725828",
+      "installer": "https://github.com/oysterhyd/minicode/actions/runs/38273725954"
+    },
+    "installed_payload_bytes": 217748604,
+    "installed_payload_files": 3320,
+    "agent_bytes": 12156416,
+    "agent_sha256": "4972b4e1f58b773012d995432e8b5f61f88335bd9d84625c0df6c68f29dc3a92",
+    "installer_tests_passed": true,
+    "update_sdk_tests_passed": true,
+    "publication_audit_files": 3320
+  },
+  "public_agent": {
+    "date": "2026-10-12T16:17:12.573Z",
+    "platform": "win32",
+    "architecture": "x64",
+    "node": "v22.22.0",
+    "samples": 7,
+    "agent": "D:\\miniclaudecode\\output\\performance-2.0.2\\public-after\\extracted\\runtime\\minicode.exe",
+    "baseline": "D:\\miniclaudecode\\output\\performance-2.0.2\\public-before\\extracted\\runtime\\minicode.exe",
+    "measurements": {
+      "cold": {
+        "before": {
+          "medians": {
+            "duration_ms": 28.868399999999383,
+            "cold_ms": 28.868399999999383,
+            "peak_working_set": 7712768,
+            "cpu_s": 0.015625,
+            "working_set": 7712768,
+            "private_bytes": 1634304,
+            "idle_working_set": 7712768,
+            "idle_private_bytes": 1634304
+          },
+          "runs": [
+            {
+              "duration_ms": 385.5815,
+              "cold_ms": 385.5815,
+              "idle": {
+                "private_bytes": 1675264,
+                "cpu_s": 0.03125,
+                "working_set": 18653184,
+                "peak_working_set": 18653184
+              },
+              "peak_working_set": 18653184,
+              "cpu_s": 0.03125,
+              "working_set": 18653184,
+              "private_bytes": 1675264
+            },
+            {
+              "duration_ms": 29.55060000000003,
+              "cold_ms": 29.55060000000003,
+              "idle": {
+                "private_bytes": 1552384,
+                "cpu_s": 0,
+                "working_set": 7639040,
+                "peak_working_set": 7639040
+              },
+              "working_set": 7639040,
+              "peak_working_set": 7639040,
+              "private_bytes": 1552384,
+              "cpu_s": 0
+            },
+            {
+              "duration_ms": 27.26170000000002,
+              "cold_ms": 27.26170000000002,
+              "idle": {
+                "private_bytes": 1556480,
+                "working_set": 7651328,
+                "cpu_s": 0.015625,
+                "peak_working_set": 7651328
+              },
+              "working_set": 7651328,
+              "private_bytes": 1556480,
+              "peak_working_set": 7651328,
+              "cpu_s": 0.015625
+            },
+            {
+              "duration_ms": 28.868399999999383,
+              "cold_ms": 28.868399999999383,
+              "idle": {
+                "private_bytes": 1634304,
+                "peak_working_set": 7737344,
+                "working_set": 7737344,
+                "cpu_s": 0
+              },
+              "working_set": 7737344,
+              "private_bytes": 1634304,
+              "peak_working_set": 7737344,
+              "cpu_s": 0
+            },
+            {
+              "duration_ms": 29.830700000000434,
+              "cold_ms": 29.830700000000434,
+              "idle": {
+                "cpu_s": 0.015625,
+                "private_bytes": 1638400,
+                "working_set": 7737344,
+                "peak_working_set": 7737344
+              },
+              "peak_working_set": 7737344,
+              "private_bytes": 1638400,
+              "working_set": 7737344,
+              "cpu_s": 0.015625
+            },
+            {
+              "duration_ms": 27.714900000000853,
+              "cold_ms": 27.714900000000853,
+              "idle": {
+                "peak_working_set": 7712768,
+                "working_set": 7712768,
+                "cpu_s": 0.015625,
+                "private_bytes": 1634304
+              },
+              "cpu_s": 0.015625,
+              "peak_working_set": 7712768,
+              "working_set": 7712768,
+              "private_bytes": 1634304
+            },
+            {
+              "duration_ms": 27.661000000000058,
+              "cold_ms": 27.661000000000058,
+              "idle": {
+                "working_set": 7606272,
+                "private_bytes": 1531904,
+                "cpu_s": 0,
+                "peak_working_set": 7606272
+              },
+              "cpu_s": 0,
+              "peak_working_set": 7606272,
+              "private_bytes": 1531904,
+              "working_set": 7606272
+            }
+          ]
+        },
+        "after": {
+          "medians": {
+            "duration_ms": 27.67540000000008,
+            "cold_ms": 27.67540000000008,
+            "working_set": 7520256,
+            "cpu_s": 0,
+            "peak_working_set": 7520256,
+            "private_bytes": 1536000,
+            "idle_working_set": 7520256,
+            "idle_private_bytes": 1536000
+          },
+          "runs": [
+            {
+              "duration_ms": 32.4070999999999,
+              "cold_ms": 32.4070999999999,
+              "idle": {
+                "cpu_s": 0.03125,
+                "private_bytes": 1581056,
+                "working_set": 17575936,
+                "peak_working_set": 17575936
+              },
+              "working_set": 17575936,
+              "cpu_s": 0.03125,
+              "peak_working_set": 17575936,
+              "private_bytes": 1581056
+            },
+            {
+              "duration_ms": 27.191800000000057,
+              "cold_ms": 27.191800000000057,
+              "idle": {
+                "working_set": 7593984,
+                "private_bytes": 1613824,
+                "peak_working_set": 7593984,
+                "cpu_s": 0
+              },
+              "private_bytes": 1613824,
+              "peak_working_set": 7593984,
+              "working_set": 7593984,
+              "cpu_s": 0
+            },
+            {
+              "duration_ms": 28.640800000000127,
+              "cold_ms": 28.640800000000127,
+              "idle": {
+                "cpu_s": 0,
+                "working_set": 7512064,
+                "peak_working_set": 7512064,
+                "private_bytes": 1531904
+              },
+              "cpu_s": 0,
+              "private_bytes": 1531904,
+              "peak_working_set": 7512064,
+              "working_set": 7512064
+            },
+            {
+              "duration_ms": 29.65939999999955,
+              "cold_ms": 29.65939999999955,
+              "idle": {
+                "cpu_s": 0.03125,
+                "working_set": 7512064,
+                "peak_working_set": 7512064,
+                "private_bytes": 1527808
+              },
+              "private_bytes": 1527808,
+              "working_set": 7512064,
+              "cpu_s": 0.03125,
+              "peak_working_set": 7512064
+            },
+            {
+              "duration_ms": 27.67540000000008,
+              "cold_ms": 27.67540000000008,
+              "idle": {
+                "peak_working_set": 7593984,
+                "private_bytes": 1626112,
+                "cpu_s": 0,
+                "working_set": 7593984
+              },
+              "cpu_s": 0,
+              "working_set": 7593984,
+              "peak_working_set": 7593984,
+              "private_bytes": 1626112
+            },
+            {
+              "duration_ms": 26.592099999999846,
+              "cold_ms": 26.592099999999846,
+              "idle": {
+                "peak_working_set": 7520256,
+                "working_set": 7520256,
+                "cpu_s": 0,
+                "private_bytes": 1536000
+              },
+              "peak_working_set": 7520256,
+              "private_bytes": 1536000,
+              "working_set": 7520256,
+              "cpu_s": 0
+            },
+            {
+              "duration_ms": 27.088999999999942,
+              "cold_ms": 27.088999999999942,
+              "idle": {
+                "private_bytes": 1527808,
+                "working_set": 7507968,
+                "peak_working_set": 7507968,
+                "cpu_s": 0
+              },
+              "private_bytes": 1527808,
+              "working_set": 7507968,
+              "cpu_s": 0,
+              "peak_working_set": 7507968
+            }
+          ]
+        }
+      },
+      "turns": {
+        "before": {
+          "medians": {
+            "duration_ms": 173.92469999999958,
+            "cold_ms": 28.370200000001205,
+            "cpu_s": 0.1875,
+            "peak_working_set": 12070912,
+            "private_bytes": 3670016,
+            "working_set": 12070912,
+            "idle_working_set": 7651328,
+            "idle_private_bytes": 1568768
+          },
+          "runs": [
+            {
+              "duration_ms": 184.8758999999991,
+              "cold_ms": 28.370200000001205,
+              "idle": {
+                "cpu_s": 0.03125,
+                "private_bytes": 1572864,
+                "working_set": 7651328,
+                "peak_working_set": 7651328
+              },
+              "cpu_s": 0.140625,
+              "peak_working_set": 12025856,
+              "private_bytes": 3641344,
+              "working_set": 12025856
+            },
+            {
+              "duration_ms": 167.45660000000134,
+              "cold_ms": 25.40129999999772,
+              "idle": {
+                "private_bytes": 1634304,
+                "cpu_s": 0.015625,
+                "working_set": 7737344,
+                "peak_working_set": 7737344
+              },
+              "working_set": 12148736,
+              "peak_working_set": 12148736,
+              "private_bytes": 3788800,
+              "cpu_s": 0.171875
+            },
+            {
+              "duration_ms": 186.23919999999998,
+              "cold_ms": 28.009299999997893,
+              "idle": {
+                "peak_working_set": 7643136,
+                "working_set": 7643136,
+                "cpu_s": 0.015625,
+                "private_bytes": 1560576
+              },
+              "cpu_s": 0.1875,
+              "working_set": 12054528,
+              "private_bytes": 3665920,
+              "peak_working_set": 12054528
+            },
+            {
+              "duration_ms": 173.34619999999995,
+              "cold_ms": 30.641999999999825,
+              "idle": {
+                "private_bytes": 1531904,
+                "peak_working_set": 7647232,
+                "cpu_s": 0,
+                "working_set": 7647232
+              },
+              "cpu_s": 0.1875,
+              "working_set": 12034048,
+              "peak_working_set": 12034048,
+              "private_bytes": 3657728
+            },
+            {
+              "duration_ms": 173.92469999999958,
+              "cold_ms": 27.63539999999921,
+              "idle": {
+                "working_set": 7667712,
+                "private_bytes": 1568768,
+                "cpu_s": 0.015625,
+                "peak_working_set": 7667712
+              },
+              "private_bytes": 3670016,
+              "cpu_s": 0.203125,
+              "working_set": 12070912,
+              "peak_working_set": 12070912
+            },
+            {
+              "duration_ms": 164.23769999999786,
+              "cold_ms": 29.35750000000189,
+              "idle": {
+                "peak_working_set": 7630848,
+                "cpu_s": 0,
+                "private_bytes": 1527808,
+                "working_set": 7630848
+              },
+              "cpu_s": 0.109375,
+              "peak_working_set": 12075008,
+              "private_bytes": 3702784,
+              "working_set": 12075008
+            },
+            {
+              "duration_ms": 175.66019999999844,
+              "cold_ms": 31.915200000003097,
+              "idle": {
+                "private_bytes": 1679360,
+                "peak_working_set": 7753728,
+                "working_set": 7753728,
+                "cpu_s": 0.015625
+              },
+              "peak_working_set": 12148736,
+              "private_bytes": 3768320,
+              "cpu_s": 0.1875,
+              "working_set": 12148736
+            }
+          ]
+        },
+        "after": {
+          "medians": {
+            "duration_ms": 167.78410000000076,
+            "cold_ms": 27.616699999998673,
+            "private_bytes": 3633152,
+            "working_set": 11722752,
+            "peak_working_set": 11722752,
+            "cpu_s": 0.15625,
+            "idle_working_set": 7561216,
+            "idle_private_bytes": 1572864
+          },
+          "runs": [
+            {
+              "duration_ms": 177.37810000000172,
+              "cold_ms": 28.954200000000128,
+              "idle": {
+                "private_bytes": 1552384,
+                "cpu_s": 0,
+                "peak_working_set": 7516160,
+                "working_set": 7516160
+              },
+              "private_bytes": 3633152,
+              "working_set": 11722752,
+              "peak_working_set": 11722752,
+              "cpu_s": 0.078125
+            },
+            {
+              "duration_ms": 156.71300000000338,
+              "cold_ms": 26.605100000000675,
+              "idle": {
+                "peak_working_set": 7561216,
+                "working_set": 7561216,
+                "cpu_s": 0,
+                "private_bytes": 1572864
+              },
+              "cpu_s": 0.125,
+              "private_bytes": 3452928,
+              "working_set": 11554816,
+              "peak_working_set": 11554816
+            },
+            {
+              "duration_ms": 161.1280000000006,
+              "cold_ms": 26.35529999999926,
+              "idle": {
+                "peak_working_set": 7577600,
+                "cpu_s": 0,
+                "working_set": 7577600,
+                "private_bytes": 1630208
+              },
+              "working_set": 11882496,
+              "private_bytes": 3854336,
+              "peak_working_set": 11882496,
+              "cpu_s": 0.1875
+            },
+            {
+              "duration_ms": 161.6382999999987,
+              "cold_ms": 26.914700000001176,
+              "idle": {
+                "private_bytes": 1556480,
+                "working_set": 7516160,
+                "cpu_s": 0.03125,
+                "peak_working_set": 7516160
+              },
+              "cpu_s": 0.125,
+              "private_bytes": 3481600,
+              "working_set": 11587584,
+              "peak_working_set": 11587584
+            },
+            {
+              "duration_ms": 176.51840000000084,
+              "cold_ms": 29.267700000000332,
+              "idle": {
+                "cpu_s": 0,
+                "private_bytes": 1662976,
+                "peak_working_set": 7626752,
+                "working_set": 7626752
+              },
+              "private_bytes": 3702784,
+              "working_set": 11812864,
+              "cpu_s": 0.15625,
+              "peak_working_set": 11812864
+            },
+            {
+              "duration_ms": 167.78410000000076,
+              "cold_ms": 28.237300000000687,
+              "idle": {
+                "peak_working_set": 7520256,
+                "cpu_s": 0.015625,
+                "private_bytes": 1548288,
+                "working_set": 7520256
+              },
+              "peak_working_set": 11812864,
+              "working_set": 11812864,
+              "cpu_s": 0.171875,
+              "private_bytes": 3760128
+            },
+            {
+              "duration_ms": 171.1713000000018,
+              "cold_ms": 27.616699999998673,
+              "idle": {
+                "peak_working_set": 7589888,
+                "cpu_s": 0.015625,
+                "working_set": 7589888,
+                "private_bytes": 1638400
+              },
+              "private_bytes": 3530752,
+              "working_set": 11636736,
+              "cpu_s": 0.1875,
+              "peak_working_set": 11636736
+            }
+          ]
+        }
+      },
+      "history": {
+        "before": {
+          "medians": {
+            "duration_ms": 107.91760000000068,
+            "cold_ms": 27.532099999996717,
+            "working_set": 11001856,
+            "cpu_s": 0.0625,
+            "peak_working_set": 55496704,
+            "private_bytes": 5517312,
+            "idle_working_set": 7684096,
+            "idle_private_bytes": 1593344
+          },
+          "runs": [
+            {
+              "duration_ms": 108.0885999999955,
+              "cold_ms": 134.03740000000107,
+              "idle": {
+                "private_bytes": 1593344,
+                "peak_working_set": 7675904,
+                "cpu_s": 0,
+                "working_set": 7675904
+              },
+              "working_set": 11210752,
+              "cpu_s": 0.0625,
+              "peak_working_set": 55500800,
+              "private_bytes": 5771264
+            },
+            {
+              "duration_ms": 107.91760000000068,
+              "cold_ms": 28.662900000002992,
+              "idle": {
+                "peak_working_set": 7684096,
+                "working_set": 7684096,
+                "cpu_s": 0,
+                "private_bytes": 1568768
+              },
+              "private_bytes": 5701632,
+              "cpu_s": 0.046875,
+              "peak_working_set": 55193600,
+              "working_set": 10985472
+            },
+            {
+              "duration_ms": 95.0931999999957,
+              "cold_ms": 27.278800000000047,
+              "idle": {
+                "peak_working_set": 7737344,
+                "working_set": 7737344,
+                "cpu_s": 0,
+                "private_bytes": 1654784
+              },
+              "cpu_s": 0.0625,
+              "working_set": 11001856,
+              "private_bytes": 4878336,
+              "peak_working_set": 55525376
+            },
+            {
+              "duration_ms": 96.59049999999843,
+              "cold_ms": 27.532099999996717,
+              "idle": {
+                "private_bytes": 1642496,
+                "working_set": 7729152,
+                "peak_working_set": 7729152,
+                "cpu_s": 0.015625
+              },
+              "peak_working_set": 55517184,
+              "private_bytes": 5062656,
+              "working_set": 11063296,
+              "cpu_s": 0.109375
+            },
+            {
+              "duration_ms": 110.84320000000298,
+              "cold_ms": 25.761899999997695,
+              "idle": {
+                "working_set": 7618560,
+                "cpu_s": 0,
+                "private_bytes": 1536000,
+                "peak_working_set": 7618560
+              },
+              "peak_working_set": 55402496,
+              "cpu_s": 0.078125,
+              "working_set": 10915840,
+              "private_bytes": 4935680
+            },
+            {
+              "duration_ms": 110.34509999999864,
+              "cold_ms": 26.963000000003376,
+              "idle": {
+                "working_set": 7716864,
+                "cpu_s": 0.015625,
+                "peak_working_set": 7716864,
+                "private_bytes": 1626112
+              },
+              "cpu_s": 0.109375,
+              "private_bytes": 5861376,
+              "peak_working_set": 55496704,
+              "working_set": 11018240
+            },
+            {
+              "duration_ms": 102.59169999999722,
+              "cold_ms": 27.68959999999788,
+              "idle": {
+                "peak_working_set": 7610368,
+                "working_set": 7610368,
+                "cpu_s": 0,
+                "private_bytes": 1527808
+              },
+              "working_set": 10936320,
+              "cpu_s": 0.0625,
+              "peak_working_set": 55398400,
+              "private_bytes": 5517312
+            }
+          ]
+        },
+        "after": {
+          "medians": {
+            "duration_ms": 81.20079999999871,
+            "cold_ms": 27.576399999998102,
+            "peak_working_set": 54456320,
+            "working_set": 10792960,
+            "cpu_s": 0.078125,
+            "private_bytes": 4829184,
+            "idle_working_set": 7557120,
+            "idle_private_bytes": 1568768
+          },
+          "runs": [
+            {
+              "duration_ms": 80.56139999999868,
+              "cold_ms": 29.989000000001397,
+              "idle": {
+                "private_bytes": 1622016,
+                "cpu_s": 0,
+                "peak_working_set": 7581696,
+                "working_set": 7581696
+              },
+              "peak_working_set": 54480896,
+              "working_set": 10735616,
+              "cpu_s": 0.078125,
+              "private_bytes": 4771840
+            },
+            {
+              "duration_ms": 81.81590000000142,
+              "cold_ms": 29.779199999997218,
+              "idle": {
+                "working_set": 7610368,
+                "private_bytes": 1622016,
+                "peak_working_set": 7610368,
+                "cpu_s": 0
+              },
+              "cpu_s": 0.046875,
+              "private_bytes": 4829184,
+              "peak_working_set": 54513664,
+              "working_set": 10792960
+            },
+            {
+              "duration_ms": 81.20079999999871,
+              "cold_ms": 26.631500000003143,
+              "idle": {
+                "private_bytes": 1548288,
+                "peak_working_set": 7536640,
+                "working_set": 7536640,
+                "cpu_s": 0
+              },
+              "private_bytes": 4886528,
+              "working_set": 10846208,
+              "cpu_s": 0.078125,
+              "peak_working_set": 54431744
+            },
+            {
+              "duration_ms": 91.84590000000026,
+              "cold_ms": 30.56430000000546,
+              "idle": {
+                "working_set": 7512064,
+                "private_bytes": 1527808,
+                "cpu_s": 0.015625,
+                "peak_working_set": 7512064
+              },
+              "cpu_s": 0.09375,
+              "private_bytes": 4878336,
+              "peak_working_set": 54415360,
+              "working_set": 10833920
+            },
+            {
+              "duration_ms": 92.53949999999895,
+              "cold_ms": 27.576399999998102,
+              "idle": {
+                "cpu_s": 0.015625,
+                "peak_working_set": 7557120,
+                "working_set": 7557120,
+                "private_bytes": 1568768
+              },
+              "working_set": 10850304,
+              "private_bytes": 4907008,
+              "cpu_s": 0.078125,
+              "peak_working_set": 54452224
+            },
+            {
+              "duration_ms": 79.17119999999704,
+              "cold_ms": 27.34270000000106,
+              "idle": {
+                "cpu_s": 0.015625,
+                "working_set": 7557120,
+                "private_bytes": 1560576,
+                "peak_working_set": 7557120
+              },
+              "working_set": 10743808,
+              "cpu_s": 0.078125,
+              "private_bytes": 4759552,
+              "peak_working_set": 54456320
+            },
+            {
+              "duration_ms": 80.90450000000419,
+              "cold_ms": 27.51550000000134,
+              "idle": {
+                "cpu_s": 0.015625,
+                "private_bytes": 1626112,
+                "peak_working_set": 7589888,
+                "working_set": 7589888
+              },
+              "peak_working_set": 54493184,
+              "private_bytes": 4825088,
+              "cpu_s": 0.0625,
+              "working_set": 10784768
+            }
+          ]
+        }
+      },
+      "poll": {
+        "before": {
+          "medians": {
+            "duration_ms": 0.06319999999686843,
+            "cold_ms": 26.742400000002817,
+            "cpu_s": 0.046875,
+            "private_bytes": 27242496,
+            "peak_working_set": 32960512,
+            "working_set": 32960512,
+            "idle_working_set": 7716864,
+            "idle_private_bytes": 1630208
+          },
+          "runs": [
+            {
+              "duration_ms": 0.10149999999703141,
+              "cold_ms": 26.742400000002817,
+              "idle": {
+                "cpu_s": 0.03125,
+                "private_bytes": 1630208,
+                "working_set": 7725056,
+                "peak_working_set": 7725056
+              },
+              "cpu_s": 0.0625,
+              "private_bytes": 27308032,
+              "peak_working_set": 33038336,
+              "working_set": 33038336
+            },
+            {
+              "duration_ms": 0.06319999999686843,
+              "cold_ms": 27.848500000000058,
+              "idle": {
+                "peak_working_set": 7716864,
+                "working_set": 7716864,
+                "private_bytes": 1634304,
+                "cpu_s": 0
+              },
+              "peak_working_set": 32989184,
+              "private_bytes": 27246592,
+              "working_set": 32989184,
+              "cpu_s": 0.03125
+            },
+            {
+              "duration_ms": 0.1007000000026892,
+              "cold_ms": 26.595799999995506,
+              "idle": {
+                "private_bytes": 1642496,
+                "peak_working_set": 7737344,
+                "cpu_s": 0.015625,
+                "working_set": 7737344
+              },
+              "working_set": 32960512,
+              "private_bytes": 27242496,
+              "cpu_s": 0.0625,
+              "peak_working_set": 32960512
+            },
+            {
+              "duration_ms": 0.05909999999857973,
+              "cold_ms": 26.46310000000085,
+              "idle": {
+                "peak_working_set": 7618560,
+                "working_set": 7618560,
+                "cpu_s": 0,
+                "private_bytes": 1527808
+              },
+              "private_bytes": 27160576,
+              "peak_working_set": 32890880,
+              "working_set": 32890880,
+              "cpu_s": 0.03125
+            },
+            {
+              "duration_ms": 0.11119999999937136,
+              "cold_ms": 27.27759999999398,
+              "idle": {
+                "working_set": 7733248,
+                "peak_working_set": 7733248,
+                "cpu_s": 0.015625,
+                "private_bytes": 1630208
+              },
+              "cpu_s": 0.046875,
+              "working_set": 33001472,
+              "private_bytes": 27258880,
+              "peak_working_set": 33001472
+            },
+            {
+              "duration_ms": 0.061799999995855615,
+              "cold_ms": 26.019899999999325,
+              "idle": {
+                "working_set": 7651328,
+                "private_bytes": 1552384,
+                "cpu_s": 0,
+                "peak_working_set": 7651328
+              },
+              "cpu_s": 0.046875,
+              "private_bytes": 27152384,
+              "working_set": 32915456,
+              "peak_working_set": 32915456
+            },
+            {
+              "duration_ms": 0.05739999999059364,
+              "cold_ms": 28.451600000000326,
+              "idle": {
+                "working_set": 7626752,
+                "cpu_s": 0.015625,
+                "private_bytes": 1523712,
+                "peak_working_set": 7626752
+              },
+              "cpu_s": 0.046875,
+              "working_set": 32874496,
+              "private_bytes": 27082752,
+              "peak_working_set": 32874496
+            }
+          ]
+        },
+        "after": {
+          "medians": {
+            "duration_ms": 0.056000000004132744,
+            "cold_ms": 28.256399999998393,
+            "private_bytes": 27226112,
+            "cpu_s": 0.03125,
+            "peak_working_set": 32772096,
+            "working_set": 32772096,
+            "idle_working_set": 7589888,
+            "idle_private_bytes": 1626112
+          },
+          "runs": [
+            {
+              "duration_ms": 0.05190000000584405,
+              "cold_ms": 29.21979999999894,
+              "idle": {
+                "peak_working_set": 7598080,
+                "working_set": 7598080,
+                "private_bytes": 1626112,
+                "cpu_s": 0
+              },
+              "private_bytes": 27246592,
+              "cpu_s": 0.015625,
+              "peak_working_set": 32792576,
+              "working_set": 32792576
+            },
+            {
+              "duration_ms": 0.060899999996763654,
+              "cold_ms": 28.225399999995716,
+              "idle": {
+                "peak_working_set": 7536640,
+                "working_set": 7536640,
+                "cpu_s": 0,
+                "private_bytes": 1560576
+              },
+              "private_bytes": 27164672,
+              "working_set": 32714752,
+              "peak_working_set": 32714752,
+              "cpu_s": 0.03125
+            },
+            {
+              "duration_ms": 0.07740000000194414,
+              "cold_ms": 27.655900000005204,
+              "idle": {
+                "peak_working_set": 7598080,
+                "cpu_s": 0.015625,
+                "private_bytes": 1630208,
+                "working_set": 7598080
+              },
+              "cpu_s": 0.046875,
+              "peak_working_set": 32772096,
+              "working_set": 32772096,
+              "private_bytes": 27234304
+            },
+            {
+              "duration_ms": 0.056000000004132744,
+              "cold_ms": 29.37489999999525,
+              "idle": {
+                "peak_working_set": 7516160,
+                "cpu_s": 0,
+                "working_set": 7516160,
+                "private_bytes": 1527808
+              },
+              "peak_working_set": 32653312,
+              "private_bytes": 27115520,
+              "working_set": 32653312,
+              "cpu_s": 0.03125
+            },
+            {
+              "duration_ms": 0.056399999986751936,
+              "cold_ms": 27.250499999994645,
+              "idle": {
+                "working_set": 7581696,
+                "peak_working_set": 7581696,
+                "private_bytes": 1613824,
+                "cpu_s": 0
+              },
+              "cpu_s": 0.03125,
+              "peak_working_set": 32772096,
+              "private_bytes": 27226112,
+              "working_set": 32772096
+            },
+            {
+              "duration_ms": 0.05049999999755528,
+              "cold_ms": 28.256399999998393,
+              "idle": {
+                "private_bytes": 1630208,
+                "cpu_s": 0.015625,
+                "peak_working_set": 7589888,
+                "working_set": 7589888
+              },
+              "cpu_s": 0.046875,
+              "private_bytes": 27230208,
+              "peak_working_set": 32743424,
+              "working_set": 32743424
+            },
+            {
+              "duration_ms": 0.04990000001271255,
+              "cold_ms": 29.00100000000384,
+              "idle": {
+                "cpu_s": 0.015625,
+                "working_set": 7602176,
+                "peak_working_set": 7602176,
+                "private_bytes": 1634304
+              },
+              "private_bytes": 27226112,
+              "working_set": 32780288,
+              "peak_working_set": 32780288,
+              "cpu_s": 0.046875
+            }
+          ]
+        }
+      },
+      "stats": {
+        "before": {
+          "medians": {
+            "duration_ms": 129.3283000000083,
+            "cold_ms": 28.778699999995297,
+            "working_set": 35090432,
+            "private_bytes": 30928896,
+            "cpu_s": 0.140625,
+            "peak_working_set": 78749696,
+            "idle_working_set": 7716864,
+            "idle_private_bytes": 1626112
+          },
+          "runs": [
+            {
+              "duration_ms": 129.3283000000083,
+              "cold_ms": 29.537100000001374,
+              "idle": {
+                "cpu_s": 0,
+                "private_bytes": 1531904,
+                "peak_working_set": 7618560,
+                "working_set": 7618560
+              },
+              "working_set": 35299328,
+              "private_bytes": 33161216,
+              "cpu_s": 0.140625,
+              "peak_working_set": 78667776
+            },
+            {
+              "duration_ms": 133.488400000002,
+              "cold_ms": 28.778699999995297,
+              "idle": {
+                "cpu_s": 0.03125,
+                "private_bytes": 1658880,
+                "working_set": 7725056,
+                "peak_working_set": 7725056
+              },
+              "private_bytes": 32403456,
+              "working_set": 34631680,
+              "peak_working_set": 78766080,
+              "cpu_s": 0.15625
+            },
+            {
+              "duration_ms": 128.01999999998952,
+              "cold_ms": 27.626900000002934,
+              "idle": {
+                "cpu_s": 0.015625,
+                "working_set": 7716864,
+                "private_bytes": 1638400,
+                "peak_working_set": 7716864
+              },
+              "peak_working_set": 78802944,
+              "private_bytes": 30928896,
+              "cpu_s": 0.140625,
+              "working_set": 35094528
+            },
+            {
+              "duration_ms": 139.2508000000089,
+              "cold_ms": 27.72060000000056,
+              "idle": {
+                "working_set": 7720960,
+                "private_bytes": 1626112,
+                "cpu_s": 0,
+                "peak_working_set": 7720960
+              },
+              "working_set": 35168256,
+              "peak_working_set": 78651392,
+              "private_bytes": 33263616,
+              "cpu_s": 0.140625
+            },
+            {
+              "duration_ms": 128.2448000000004,
+              "cold_ms": 25.69230000000971,
+              "idle": {
+                "working_set": 7626752,
+                "private_bytes": 1544192,
+                "peak_working_set": 7626752,
+                "cpu_s": 0
+              },
+              "cpu_s": 0.140625,
+              "private_bytes": 28291072,
+              "peak_working_set": 78704640,
+              "working_set": 33914880
+            },
+            {
+              "duration_ms": 132.34560000000056,
+              "cold_ms": 29.313799999988987,
+              "idle": {
+                "working_set": 7651328,
+                "cpu_s": 0.015625,
+                "peak_working_set": 7651328,
+                "private_bytes": 1536000
+              },
+              "private_bytes": 30789632,
+              "peak_working_set": 78749696,
+              "working_set": 35090432,
+              "cpu_s": 0.140625
+            },
+            {
+              "duration_ms": 126.15780000000086,
+              "cold_ms": 48.6137999999919,
+              "idle": {
+                "working_set": 7716864,
+                "peak_working_set": 7716864,
+                "cpu_s": 0,
+                "private_bytes": 1634304
+              },
+              "cpu_s": 0.125,
+              "working_set": 33923072,
+              "private_bytes": 28368896,
+              "peak_working_set": 78774272
+            }
+          ]
+        },
+        "after": {
+          "medians": {
+            "duration_ms": 106.62090000000899,
+            "cold_ms": 28.878200000006473,
+            "peak_working_set": 55627776,
+            "private_bytes": 29855744,
+            "working_set": 35123200,
+            "cpu_s": 0.125,
+            "idle_working_set": 7544832,
+            "idle_private_bytes": 1572864
+          },
+          "runs": [
+            {
+              "duration_ms": 105.00319999999192,
+              "cold_ms": 31.045700000002398,
+              "idle": {
+                "peak_working_set": 7499776,
+                "working_set": 7499776,
+                "private_bytes": 1527808,
+                "cpu_s": 0.015625
+              },
+              "peak_working_set": 55599104,
+              "private_bytes": 29827072,
+              "working_set": 35069952,
+              "cpu_s": 0.125
+            },
+            {
+              "duration_ms": 115.64640000001236,
+              "cold_ms": 28.477799999993294,
+              "idle": {
+                "peak_working_set": 7618560,
+                "cpu_s": 0.015625,
+                "private_bytes": 1642496,
+                "working_set": 7618560
+              },
+              "cpu_s": 0.140625,
+              "peak_working_set": 55693312,
+              "working_set": 35049472,
+              "private_bytes": 29855744
+            },
+            {
+              "duration_ms": 102.79309999999532,
+              "cold_ms": 28.58780000000843,
+              "idle": {
+                "working_set": 7544832,
+                "private_bytes": 1576960,
+                "peak_working_set": 7544832,
+                "cpu_s": 0
+              },
+              "working_set": 36126720,
+              "private_bytes": 34185216,
+              "peak_working_set": 55627776,
+              "cpu_s": 0.109375
+            },
+            {
+              "duration_ms": 113.12640000000829,
+              "cold_ms": 100.13470000000962,
+              "idle": {
+                "private_bytes": 1576960,
+                "working_set": 7561216,
+                "peak_working_set": 7561216,
+                "cpu_s": 0.015625
+              },
+              "peak_working_set": 55656448,
+              "private_bytes": 32870400,
+              "cpu_s": 0.125,
+              "working_set": 36093952
+            },
+            {
+              "duration_ms": 103.57940000000235,
+              "cold_ms": 28.878200000006473,
+              "idle": {
+                "cpu_s": 0.015625,
+                "peak_working_set": 7503872,
+                "working_set": 7503872,
+                "private_bytes": 1523712
+              },
+              "peak_working_set": 55595008,
+              "private_bytes": 31772672,
+              "cpu_s": 0.125,
+              "working_set": 35221504
+            },
+            {
+              "duration_ms": 106.62090000000899,
+              "cold_ms": 25.832599999994272,
+              "idle": {
+                "working_set": 7565312,
+                "private_bytes": 1572864,
+                "peak_working_set": 7565312,
+                "cpu_s": 0.015625
+              },
+              "working_set": 35123200,
+              "cpu_s": 0.125,
+              "peak_working_set": 55648256,
+              "private_bytes": 29671424
+            },
+            {
+              "duration_ms": 114.30349999999453,
+              "cold_ms": 50.4485999999888,
+              "idle": {
+                "working_set": 7495680,
+                "peak_working_set": 7495680,
+                "cpu_s": 0,
+                "private_bytes": 1519616
+              },
+              "working_set": 35082240,
+              "cpu_s": 0.09375,
+              "peak_working_set": 55578624,
+              "private_bytes": 29548544
+            }
+          ]
+        }
+      }
+    },
+    "artifacts": {
+      "after": {
+        "bytes": 12156416,
+        "version": "2.0.2",
+        "sha256": "4972b4e1f58b773012d995432e8b5f61f88335bd9d84625c0df6c68f29dc3a92"
+      },
+      "before": {
+        "bytes": 12668416,
+        "version": "2.0.1",
+        "sha256": "5f031b5c9d90662ae13050924f4d49bfc03e6ddbdba599d8b1336ce2856f0bbd"
+      }
+    }
+  }
 }
