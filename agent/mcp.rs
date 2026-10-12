@@ -30,6 +30,13 @@ pub struct Connector {
     legacy_task: Option<tokio::task::JoinHandle<()>>,
     endpoint: Option<String>,
 }
+impl Drop for Connector {
+    fn drop(&mut self) {
+        if let Some(task) = self.legacy_task.take() {
+            task.abort();
+        }
+    }
+}
 impl Connector {
     pub fn new(config: Server) -> Result<Self> {
         Ok(Self {
@@ -100,6 +107,7 @@ impl Connector {
         let mut tools = vec![];
         let mut cursor = None;
         let mut seen = std::collections::HashSet::new();
+        let mut cursors = std::collections::HashSet::new();
         loop {
             let mut params = json!({});
             if let Some(c) = &cursor {
@@ -135,7 +143,7 @@ impl Connector {
             if next.is_none() {
                 break;
             }
-            if cursor == next {
+            if !cursors.insert(next.clone()) || cursors.len() > 2048 {
                 bail!("MCP repeated pagination cursor")
             }
             cursor = next;
@@ -437,8 +445,11 @@ impl McpRegistry {
         r
     }
     pub async fn close(&self) {
+        let mut closed = std::collections::HashSet::new();
         for (_, _, c) in self.tools.values() {
-            c.lock().await.close().await;
+            if closed.insert(Arc::as_ptr(c) as usize) {
+                c.lock().await.close().await;
+            }
         }
     }
 }

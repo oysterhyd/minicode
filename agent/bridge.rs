@@ -1208,7 +1208,8 @@ pub async fn serve(store: Store) -> Result<()> {
         });
         while tasks.try_join_next().is_some() {}
     }
-    router.lock().await.close().await;
+    tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+    router.lock().await.close().await;
     Ok(())
 }

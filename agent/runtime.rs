@@ -390,6 +390,24 @@ impl Runtime {
         }
         Ok(prompt)
     }
+    async fn connect_mcp(&mut self, hooks: &Hooks) -> Result<()> {
+        let servers = self.catalog.lock().await.servers.clone();
+        let deadline = hooks.shared.lock().unwrap().deadline;
+        let prepare = McpRegistry::prepare(servers);
+        let registry = tokio::select! {
+            _=hooks.cancel.cancelled()=>bail!("turn cancelled"),
+            result=async {
+                if let Some(deadline)=deadline {
+                    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()),prepare).await.map_err(|_|anyhow::anyhow!("turn deadline exceeded"))
+                } else { Ok(prepare.await) }
+            }=>result?
+        };
+        self.mcp = Arc::new(registry);
+        for status in &self.mcp.statuses {
+            self.event(hooks, "mcp_discovery", status.clone())?;
+        }
+        Ok(())
+    }
     pub async fn prepare(&mut self, hooks: &Hooks) -> Result<()> {
         let existing = self.store.events(&self.session, -1)?;
         if !existing.iter().any(|e| e.r#type == "session_start") {
@@ -404,11 +422,6 @@ impl Runtime {
         }
         if let Some(goal) = &self.goal {
             goal.save(&self.store, &self.session)?;
-        }
-        let servers = self.catalog.lock().await.servers.clone();
-        self.mcp = Arc::new(McpRegistry::prepare(servers).await);
-        for status in &self.mcp.statuses {
-            self.event(hooks, "mcp_discovery", status.clone())?;
         }
         let mut answered = HashSet::new();
         let mut pending = vec![];
@@ -497,6 +510,12 @@ impl Runtime {
         hooks: Hooks,
     ) -> Result<RunResult> {
         let _ownership = self.store.activation(&self.session)?;
+        if text.is_none()
+            && self.store.require(&self.session)?["exit_reason"] == "goal_not_met"
+            && let Some(goal) = &mut self.goal
+        {
+            goal.attempts = 0;
+        }
         let started = Instant::now();
         let budget = hooks.settings.lock().unwrap().budget.clone();
         {
@@ -649,6 +668,7 @@ impl Runtime {
         )?;
         let budget = hooks.settings.lock().unwrap().budget.clone();
         self.event(hooks, "budget_changed", json!({"budget":budget}))?;
+        self.connect_mcp(hooks).await?;
         let mut truncations = 0;
         let mut repeated = 0;
         let mut previous = None;
@@ -736,8 +756,14 @@ impl Runtime {
             {
                 return Ok("context_limit".into());
             }
+            {
+                let mut ledger = hooks.shared.lock().unwrap();
+                if budget.max_rounds > 0 && ledger.rounds >= budget.max_rounds {
+                    return Ok("max_rounds".into());
+                }
+                ledger.rounds += 1;
+            }
             self.rounds += 1;
-            hooks.shared.lock().unwrap().rounds += 1;
             self.event(hooks, "round_start", json!({"round":self.rounds}))?;
             self.store
                 .update(&self.session, &json!({"rounds":self.rounds}))?;

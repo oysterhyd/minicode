@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -340,6 +341,9 @@ impl Store {
             .open(dir.join(format!("{id}.lock")))?;
         fs2::FileExt::try_lock_exclusive(&f)
             .with_context(|| format!("session already running: {id}"))?;
+        if f.metadata()?.len() == 0 {
+            (&f).write_all(&[0])?;
+        }
         Ok(f)
     }
     pub fn spill(&self, id: &str, kind: &str, text: &str) -> Result<String> {

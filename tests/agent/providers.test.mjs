@@ -5,10 +5,10 @@ import http from 'node:http'
 import {test} from 'node:test'
 import {fixture} from './helpers.mjs'
 test('two read-only delegates overlap while sharing parent usage',async t=>{
-  const f=await fixture(t);let parent=0,active=0,maxActive=0
+  const f=await fixture(t);let parent=0,active=0,maxActive=0;const waiting=[]
   const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
     const p=JSON.parse(body),system=p.messages.find(m=>m.role==='system')?.content||''
-    if(system.includes('你是子助手。')){active++;maxActive=Math.max(maxActive,active);setTimeout(()=>{active--;write(res,[{choices:[{delta:{content:JSON.stringify({summary:'done',findings:[],evidence_refs:[],unresolved:[]})},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:5}}])},120)}
+    if(system.includes('你是子助手。')){active++;maxActive=Math.max(maxActive,active);const finish=()=>{if(res.writableEnded)return;active--;write(res,[{choices:[{delta:{content:JSON.stringify({summary:'done',findings:[],evidence_refs:[],unresolved:[]})},finish_reason:'stop'}],usage:{prompt_tokens:10,completion_tokens:5}}])};const fallback=setTimeout(finish,4000);waiting.push(()=>{clearTimeout(fallback);finish()});if(waiting.length===2)waiting.forEach(fn=>fn())}
     else if(parent++===0){write(res,[{choices:[{delta:{tool_calls:[{index:0,id:'delegate-a',function:{name:'delegate',arguments:JSON.stringify({kind:'explore',task:'inspect A'})}},{index:1,id:'delegate-b',function:{name:'delegate',arguments:JSON.stringify({kind:'explore',task:'inspect B'})}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:20,completion_tokens:10}}])}
     else write(res,[{choices:[{delta:{content:'completed'},finish_reason:'stop'}],usage:{prompt_tokens:20,completion_tokens:10}}])
   })})

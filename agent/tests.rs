@@ -67,6 +67,19 @@ fn utf8_bounds() {
     }
 }
 #[test]
+fn report_preserves_released_html_layout_and_diff_colours() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/agent/fixtures/report.json")).unwrap();
+    let events: Vec<crate::models::Event> =
+        serde_json::from_value(fixture["events"].clone()).unwrap();
+    let messages: Vec<crate::models::Message> =
+        serde_json::from_value(fixture["messages"].clone()).unwrap();
+    let full = serde_json::from_value(fixture["full_outputs"].clone()).unwrap();
+    let actual = crate::report::render(&fixture["summary"], &events, &messages, &full);
+    let expected = include_str!("../tests/agent/fixtures/report.html");
+    assert_eq!(actual.replace("\r\n", "\n"), expected.replace("\r\n", "\n"));
+}
+#[test]
 fn usage_preserves_uncertainty() {
     let mut u = Usage::default();
     u.add(&Usage {

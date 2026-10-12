@@ -1,0 +1,222 @@
+{
+  "summary": {
+    "session_id": "01234567890123456789012345678901",
+    "created_at": "2026-01-02T03:04:05.123456+00:00",
+    "workspace": "C:/repo<&>",
+    "provider": "fake",
+    "model": "fake",
+    "status": "paused",
+    "exit_reason": "cancelled",
+    "rounds": 1,
+    "input_tokens": 10,
+    "output_tokens": 4,
+    "cache_read_tokens": 2,
+    "cache_write_tokens": 1,
+    "usage_available": false
+  },
+  "events": [
+    {
+      "type": "session_start",
+      "data": {
+        "workspace": "C:/repo<&>",
+        "provider": "fake",
+        "model": "fake"
+      },
+      "seq": 0,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "round_start",
+      "data": {
+        "round": 1
+      },
+      "seq": 1,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "assistant_message",
+      "data": {
+        "text": "hello <script> & 世界",
+        "tool_calls": [
+          "edit"
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 4,
+          "cache_read_tokens": 2,
+          "cache_write_tokens": 1,
+          "available": true
+        },
+        "stop_reason": "tool_use"
+      },
+      "seq": 2,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "tool_call_start",
+      "data": {
+        "call_id": "x",
+        "name": "edit",
+        "arguments": {
+          "path": "a.txt",
+          "old_text": "old",
+          "new_text": "new"
+        },
+        "source": {
+          "plugin": "docs",
+          "plugin_version": "0.1.0",
+          "plugin_sha256": "abcdef1234567890"
+        }
+      },
+      "seq": 3,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "approval_request",
+      "data": {
+        "tool_name": "edit",
+        "summary": "edit <file>"
+      },
+      "seq": 4,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "approval_decision",
+      "data": {
+        "tool_name": "edit",
+        "granted": true,
+        "reason": "allowed"
+      },
+      "seq": 5,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "tool_call_result",
+      "data": {
+        "call_id": "x",
+        "name": "edit",
+        "success": true,
+        "exit_code": 0,
+        "output_preview": "Applied change to a.txt",
+        "error": null
+      },
+      "seq": 6,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "context_compacted",
+      "data": {
+        "tokens_before": 90000,
+        "tokens_after": 30000
+      },
+      "seq": 7,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "goal_check",
+      "data": {
+        "items": [
+          {
+            "item": "tests-pass",
+            "kind": "command",
+            "passed": true,
+            "exit_code": 0
+          },
+          {
+            "item": "guard",
+            "kind": "protected",
+            "passed": false,
+            "exit_code": null
+          }
+        ]
+      },
+      "seq": 8,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "side_effect_unknown",
+      "data": {
+        "tool": "write",
+        "reason": "interrupted"
+      },
+      "seq": 9,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "background_job_started",
+      "data": {
+        "job_id": "j",
+        "command": "node --version"
+      },
+      "seq": 10,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "background_job_completed",
+      "data": {
+        "job_id": "j",
+        "exit_code": 0,
+        "output": "v22\n"
+      },
+      "seq": 11,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "background_job_lost",
+      "data": {
+        "job_id": "lost"
+      },
+      "seq": 12,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "round_end",
+      "data": {
+        "round": 1
+      },
+      "seq": 13,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "budget_changed",
+      "data": {
+        "budget": {
+          "max_rounds": 5,
+          "max_seconds": 60,
+          "max_total_tokens": 80000
+        }
+      },
+      "seq": 14,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    },
+    {
+      "type": "session_end",
+      "data": {
+        "exit_reason": "cancelled",
+        "rounds": 1,
+        "total_usage": {
+          "input_tokens": 10,
+          "output_tokens": 4,
+          "available": false
+        },
+        "error": "<error>"
+      },
+      "seq": 15,
+      "timestamp": "2026-01-02T03:04:05.123456+00:00"
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "x",
+          "content": "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+          "is_error": false
+        }
+      ]
+    }
+  ],
+  "full_outputs": {}
+}

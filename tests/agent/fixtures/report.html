@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini Claude Code 执行报告 — 01234567890123456789012345678901</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--deep:#010409;--border:#30363d;
+--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--green:#3fb950;
+--red:#f85149;--yellow:#d29922;--purple:#bc8cff;--cyan:#39c5cf;}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--text);
+font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",
+"PingFang SC","Microsoft YaHei",sans-serif;}
+.wrap{max-width:980px;margin:0 auto;padding:24px 16px 48px;}
+h1{font-size:20px;margin:0 0 12px;}
+h2{font-size:16px;margin:0 0 10px;color:var(--accent);}
+h3{font-size:14px;margin:12px 0 6px;color:var(--text);}
+.panel{background:var(--panel);border:1px solid var(--border);
+border-radius:8px;padding:14px 16px;margin:0 0 16px;}
+table{border-collapse:collapse;width:100%;}
+th,td{text-align:left;padding:4px 12px 4px 0;vertical-align:top;}
+.meta th{color:var(--muted);font-weight:400;white-space:nowrap;width:90px;}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono",
+"Courier New",monospace;font-size:12.5px;background:var(--deep);
+border:1px solid var(--border);border-radius:4px;padding:1px 5px;
+word-break:break-all;}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono",
+"Courier New",monospace;font-size:12.5px;word-break:break-all;}
+.muted{color:var(--muted);}
+.badge{display:inline-block;border-radius:10px;padding:1px 9px;
+font-size:12px;font-weight:600;border:1px solid;white-space:nowrap;}
+.b-start{color:var(--accent);border-color:var(--accent);}
+.b-round{color:var(--muted);border-color:var(--border);}
+.b-assistant{color:var(--purple);border-color:var(--purple);}
+.b-tool{color:var(--accent);border-color:var(--accent);}
+.b-ok{color:var(--green);border-color:var(--green);}
+.b-fail{color:var(--red);border-color:var(--red);}
+.b-approval{color:var(--yellow);border-color:var(--yellow);}
+.b-end{color:var(--purple);border-color:var(--purple);}
+.b-compact{color:var(--cyan);border-color:var(--cyan);}
+.b-goal{color:var(--green);border-color:var(--green);}
+.b-warn{color:var(--yellow);border-color:var(--yellow);}
+.b-bg{color:var(--cyan);border-color:var(--cyan);}
+.timeline{display:flex;flex-direction:column;gap:8px;}
+.event{background:var(--panel);border:1px solid var(--border);
+border-left:3px solid var(--border);border-radius:6px;padding:8px 12px;}
+.event.ok{border-left-color:var(--green);}
+.event.fail{border-left-color:var(--red);}
+.ev-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+.ev-type{color:var(--muted);background:none;border:none;padding:0;}
+.ev-time{color:var(--muted);font-size:12px;}
+.ev-body{margin-top:6px;}
+.kv{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;}
+.kv .k{color:var(--muted);min-width:60px;}
+.pass{color:var(--green);font-weight:600;}
+.notpass{color:var(--red);font-weight:600;}
+.err{color:var(--red);}
+.msg-text{white-space:pre-wrap;word-break:break-word;}
+pre{background:var(--deep);border:1px solid var(--border);
+border-radius:6px;padding:8px 10px;overflow-x:auto;white-space:pre;
+margin:6px 0;font-family:ui-monospace,SFMono-Regular,Consolas,
+"Cascadia Mono","Courier New",monospace;font-size:12.5px;}
+details{margin-top:6px;}
+summary{cursor:pointer;color:var(--accent);}
+summary:hover{text-decoration:underline;}
+.d-add{color:var(--green);}
+.d-del{color:var(--red);}
+.d-hunk{color:var(--cyan);}
+.d-meta{color:var(--muted);font-weight:600;}
+.goal-table th{color:var(--muted);font-weight:400;
+border-bottom:1px solid var(--border);}
+.goal-table td{border-bottom:1px solid var(--border);}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="panel"><h1>Mini Claude Code 执行报告</h1><table class="meta"><tr><th>会话 ID</th><td><code>01234567890123456789012345678901</code></td></tr><tr><th>状态</th><td>已暂停，可继续 <span class="muted">(paused)</span> <span class="muted">· 退出原因：已取消 (cancelled)</span></td></tr><tr><th>工作区</th><td><code>C:/repo&lt;&amp;&gt;</code></td></tr><tr><th>模型</th><td>fake / fake</td></tr><tr><th>创建时间</th><td>2026-01-02 03:04:05</td></tr><tr><th>轮数</th><td>1</td></tr><tr><th>Token</th><td>输入 10 · 输出 4 · 总计 14</td></tr><tr><th>缓存 Token</th><td>读取 2 · 写入 1 · 用量不完整</td></tr></table></header><section class="panel"><h2>目标验收（Goal Checks）</h2><table class="goal-table"><thead><tr><th>item</th><th>kind</th><th>通过</th><th>退出码</th><th>时间</th></tr></thead><tbody><tr><td>tests-pass</td><td>command</td><td><span class="pass">✓ 通过</span></td><td><code>0</code></td><td class="ev-time">2026-01-02 03:04:05</td></tr>
+<tr><td>guard</td><td>protected</td><td><span class="notpass">✗ 失败</span></td><td><span class="muted">—</span></td><td class="ev-time">2026-01-02 03:04:05</td></tr></tbody></table></section><section class="panel"><h2>时间线</h2><div class="timeline"><div class="event ">
+<div class="ev-head"><span class="badge b-start">会话开始</span><code class="ev-type">session_start</code><span class="ev-time">#0 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">工作区</span><span><code>C:/repo&lt;&amp;&gt;</code></span></div>
+<div class="kv"><span class="k">提供商</span><span>fake</span></div>
+<div class="kv"><span class="k">模型</span><span>fake</span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-round">轮开始</span><code class="ev-type">round_start</code><span class="ev-time">#1 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">轮次</span><span>第 1 轮</span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-assistant">助手消息</span><code class="ev-type">assistant_message</code><span class="ev-time">#2 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="msg-text">hello &lt;script&gt; &amp; 世界</div>
+<div class="kv"><span class="k">工具调用</span><span><code>edit</code></span></div>
+<div class="kv"><span class="k">Token</span><span>输入 10 · 输出 4 · 缓存读 2 · 缓存写 1</span></div>
+<div class="kv"><span class="k">停止原因</span><span>tool_use</span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-tool">工具调用</span><code class="ev-type">tool_call_start</code><span class="ev-time">#3 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">工具</span><span><code>edit</code></span></div>
+<div class="kv"><span class="k">来源</span><span><code>docs@0.1.0 sha256:abcdef123456</code></span></div>
+<div class="kv"><span class="k">参数</span><span><code>{&quot;path&quot;: &quot;a.txt&quot;, &quot;old_text&quot;: &quot;old&quot;, &quot;new_text&quot;: &quot;new&quot;}</code></span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-approval">审批请求</span><code class="ev-type">approval_request</code><span class="ev-time">#4 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">工具</span><span><code>edit</code></span></div>
+<div class="kv"><span class="k">内容</span><span>edit &lt;file&gt;</span></div></div>
+</div>
+<div class="event ok">
+<div class="ev-head"><span class="badge b-ok">审批决定</span><code class="ev-type">approval_decision</code><span class="ev-time">#5 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">决定</span><span><span class="pass">✓ 允许</span></span></div>
+<div class="kv"><span class="k">工具</span><span><code>edit</code></span></div>
+<div class="kv"><span class="k">原因</span><span>allowed</span></div></div>
+</div>
+<div class="event ok">
+<div class="ev-head"><span class="badge b-ok">工具结果</span><code class="ev-type">tool_call_result</code><span class="ev-time">#6 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">结果</span><span><span class="pass">✓ 成功</span></span></div>
+<div class="kv"><span class="k">工具</span><span><code>edit</code></span></div>
+<div class="kv"><span class="k">退出码</span><span><code>0</code></span></div>
+<pre class="preview">Applied change to a.txt</pre>
+<details><summary>展开完整 diff</summary><pre class="diff"><span class="d-meta">--- a/a.txt</span>
+<span class="d-meta">+++ b/a.txt</span>
+<span class="d-hunk">@@ -1 +1 @@</span>
+<span class="d-del">-old</span>
+<span class="d-add">+new</span>
+</pre></details></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-compact">上下文压缩</span><code class="ev-type">context_compacted</code><span class="ev-time">#7 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">Token</span><span>90000 → 30000</span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-goal">目标验收</span><code class="ev-type">goal_check</code><span class="ev-time">#8 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="pass">✓ 通过</span> <span class="mono">tests-pass</span> <span class="muted">kind=command</span> 退出码 <code>0</code></div>
+<div class="kv"><span class="notpass">✗ 失败</span> <span class="mono">guard</span> <span class="muted">kind=protected</span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-warn">副作用未知</span><code class="ev-type">side_effect_unknown</code><span class="ev-time">#9 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">工具</span><span><code>write</code></span></div>
+<div class="kv"><span class="k">说明</span><span>interrupted</span></div>
+<div class="kv"><span class="k">状态</span><span><span class="muted">副作用结果未知</span></span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-bg">后台任务启动</span><code class="ev-type">background_job_started</code><span class="ev-time">#10 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">任务</span><span><code>j</code></span></div>
+<div class="kv"><span class="k">内容</span><span>node --version</span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-bg">后台任务完成</span><code class="ev-type">background_job_completed</code><span class="ev-time">#11 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">任务</span><span><code>j</code></span></div>
+<div class="kv"><span class="k">退出码</span><span><code>0</code></span></div>
+<pre class="preview">v22
+</pre></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-warn">后台任务丢失</span><code class="ev-type">background_job_lost</code><span class="ev-time">#12 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">任务</span><span><code>lost</code> 结果丢失</span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-round">轮结束</span><code class="ev-type">round_end</code><span class="ev-time">#13 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">轮次</span><span>第 1 轮</span></div></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-round">预算更新</span><code class="ev-type">budget_changed</code><span class="ev-time">#14 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><pre class="raw">{
+  &quot;budget&quot;: {
+    &quot;max_rounds&quot;: 5,
+    &quot;max_seconds&quot;: 60,
+    &quot;max_total_tokens&quot;: 80000
+  }
+}</pre></div>
+</div>
+<div class="event ">
+<div class="ev-head"><span class="badge b-end">会话结束</span><code class="ev-type">session_end</code><span class="ev-time">#15 · 2026-01-02 03:04:05</span></div>
+<div class="ev-body"><div class="kv"><span class="k">退出原因</span><span>已取消 <code>cancelled</code></span></div>
+<div class="kv"><span class="k">轮数</span><span>1</span></div>
+<div class="kv"><span class="k">Token</span><span>输入 10 · 输出 4 · 缓存读 0 · 缓存写 0 · 用量不完整</span></div>
+<div class="kv"><span class="k">错误</span><span><code class="err">&lt;error&gt;</code></span></div></div>
+</div></div></section><footer class="panel"><h2>用量</h2><p>输入 Token <strong>10</strong> · 输出 Token <strong>4</strong> · 总计 <strong>14</strong> · 缓存读取 <strong>2</strong> · 缓存写入 <strong>1</strong> · 轮数 <strong>1</strong></p><p class="muted">单文件离线报告：无外部 CSS / JS / 字体依赖，无需 JavaScript 即可查看全部内容（折叠区使用原生 details 元素）。</p></footer>
+</div>
+</body>
+</html>

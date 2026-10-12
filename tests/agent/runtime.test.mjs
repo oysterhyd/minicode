@@ -5,6 +5,9 @@ import {test} from 'node:test'
 import {setTimeout as delay} from 'node:timers/promises'
 import {spawnSync} from 'node:child_process'
 import {fixture,connect,profile,executable} from './helpers.mjs'
+test('continuing a failed acceptance slice resets its fix attempts',async t=>{
+  const f=await fixture(t,[{text:'first premature finish'},{text:'second premature finish'},{text:'another attempt before the fix'},{tool_calls:[{name:'write',arguments:{path:'fixed.txt',content:'done'}}]},{text:'fixed'}]);const spec=path.join(f.root,'acceptance.json');fs.writeFileSync(spec,JSON.stringify({max_fix_attempts:2,items:[{id:'exists',type:'artifact',path:'fixed.txt'}]}));await f.request('setPermissionMode',{mode:'bypass'});await f.request('setAcceptance',{path:spec});const first=await f.run();assert.equal(first.result.exit_reason,'goal_not_met');const from=f.events.length;await f.request('runSlash',{text:'/continue',workspace:f.workspace,sessionId:first.id});const done=await f.wait(e=>e.event==='run_done',from);assert.equal(done.result.exit_reason,'completed');assert.equal(fs.readFileSync(path.join(f.workspace,'fixed.txt'),'utf8'),'done')
+})
 test('native file pages preserve universal newlines and search beyond one megabyte',async t=>{
   const f=await fixture(t,[{tool_calls:[{name:'read',arguments:{path:'newlines.txt'}},{name:'grep',arguments:{path:'large.txt',pattern:'TARGET'}}]},{text:'done'}]);
   fs.writeFileSync(path.join(f.workspace,'newlines.txt'),'one\rtwo\r\nthree\nfour');fs.writeFileSync(path.join(f.workspace,'large.txt'),'filler\n'.repeat(200000)+'TARGET\n');

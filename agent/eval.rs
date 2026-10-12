@@ -364,7 +364,7 @@ pub async fn run(mut options: Options) -> Result<()> {
     if options.schedule == "grouped" {
         combinations.sort_by(|a, b| (&a.1, &a.0, a.2).cmp(&(&b.1, &b.0, b.2)));
     }
-    let config = json!({"version":crate::VERSION,"model":options.model,"baselines":baselines,"repeats":options.repeats,"concurrency":options.concurrency,"schedule":options.schedule,"fixtures":tasks.iter().map(|p|goals::fingerprint(p).map(|hash|json!({"task":p.file_name().unwrap().to_string_lossy(),"sha256":hash}))).collect::<Result<Vec<_>>>()?});
+    let config = json!({"version":crate::VERSION,"agent_sha256":goals::hash_file(&std::env::current_exe()?)?,"model":options.model,"baselines":baselines,"repeats":options.repeats,"concurrency":options.concurrency,"schedule":options.schedule,"fixtures":tasks.iter().map(|p|goals::fingerprint(p).map(|hash|json!({"task":p.file_name().unwrap().to_string_lossy(),"sha256":hash}))).collect::<Result<Vec<_>>>()?});
     let config_path = options.output.join("config.json");
     if config_path.is_file() && serde_json::from_slice::<Value>(&fs::read(&config_path)?)? != config
     {

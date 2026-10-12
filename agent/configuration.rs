@@ -26,16 +26,17 @@ impl Configuration {
         if !value.is_object() || !value["services"].is_array() || !value["agents"].is_array() {
             bail!("harness configuration must contain services and agents lists")
         }
-        if value["services"]
+        if value["services"].as_array().unwrap().iter().any(|s| {
+            !s.is_object()
+                || !s["models"].is_array()
+                || s["models"]
+                    .as_array()
+                    .is_some_and(|models| models.iter().any(|m| !m.is_object()))
+        }) || value["agents"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|s| !s.is_object() || !s["models"].is_array())
-            || value["agents"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|a| !a.is_object())
+            .any(|a| !a.is_object())
         {
             bail!("invalid service or agent configuration")
         }
