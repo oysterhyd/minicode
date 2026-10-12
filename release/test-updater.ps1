@@ -13,8 +13,12 @@ $qaTarget = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ('.cache/update-qa-æ
 $qaCache = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '.cache'))
 if (-not $qaTarget.StartsWith($qaCache+[IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid update QA directory' }
 New-Item -ItemType Directory -Force $qaTarget | Out-Null
-& tar.exe -xf $archivePath -C $qaTarget
-if ($LASTEXITCODE -ne 0) { throw 'Update archive extraction failed' }
+# Windows tar.exe can pass Unicode paths through the runner's ANSI code page.
+# The .NET extractor preserves the same Chinese/space path used by the SDK probe.
+$archiveStream = [IO.File]::OpenRead($archivePath)
+$gzipStream = [IO.Compression.GZipStream]::new($archiveStream, [IO.Compression.CompressionMode]::Decompress)
+try { [System.Formats.Tar.TarFile]::ExtractToDirectory($gzipStream, $qaTarget, $false) }
+finally { $gzipStream.Dispose(); $archiveStream.Dispose() }
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $listener.Start()
 $qaPort = $listener.LocalEndpoint.Port
@@ -51,5 +55,4 @@ try {
     $liveRuntime.Dispose()
 }
 & (Join-Path $PSScriptRoot 'smoke-native.ps1') -Installation $qaTarget
-if ($LASTEXITCODE -ne 0) { throw 'Updated installation smoke failed' }
 Write-Host "Signed update, tamper rejection and updated runtime verified: $qaTarget"

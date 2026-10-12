@@ -27,5 +27,10 @@ async function measure(kind,backend){
   const used=await memory(child.pid);const exited=new Promise(resolve=>child.once('exit',resolve));child.stdin.end();await exited;if(errors.includes('Traceback'))throw Error(errors);if(path.dirname(root)!==path.resolve(os.tmpdir()))throw Error('Unsafe benchmark cleanup');fs.rmSync(root,{recursive:true,force:true});return {duration_ms,cold_ms,idle,...used}
 }
 const record={date:new Date().toISOString(),platform:process.platform,architecture:process.arch,node:process.version,samples,agent,legacy,measurements:{}}
-for(const kind of ['cold','turns','history','poll']){record.measurements[kind]={};for(const backend of legacy?['python','rust']:['rust']){const runs=[];for(let i=0;i<samples;i++)runs.push(await measure(kind,backend));const numeric=Object.keys(runs[0]).filter(k=>typeof runs[0][k]==='number');const medians=Object.fromEntries(numeric.map(k=>[k,median(runs.map(r=>r[k]))]));medians.idle_working_set=median(runs.map(r=>r.idle.working_set));medians.idle_private_bytes=median(runs.map(r=>r.idle.private_bytes));record.measurements[kind][backend]={medians,runs};console.log(`${kind} ${backend}: ${JSON.stringify(medians)}`)}}
+for(const kind of ['cold','turns','history','poll']) {
+  const backends=legacy?['python','rust']:['rust'],runs=Object.fromEntries(backends.map(b=>[b,[]]));record.measurements[kind]={}
+  // Reverse each pair so neither implementation always benefits from order.
+  for(let i=0;i<samples;i++)for(const backend of i%2?[...backends].reverse():backends)runs[backend].push(await measure(kind,backend))
+  for(const backend of backends){const values=runs[backend],numeric=Object.keys(values[0]).filter(k=>typeof values[0][k]==='number');const medians=Object.fromEntries(numeric.map(k=>[k,median(values.map(r=>r[k]))]));medians.idle_working_set=median(values.map(r=>r.idle.working_set));medians.idle_private_bytes=median(values.map(r=>r.idle.private_bytes));record.measurements[kind][backend]={medians,runs:values};console.log(kind+' '+backend+': '+JSON.stringify(medians))}
+}
 fs.mkdirSync(path.dirname(options.output||'output/rust-migration/benchmark.json'),{recursive:true});fs.writeFileSync(options.output||'output/rust-migration/benchmark.json',JSON.stringify(record,null,2)+'\n')
