@@ -51,6 +51,8 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
 1.2.0 起 Desktop 使用原生 UI，并内置 GitHub Releases 自动更新。“设置 → 通用”可管理自动检查和自动下载安装，“关于”页可手动检查。1.1.0 用户需要下载安装一次原生版本，后续可在应用内升级。体积、界面响应及 Diff 对比和验收范围见
 [原生迁移报告](docs/native-desktop-report.md)。
 
+2.0.0 起整个 Agent 后端、CLI、评测和报告生成改为 Rust，保持现有 Ink TUI 与 MyGo Desktop。代码简化、安装体积和 Agent 性能实测见 [Rust 迁移报告](docs/rust-agent-2.0.0.md)。
+
 发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未作 Windows 代码签名，更新归档使用 Ed25519 签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
 
@@ -84,7 +86,7 @@ CLI 与桌面端共用已添加的 AI 服务和会话。源码构建后，使用
 | 模型服务 | 支持 OpenAI Chat Completions 与 Anthropic Messages，可管理多个服务和模型。 |
 | 上下文与预算 | 上下文压缩、长输出归档，以及轮数、token 和时长预算。 |
 | 任务验收 | 可配置验收命令，将测试结果和工作区状态作为完成任务的证据。 |
-| 扩展能力 | 项目指令、Skills、本地 stdio MCP、插件和可配置子助手。 |
+| 扩展能力 | 项目指令、Skills、MCP（stdio / HTTP / SSE）、插件和可配置子助手。 |
 | 执行记录 | 会话事件、命令退出码、修改摘要、用量统计和 HTML 执行报告。 |
 
 ### 从任务到结果
