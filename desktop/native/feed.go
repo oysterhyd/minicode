@@ -92,7 +92,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 			d.markdown(c, p, item.Text)
 			if item.Pending {
 				e := ui.Box(c).Size(7, 14).Radius(2).Background(p.Accent)
-				e.Opacity(e.Loop("caret", time.Second, ui.Linear))
+				e.OpacityLoop("caret", time.Second, ui.Linear, 0, 1)
 			} else {
 				actions := ui.Row(c).Height(26).Gap(2)
 				if !last && !turn.Hovered() && !turn.FocusWithin() {
@@ -111,7 +111,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 	case "thinking":
 		ui.Row(c).Height(26).Gap(10).Children(func() {
 			orb := ui.Box(c).Size(10, 10).Radius(99).Background(p.Accent).Shadow(0, 0, 0, 4, p.AccentSoft)
-			orb.Opacity(0.4 + 0.6*orb.Loop("breathe", 1600*time.Millisecond, ui.Bounce(ui.EaseInOut)))
+			orb.OpacityLoop("breathe", 1600*time.Millisecond, ui.Bounce(ui.EaseInOut), 0.4, 1)
 			ui.Text(c, tr(item.Text)).SingleLine().Grow(1).Basis(0).MinWidth(0).FontSize(p.font(12.6)).TextColor(p.Text3)
 			if elapsed := time.Since(item.StartedAt); elapsed >= 2*time.Second {
 				muted(c, p, fmt.Sprintf("%ds", int(elapsed.Seconds()))).NoWrap().Shrink(0).FontSize(p.font(10.92))

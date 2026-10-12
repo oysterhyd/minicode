@@ -41,6 +41,8 @@ type conversation struct {
 	State                         model.State
 	Items                         []*model.FeedItem
 	Rows                          []model.FeedRow
+	toolItems                     map[string]*model.FeedItem
+	thinkingCount                 int
 	Trace                         []model.Event
 	Tasks                         []model.Task
 	Changes                       []model.Change
@@ -121,6 +123,8 @@ type desktop struct {
 	treeCache                              *treeCache
 	folderRevision                         uint64
 	frameObserved                          func()
+	framePainted                           func()
+	frameStarted                           float64
 	images                                 map[string]*messageImage
 	updates                                updateService
 }
@@ -408,10 +412,7 @@ func (d *desktop) openSession(session model.Session) {
 			}
 			v.Items = model.History(detail)
 			v.rebuildRows()
-			v.Trace = detail.Events
-			if len(v.Trace) > 300 {
-				v.Trace = v.Trace[len(v.Trace)-300:]
-			}
+			v.Trace = recentTrace(detail.Events)
 			v.Loaded = true
 			v.Error = ""
 			d.rememberWorkspace(v.Workspace)
@@ -420,23 +421,44 @@ func (d *desktop) openSession(session model.Session) {
 	})
 }
 
-func (v *conversation) rebuildRows() { v.version++; v.Rows = model.GroupFeed(v.Items) }
+func (v *conversation) rebuildRows() {
+	v.version++
+	v.Rows = model.GroupFeed(v.Items)
+	clear(v.toolItems)
+	v.thinkingCount = 0
+	for _, item := range v.Items {
+		v.indexItem(item)
+	}
+}
+
+func (v *conversation) indexItem(item *model.FeedItem) {
+	if item.Kind == "tool" {
+		if v.toolItems == nil {
+			v.toolItems = map[string]*model.FeedItem{}
+		}
+		v.toolItems[item.ID] = item
+	} else if item.Kind == "thinking" {
+		v.thinkingCount++
+	}
+}
+
 func (v *conversation) append(items ...*model.FeedItem) {
+	position := len(v.Items)
 	v.Items = append(v.Items, items...)
-	v.rebuildRows()
+	for i, item := range items {
+		v.Rows = model.AppendFeed(v.Rows, item, position+i)
+		v.indexItem(item)
+	}
+	v.version++
 }
 func (v *conversation) removeThinking() {
-	changed := false
-	v.Items = slices.DeleteFunc(v.Items, func(item *model.FeedItem) bool {
-		if item.Kind == "thinking" {
-			changed = true
-			return true
-		}
-		return false
-	})
-	if changed {
-		v.rebuildRows()
+	if v.thinkingCount == 0 {
+		return
 	}
+	v.Items = slices.DeleteFunc(v.Items, func(item *model.FeedItem) bool {
+		return item.Kind == "thinking"
+	})
+	v.rebuildRows()
 }
 
 func (d *desktop) send(text string, v *conversation) {
@@ -806,21 +828,19 @@ func (v *conversation) finishStream() {
 	v.streamText.Reset()
 }
 
+func recentTrace(events []model.Event) []model.Event {
+	// A suffix slice pins the complete imported trace and all its data maps.
+	return slices.Clone(events[max(0, len(events)-300):])
+}
+
 func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 	v.Trace = append(v.Trace, event)
 	if len(v.Trace) > 300 {
+		v.Trace[0] = model.Event{} // Release maps in the discarded backing slot.
 		v.Trace = v.Trace[len(v.Trace)-300:]
 	}
 	data := event.Data
 	stamp := model.Time(event.Timestamp)
-	find := func(id string) *model.FeedItem {
-		for i := len(v.Items) - 1; i >= 0; i-- {
-			if v.Items[i].ID == id {
-				return v.Items[i]
-			}
-		}
-		return nil
-	}
 	switch event.Type {
 	case "round_start":
 		v.finishStream()
@@ -849,7 +869,12 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 				stream.Text = text
 				stream.ID = fmt.Sprintf("assistant-%d", event.Seq)
 				stream.Version++
-				v.rebuildRows()
+				if last := &v.Rows[len(v.Rows)-1]; last.Item == stream {
+					last.ID = stream.ID
+					v.version++
+				} else {
+					v.rebuildRows()
+				}
 			}
 		} else if text != "" {
 			v.append(&model.FeedItem{ID: fmt.Sprintf("assistant-%d", event.Seq), Kind: "assistant", Text: text})
@@ -861,7 +886,7 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 		args, _ := data["arguments"].(map[string]any)
 		v.append(&model.FeedItem{ID: model.String(data["call_id"]), Kind: "tool", Name: model.String(data["name"]), Args: args, Pending: true, StartedAt: stamp})
 	case "tool_call_result":
-		if item := find(model.String(data["call_id"])); item != nil {
+		if item := v.toolItems[model.String(data["call_id"])]; item != nil {
 			item.Pending = false
 			item.Success = model.Bool(data["success"])
 			item.EndedAt = stamp
@@ -886,7 +911,7 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 			time.AfterFunc(80*time.Millisecond, func() { d.schedule(func() { v.refreshPending = false; d.refresh(v, false) }) })
 		}
 	case "tool_output":
-		if item := find(model.String(data["call_id"])); item != nil {
+		if item := v.toolItems[model.String(data["call_id"])]; item != nil {
 			item.Output = model.String(data["output_preview"])
 			item.Version++
 		}

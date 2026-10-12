@@ -96,6 +96,8 @@ def session_list(store: SqliteStore) -> list[dict]:
 
 class Bridge:
     def __init__(self, store: SqliteStore | None = None) -> None:
+        from minicode.storage.statistics import SessionStatistics
+        self._statistics = SessionStatistics()
         self.store = store if store is not None else _open_store()
         self.attachments = AttachmentStore(self.store._db_path.parent / "attachments")
         self.client_key: str | None = None
@@ -144,28 +146,7 @@ class Bridge:
         self.runtime.refresh_tools()
 
     def statistics(self):
-        events = self.store.get_events(self.runtime.session_id) if self.runtime and self.runtime.session_id else []
-        samples = []
-        for event in events:
-            if event.type.value != "assistant_message":
-                continue
-            usage = event.data.get("usage", {})
-            seconds = event.data.get("request_seconds")
-            generation = event.data.get("generation_seconds")
-            samples.append({"round": len(samples) + 1, "input": usage.get("input_tokens", 0), "output": usage.get("output_tokens", 0),
-                            "cached": usage.get("cache_read_tokens", 0), "available": usage.get("available", True),
-                            "seconds": seconds, "generationSeconds": generation,
-                            "firstTokenSeconds": event.data.get("first_token_seconds"),
-                            "requestTps": usage.get("output_tokens", 0) / seconds if seconds and seconds > 0 and usage.get("available", True) else None,
-                            "tps": usage.get("output_tokens", 0) / generation if generation and generation > 0 and usage.get("available", True) else None})
-        measured = [s for s in samples if s["seconds"] and s["seconds"] > 0 and s["available"]]
-        seconds = sum(s["seconds"] for s in measured)
-        generated = [s for s in samples if s["tps"] is not None]
-        generation_seconds = sum(s["generationSeconds"] for s in generated)
-        return {"toolCalls": sum(e.type.value == "tool_call_start" for e in events), "requests": len(samples),
-                "modelSeconds": seconds, "tps": sum(s["output"] for s in generated) / generation_seconds if generation_seconds else None,
-                "requestTps": sum(s["output"] for s in measured) / seconds if seconds else None,
-                "lastTps": samples[-1]["tps"] if samples else None, "samples": samples[-32:]}
+        return self._statistics.read(self.store, self.runtime.session_id if self.runtime else None)
 
     def emit(self, message: dict) -> None:
         emit(message | {"clientKey": self.event_key or self.client_key})

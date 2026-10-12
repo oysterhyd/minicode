@@ -22,6 +22,12 @@ SUFFIXES = {mime: suffix for suffix, (_, mime) in FORMATS.items()}
 MIME_KINDS = {mime: kind for kind, mime in FORMATS.values()}
 
 
+def _asset_digest(mime: str, data: bytes) -> str:
+    digest = hashlib.sha256(mime.encode() + b"\0")
+    digest.update(data)
+    return digest.hexdigest()
+
+
 def check_attachments(blocks, modalities, api_style=None):
     from minicode.providers.errors import ProviderRequestError
     if len(blocks) > MAX_ATTACHMENTS or sum(b.size for b in blocks) > MAX_TOTAL_BYTES:
@@ -65,7 +71,7 @@ class AttachmentStore:
         }[mime]
         if not valid:
             raise ValueError(f"文件内容与格式不符：{name}")
-        digest = hashlib.sha256(mime.encode() + b"\0" + data).hexdigest()
+        digest = _asset_digest(mime, data)
         block = MediaBlock(asset_id=digest, kind=kind, name=name, mime_type=mime, size=len(data))
         self.root.mkdir(parents=True, exist_ok=True)
         for target, payload in [(self.root / (digest + SUFFIXES[mime]), data), (self.root / (digest + ".json"), block.model_dump_json().encode("utf-8"))]:
@@ -107,6 +113,6 @@ class AttachmentStore:
                 data = stream.read(MAX_ATTACHMENT_BYTES+1)
         except OSError as exc:
             raise ProviderRequestError(f"附件无法读取：{block.name}") from exc
-        if len(data) != block.size or hashlib.sha256(block.mime_type.encode()+b"\0"+data).hexdigest() != block.asset_id:
+        if len(data) != block.size or _asset_digest(block.mime_type, data) != block.asset_id:
             raise ProviderRequestError(f"附件已损坏：{block.name}")
         return base64.b64encode(data).decode("ascii")

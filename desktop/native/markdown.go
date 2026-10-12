@@ -56,15 +56,37 @@ func (cache *renderCache) get(source string) *document {
 	if doc := cache.docs[source]; doc != nil {
 		return doc
 	}
+	source = strings.Clone(source) // Chunk slices must not pin old stream buffers.
 	doc := parseMarkdown(source)
+	cache.store(source, doc)
+	return doc
+}
+
+func (cache *renderCache) store(source string, doc *document) {
 	cache.docs[source] = doc
 	cache.order = append(cache.order, source)
 	cache.bytes += len(source)
 	for len(cache.order) > 1 && (len(cache.order) > 512 || cache.bytes > 8<<20) {
 		cache.bytes -= len(cache.order[0])
 		delete(cache.docs, cache.order[0])
+		cache.order[0] = ""
 		cache.order = cache.order[1:]
 	}
+}
+
+func (cache *renderCache) markdown(source string) *document {
+	if doc := cache.docs[source]; doc != nil {
+		return doc
+	}
+	chunks := markdownChunks(source)
+	if len(chunks) == 1 {
+		return cache.get(chunks[0])
+	}
+	doc := &document{}
+	for _, chunk := range chunks {
+		doc.Blocks = append(doc.Blocks, cache.get(chunk).Blocks...)
+	}
+	cache.store(source, doc)
 	return doc
 }
 
@@ -336,10 +358,7 @@ func inlineText(c *ui.Context, p palette, spans []inline, bold bool) *ui.Element
 }
 
 func (d *desktop) markdown(c *ui.Context, p palette, source string) {
-	var doc document
-	for _, chunk := range markdownChunks(source) {
-		doc.Blocks = append(doc.Blocks, d.renderCache.get(chunk).Blocks...)
-	}
+	doc := d.renderCache.markdown(source)
 	ui.Column(c).Gap(10.29).FontSize(p.font(13.72)).Children(func() {
 		for i, block := range doc.Blocks {
 			ui.Column(c).Key(i).Margin(0, 0, 0, float32(block.Indent)*18).Children(func() {
@@ -413,9 +432,8 @@ func convertDiff(text string) []modelDiffLine { return content.ParseDiff(text) }
 
 func markdownChunks(source string) []string {
 	var chunks []string
-	lines := strings.Split(source, "\n")
-	start, fence := 0, ""
-	for i, line := range lines {
+	start, position, fence, previous := 0, 0, "", ""
+	for line := range strings.SplitSeq(source, "\n") {
 		trim := strings.TrimSpace(line)
 		if strings.HasPrefix(trim, "```") || strings.HasPrefix(trim, "~~~") {
 			marker := trim[:3]
@@ -425,16 +443,17 @@ func markdownChunks(source string) []string {
 				fence = ""
 			}
 		}
-		if fence == "" && trim == "" && i > start {
-			previous := strings.TrimSpace(lines[i-1])
+		if fence == "" && trim == "" && position > start {
 			if !strings.HasPrefix(previous, "- ") && !strings.HasPrefix(previous, "* ") && !strings.HasPrefix(previous, "+ ") {
-				chunks = append(chunks, strings.Join(lines[start:i], "\n"))
-				start = i + 1
+				chunks = append(chunks, source[start:position-1])
+				start = position + len(line) + 1
 			}
 		}
+		previous = trim
+		position += len(line) + 1
 	}
-	if start < len(lines) {
-		chunks = append(chunks, strings.Join(lines[start:], "\n"))
+	if start <= len(source) {
+		chunks = append(chunks, source[start:])
 	}
 	if len(chunks) == 0 {
 		return []string{source}

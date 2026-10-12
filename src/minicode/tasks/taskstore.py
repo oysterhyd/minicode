@@ -44,27 +44,25 @@ def _find_cycle(graph: dict[str, list[str]], start: str) -> list[str] | None:
     Edges point from a task to the tasks it depends on. A cycle exists when
     the search reaches a node already on the current path.
     """
-    visited: set[str] = set()
-    path: list[str] = []
-    on_path: set[str] = set()
-
-    def dfs(node: str) -> list[str] | None:
-        if node in on_path:
-            return path[path.index(node):]
-        if node in visited or node not in graph:
-            return None
-        visited.add(node)
-        on_path.add(node)
-        path.append(node)
-        for dep in graph[node]:
-            found = dfs(dep)
-            if found is not None:
-                return found
-        on_path.discard(node)
-        path.pop()
+    if start not in graph:
         return None
-
-    return dfs(start)
+    visited = {start}
+    active = {start: 0}
+    end = object()
+    stack = [(start, iter(graph[start]))]
+    while stack:
+        node, children = stack[-1]
+        child = next(children, end)
+        if child is end:
+            stack.pop()
+            del active[node]
+        elif child in active:
+            return [name for name, _ in stack[active[child]:]]
+        elif child not in visited and child in graph:
+            visited.add(child)
+            active[child] = len(stack)
+            stack.append((child, iter(graph[child])))
+    return None
 
 
 class TaskStore:
@@ -117,27 +115,23 @@ class TaskStore:
             if self._fetch(conn, session_id, task_id) is not None:
                 raise ValueError(f"task already exists: {task_id}")
             ready = True
-            for dep in deps:
-                dependency = self._fetch(conn, session_id, dep)
-                if dependency is None:
-                    raise ValueError(
-                        f"unknown dependency: {dep} (task {task_id!r} in session {session_id!r})"
-                    )
-                ready = ready and dependency["status"] == "done"
-
-            graph = {
-                row["task_id"]: json.loads(row["depends_on"])
-                for row in conn.execute(
-                    "SELECT task_id, depends_on FROM tasks WHERE session_id = ?",
+            # An isolated new node cannot reach a cycle. Dependency-bearing
+            # additions still validate the reachable graph, including corrupt
+            # legacy cycles, using one query rather than one per dependency.
+            if deps:
+                rows = {row["task_id"]: row for row in conn.execute(
+                    "SELECT task_id, depends_on, status FROM tasks WHERE session_id = ?",
                     (session_id,),
-                ).fetchall()
-            }
-            graph[task_id] = deps
-            cycle = _find_cycle(graph, task_id)
-            if cycle is not None:
-                raise ValueError(
-                    "dependency cycle detected: " + " -> ".join(cycle)
-                )
+                )}
+                for dep in deps:
+                    if dep not in rows:
+                        raise ValueError(f"unknown dependency: {dep} (task {task_id!r} in session {session_id!r})")
+                    ready = ready and rows[dep]["status"] == "done"
+                graph = {key: json.loads(row["depends_on"]) for key, row in rows.items()}
+                graph[task_id] = deps
+                cycle = _find_cycle(graph, task_id)
+                if cycle is not None:
+                    raise ValueError("dependency cycle detected: " + " -> ".join(cycle))
 
             conn.execute(
                 "INSERT INTO tasks (session_id, task_id, title, depends_on,"

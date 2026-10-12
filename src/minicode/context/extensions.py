@@ -108,10 +108,12 @@ def _skill_metadata(path: Path) -> tuple[str, str]:
         if stream.readline().strip() != "---":
             raise ValueError(f"skill has no YAML front matter: {path}")
         header: list[str] = []
+        header_size = 0
         closed = False
         for _ in range(80):
             line = stream.readline(4097)
-            if len(line) > 4096 or sum(map(len, header)) + len(line) > 8192:
+            header_size += len(line)
+            if len(line) > 4096 or header_size > 8192:
                 raise ValueError(f"skill header is too large: {path}")
             if not line:
                 break

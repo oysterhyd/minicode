@@ -9,7 +9,13 @@ import (
 // Context compaction can remove earlier messages. Match the preserved suffix
 // backwards against committed responses, using tool IDs when present.
 func reasoningHistory(detail Detail) map[int]Event {
+	type key struct {
+		text, calls string
+		kind        byte
+	}
 	var responses []Event
+	var previous []int
+	var latest map[key]int
 	for _, event := range detail.Events {
 		if event.Type == "assistant_message" {
 			responses = append(responses, event)
@@ -33,24 +39,70 @@ func reasoningHistory(detail Detail) map[int]Event {
 				names = append(names, String(block["name"]))
 			}
 		}
-		for j := cursor; j >= 0; j-- {
-			event := responses[j]
-			if String(event.Data["text"]) != text.String() {
-				continue
-			}
-			if raw, ok := event.Data["tool_call_ids"]; ok {
-				if fmt.Sprint(raw) != fmt.Sprint(ids) {
-					continue
+		// Normal histories align directly. Build the recovery index only when
+		// compaction or a missing response makes a search necessary.
+		if cursor >= 0 && responseMatches(responses[cursor], text.String(), ids, names) {
+			matched[i] = responses[cursor]
+			cursor--
+			continue
+		}
+		if latest == nil {
+			latest = make(map[key]int, len(responses))
+			previous = make([]int, len(responses))
+			for j, event := range responses {
+				k := key{text: String(event.Data["text"])}
+				if raw, ok := event.Data["tool_call_ids"]; ok {
+					k.kind, k.calls = 1, fmt.Sprint(raw)
+				} else if raw, ok := event.Data["tool_calls"]; ok {
+					k.kind, k.calls = 2, fmt.Sprint(raw)
 				}
-			} else if raw, ok := event.Data["tool_calls"]; ok && fmt.Sprint(raw) != fmt.Sprint(names) {
+				prior, ok := latest[k]
+				if !ok {
+					prior = -1
+				}
+				previous[j], latest[k] = prior, j
+			}
+		}
+		// The cursor only moves backwards. Prune each signature's index chain
+		// once, so the complete match is linear even with duplicate responses.
+		best := -1
+		for _, k := range []key{{text: text.String()}, {text.String(), callSignature(ids), 1}, {text.String(), callSignature(names), 2}} {
+			j, ok := latest[k]
+			if !ok {
 				continue
 			}
-			matched[i] = event
-			cursor = j - 1
-			break
+			for j > cursor {
+				j = previous[j]
+			}
+			latest[k] = j
+			best = max(best, j)
+		}
+		if best >= 0 {
+			matched[i] = responses[best]
+			cursor = best - 1
 		}
 	}
 	return matched
+}
+
+func responseMatches(event Event, text string, ids, names []string) bool {
+	if String(event.Data["text"]) != text {
+		return false
+	}
+	if raw, ok := event.Data["tool_call_ids"]; ok {
+		return fmt.Sprint(raw) == callSignature(ids)
+	}
+	if raw, ok := event.Data["tool_calls"]; ok {
+		return fmt.Sprint(raw) == callSignature(names)
+	}
+	return true
+}
+
+func callSignature(calls []string) string {
+	if len(calls) == 0 {
+		return "[]"
+	}
+	return fmt.Sprint(calls)
 }
 
 func History(detail Detail) []*FeedItem {
@@ -159,15 +211,19 @@ func ImageReferences(raw any) []Attachment {
 func GroupFeed(items []*FeedItem) []FeedRow {
 	rows := make([]FeedRow, 0, len(items))
 	for i, item := range items {
-		if item.Kind == "tool" {
-			if len(rows) > 0 && rows[len(rows)-1].Tools != nil {
-				rows[len(rows)-1].Tools = append(rows[len(rows)-1].Tools, item)
-			} else {
-				rows = append(rows, FeedRow{ID: item.ID, Tools: []*FeedItem{item}, Position: i})
-			}
-		} else {
-			rows = append(rows, FeedRow{ID: item.ID, Item: item, Position: i})
-		}
+		rows = AppendFeed(rows, item, i)
 	}
 	return rows
+}
+
+// AppendFeed updates only the tail. Shared by history loading and live events.
+func AppendFeed(rows []FeedRow, item *FeedItem, position int) []FeedRow {
+	if item.Kind != "tool" {
+		return append(rows, FeedRow{ID: item.ID, Item: item, Position: position})
+	}
+	if len(rows) > 0 && rows[len(rows)-1].Tools != nil {
+		rows[len(rows)-1].Tools = append(rows[len(rows)-1].Tools, item)
+		return rows
+	}
+	return append(rows, FeedRow{ID: item.ID, Tools: []*FeedItem{item}, Position: position})
 }

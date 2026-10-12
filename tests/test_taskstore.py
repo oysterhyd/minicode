@@ -81,6 +81,14 @@ def test_find_cycle_unit():
     assert _find_cycle({"a": ["a"]}, "a") is not None
 
 
+def test_find_cycle_handles_deep_dependency_chains():
+    graph = {str(i): [str(i + 1)] for i in range(10000)}
+    graph["10000"] = []
+    assert _find_cycle(graph, "0") is None
+    graph["10000"] = ["9998"]
+    assert _find_cycle(graph, "0") == ["9998", "9999", "10000"]
+
+
 # ---------------------------------------------------------------------------
 # claim
 # ---------------------------------------------------------------------------

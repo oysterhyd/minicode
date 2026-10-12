@@ -28,6 +28,7 @@ try {
     $paintSource = $paintSource.Substring(0, $start) + $section + $paintSource.Substring($end)
     Set-Content -LiteralPath $paint -Value $paintSource -Encoding utf8NoBOM
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'minicode_motion.go.txt') -Destination (Join-Path $nativeRoot 'vendor/github.com/egoist/mygo/ui/minicode_motion.go')
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'minicode_motion_test.go.txt') -Destination (Join-Path $nativeRoot 'vendor/github.com/egoist/mygo/ui/minicode_motion_test.go')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'minicode_frame.go.txt') -Destination (Join-Path $nativeRoot 'vendor/github.com/egoist/mygo/ui/minicode_frame.go')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'minicode_surface_windows.go.txt') -Destination (Join-Path $nativeRoot 'vendor/github.com/egoist/mygo/internal/windows/minicode_surface_windows.go')
     $runtime = Join-Path $nativeRoot 'vendor/github.com/egoist/mygo/ui/runtime.go'

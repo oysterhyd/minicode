@@ -81,7 +81,10 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Verify native UI, workspace and Python bridge
         working-directory: desktop/native
-        run: go test -count=1 ./...
+        run: |
+          go test -count=1 ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -count=1 ./vendor/github.com/egoist/mygo/ui
       - name: Build native Windows executable
         working-directory: desktop/native
         run: ./build.ps1

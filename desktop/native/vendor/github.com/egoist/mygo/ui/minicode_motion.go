@@ -1,6 +1,44 @@
 package ui
 
-import "github.com/egoist/mygo/internal/scene"
+import (
+	"github.com/egoist/mygo/internal/scene"
+	"time"
+)
+
+// Continuous visual effects repaint the existing tree; they never require
+// another layout pass. Keep the same per-element origin and easing as Loop.
+func (e *Element) paintLoop(key any, period time.Duration, ease Easing, apply func(float32)) *Element {
+	if e.st.anims == nil {
+		e.st.anims = map[any]*anim{}
+	}
+	a := e.st.anims[key]
+	if a == nil {
+		a = &anim{start: e.c.now}
+		e.st.anims[key] = a
+	}
+	previous := e.styleFn
+	e.styleFn = func(element *Element) {
+		if previous != nil {
+			previous(element)
+		}
+		value := float32(0)
+		if !element.c.rt.preferences().ReduceMotion {
+			p := max(period, time.Millisecond)
+			value = ease(float32(element.c.now.Sub(a.start)%p) / float32(p))
+			element.c.rt.repainting = true
+		}
+		apply(value)
+	}
+	return e
+}
+
+func (e *Element) OpacityLoop(key any, period time.Duration, ease Easing, low, high float32) *Element {
+	return e.paintLoop(key, period, ease, func(value float32) { e.Opacity(low + (high-low)*value) })
+}
+
+func (e *Element) RotateLoop(key any, period time.Duration, ease Easing) *Element {
+	return e.paintLoop(key, period, ease, func(value float32) { e.Rotate(value * 360) })
+}
 
 // TransformScale scales painting about an element's center without reflow.
 func (e *Element) TransformScale(scale float32) *Element {

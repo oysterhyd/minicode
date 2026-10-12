@@ -1,0 +1,783 @@
+{
+  "version": "1.3.1",
+  "measured_date": "2026-10-11",
+  "baseline_commit": "a65a99b2a2e64484a37d76e953ec8e8c32b75127",
+  "hardware": {
+    "cpu": "AMD Ryzen 7 8845H",
+    "cores": 8,
+    "threads": 16,
+    "gpu": "AMD Radeon 780M",
+    "refresh_hz": 60,
+    "os": "Windows 11 build 26200",
+    "native_logical_window": [
+      1500,
+      940
+    ]
+  },
+  "go": {
+    "before": {
+      "raw": "goos: windows\ngoarch: amd64\npkg: minicode.desktop\ncpu: AMD Ryzen 7 8845H w/ Radeon 780M Graphics      \nBenchmarkOptimization/Append30k-16         \t     100\t    493646 ns/op\t 1687658 B/op\t       1 allocs/op\nBenchmarkOptimization/Append30k-16         \t     100\t    472447 ns/op\t 1687603 B/op\t       1 allocs/op\nBenchmarkOptimization/Append30k-16         \t     100\t    513522 ns/op\t 1687556 B/op\t       1 allocs/op\nBenchmarkOptimization/Append30k-16         \t     100\t    434579 ns/op\t 1687554 B/op\t       1 allocs/op\nBenchmarkOptimization/Append30k-16         \t     100\t    446116 ns/op\t 1687555 B/op\t       1 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t     46479 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t     70214 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t     48939 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t     65831 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t     47733 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2698404 ns/op\t 1003908 B/op\t    6243 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2907650 ns/op\t 1003904 B/op\t    6243 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2892823 ns/op\t 1003904 B/op\t    6243 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2531688 ns/op\t 1003905 B/op\t    6243 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2347887 ns/op\t 1003904 B/op\t    6243 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     28838 ns/op\t   68149 B/op\t      10 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     31990 ns/op\t   68149 B/op\t      10 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     34711 ns/op\t   68149 B/op\t      10 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     29926 ns/op\t   68149 B/op\t      10 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     34521 ns/op\t   68149 B/op\t      10 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t  49928088 ns/op\t  908809 B/op\t    7760 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t  54241273 ns/op\t  908766 B/op\t    7759 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t  52376553 ns/op\t  908791 B/op\t    7759 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t  51937158 ns/op\t  908819 B/op\t    7759 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t  53315994 ns/op\t  908787 B/op\t    7759 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1430511 ns/op\t 2205580 B/op\t   15536 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1682028 ns/op\t 2205556 B/op\t   15536 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1550419 ns/op\t 2205593 B/op\t   15536 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1496481 ns/op\t 2205570 B/op\t   15536 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1557779 ns/op\t 2205554 B/op\t   15536 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  11055491 ns/op\t 5210238 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  11121761 ns/op\t 5210232 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  10949156 ns/op\t 5210238 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  11229583 ns/op\t 5210243 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  10878663 ns/op\t 5210233 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1244631 ns/op\t 4017857 B/op\t    1444 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1276940 ns/op\t 4017853 B/op\t    1444 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1484960 ns/op\t 4017852 B/op\t    1444 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1274192 ns/op\t 4017853 B/op\t    1444 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1223436 ns/op\t 4017852 B/op\t    1444 allocs/op\nPASS\nok  \tminicode.desktop\t36.920s\n",
+      "medians": {
+        "BenchmarkOptimization/Append30k": {
+          "ns": 472447.0,
+          "bytes": 1687556.0,
+          "allocations": 1.0
+        },
+        "BenchmarkOptimization/RemoveThinking30k": {
+          "ns": 48939.0,
+          "bytes": 0.0,
+          "allocations": 0.0
+        },
+        "BenchmarkOptimization/MarkdownWarm24k": {
+          "ns": 2698404.0,
+          "bytes": 1003904.0,
+          "allocations": 6243.0
+        },
+        "BenchmarkOptimization/MarkdownChunks24k": {
+          "ns": 31990.0,
+          "bytes": 68149.0,
+          "allocations": 10.0
+        },
+        "BenchmarkOptimization/HistoryUnmatched2k": {
+          "ns": 52376553.0,
+          "bytes": 908791.0,
+          "allocations": 7759.0
+        },
+        "BenchmarkOptimization/HistoryMatched2k": {
+          "ns": 1550419.0,
+          "bytes": 2205570.0,
+          "allocations": 15536.0
+        },
+        "BenchmarkSessionGroups/Before": {
+          "ns": 11055491.0,
+          "bytes": 5210238.0,
+          "allocations": 1424.0
+        },
+        "BenchmarkSessionGroups/After": {
+          "ns": 1274192.0,
+          "bytes": 4017853.0,
+          "allocations": 1444.0
+        }
+      }
+    },
+    "after": {
+      "raw": "goos: windows\ngoarch: amd64\npkg: minicode.desktop\ncpu: AMD Ryzen 7 8845H w/ Radeon 780M Graphics      \nBenchmarkOptimization/Append30k-16         \t     100\t        15.00 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/Append30k-16         \t     100\t        14.00 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/Append30k-16         \t     100\t        13.00 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/Append30k-16         \t     100\t        14.00 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/Append30k-16         \t     100\t        15.00 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t         5.000 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t         3.000 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t         6.000 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t         8.000 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/RemoveThinking30k-16 \t     100\t         3.000 ns/op\t       0 B/op\t       0 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2508384 ns/op\t  756448 B/op\t    6223 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2422847 ns/op\t  756448 B/op\t    6223 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2064507 ns/op\t  756448 B/op\t    6223 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2210218 ns/op\t  756448 B/op\t    6223 allocs/op\nBenchmarkOptimization/MarkdownWarm24k-16   \t     100\t   2441969 ns/op\t  756499 B/op\t    6223 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     24093 ns/op\t   35429 B/op\t      11 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     22555 ns/op\t   35429 B/op\t      11 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     22981 ns/op\t   35429 B/op\t      11 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     22535 ns/op\t   35429 B/op\t      11 allocs/op\nBenchmarkOptimization/MarkdownChunks24k-16 \t     100\t     22378 ns/op\t   35429 B/op\t      11 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t    900487 ns/op\t 1154837 B/op\t    7770 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t    908136 ns/op\t 1154831 B/op\t    7770 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t    863842 ns/op\t 1154840 B/op\t    7770 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t    871828 ns/op\t 1154840 B/op\t    7770 allocs/op\nBenchmarkOptimization/HistoryUnmatched2k-16         \t     100\t    861653 ns/op\t 1154840 B/op\t    7770 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1178466 ns/op\t 2205558 B/op\t   15536 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1185358 ns/op\t 2205592 B/op\t   15536 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1182648 ns/op\t 2205557 B/op\t   15536 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1164025 ns/op\t 2205569 B/op\t   15536 allocs/op\nBenchmarkOptimization/HistoryMatched2k-16           \t     100\t   1112824 ns/op\t 2205592 B/op\t   15536 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  10032777 ns/op\t 5210236 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  11288203 ns/op\t 5210239 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  11194626 ns/op\t 5210235 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  11092560 ns/op\t 5210237 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/Before-16                    \t     100\t  11537188 ns/op\t 5210238 B/op\t    1424 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1325788 ns/op\t 4017862 B/op\t    1444 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1197746 ns/op\t 4017847 B/op\t    1444 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1227949 ns/op\t 4017862 B/op\t    1444 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1314695 ns/op\t 4017854 B/op\t    1444 allocs/op\nBenchmarkSessionGroups/After-16                     \t     100\t   1473350 ns/op\t 4017852 B/op\t    1444 allocs/op\nPASS\nok  \tminicode.desktop\t10.236s\n",
+      "medians": {
+        "BenchmarkOptimization/Append30k": {
+          "ns": 14.0,
+          "bytes": 0.0,
+          "allocations": 0.0
+        },
+        "BenchmarkOptimization/RemoveThinking30k": {
+          "ns": 5.0,
+          "bytes": 0.0,
+          "allocations": 0.0
+        },
+        "BenchmarkOptimization/MarkdownWarm24k": {
+          "ns": 2422847.0,
+          "bytes": 756448.0,
+          "allocations": 6223.0
+        },
+        "BenchmarkOptimization/MarkdownChunks24k": {
+          "ns": 22555.0,
+          "bytes": 35429.0,
+          "allocations": 11.0
+        },
+        "BenchmarkOptimization/HistoryUnmatched2k": {
+          "ns": 871828.0,
+          "bytes": 1154840.0,
+          "allocations": 7770.0
+        },
+        "BenchmarkOptimization/HistoryMatched2k": {
+          "ns": 1178466.0,
+          "bytes": 2205569.0,
+          "allocations": 15536.0
+        },
+        "BenchmarkSessionGroups/Before": {
+          "ns": 11194626.0,
+          "bytes": 5210237.0,
+          "allocations": 1424.0
+        },
+        "BenchmarkSessionGroups/After": {
+          "ns": 1314695.0,
+          "bytes": 4017854.0,
+          "allocations": 1444.0
+        }
+      }
+    }
+  },
+  "python": {
+    "before": {
+      "python": "3.12.4",
+      "platform": "Windows-11-10.0.26200-SP0",
+      "benchmarks": {
+        "statistics_warm_5000_events": {
+          "median_ms": 126.7883,
+          "min_ms": 118.0371,
+          "max_ms": 165.8526,
+          "peak_bytes": 106620994,
+          "repeats": 7
+        },
+        "statistics_cold_5000_events": {
+          "median_ms": 139.1977,
+          "min_ms": 112.9352,
+          "max_ms": 198.6503,
+          "peak_bytes": 106620994,
+          "repeats": 7
+        },
+        "task_add_5000_independent": {
+          "median_ms": 12.1802,
+          "min_ms": 10.5999,
+          "max_ms": 16.4252,
+          "peak_bytes": 1272029,
+          "repeats": 7
+        },
+        "attachment_digest_20MB": {
+          "median_ms": 13.3035,
+          "min_ms": 12.915,
+          "max_ms": 13.9766,
+          "peak_bytes": 20000086,
+          "repeats": 7
+        }
+      }
+    },
+    "after": {
+      "python": "3.12.4",
+      "platform": "Windows-11-10.0.26200-SP0",
+      "benchmarks": {
+        "statistics_warm_5000_events": {
+          "median_ms": 0.0056,
+          "min_ms": 0.0052,
+          "max_ms": 0.0183,
+          "peak_bytes": 9304,
+          "repeats": 7
+        },
+        "statistics_cold_5000_events": {
+          "median_ms": 25.9821,
+          "min_ms": 22.2917,
+          "max_ms": 68.6634,
+          "peak_bytes": 16834320,
+          "repeats": 7
+        },
+        "task_add_5000_independent": {
+          "median_ms": 0.0184,
+          "min_ms": 0.0144,
+          "max_ms": 0.0252,
+          "peak_bytes": 2262,
+          "repeats": 7
+        },
+        "attachment_digest_20MB": {
+          "median_ms": 8.568,
+          "min_ms": 8.5278,
+          "max_ms": 8.7351,
+          "peak_bytes": 201,
+          "repeats": 7
+        }
+      }
+    }
+  },
+  "tui": {
+    "node": "v22.22.0",
+    "benchmark": "10000 quiet tools without expandable output",
+    "before": {
+      "median_ms": 10.991479999999996,
+      "min_ms": 10.80922999999999,
+      "max_ms": 11.48714,
+      "repeats": 7
+    },
+    "after": {
+      "median_ms": 0.030750000000011823,
+      "min_ms": 0.02958000000000993,
+      "max_ms": 0.03164999999999054,
+      "repeats": 7
+    }
+  },
+  "ui_static_comparison": {
+    "before-conversation-dark.png": {
+      "different_bounds": null
+    },
+    "before-conversation-light.png": {
+      "different_bounds": null
+    },
+    "before-home-dark.png": {
+      "different_bounds": null
+    },
+    "before-home-light.png": {
+      "different_bounds": null
+    },
+    "before-model-menu-dark.png": {
+      "different_bounds": null
+    },
+    "before-model-menu-light.png": {
+      "different_bounds": null
+    },
+    "before-settings-model-dark.png": {
+      "different_bounds": null
+    },
+    "before-settings-model-light.png": {
+      "different_bounds": null
+    },
+    "before-settings-permissions-dark.png": {
+      "different_bounds": null
+    },
+    "before-settings-permissions-light.png": {
+      "different_bounds": null
+    }
+  },
+  "animation": {
+    "before": {
+      "runs": [
+        {
+          "benchmarks": {
+            "panels": {
+              "build_ms": {
+                "max": 0.7336000204086304,
+                "mean": 0.21425595382849374,
+                "median": 0.19159996509552002,
+                "p95": 0.4376000165939331
+              },
+              "frames": 168,
+              "interval_ms": {
+                "max": 22.58019995689392,
+                "mean": 17.837998809559004,
+                "median": 18.12529993057251,
+                "p95": 20.152300000190735
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 168
+            },
+            "running": {
+              "build_ms": {
+                "max": 0.7446999549865723,
+                "mean": 0.19128520672137922,
+                "median": 0.15149998664855957,
+                "p95": 0.3496999740600586
+              },
+              "frames": 169,
+              "interval_ms": {
+                "max": 20.468200087547302,
+                "mean": 17.694547929001985,
+                "median": 17.675999999046326,
+                "p95": 18.462300062179565
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 169
+            },
+            "streaming_long": {
+              "build_ms": {
+                "max": 1.7304999828338623,
+                "mean": 0.8469909440338342,
+                "median": 0.7853000164031982,
+                "p95": 1.4433000087738037
+              },
+              "frames": 221,
+              "interval_ms": {
+                "max": 21.64520001411438,
+                "mean": 13.585439366452833,
+                "median": 17.403200030326843,
+                "p95": 20.365000009536743
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 221
+            }
+          },
+          "go": "go1.27.1",
+          "metric": "native frame cadence; not display FPS",
+          "platform": "windows"
+        },
+        {
+          "benchmarks": {
+            "panels": {
+              "build_ms": {
+                "max": 0.590499997138977,
+                "mean": 0.23274910235833265,
+                "median": 0.1938999891281128,
+                "p95": 0.45899999141693115
+              },
+              "frames": 167,
+              "interval_ms": {
+                "max": 21.186699986457825,
+                "mean": 17.975143712437795,
+                "median": 18.30209994316101,
+                "p95": 20.630499958992004
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 167
+            },
+            "running": {
+              "build_ms": {
+                "max": 0.8424999713897705,
+                "mean": 0.18988208274620805,
+                "median": 0.17320001125335693,
+                "p95": 0.28550004959106445
+              },
+              "frames": 173,
+              "interval_ms": {
+                "max": 19.636200070381165,
+                "mean": 17.405501734314626,
+                "median": 17.63980007171631,
+                "p95": 18.188599944114685
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 173
+            },
+            "streaming_long": {
+              "build_ms": {
+                "max": 2.3269999027252197,
+                "mean": 1.117183118313551,
+                "median": 1.0115000009536743,
+                "p95": 1.768899917602539
+              },
+              "frames": 159,
+              "interval_ms": {
+                "max": 23.186800003051758,
+                "mean": 18.75448427635169,
+                "median": 19.64109992980957,
+                "p95": 21.99899995326996
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 160
+            }
+          },
+          "go": "go1.27.1",
+          "metric": "native frame cadence; not display FPS",
+          "platform": "windows"
+        },
+        {
+          "benchmarks": {
+            "panels": {
+              "build_ms": {
+                "max": 0.8099000453948975,
+                "mean": 0.20319638410246516,
+                "median": 0.16760003566741943,
+                "p95": 0.37749993801116943
+              },
+              "frames": 167,
+              "interval_ms": {
+                "max": 20.575600028038025,
+                "mean": 18.05106586824634,
+                "median": 18.18939995765686,
+                "p95": 19.571900010108948
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 166
+            },
+            "running": {
+              "build_ms": {
+                "max": 1.3235000371932983,
+                "mean": 0.20560470118242152,
+                "median": 0.15430009365081787,
+                "p95": 0.33149993419647217
+              },
+              "frames": 170,
+              "interval_ms": {
+                "max": 19.377900004386902,
+                "mean": 17.733027646822087,
+                "median": 17.6774001121521,
+                "p95": 18.473399996757507
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 170
+            },
+            "streaming_long": {
+              "build_ms": {
+                "max": 2.4047999382019043,
+                "mean": 0.8958544450280554,
+                "median": 0.8167999982833862,
+                "p95": 1.472000002861023
+              },
+              "frames": 191,
+              "interval_ms": {
+                "max": 22.312299966812134,
+                "mean": 15.706161256235932,
+                "median": 18.880599975585938,
+                "p95": 20.5760999917984
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 191
+            }
+          },
+          "go": "go1.27.1",
+          "metric": "native frame cadence; not display FPS",
+          "platform": "windows"
+        }
+      ],
+      "median_of_run_summaries": {
+        "running": {
+          "frames": 170,
+          "view_builds": 170,
+          "intervals_over_25ms": 0,
+          "interval_ms": {
+            "median": 17.675999999046326,
+            "p95": 18.462300062179565,
+            "mean": 17.694547929001985,
+            "max": 19.636200070381165
+          },
+          "build_ms": {
+            "median": 0.15430009365081787,
+            "p95": 0.33149993419647217,
+            "mean": 0.19128520672137922,
+            "max": 0.8424999713897705
+          }
+        },
+        "streaming_long": {
+          "frames": 191,
+          "view_builds": 191,
+          "intervals_over_25ms": 0,
+          "interval_ms": {
+            "median": 18.880599975585938,
+            "p95": 20.5760999917984,
+            "mean": 15.706161256235932,
+            "max": 22.312299966812134
+          },
+          "build_ms": {
+            "median": 0.8167999982833862,
+            "p95": 1.472000002861023,
+            "mean": 0.8958544450280554,
+            "max": 2.3269999027252197
+          }
+        },
+        "panels": {
+          "frames": 167,
+          "view_builds": 167,
+          "intervals_over_25ms": 0,
+          "interval_ms": {
+            "median": 18.18939995765686,
+            "p95": 20.152300000190735,
+            "mean": 17.975143712437795,
+            "max": 21.186699986457825
+          },
+          "build_ms": {
+            "median": 0.19159996509552002,
+            "p95": 0.4376000165939331,
+            "mean": 0.21425595382849374,
+            "max": 0.7336000204086304
+          }
+        }
+      }
+    },
+    "after": {
+      "runs": [
+        {
+          "benchmarks": {
+            "panels": {
+              "build_ms": {
+                "max": 0.6996999979019165,
+                "mean": 0.18347548503501743,
+                "median": 0.15079998970031738,
+                "p95": 0.3745999336242676
+              },
+              "frames": 179,
+              "interval_ms": {
+                "max": 19.242799997329712,
+                "mean": 16.75736480451829,
+                "median": 17.055399894714355,
+                "p95": 17.93370008468628
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 102
+            },
+            "running": {
+              "build_ms": {
+                "max": 0.21900010108947754,
+                "mean": 0.15277504920959473,
+                "median": 0.13760006427764893,
+                "p95": 0.13760006427764893
+              },
+              "frames": 177,
+              "interval_ms": {
+                "max": 19.950499892234802,
+                "mean": 16.955266666951154,
+                "median": 17.02339994907379,
+                "p95": 17.60979998111725
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 4
+            },
+            "streaming_long": {
+              "build_ms": {
+                "max": 1.9860000610351562,
+                "mean": 0.7798480479978025,
+                "median": 0.734700083732605,
+                "p95": 1.2944999933242798
+              },
+              "frames": 280,
+              "interval_ms": {
+                "max": 18.831300020217896,
+                "mean": 10.708301428811891,
+                "median": 14.769699931144714,
+                "p95": 17.61769998073578
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 256
+            }
+          },
+          "go": "go1.27.1",
+          "metric": "native frame cadence; not display FPS",
+          "platform": "windows"
+        },
+        {
+          "benchmarks": {
+            "panels": {
+              "build_ms": {
+                "max": 0.3315999507904053,
+                "mean": 0.16410672893890968,
+                "median": 0.1540999412536621,
+                "p95": 0.22789990901947021
+              },
+              "frames": 179,
+              "interval_ms": {
+                "max": 18.24899995326996,
+                "mean": 16.71763351909275,
+                "median": 16.918799996376038,
+                "p95": 17.739699959754944
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 104
+            },
+            "running": {
+              "build_ms": {
+                "max": 0.1445000171661377,
+                "mean": 0.13813336690266928,
+                "median": 0.13540005683898926,
+                "p95": 0.13540005683898926
+              },
+              "frames": 177,
+              "interval_ms": {
+                "max": 17.996600031852722,
+                "mean": 16.943859321922904,
+                "median": 17.03920006752014,
+                "p95": 17.51890003681183
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 3
+            },
+            "streaming_long": {
+              "build_ms": {
+                "max": 2.1057000160217285,
+                "mean": 0.7670142297561352,
+                "median": 0.73170006275177,
+                "p95": 1.1446000337600708
+              },
+              "frames": 282,
+              "interval_ms": {
+                "max": 18.586599946022034,
+                "mean": 10.636220921861364,
+                "median": 14.863900065422058,
+                "p95": 17.449399948120117
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 260
+            }
+          },
+          "go": "go1.27.1",
+          "metric": "native frame cadence; not display FPS",
+          "platform": "windows"
+        },
+        {
+          "benchmarks": {
+            "panels": {
+              "build_ms": {
+                "max": 0.6608999967575073,
+                "mean": 0.18626038980956125,
+                "median": 0.1569000482559204,
+                "p95": 0.33020007610321045
+              },
+              "frames": 179,
+              "interval_ms": {
+                "max": 19.93309998512268,
+                "mean": 16.752535754741903,
+                "median": 16.981600046157837,
+                "p95": 17.955899953842163
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 101
+            },
+            "running": {
+              "build_ms": {
+                "max": 0.14139997959136963,
+                "mean": 0.13293333848317465,
+                "median": 0.1380000114440918,
+                "p95": 0.1380000114440918
+              },
+              "frames": 177,
+              "interval_ms": {
+                "max": 17.73070001602173,
+                "mean": 16.960057627009807,
+                "median": 17.104300022125244,
+                "p95": 17.43850004673004
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 3
+            },
+            "streaming_long": {
+              "build_ms": {
+                "max": 1.9800999164581299,
+                "mean": 0.8151797659202309,
+                "median": 0.739300012588501,
+                "p95": 1.4501999616622925
+              },
+              "frames": 281,
+              "interval_ms": {
+                "max": 18.839400053024292,
+                "mean": 10.679633451950508,
+                "median": 14.787699937820435,
+                "p95": 17.556699991226196
+              },
+              "intervals_over_25ms": 0,
+              "view_builds": 257
+            }
+          },
+          "go": "go1.27.1",
+          "metric": "native frame cadence; not display FPS",
+          "platform": "windows"
+        }
+      ],
+      "median_of_run_summaries": {
+        "running": {
+          "frames": 177,
+          "view_builds": 3,
+          "intervals_over_25ms": 0,
+          "interval_ms": {
+            "median": 17.03920006752014,
+            "p95": 17.51890003681183,
+            "mean": 16.955266666951154,
+            "max": 17.996600031852722
+          },
+          "build_ms": {
+            "median": 0.13760006427764893,
+            "p95": 0.13760006427764893,
+            "mean": 0.13813336690266928,
+            "max": 0.1445000171661377
+          }
+        },
+        "streaming_long": {
+          "frames": 281,
+          "view_builds": 257,
+          "intervals_over_25ms": 0,
+          "interval_ms": {
+            "median": 14.787699937820435,
+            "p95": 17.556699991226196,
+            "mean": 10.679633451950508,
+            "max": 18.831300020217896
+          },
+          "build_ms": {
+            "median": 0.734700083732605,
+            "p95": 1.2944999933242798,
+            "mean": 0.7798480479978025,
+            "max": 1.9860000610351562
+          }
+        },
+        "panels": {
+          "frames": 179,
+          "view_builds": 102,
+          "intervals_over_25ms": 0,
+          "interval_ms": {
+            "median": 16.981600046157837,
+            "p95": 17.93370008468628,
+            "mean": 16.752535754741903,
+            "max": 19.242799997329712
+          },
+          "build_ms": {
+            "median": 0.1540999412536621,
+            "p95": 0.33020007610321045,
+            "mean": 0.18347548503501743,
+            "max": 0.6608999967575073
+          }
+        }
+      }
+    }
+  },
+  "code_line_changes": {
+    "scope": "15 edited business/UI template files plus 2 new business helpers; excludes tests, benchmark harnesses, main.go diagnostics, docs, version metadata and duplicate generated vendor files; shell.go includes the paint-observer hook",
+    "files": [
+      {
+        "path": "desktop/bridge.py",
+        "added": 3,
+        "deleted": 22
+      },
+      {
+        "path": "desktop/native/feed.go",
+        "added": 2,
+        "deleted": 2
+      },
+      {
+        "path": "desktop/native/internal/model/feed.go",
+        "added": 77,
+        "deleted": 21
+      },
+      {
+        "path": "desktop/native/markdown.go",
+        "added": 32,
+        "deleted": 13
+      },
+      {
+        "path": "desktop/native/shell.go",
+        "added": 18,
+        "deleted": 33
+      },
+      {
+        "path": "desktop/native/state.go",
+        "added": 51,
+        "deleted": 26
+      },
+      {
+        "path": "desktop/native/theme.go",
+        "added": 1,
+        "deleted": 1
+      },
+      {
+        "path": "desktop/native/toolkit/minicode_frame.go.txt",
+        "added": 3,
+        "deleted": 1
+      },
+      {
+        "path": "desktop/native/toolkit/minicode_motion.go.txt",
+        "added": 32,
+        "deleted": 1
+      },
+      {
+        "path": "src/minicode/context/extensions.py",
+        "added": 3,
+        "deleted": 1
+      },
+      {
+        "path": "src/minicode/storage/attachments.py",
+        "added": 8,
+        "deleted": 2
+      },
+      {
+        "path": "src/minicode/storage/sqlite_store.py",
+        "added": 12,
+        "deleted": 1
+      },
+      {
+        "path": "src/minicode/tasks/taskstore.py",
+        "added": 34,
+        "deleted": 40
+      },
+      {
+        "path": "tui/src/feed.ts",
+        "added": 2,
+        "deleted": 3
+      },
+      {
+        "path": "tui/src/transcript.ts",
+        "added": 12,
+        "deleted": 9
+      },
+      {
+        "path": "desktop/native/session_groups.go",
+        "added": 44,
+        "deleted": 0
+      },
+      {
+        "path": "src/minicode/storage/statistics.py",
+        "added": 55,
+        "deleted": 0
+      }
+    ],
+    "added": 389,
+    "deleted": 176
+  }
+}

@@ -95,13 +95,12 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
   }
   if (event.event === 'approval_auto' && event.request) {
     const request = event.request
-    const index = [...state.items].reverse().findIndex(item => item.kind === 'tool' && item.pending
+    const index = state.items.findLastIndex(item => item.kind === 'tool' && item.pending
       && (state.approvalCallId ? (item.callId || item.id) === state.approvalCallId : item.name === request.tool_name))
     if (index < 0) return state
-    const actual = state.items.length - 1 - index
     return {
       ...state,
-      items: state.items.map((item, i) => i === actual ? { ...item, auto: true } : item),
+      items: state.items.map((item, i) => i === index ? { ...item, auto: true } : item),
     }
   }
   if (event.event !== 'agent_event' || !event.item) return state

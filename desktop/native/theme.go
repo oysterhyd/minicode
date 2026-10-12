@@ -198,7 +198,7 @@ func muted(c *ui.Context, p palette, text string) *ui.Element {
 func spinner(c *ui.Context, p palette) {
 	if svg := icons["LoaderCircle"]; svg != nil {
 		e := ui.Icon(c, svg).FontSize(14).TextColor(p.Accent)
-		e.Rotate(e.Loop("spin", 900*time.Millisecond, ui.Linear) * 360)
+		e.RotateLoop("spin", 900*time.Millisecond, ui.Linear)
 	}
 }
 

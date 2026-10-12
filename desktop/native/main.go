@@ -16,7 +16,7 @@ import (
 	"minicode.desktop/internal/workspace"
 )
 
-const appVersion = "1.3.0"
+const appVersion = "1.3.1"
 
 func projectRoot() string {
 	if override := os.Getenv("MINICODE_PROJECT_ROOT"); override != "" {
@@ -41,12 +41,13 @@ func main() {
 	started := time.Now()
 	fixture := flag.Bool("fixture", false, "run the isolated UI regression fixture")
 	benchmark := flag.String("benchmark", "", "measure isolated native controller-to-view updates")
+	animationBenchmark := flag.String("animation-benchmark", "", "measure isolated native animation frame cadence")
 	capture := flag.String("capture", "", "capture the native window to a PNG and exit")
 	probe := flag.String("probe", "", "verify the installed native window and Python bridge")
 	fixturePage := flag.String("fixture-page", "home", "fixture state: home, conversation, approval, settings, files, diff")
 	theme := flag.String("theme", "", "override appearance for regression checks")
 	flag.Parse()
-	if *benchmark != "" {
+	if *benchmark != "" || *animationBenchmark != "" {
 		*fixture = true
 	}
 	mygo.App.SetName("MiniCode")
@@ -149,6 +150,9 @@ func main() {
 			Title: "MiniCode", Width: 1500, Height: 940, MinWidth: 1030, MinHeight: 680,
 			StateKey: "main", TitleBarStyle: mygo.TitleBarHidden, TitleBarHeight: 40,
 			AutoHideMenuBar: true, Content: ui.View(func(c *ui.Context) {
+				if *animationBenchmark != "" {
+					d.frameStarted = preciseMilliseconds()
+				}
 				d.view(c)
 				if d.frameObserved != nil {
 					d.frameObserved()
@@ -181,6 +185,9 @@ func main() {
 		}
 		if *benchmark != "" {
 			go runUIBenchmark(d, *benchmark)
+		}
+		if *animationBenchmark != "" {
+			go runAnimationBenchmark(d, *animationBenchmark)
 		}
 		if *capture != "" {
 			path := *capture

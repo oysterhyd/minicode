@@ -32,9 +32,11 @@ function thoughtFrom(tools: FeedItem[]): ThoughtItem {
   const last = tools.at(-1)!
   let reads = 0
   let searches = 0
+  let endedAt = -Infinity
   for (const item of tools) {
     if (item.name === 'grep') searches += 1
     else reads += 1
+    endedAt = Math.max(endedAt, item.endedAt || 0)
   }
   return {
     kind: 'thought',
@@ -42,7 +44,7 @@ function thoughtFrom(tools: FeedItem[]): ThoughtItem {
     reads,
     searches,
     startedAt: first.startedAt,
-    endedAt: Math.max(...tools.map(item => item.endedAt || 0)) || last.endedAt,
+    endedAt: endedAt || last.endedAt,
     target: reads + searches === 1 ? String(first.args?.path || first.args?.pattern || '') : undefined,
   }
 }
@@ -56,9 +58,11 @@ export function layoutTranscript(items: FeedItem[], settled = true): { frozen: L
     if (!quiet.length) return
     // Static is append-only. A group cannot freeze until no more tools can join
     // it, and nothing after an unfinished row may overtake that row.
-    if (!closed || quiet.some(item => item.pending)) barrier = Math.min(barrier, rows.length)
-    if (quiet.some(item => item.pending)) rows.push(...quiet)
-    else rows.push(thoughtFrom(quiet))
+    const pending = quiet.some(item => item.pending)
+    if (!closed || pending) barrier = Math.min(barrier, rows.length)
+    if (pending) {
+      for (const item of quiet) rows.push(item)
+    } else rows.push(thoughtFrom(quiet))
     quiet = []
   }
 
@@ -79,11 +83,10 @@ export function layoutTranscript(items: FeedItem[], settled = true): { frozen: L
 }
 
 export function lastExpandableTool(items: FeedItem[], afterUserIndex: number): FeedItem | undefined {
-  return [...items].reverse().find(item => (
-    item.kind === 'tool'
-    && items.indexOf(item) >= afterUserIndex
-    && Boolean(item.output || item.args?.command || item.name?.startsWith('skill'))
-  ))
+  for (let i = items.length - 1; i >= Math.max(0, afterUserIndex); i--) {
+    const item = items[i]
+    if (item.kind === 'tool' && (item.output || item.args?.command || item.name?.startsWith('skill'))) return item
+  }
 }
 
 export function toolOutputLines(item: FeedItem): string[] {

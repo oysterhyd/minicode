@@ -1,9 +1,73 @@
 package model
 
 import (
+	"fmt"
+	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestReasoningIndexPreservesLegacyGreedyMatching(t *testing.T) {
+	rng := rand.New(rand.NewSource(19))
+	for range 300 {
+		var detail Detail
+		for i := range 80 {
+			data := map[string]any{"text": fmtIntForTest(rng.Intn(4))}
+			switch rng.Intn(4) {
+			case 0:
+				data["tool_call_ids"] = []any{fmtIntForTest(rng.Intn(4))}
+			case 1:
+				data["tool_calls"] = []any{fmtIntForTest(rng.Intn(4))}
+			case 2:
+				data["tool_call_ids"] = []any{}
+			}
+			detail.Events = append(detail.Events, Event{Seq: i, Type: "assistant_message", Data: data})
+		}
+		for range 60 {
+			blocks := []map[string]any{{"type": "text", "text": fmtIntForTest(rng.Intn(6))}}
+			if rng.Intn(2) == 0 {
+				blocks = append(blocks, map[string]any{"type": "tool_use", "id": fmtIntForTest(rng.Intn(4)), "name": fmtIntForTest(rng.Intn(4))})
+			}
+			detail.Messages = append(detail.Messages, Message{Role: "assistant", Content: blocks})
+		}
+		want := map[int]Event{}
+		cursor := len(detail.Events) - 1
+		for i := len(detail.Messages) - 1; i >= 0; i-- {
+			var text strings.Builder
+			var ids, names []string
+			for _, block := range detail.Messages[i].Content {
+				if String(block["type"]) == "text" {
+					text.WriteString(String(block["text"]))
+				} else {
+					ids = append(ids, String(block["id"]))
+					names = append(names, String(block["name"]))
+				}
+			}
+			for j := cursor; j >= 0; j-- {
+				event := detail.Events[j]
+				if String(event.Data["text"]) != text.String() {
+					continue
+				}
+				if raw, ok := event.Data["tool_call_ids"]; ok {
+					if fmt.Sprint(raw) != fmt.Sprint(ids) {
+						continue
+					}
+				} else if raw, ok := event.Data["tool_calls"]; ok && fmt.Sprint(raw) != fmt.Sprint(names) {
+					continue
+				}
+				want[i] = event
+				cursor = j - 1
+				break
+			}
+		}
+		if !reflect.DeepEqual(reasoningHistory(detail), want) {
+			t.Fatal("indexed reasoning changed greedy legacy matching")
+		}
+	}
+}
+
+func fmtIntForTest(value int) string { return fmt.Sprint(value) }
 
 func TestReasoningHistoryMatchesPreservedMessages(t *testing.T) {
 	detail := Detail{Messages: []Message{

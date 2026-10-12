@@ -652,8 +652,14 @@ class SqliteStore:
             )
         return Event(seq=seq, type=type, timestamp=timestamp, data=payload)
 
+    def latest_event_seq(self, session_id: str) -> int:
+        row = self._conn.execute("SELECT COALESCE(MAX(seq), -1) FROM events WHERE session_id = ?",
+                                 (session_id,)).fetchone()
+        return row[0]
+
     def get_events(self, session_id: str, *, after_seq: int | None = None,
-                   limit: int | None = None, newest_first: bool = False) -> list[Event]:
+                   limit: int | None = None, newest_first: bool = False,
+                   types: tuple[EventType, ...] | None = None) -> list[Event]:
         """Read an indexed trace page; defaults preserve the full-history API."""
         if limit is not None and limit < 0:
             raise ValueError("event limit must be nonnegative")
@@ -662,6 +668,11 @@ class SqliteStore:
         if after_seq is not None:
             query += " AND seq > ?"
             params.append(after_seq)
+        if types is not None:
+            if not types:
+                return []
+            query += " AND type IN (" + ",".join("?" for _ in types) + ")"
+            params.extend(kind.value for kind in types)
         query += " ORDER BY seq " + ("DESC" if newest_first else "ASC")
         if limit is not None:
             query += " LIMIT ?"

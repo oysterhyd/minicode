@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -13,7 +12,15 @@ import (
 func (d *desktop) view(c *ui.Context) {
 	setUILanguage(d.preferences.Language)
 	p := d.theme(c)
-	ui.Column(c).Fill().Children(func() {
+	root := ui.Column(c).Fill()
+	if d.framePainted != nil {
+		root.DrawOver(func(_ *ui.Painter, _ ui.Rect) {
+			if d.framePainted != nil {
+				d.framePainted()
+			}
+		})
+	}
+	root.Children(func() {
 		d.titlebar(c, p)
 		ui.Row(c).Grow(1).AlignItems(ui.Stretch).Padding(0, 4, 8, 0).Children(func() {
 			leftWidth := d.preferences.SidebarWidth
@@ -132,7 +139,7 @@ func (d *desktop) titlebar(c *ui.Context, p palette) {
 			ui.Row(c).Gap(5).Padding(2, 8).Radius(99).Background(bg).Children(func() {
 				dot := ui.Box(c).Size(6, 6).Radius(99).Background(p.Success)
 				if v.Busy {
-					dot.Background(p.Accent).Opacity(0.4 + 0.6*dot.Loop("pulse", 1400*time.Millisecond, ui.Bounce(ui.EaseInOut)))
+					dot.Background(p.Accent).OpacityLoop("pulse", 1400*time.Millisecond, ui.Bounce(ui.EaseInOut), 0.4, 1)
 				}
 				ui.Text(c, status).FontSize(p.font(9.8)).FontWeight(550).TextColor(color).NoWrap().Shrink(0)
 			})
@@ -199,14 +206,10 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 			})
 		})
 		ui.Scroll(c).Grow(1).Padding(0, 4, 8, 10).Children(func() {
-			query := strings.ToLower(strings.TrimSpace(d.search))
-			matches := func(s model.Session) bool {
-				return query == "" || strings.Contains(strings.ToLower(s.Title+" "+s.Workspace), query)
-			}
-			pinned := slices.DeleteFunc(slices.Clone(d.sessions), func(s model.Session) bool { return !s.Pinned || !matches(s) })
-			if len(pinned) > 0 {
+			groups := groupSessions(d.sessions, v.Workspace, d.recent, d.search)
+			if len(groups.Pinned) > 0 {
 				ui.Text(c, tr("置顶")).FontSize(p.font(10.36)).TextColor(p.Text3).Padding(6, 8)
-				for _, session := range pinned {
+				for _, session := range groups.Pinned {
 					d.sessionRow(c, p, session, true)
 				}
 			}
@@ -217,21 +220,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 					d.chooseWorkspace()
 				}
 			})
-			roots := []string{}
-			if v.Workspace != "" {
-				roots = append(roots, v.Workspace)
-			}
-			for _, session := range d.sessions {
-				if !slices.Contains(roots, session.Workspace) {
-					roots = append(roots, session.Workspace)
-				}
-			}
-			for _, root := range d.recent {
-				if !slices.Contains(roots, root) {
-					roots = append(roots, root)
-				}
-			}
-			for _, root := range roots {
+			for _, root := range groups.Roots {
 				ui.Column(c).Key("project-" + root).Children(func() {
 					row := ui.ButtonBase(c).Label(tr("工作区 ")+root).Height(30).Radius(8).Gap(7).Padding(0, 1).Justify(ui.Start)
 					if row.Hovered() {
@@ -269,20 +258,16 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 						}
 					})
 					if !d.collapsedProjects[root] {
-						count := 0
-						for _, session := range d.sessions {
-							if session.Workspace == root && !session.Pinned && matches(session) {
-								d.sessionRow(c, p, session, false)
-								count++
-							}
+						for _, session := range groups.Projects[root] {
+							d.sessionRow(c, p, session, false)
 						}
-						if count == 0 {
+						if len(groups.Projects[root]) == 0 {
 							muted(c, p, tr("暂无任务")).Padding(4, 28).FontSize(p.font(11.2))
 						}
 					}
 				})
 			}
-			if len(roots) == 0 {
+			if len(groups.Roots) == 0 {
 				if button(c, p, tr("打开本地项目"), "FolderOpen", false).FillWidth().Height(64).BorderStyle(ui.BorderDashed).Clicked() {
 					d.chooseWorkspace()
 				}

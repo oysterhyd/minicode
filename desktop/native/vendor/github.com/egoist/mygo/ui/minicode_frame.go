@@ -18,7 +18,9 @@ func (h *windowHost) requestAnimatedFrame() {
 	if hz <= 0 {
 		hz = 60
 	}
-	h.minicodeFrameDue = h.lastFrame.Add(time.Duration(float32(time.Second) / hz))
+	// Pace from the frame's beginning; lastFrame is recorded only after build,
+	// layout and paint, which otherwise adds that work to every refresh interval.
+	h.minicodeFrameDue = h.rt.c.now.Add(time.Duration(float64(time.Second) / float64(hz)))
 	delay := max(time.Until(h.minicodeFrameDue), time.Millisecond)
 	wake := func() {
 		h.post(func() {

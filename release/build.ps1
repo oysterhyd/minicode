@@ -61,7 +61,10 @@ try {
     Run $python @('-I', '-X', 'utf8', "$PSScriptRoot/audit.py", "$stage/runtime")
     if (-not $SkipTests) {
         Push-Location "$root/desktop/native"
-        try { Run 'go' @('test', './...') } finally { Pop-Location }
+        try {
+            Run 'go' @('test', '-count=1', './...')
+            Run 'go' @('test', '-count=1', './vendor/github.com/egoist/mygo/ui')
+        } finally { Pop-Location }
         Run $python @('-m', 'pytest', 'tests', '-o', 'addopts=', '-q', '--basetemp', "$cache/tests")
         $oldPython = $env:MINICODE_PYTHON
         $oldBridgeTest = $env:MINICODE_TUI_BRIDGE_TEST
