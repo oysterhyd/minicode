@@ -1,0 +1,85 @@
+{
+  "source_commit": "c00deeb66bc01c4c08cc00d79c0535b3ed7dbc92",
+  "release_url": "https://github.com/oysterhyd/minicode/releases/tag/v2.0.3",
+  "published_at": "2026-10-13T06:13:30Z",
+  "assets": [
+    {
+      "name": "minicode-2.0.0-to-2.0.3-windows-amd64.delta",
+      "bytes": 4084576,
+      "sha256": "e553f6ab9c49355a6894fc837a11280c0328b9b1b401bd6f424019a160a5aabf"
+    },
+    {
+      "name": "minicode-2.0.1-to-2.0.3-windows-amd64.delta",
+      "bytes": 4068933,
+      "sha256": "78d2623413356dde033d340b80b989ea4f4578ca98364351816d1079e62f8ec0"
+    },
+    {
+      "name": "minicode-2.0.2-to-2.0.3-windows-amd64.delta",
+      "bytes": 1731384,
+      "sha256": "8c780d4d08f2146fa9c689581572a653cc2726b03c4fdf255b9eefa12060513a"
+    },
+    {
+      "name": "minicode-2.0.3-windows-amd64.tar.gz",
+      "bytes": 89629189,
+      "sha256": "9815a484ec078d67f6749767f4a000e269a1b307f6aaff058bfe9b14bd815b97"
+    },
+    {
+      "name": "MiniCode-Setup-2.0.3-win-x64.exe",
+      "bytes": 57759517,
+      "sha256": "168bd1852ab61a064282cec749bd02addf62e88f0e1595ca70acb8e868255ec6"
+    },
+    {
+      "name": "SHA256SUMS.txt",
+      "bytes": 100,
+      "sha256": "0a7078b4579ccc1a8c03f06d4f268ec6b027b593ff204c6eb5225d8d46b187b2"
+    },
+    {
+      "name": "update-windows-amd64.json",
+      "bytes": 2870,
+      "sha256": "f07e9e0262938bcfe0a162cd96bee5a6a2d1ff028be324ab5d72dcf0060dd0dc"
+    }
+  ],
+  "signature_verified": [
+    "minicode-2.0.3-windows-amd64.tar.gz",
+    "minicode-2.0.2-to-2.0.3-windows-amd64.delta",
+    "minicode-2.0.1-to-2.0.3-windows-amd64.delta",
+    "minicode-2.0.0-to-2.0.3-windows-amd64.delta"
+  ],
+  "all_public_digests_match": true,
+  "anonymous_latest_matches": true,
+  "ci": {
+    "main": "https://github.com/oysterhyd/minicode/actions/runs/38354297404",
+    "tag": "https://github.com/oysterhyd/minicode/actions/runs/38354302665",
+    "installer": "https://github.com/oysterhyd/minicode/actions/runs/38354302660"
+  },
+  "verified_at": "2026-10-13T06:18:24.1425984Z",
+  "validation": {
+    "rust_tests": 46,
+    "backend_tests": 66,
+    "tui_tests": 88,
+    "packaged_tui_tests": 88,
+    "tui_skipped": 0,
+    "go_full_and_vendor_tests": true,
+    "go_vet": true,
+    "rust_fmt_and_clippy": true,
+    "offline_tasks_passed": 60,
+    "offline_scenarios": 9,
+    "offline_scenarios_passed": 7,
+    "offline_scenarios_expected_failures": 2,
+    "offline_scenarios_conform_to_expected": true,
+    "source_and_history_audit": true,
+    "native_window_cli_git_tui_smoke": true,
+    "unicode_nsis_install_shortcut_uninstall": true,
+    "sdk_signed_update": true,
+    "sdk_tamper_rejection": true,
+    "sdk_same_version_ignored": true
+  },
+  "public_runtime": {
+    "version": "2.0.3",
+    "protocol_version": 2,
+    "fresh_model_configuration_empty": true,
+    "files": 3320,
+    "installed_bytes": 217869328,
+    "agent_sha256": "1eeaf1a83c608760234e2946ed36cb3c0a910a84e8c614fa214d628e3d3ae420"
+  }
+}

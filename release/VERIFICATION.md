@@ -4,7 +4,11 @@
 
 20 题 B0 / B1 / B2 共 60 次通过；3 个场景共 9 次符合既定结果（7 次通过，counter_retry 的 B0 / B1 为预设首轮失败）。原始运行结果位于本地 output/audit-2.0.3；逐项触发条件和修复行为见 [2.0.3 修复说明](../docs/fixes-2.0.3.md)。源文件与 Git 历史凭据审计通过，并新增签名私钥泄漏拒绝复现。发行构建沿用原 Ed25519 公钥和仓库中的签名 Secret。
 
-安装包及公开资产核验记录将在签名发行完成后补充。
+运行源码 `c00deeb66bc01c4c08cc00d79c0535b3ed7dbc92`。[main CI](https://github.com/oysterhyd/minicode/actions/runs/38354297404) 和 [标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38354302665)各五项全部通过。[完整 Windows 发行构建](https://github.com/oysterhyd/minicode/actions/runs/38354302660)未跳过全套验证，Rust 46 项、后端 66 项、TUI 88 项及生产压缩 JS 的同一套 88 项均通过。Go 全量 / vendor UI、离线任务和场景符合预期。
+
+包内实际原生窗口、CLI / Git / TUI、空白模型配置，中文路径 NSIS 安装、Unicode 快捷方式、卸载，以及真实 SDK 签名更新、篡改拒绝、同版本忽略和更新后运行均通过。发行过程中新增了真实 Rust 桥接的受控延迟复现，修复后台状态读操作恢复已清除会话的竞态。
+
+公开 [v2.0.3](https://github.com/oysterhyd/minicode/releases/tag/v2.0.3) 七个资产已实际下载，大小和 SHA256 与 GitHub 资产摘要一致；完整归档和三个差分包的原 Ed25519 公钥签名通过，匿名 latest 清单一致。下载归档内 Agent 实际运行确认为 2.0.3、协议 2、全新模型配置为空。安装器 57,759,517 B（55.08 MiB），归档内安装内容 217,869,328 B；安装器 SHA256：`168bd1852ab61a064282cec749bd02addf62e88f0e1595ca70acb8e868255ec6`。完整资产、签名、运行与 CI 记录见 [原始核对记录](../docs/assets/fixes-2.0.3.json)。
 
 # v2.0.2 性能与发行核验
 
