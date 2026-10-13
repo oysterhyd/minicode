@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import React from 'react'
 import { render } from 'ink-testing-library'
 import { App } from '../src/App.js'
-import { BridgeClient } from '../src/bridge.js'
+import { BridgeClient, type BridgeApi } from '../src/bridge.js'
 import { spawnBridge } from '../src/launch.js'
 import { historyItems, type AgentState, type DesktopEvent, type SessionDetail } from '../src/types.js'
 
@@ -74,7 +74,7 @@ test('real Ink + Rust: script selection, approvals, pause/continue, persisted hi
   await waitFor(() => f.events.filter(event => event.event === 'run_done').length === 2, 'continue finishes')
   assert.equal(f.events.filter(event => event.event === 'run_done')[1].result?.exit_reason, 'completed')
   const detail = await f.client.request<SessionDetail>('getSession', { sessionId })
-  // Node's JS realpath preserves Windows 8.3 aliases; Python resolves them.
+  // Compare native canonical paths because Windows TEMP may use an 8.3 alias.
   assert.equal(fs.realpathSync.native(detail.summary.workspace), fs.realpathSync.native(f.workspace))
   const history = historyItems(detail)
   assert.ok(history.some(item => item.kind === 'tool' && item.name === 'read' && item.success && item.output?.includes('Independent TUI audit')))
@@ -88,6 +88,45 @@ test('real Ink + Rust: script selection, approvals, pause/continue, persisted hi
   assert.equal(state.taskPending, false)
   await f.client.close()
   assert.equal(f.child.exitCode, 0)
+})
+
+test('real Ink + Rust: delayed background state refresh cannot restore a session after /new', { skip: !enabled, timeout: 30000 }, async t => {
+  const f = fixture([{ text: 'finished' }])
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let armed = false, held = false, newApplied = false, newStateRead = false, delivered = false
+  const client: BridgeApi = {
+    async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+      if (method === 'getState' && armed && !held) {
+        held = true
+        await gate
+        const result = await f.client.request<T>(method, params)
+        delivered = true
+        return result
+      }
+      const result = await f.client.request<T>(method, params)
+      if (method === 'runSlash' && params.text === '/new') newApplied = true
+      if (method === 'getState' && newApplied) newStateRead = true
+      return result
+    },
+    onEvent: listener => f.client.onEvent(listener),
+    close: () => f.client.close(),
+  }
+  t.after(async () => { release(); await f.close() })
+  const ui = render(<App client={client} options={{ workspace: f.workspace, script: 'script.json' }} />)
+  t.after(() => { ui.unmount(); ui.cleanup() })
+  await waitFor(() => (ui.lastFrame() || '').includes('fake') && !(ui.lastFrame() || '').includes('正在连接'), 'TUI ready')
+  armed = true
+  ui.stdin.write('first task')
+  ui.stdin.write('\r')
+  await waitFor(() => held && f.events.some(event => event.event === 'run_done'), 'background refresh is held')
+  ui.stdin.write('/new')
+  ui.stdin.write('\r')
+  await waitFor(() => newStateRead, 'new session has been applied')
+  assert.equal((await f.client.request<AgentState>('getState')).sessionId, null)
+  release()
+  await waitFor(() => delivered, 'old refresh arrives after new session')
+  assert.equal((await f.client.request<AgentState>('getState')).sessionId, null)
 })
 
 test('real Rust: cancellation while waiting for approval does not write the file and permits recovery', { skip: !enabled, timeout: 30000 }, async t => {

@@ -1,6 +1,6 @@
 # v2.0.3 代码审查核验
 
-2026-10-13，本地 Rust 46 项、后端集成 66 项、Ink TUI 87 项全部通过；TUI 包含真实 Rust 桥接，无跳过。Rust fmt / Clippy、Go 全量 / vet / vendor UI 专项和原生 Windows 编译通过。实际原生审批窗口已隔离捕获并检查。
+2026-10-13，本地 Rust 46 项、后端集成 66 项、Ink TUI 88 项全部通过；TUI 包含真实 Rust 桥接，无跳过。Rust fmt / Clippy、Go 全量 / vet / vendor UI 专项和原生 Windows 编译通过。实际原生审批窗口已隔离捕获并检查。
 
 20 题 B0 / B1 / B2 共 60 次通过；3 个场景共 9 次符合既定结果（7 次通过，counter_retry 的 B0 / B1 为预设首轮失败）。原始运行结果位于本地 output/audit-2.0.3；逐项触发条件和修复行为见 [2.0.3 修复说明](../docs/fixes-2.0.3.md)。源文件与 Git 历史凭据审计通过，并新增签名私钥泄漏拒绝复现。发行构建沿用原 Ed25519 公钥和仓库中的签名 Secret。
 

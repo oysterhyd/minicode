@@ -156,7 +156,10 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
     const revision = ++stateRevision.current
     const sessionId = sessionRef.current
     try {
-      const state = await client.request<AgentState>('getState', { sessionId, workspace: workspaceRef.current })
+      // A sessionId on getState can resume that session in the bridge. Background
+      // refreshes must observe the client's selection so a delayed read cannot
+      // undo /new or /resume; the local revision still rejects stale responses.
+      const state = await client.request<AgentState>('getState', { workspace: workspaceRef.current })
       if (activeRef.current && revision === stateRevision.current && sessionId === sessionRef.current) updateAgent(state)
     } catch { /* a run error is already shown by the event handler */ }
   }
