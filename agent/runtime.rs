@@ -114,6 +114,7 @@ pub struct Runtime {
     pub custom_prompt: Option<String>,
     pub compaction: bool,
     delegation_branch: bool,
+    used_call_ids: HashSet<String>,
 }
 impl Runtime {
     pub async fn new(
@@ -233,6 +234,29 @@ impl Runtime {
                 }
             }
         }
+        let used_call_ids = messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| {
+                if let Block::ToolUse { id, .. } = b {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .chain(events.iter().flat_map(|e| {
+                e.data["tool_call_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+            }))
+            .chain(
+                events
+                    .iter()
+                    .filter_map(|e| e.data["call_id"].as_str().map(str::to_string)),
+            )
+            .collect();
         let mut runtime = Self {
             session: id,
             workspace,
@@ -251,6 +275,7 @@ impl Runtime {
             custom_prompt: None,
             compaction: true,
             delegation_branch: false,
+            used_call_ids,
         };
         let child_ids = events
             .iter()
@@ -265,7 +290,12 @@ impl Runtime {
                 .and_then(|e| e.data["provider_resume_identity"].as_str())
                 .is_some_and(|id| Some(id.to_string()) == runtime.provider.identity());
         let mut recovered_usage = Usage::default();
-        for event in events.iter().filter(|e| e.r#type == "assistant_message") {
+        for event in events.iter().filter(|e| {
+            matches!(
+                e.r#type.as_str(),
+                "assistant_message" | "provider_response_rejected"
+            )
+        }) {
             if let Ok(usage) = serde_json::from_value::<Usage>(event.data["usage"].clone()) {
                 recovered_usage.add(&usage);
             }
@@ -274,10 +304,12 @@ impl Runtime {
         for child_id in child_ids {
             let child_events = runtime.store.events(&child_id, -1)?;
             let mut usage = Usage::default();
-            for event in child_events
-                .iter()
-                .filter(|e| e.r#type == "assistant_message")
-            {
+            for event in child_events.iter().filter(|e| {
+                matches!(
+                    e.r#type.as_str(),
+                    "assistant_message" | "provider_response_rejected"
+                )
+            }) {
                 if let Ok(response_usage) =
                     serde_json::from_value::<Usage>(event.data["usage"].clone())
                 {
@@ -306,45 +338,64 @@ impl Runtime {
             runtime.usage = recovered_usage;
         }
         if resume_fake {
-            runtime.provider.index = recovery_events
-                .iter()
-                .filter(|e| e.r#type == "assistant_message")
-                .count();
-            runtime.provider.call_counter = runtime
-                .messages
-                .iter()
-                .flat_map(|m| &m.content)
-                .filter_map(|b| {
-                    if let Block::ToolUse { id, .. } = b {
-                        id.strip_prefix("fake_tool_")
-                            .and_then(|s| s.parse::<usize>().ok())
-                    } else {
-                        None
-                    }
-                })
-                .max()
-                .unwrap_or(0);
-            for event in &recovery_events {
-                if let Some(n) = event.data["call_id"]
-                    .as_str()
-                    .and_then(|id| id.strip_prefix("fake_tool_"))
-                    .and_then(|s| s.parse::<usize>().ok())
-                {
-                    runtime.provider.call_counter = runtime.provider.call_counter.max(n);
-                }
-                if let Some(progress) = event.data.get("provider_progress") {
-                    runtime.provider.index = runtime
-                        .provider
-                        .index
-                        .max(progress["index"].as_u64().unwrap_or(0) as usize);
-                    runtime.provider.call_counter = runtime
-                        .provider
-                        .call_counter
-                        .max(progress["call_counter"].as_u64().unwrap_or(0) as usize);
-                }
-            }
+            runtime.restore_script_progress(&recovery_events);
         }
         Ok(runtime)
+    }
+    fn restore_script_progress(&mut self, events: &[Event]) {
+        self.provider.index = events
+            .iter()
+            .filter(|e| e.r#type == "assistant_message")
+            .count();
+        self.provider.call_counter = self
+            .used_call_ids
+            .iter()
+            .filter_map(|id| {
+                id.strip_prefix("fake_tool_")
+                    .and_then(|s| s.parse::<usize>().ok())
+            })
+            .max()
+            .unwrap_or(0);
+        for event in events {
+            if let Some(n) = event.data["call_id"]
+                .as_str()
+                .and_then(|id| id.strip_prefix("fake_tool_"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                self.provider.call_counter = self.provider.call_counter.max(n);
+            }
+            if let Some(progress) = event.data.get("provider_progress") {
+                self.provider.index = self
+                    .provider
+                    .index
+                    .max(progress["index"].as_u64().unwrap_or(0) as usize);
+                self.provider.call_counter = self
+                    .provider
+                    .call_counter
+                    .max(progress["call_counter"].as_u64().unwrap_or(0) as usize);
+            }
+        }
+    }
+    pub fn set_script(&mut self, script: Value) -> Result<()> {
+        self.provider.set_script(script)?;
+        let mut events = self.store.events(&self.session, -1)?;
+        if events
+            .iter()
+            .find(|e| e.r#type == "session_start")
+            .and_then(|e| e.data["provider_resume_identity"].as_str())
+            .is_some_and(|id| Some(id.to_string()) == self.provider.identity())
+        {
+            let children = events
+                .iter()
+                .filter(|e| e.r#type == "subagent_start")
+                .filter_map(|e| e.data["child_session_id"].as_str().map(str::to_string))
+                .collect::<HashSet<_>>();
+            for id in children {
+                events.extend(self.store.events(&id, -1)?);
+            }
+            self.restore_script_progress(&events);
+        }
+        Ok(())
     }
     pub fn event(&self, hooks: &Hooks, kind: &str, data: Value) -> Result<Event> {
         let event = self.store.event(&self.session, kind, &data)?;
@@ -511,6 +562,10 @@ impl Runtime {
         hooks: Hooks,
     ) -> Result<RunResult> {
         let _ownership = self.store.activation(&self.session)?;
+        self.store.require(&self.session)?;
+        if self.store.messages(&self.session)? != self.messages {
+            bail!("会话已被另一个进程更新，请重新加载会话后继续；本次没有执行任何操作")
+        }
         if text.is_none()
             && self.store.require(&self.session)?["exit_reason"] == "goal_not_met"
             && let Some(goal) = &mut self.goal
@@ -553,7 +608,16 @@ impl Runtime {
         }
         self.mcp.close().await;
         self.mcp = Arc::new(McpRegistry::default());
-        hooks.approvals.lock().unwrap().clear();
+        if self.child {
+            let prefix = format!("{}:", self.session);
+            hooks
+                .approvals
+                .lock()
+                .unwrap()
+                .retain(|id, _| !id.starts_with(&prefix));
+        } else {
+            hooks.approvals.lock().unwrap().clear();
+        }
         let (reason, error) = match result {
             Ok(reason) => (reason, None),
             Err(error) => {
@@ -693,7 +757,7 @@ impl Runtime {
             {
                 let ledger = hooks.shared.lock().unwrap();
                 if budget.max_total_tokens > 0
-                    && ledger.usage.total() > budget.max_total_tokens as u64
+                    && ledger.usage.total() >= budget.max_total_tokens as u64
                 {
                     return Ok("token_budget".into());
                 }
@@ -718,7 +782,9 @@ impl Runtime {
             let (specs, system) = {
                 let mut catalog = self.catalog.lock().await;
                 catalog.pending_scopes.clear();
-                catalog.reload_instructions()?;
+                for source in catalog.reload_instructions()? {
+                    self.event(hooks, "project_instructions", source)?;
+                }
                 let agents = catalog.configuration.agents()?;
                 let specs = self.tool_specs(&catalog, &agents);
                 let system = self.system(&catalog, &specs)?;
@@ -816,8 +882,21 @@ impl Runtime {
                     }
                 }
             };
-            validate_response(&response, &self.messages)
-                .map_err(|e| anyhow::anyhow!("provider protocol error: {e}"))?;
+            self.usage.add(&response.usage);
+            hooks.shared.lock().unwrap().usage.add(&response.usage);
+            let validation = validate_response(&response, &self.messages).and_then(|_| {
+                if response.blocks.iter().any(
+                    |b| matches!(b, Block::ToolUse { id, .. } if self.used_call_ids.contains(id)),
+                ) {
+                    bail!("reused archived tool call id");
+                }
+                Ok(())
+            });
+            if let Err(error) = validation {
+                let event = self.store.checkpoint(&self.session, "provider_response_rejected", &json!({"error":error.to_string(),"usage":response.usage,"provider_progress":{"index":self.provider.index,"call_counter":self.provider.call_counter}}), None, None, Some(&store::counters(self.rounds, &self.usage)))?;
+                (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
+                bail!("provider protocol error: {error}");
+            }
             let assistant = Message {
                 role: "assistant".into(),
                 content: response.blocks.clone(),
@@ -828,8 +907,6 @@ impl Runtime {
                 .filter(|b| matches!(b, Block::ToolUse { .. }))
                 .cloned()
                 .collect::<Vec<_>>();
-            self.usage.add(&response.usage);
-            hooks.shared.lock().unwrap().usage.add(&response.usage);
             metrics["text"] = json!(assistant.text());
             metrics["usage"] = json!(response.usage);
             metrics["usage"]["total_tokens"] = json!(response.usage.total());
@@ -865,10 +942,17 @@ impl Runtime {
                 Some(&store::counters(self.rounds, &self.usage)),
             )?;
             self.messages.push(assistant);
+            self.used_call_ids.extend(calls.iter().filter_map(|b| {
+                if let Block::ToolUse { id, .. } = b {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            }));
             (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
             Self::check(hooks)?;
             if budget.max_total_tokens > 0
-                && hooks.shared.lock().unwrap().usage.total() > budget.max_total_tokens as u64
+                && hooks.shared.lock().unwrap().usage.total() >= budget.max_total_tokens as u64
             {
                 self.backfill(&calls, "未执行：显式 Token 费用上限已达到。")?;
                 return Ok("token_budget".into());
@@ -887,12 +971,6 @@ impl Runtime {
                 Self::phase(hooks, "finishing");
                 let ctx = self.context(hooks, None);
                 if let Some(goal) = &mut self.goal {
-                    if goal.evidence.as_ref().is_some_and(|e| e["passed"] == true)
-                        && goal.evidence.as_ref().unwrap()["fingerprint"]
-                            == crate::goals::fingerprint(&self.workspace)?
-                    {
-                        return Ok("completed".into());
-                    }
                     let report = goal.check(&ctx).await?;
                     let passed = report["passed"] == true;
                     let attempts_exceeded = goal.attempts >= goal.spec.max_fix_attempts;
@@ -1020,6 +1098,7 @@ impl Runtime {
                                 custom_prompt: self.custom_prompt.clone(),
                                 compaction: self.compaction,
                                 delegation_branch: true,
+                                used_call_ids: self.used_call_ids.clone(),
                             },
                         ));
                     }
@@ -1189,8 +1268,9 @@ impl Runtime {
             ))));
         }
         let mut catalog = self.catalog.lock().await;
-        if ["read", "ls", "grep", "edit", "write"].contains(&name.as_str()) {
-            match catalog.discover_instructions(input["path"].as_str().unwrap_or(".")) {
+        if ["read", "ls", "grep", "edit", "write", "bash"].contains(&name.as_str()) {
+            let field = if name == "bash" { "cwd" } else { "path" };
+            match catalog.discover_instructions(input[field].as_str().unwrap_or(".")) {
                 Ok(sources) if !sources.is_empty() => {
                     for source in sources {
                         self.event(hooks, "project_instructions", source)?;
@@ -1492,7 +1572,8 @@ impl Runtime {
                             None
                         }
                     });
-                let settings = hooks.settings.lock().unwrap().clone();
+                let mut settings = hooks.settings.lock().unwrap().clone();
+                settings.acceptance = None;
                 Box::new(
                     Self::new(
                         &self.workspace,
@@ -1506,6 +1587,15 @@ impl Runtime {
                 )
             };
             child.child = true;
+            child.goal = None;
+            // A delegated task must see the same pinned project instructions
+            // and activated skills as the request that created it.
+            {
+                let parent_catalog = self.catalog.lock().await;
+                let mut child_catalog = child.catalog.lock().await;
+                child_catalog.instructions = parent_catalog.instructions.clone();
+                child_catalog.active = parent_catalog.active.clone();
+            }
             child.allowed = allowed.map(|mut set| {
                 set.remove("delegate");
                 set.retain(|s| !s.starts_with("task_"));
@@ -1578,9 +1668,10 @@ impl Runtime {
                 .unwrap_or_default();
             let parsed = serde_json::from_str::<Value>(&final_text).ok().filter(|v| {
                 v["summary"].is_string()
-                    && ["findings", "evidence_refs", "unresolved"]
-                        .iter()
-                        .all(|k| v[k].is_array())
+                    && ["findings", "evidence_refs", "unresolved"].iter().all(|k| {
+                        v[k].as_array()
+                            .is_some_and(|items| items.iter().all(Value::is_string))
+                    })
             });
             let structured = parsed.is_some();
             let mut payload=parsed.unwrap_or(json!({"summary":final_text,"findings":[],"evidence_refs":[],"unresolved":["子助手未返回有效的结构化结果。"]}));
@@ -1654,8 +1745,8 @@ impl Runtime {
             &system,
             &specs,
             &mut self.messages,
-            self.provider.window,
-            false,
+            (self.provider.window as f64 / self.provider.prompt_scale) as u64,
+            true,
         )?;
         if let Some(stats) = changed {
             self.event(hooks, "context_compacted", stats)?;

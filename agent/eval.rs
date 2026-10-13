@@ -314,6 +314,7 @@ pub async fn run(mut options: Options) -> Result<()> {
     }
     if !options.tasks_dir.is_dir() {
         let runtime = std::env::var_os("MINICODE_RESOURCES")
+            .filter(|p| !p.is_empty())
             .map(|p| PathBuf::from(p).join("runtime"))
             .or_else(|| {
                 std::env::current_exe()

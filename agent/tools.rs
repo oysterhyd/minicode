@@ -9,6 +9,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
+    borrow::Cow,
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -186,6 +187,11 @@ async fn execute_inner(name: &str, args: &Value, ctx: &ToolContext) -> Result<Ou
         "skill_load" => {
             let name = util::string(args, "name")?;
             let s = ctx.catalog.lock().await.load(name)?;
+            ctx.store.event(
+                &ctx.session,
+                "skill_activated",
+                &json!({"name":name,"path":s.path,"sha256":s.digest}),
+            )?;
             Ok(Outcome::ok(format!(
                 "Activated skill {name} (sha256:{})\n{}",
                 s.digest, s.content
@@ -194,6 +200,8 @@ async fn execute_inner(name: &str, args: &Value, ctx: &ToolContext) -> Result<Ou
         "skill_unload" => {
             let name = util::string(args, "name")?;
             ctx.catalog.lock().await.unload(name)?;
+            ctx.store
+                .event(&ctx.session, "skill_deactivated", &json!({"name":name}))?;
             Ok(Outcome::ok(format!("Deactivated skill {name}")))
         }
         "skills_list" => Ok(Outcome::ok(ctx.catalog.lock().await.listing())),
@@ -314,6 +322,12 @@ fn read_file(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let offset = args["offset"].as_u64().unwrap_or(1) as usize;
     let limit = args["limit"].as_u64().unwrap_or(2000).min(2000) as usize;
     let mut reader = BufReader::new(File::open(&target)?);
+    if reader.get_ref().metadata()?.len() == 0
+        && offset == 1
+        && args["cursor"].as_u64().unwrap_or(0) == 0
+    {
+        return Ok(Outcome::ok("(empty file)"));
+    }
     let mut line_number = offset;
     if let Some(cursor) = args["cursor"].as_u64() {
         reader.seek(SeekFrom::Start(cursor))?;
@@ -532,7 +546,7 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         .map(globset::Glob::new)
         .transpose()?
         .map(|g| g.compile_matcher());
-    let max = args["max_results"].as_i64().unwrap_or(100).max(1) as usize;
+    let max = args["max_results"].as_i64().unwrap_or(100).clamp(1, 1000) as usize;
     let mut lines = vec![];
     let start = Instant::now();
     let files = util::walk(&base).filter(|e| e.file_type().is_file());
@@ -595,8 +609,12 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             if regex.is_match(line)? {
                 let mut chars = line.chars();
                 let snippet = chars.by_ref().take(500).collect::<String>();
+                let workspace_path = path
+                    .strip_prefix(&ctx.workspace)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 lines.push(format!(
-                    "{relative}:{}: {snippet}{}",
+                    "{workspace_path}:{}: {snippet}{}",
                     number,
                     if chars.next().is_some() {
                         "...[行已截断]"
@@ -616,6 +634,29 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     } else {
         Ok(bounded(lines.join("\n")))
     }
+}
+fn replacement_texts<'a>(text: &str, args: &'a Value) -> Result<(Cow<'a, str>, Cow<'a, str>)> {
+    let old = util::string(args, "old_text")?;
+    let new = util::string(args, "new_text")?;
+    if old.is_empty() {
+        bail!("old_text must be nonempty")
+    }
+    // Reads expose logical lines. Keep a consistently CRLF file in its native
+    // format when a model supplies the same text using LF line endings.
+    let crlf = text.contains("\r\n")
+        && !text
+            .as_bytes()
+            .iter()
+            .enumerate()
+            .any(|(i, b)| *b == b'\n' && (i == 0 || text.as_bytes()[i - 1] != b'\r'));
+    let convert = |value: &'a str| {
+        if crlf && !value.contains('\r') {
+            Cow::Owned(value.replace('\n', "\r\n"))
+        } else {
+            Cow::Borrowed(value)
+        }
+    };
+    Ok((convert(old), convert(new)))
 }
 fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let raw = util::string(args, "path")?;
@@ -646,12 +687,8 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let after = if name == "write" {
         util::string(args, "content")?.to_string()
     } else {
-        let old = util::string(args, "old_text")?;
-        let new = util::string(args, "new_text")?;
-        if old.is_empty() {
-            bail!("old_text must be nonempty")
-        }
-        let count = before.matches(old).count();
+        let (old, new) = replacement_texts(&before, args)?;
+        let count = before.matches(old.as_ref()).count();
         if count == 0 {
             bail!("old_text not found in {relative}: file may have changed; re-read the file first")
         }
@@ -661,9 +698,9 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             )
         }
         if args["replace_all"] == true {
-            before.replace(old, new)
+            before.replace(old.as_ref(), new.as_ref())
         } else {
-            before.replacen(old, new, 1)
+            before.replacen(old.as_ref(), new.as_ref(), 1)
         }
     };
     if ctx.cancel.is_cancelled() {
@@ -714,17 +751,13 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     )))
 }
 fn edit_large(path: &Path, relative: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
-    let old = util::string(args, "old_text")?;
-    let new = util::string(args, "new_text")?;
-    if old.is_empty() {
-        bail!("old_text must be nonempty")
-    }
     let input = File::open(path)?;
     let original = input.metadata()?;
     // The mapped source is borrowed; no second heap copy of a large file.
     let mapped = unsafe { memmap2::MmapOptions::new().map(&input)? };
     let text = std::str::from_utf8(&mapped).context("binary or non-UTF-8 file")?;
-    let count = text.matches(old).count();
+    let (old, new) = replacement_texts(text, args)?;
+    let count = text.matches(old.as_ref()).count();
     if count == 0 {
         bail!("old_text not found in {relative}: file may have changed; re-read the file first")
     }
@@ -737,7 +770,7 @@ fn edit_large(path: &Path, relative: &str, args: &Value, ctx: &ToolContext) -> R
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     let mut position = 0;
     let mut replacements = 0;
-    for (index, _) in text.match_indices(old) {
+    for (index, _) in text.match_indices(old.as_ref()) {
         if ctx.cancel.is_cancelled() {
             bail!("tool cancelled")
         }
@@ -779,10 +812,6 @@ pub fn shell(command: &str, cwd: &Path) -> Command {
             "powershell"
         };
         let mut c = Command::new(shell);
-        static NULL_REDIRECT: OnceLock<regex::Regex> = OnceLock::new();
-        let command = NULL_REDIRECT
-            .get_or_init(|| regex::Regex::new(r"([12]?>>|[12]?>)\s*/dev/null\b").unwrap())
-            .replace_all(command, "${1}$$null");
         c.args(["-NoProfile","-NonInteractive","-Command",&format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;{command}")]);
         c.creation_flags(0x08000000);
         c
@@ -895,6 +924,7 @@ pub async fn run_command(
         }
         tokio::select! {_ = tokio::time::sleep(Duration::from_millis(50))=>{},_ = ctx.cancel.cancelled()=>{}}
     };
+    tree.shutdown().await;
     drop(tree);
     if cancelled {
         bail!("tool cancelled")
@@ -910,7 +940,7 @@ pub async fn run_command(
         .read_to_end(&mut bytes)?;
     let decoded = decode(&bytes);
     let preview = util::tail(&decoded, 2000, 50 * 1024 - 200);
-    let truncated = total > 256_000 || preview != decoded;
+    let truncated = total > 256_000 || preview != decoded.trim_end_matches(['\r', '\n']);
     let mut outcome = Outcome::ok(preview);
     if truncated {
         let artifact = record_capture(&captured, ctx, total)?;

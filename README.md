@@ -55,6 +55,8 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
 
 2.0.2 进一步优化长会话、模型请求组装、SSE 与 Markdown，缩小发行包；逐功能审查、代码简化和同机实测见 [2.0.2 性能报告](docs/performance-2.0.2.md)。
 
+2.0.3 对 Agent、Desktop 和 TUI 做代码级可靠性审查，修复思考事件断线、取消与队列竞态、子助手验收、上下文约束丢失、文件编辑与 Git 范围等问题；具体触发条件和修复行为见 [2.0.3 修复说明](docs/fixes-2.0.3.md)。
+
 发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未作 Windows 代码签名，更新归档使用 Ed25519 签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
 
@@ -193,6 +195,7 @@ Windows 安装包的构建入口位于 [`release/`](release/README.md)，桌面�
 | [原生迁移报告](docs/native-desktop-report.md) | 安装包体积、实测响应、Diff 性能与验收范围。 |
 | [1.3.2 优化报告](docs/performance-1.3.2.md) | 功能审查、代码简化、耗时、分配及发行体积。 |
 | [2.0.2 优化报告](docs/performance-2.0.2.md) | Rust / Desktop / TUI 功能审查、前后实测与发行验证。 |
+| [2.0.3 修复说明](docs/fixes-2.0.3.md) | 按功能列出缺陷、修复行为、独立复现与升级注意事项。 |
 | [架构](docs/architecture.md) | 运行核心、工具、会话存储与扩展契约。 |
 | [MCP 示例](examples/mcp_docs/plugin.json) | 本地文档工具插件的 manifest 与示例实现。 |
 | [许可证](LICENSE) | MIT 许可证。 |

@@ -46,6 +46,7 @@ class ProbeBridge implements BridgeApi {
   heldState?: ReturnType<typeof deferred<AgentState>>
   heldSlash?: ReturnType<typeof deferred<void>>
   continuationCompletesEarly = false
+  slashError?: string
   foreignWorkspace = 'D:/other-project'
   sessions = [{ session_id: 'restored-session', title: 'restored' }]
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -63,6 +64,7 @@ class ProbeBridge implements BridgeApi {
       result = this.heldSend ? await this.heldSend.promise : { sessionId: 'active' }
     } else if (method === 'runSlash') {
       if (this.heldSlash) await this.heldSlash.promise
+      if (this.slashError) throw new Error(this.slashError)
       const text = String(params.text)
       if (text.startsWith('/resume')) result = { action: 'resume', sessionId: 'restored-session' }
       else if (text === '/new') {
@@ -367,6 +369,53 @@ test('bridge marks invalid NDJSON and spawn errors terminal for present and futu
   await assert.rejects(failed.request('initialize'), /ENOENT/)
   await assert.rejects(failed.request('getState'), /ENOENT/)
   await failed.close()
+})
+
+test('reasoning events do not poison the bridge and unanswered requests expire', async () => {
+  const child = new EventEmitter() as ChildProcess
+  Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null })
+  const client = new BridgeClient(child, 25)
+  const events: DesktopEvent[] = []
+  client.onEvent(event => events.push(event))
+  const request = client.request<{ ok: boolean }>('initialize')
+  child.stdout!.emit('data', JSON.stringify({ event: 'reasoning_delta', text: 'thinking', sessionId: 'active' }) + '\n')
+  child.stdout!.emit('data', JSON.stringify({ id: 1, result: { ok: true } }) + '\n')
+  assert.equal((await request).ok, true)
+  assert.equal(events[0].event, 'reasoning_delta')
+  await assert.rejects(client.request('getState'), /请求超时/)
+  await assert.rejects(client.request('sendPrompt', { text: '中'.repeat(1_400_000) }), /size limit/)
+  await client.close()
+})
+
+test('stop intent preserves queued messages even if completion wins the cancellation race', async () => {
+  const { client, ui } = await mount()
+  enter(ui, 'first')
+  enter(ui, 'second')
+  await eventually(() => client.prompts().length === 1, 'first starts')
+  ui.stdin.write('\x03')
+  client.emit({ event: 'run_done', sessionId: 'active', result: { exit_reason: 'completed' } })
+  await delay(50)
+  assert.equal(client.prompts().length, 1)
+  ui.stdin.write('\r')
+  await eventually(() => client.prompts().length === 2, 'queued prompt can still be sent manually')
+  assert.equal(client.prompts()[1].params.text, 'second')
+})
+
+test('a rejected resume command preserves the paused prompt queue', async () => {
+  const { client, ui } = await mount()
+  enter(ui, 'first')
+  enter(ui, 'keep queued')
+  await eventually(() => client.prompts().length === 1, 'first starts')
+  client.emit({ event: 'run_done', sessionId: 'active', result: { exit_reason: 'cancelled' } })
+  await delay(20)
+  client.slashError = 'unknown session'
+  enter(ui, '/resume missing')
+  await eventually(() => client.calls.some(call => call.method === 'runSlash'), 'resume was attempted')
+  await delay(30)
+  client.slashError = undefined
+  ui.stdin.write('\r')
+  await eventually(() => client.prompts().length === 2, 'queue remains available after a command error')
+  assert.equal(client.prompts()[1].params.text, 'keep queued')
 })
 
 test('bridge shutdown uses EOF so Python can clean up before exit', async () => {

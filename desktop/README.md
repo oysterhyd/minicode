@@ -47,7 +47,7 @@ Agent 配置和会话继续位于 `%USERPROFILE%\.minicode`，服务密钥仅由
 
 更新来自 `oysterhyd/minicode` 的 GitHub Releases，SDK 使用嵌入的 Ed25519 公钥验证更新归档。开发构建或不可写的安装目录会禁用更新并显示原因。首次从 Electron 1.1.0 迁移需手动安装原生版，以后的签名原生版本可以应用内升级。构建签名及升级验收见 [发行说明](../release/README.md#自动更新与签名)。
 
-插件沿用精确宿主版本契约。升级至 1.3.1 后，现有插件 manifest 的 `minicode_version` 也需要更新为 `1.3.1` 并重新锁定；仓库示例已同步。
+插件的 `minicode_version` 表示同一主／次版本系列中所需的最低补丁版本。2.0.3 使用带长度边界的格式 2 指纹；已有旧插件锁需审查插件后运行 `minicode plugins lock` 重新生成。
 
 ## 快捷键
 

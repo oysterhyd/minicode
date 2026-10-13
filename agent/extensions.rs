@@ -172,12 +172,16 @@ pub fn fingerprint(root: &Path) -> Result<String> {
         if path.components().any(|s| s.as_os_str() == "__pycache__") {
             continue;
         }
-        digest.update(
-            path.strip_prefix(root)?
-                .to_string_lossy()
-                .replace('\\', "/"),
-        );
+        let relative = path
+            .strip_prefix(root)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Length framing prevents distinct filename/content layouts from
+        // producing the same concatenated byte stream before hashing.
+        digest.update((relative.len() as u64).to_le_bytes());
+        digest.update(relative.as_bytes());
         let mut file = fs::File::open(path)?;
+        digest.update(file.metadata()?.len().to_le_bytes());
         loop {
             let n = file.read(&mut buffer)?;
             if n == 0 {
@@ -234,6 +238,17 @@ impl Catalog {
         result.scan_local()?;
         Ok(result)
     }
+    pub fn refresh(&self) -> Result<Self> {
+        let mut next = Self::scan(&self.workspace, self.configuration.clone(), true)?;
+        next.instructions = self.instructions.clone();
+        next.reload_instructions()?;
+        for (name, digest) in &self.active {
+            if next.skills.contains_key(name) && next.load(name)?.digest != *digest {
+                bail!("activated skill changed since session start: {name}");
+            }
+        }
+        Ok(next)
+    }
     fn skills_at(&mut self, root: &Path, origin: &str, parent: Option<&str>) -> Result<()> {
         for dir in directories(root).into_iter().take(1000) {
             let path = dir.join("SKILL.md");
@@ -246,7 +261,12 @@ impl Catalog {
                 } else {
                     name
                 };
-                if parent.is_none() && self.skills.contains_key(&key) {
+                if parent.is_none()
+                    && self
+                        .skills
+                        .get(&key)
+                        .is_some_and(|skill| !(origin == "project" && skill.origin == "user"))
+                {
                     bail!("duplicate skill name: {key}")
                 }
                 self.skills.insert(
@@ -271,7 +291,7 @@ impl Catalog {
         if !root.exists() {
             return Ok(());
         }
-        let mut lock = json!({"plugins":{}});
+        let mut lock = json!({"fingerprint_format":2,"plugins":{}});
         static NAME: OnceLock<regex::Regex> = OnceLock::new();
         let valid_name = NAME.get_or_init(|| regex::Regex::new(r"^[a-z][a-z0-9_]{0,31}$").unwrap());
         for dir in directories(&root) {
@@ -385,7 +405,7 @@ impl Catalog {
         Ok(())
     }
     pub fn write_lock(&self) -> Result<PathBuf> {
-        let mut lock = json!({"plugins":{}});
+        let mut lock = json!({"fingerprint_format":2,"plugins":{}});
         let root = self.workspace.join(".minicode/plugins");
         for dir in directories(&root) {
             let path = dir.join("plugin.json");
@@ -955,13 +975,14 @@ impl Catalog {
         data["localExtensions"][key] = json!(enabled);
         self.configuration.write(&data)
     }
-    pub fn reload_instructions(&mut self) -> Result<()> {
+    pub fn reload_instructions(&mut self) -> Result<Vec<Value>> {
         let global = self
             .configuration
             .path
             .parent()
             .unwrap_or(Path::new("."))
             .join("AGENTS.md");
+        let mut changed = vec![];
         for path in [global.clone(), self.workspace.join("AGENTS.md")] {
             if util::is_link(&path) || (path == global && util::is_link(path.parent().unwrap())) {
                 bail!("instructions path is a link or junction")
@@ -971,12 +992,19 @@ impl Catalog {
             }
             if path.is_file() {
                 let source = Source::read(&path, 64_000)?;
+                if self
+                    .instructions
+                    .get(&path)
+                    .is_none_or(|previous| previous.digest != source.digest)
+                {
+                    changed.push(source.metadata(&global));
+                }
                 self.instructions.insert(path, source);
             } else {
                 self.instructions.remove(&path);
             }
         }
-        Ok(())
+        Ok(changed)
     }
     pub fn discover_instructions(&mut self, target: &str) -> Result<Vec<Value>> {
         let path = util::in_workspace(&self.workspace, target)?;
@@ -997,6 +1025,9 @@ impl Catalog {
         for component in path.strip_prefix(&self.workspace)?.components() {
             cursor.push(component);
             let file = cursor.join("AGENTS.md");
+            if util::is_link(&file) {
+                bail!("instructions path is a link or junction");
+            }
             if file.is_file() && !self.instructions.contains_key(&file) {
                 let s = Source::read(&file, 64_000)?;
                 self.pending_scopes

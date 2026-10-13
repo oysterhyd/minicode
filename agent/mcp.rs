@@ -39,6 +39,9 @@ impl Drop for Connector {
 }
 impl Connector {
     pub fn new(config: Server) -> Result<Self> {
+        if !config.timeout.is_finite() || !(0.0 < config.timeout && config.timeout <= 300.0) {
+            bail!("invalid MCP timeout");
+        }
         Ok(Self {
             config,
             protocol: None,
@@ -162,47 +165,22 @@ impl Connector {
         let mut stream = response.bytes_stream();
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         self.legacy_task = Some(tokio::spawn(async move {
-            let mut pending = Vec::new();
-            let mut data = String::new();
-            let mut event = String::new();
+            let mut decoder = crate::sse::Decoder::default();
             while let Some(Ok(chunk)) = stream.next().await {
-                pending.extend_from_slice(&chunk);
-                if pending.len() > 16_000_000 {
-                    break;
-                }
-                let mut start = 0;
-                while let Some(end) = pending[start..].iter().position(|b| *b == b'\n') {
-                    let end = start + end + 1;
-                    let Ok(line) = std::str::from_utf8(&pending[start..end]) else {
+                let Ok(events) = decoder.push(&chunk) else {
+                    return;
+                };
+                for event in events {
+                    if event.kind == "endpoint" {
+                        if tx.send(json!({"endpoint":event.data})).await.is_err() {
+                            return;
+                        }
+                    } else if let Ok(v) = serde_json::from_str::<Value>(&event.data)
+                        && tx.send(v).await.is_err()
+                    {
                         return;
-                    };
-                    start = end;
-                    let line = line.trim_end_matches(['\r', '\n']);
-                    if line.is_empty() {
-                        if event == "endpoint" {
-                            if tx.send(json!({"endpoint":data})).await.is_err() {
-                                return;
-                            }
-                        } else if let Ok(v) = serde_json::from_str::<Value>(&data)
-                            && tx.send(v).await.is_err()
-                        {
-                            return;
-                        }
-                        data.clear();
-                        event.clear();
-                    } else if let Some(s) = line.strip_prefix("data:") {
-                        if !data.is_empty() {
-                            data.push('\n');
-                        }
-                        data.push_str(s.trim_start());
-                        if data.len() > 16_000_000 {
-                            return;
-                        }
-                    } else if let Some(s) = line.strip_prefix("event:") {
-                        event = s.trim().into();
                     }
                 }
-                pending.drain(..start);
             }
         }));
         let first = tokio::time::timeout(Duration::from_secs_f64(self.config.timeout), rx.recv())
@@ -281,6 +259,11 @@ impl Connector {
                         let input = self.input.as_mut().unwrap();
                         input.write_all(format!("{reply}\n").as_bytes()).await?;
                         input.flush().await?;
+                    } else if response["method"].is_string() && response.get("id").is_some() {
+                        let reply = json!({"jsonrpc":"2.0","id":response["id"],"error":{"code":-32601,"message":"Client does not support this method"}});
+                        let input = self.input.as_mut().unwrap();
+                        input.write_all(format!("{reply}\n").as_bytes()).await?;
+                        input.flush().await?;
                     }
                 }
             }
@@ -307,43 +290,32 @@ impl Connector {
                 .is_some_and(|s| s.to_str().unwrap_or("").starts_with("text/event-stream"));
             let mut stream = response.bytes_stream();
             let mut buffer = Vec::new();
-            let mut event_data = String::new();
+            let mut decoder = crate::sse::Decoder::default();
             while let Some(bytes) = stream.next().await {
-                buffer.extend_from_slice(&bytes?);
-                if buffer.len() > 16_000_000 {
-                    bail!("MCP response exceeds the size limit")
-                }
+                let bytes = bytes?;
                 if sse {
-                    let mut start = 0;
-                    while let Some(end) = buffer[start..].iter().position(|b| *b == b'\n') {
-                        let end = start + end + 1;
-                        let line = std::str::from_utf8(&buffer[start..end])?;
-                        start = end;
-                        let line = line.trim_end_matches(['\r', '\n']);
-                        if line.is_empty() {
-                            if let Ok(v) = serde_json::from_str::<Value>(&event_data)
-                                && v["id"] == id
-                            {
-                                return rpc_result(v);
-                            }
-                            event_data.clear();
-                        } else if let Some(s) = line.strip_prefix("data:") {
-                            if !event_data.is_empty() {
-                                event_data.push('\n');
-                            }
-                            event_data.push_str(s.trim_start());
-                            if event_data.len() > 16_000_000 {
-                                bail!("MCP response exceeds the size limit")
-                            }
+                    for event in decoder.push(&bytes)? {
+                        if let Ok(v) = serde_json::from_str::<Value>(&event.data)
+                            && v["id"] == id
+                        {
+                            return rpc_result(v);
                         }
                     }
-                    buffer.drain(..start);
+                } else {
+                    buffer.extend_from_slice(&bytes);
+                    if buffer.len() > 16_000_000 {
+                        bail!("MCP response exceeds the size limit")
+                    }
                 }
             }
             if sse {
                 bail!("MCP SSE response missing result")
             }
-            rpc_result(serde_json::from_slice(&buffer)?)
+            let response: Value = serde_json::from_slice(&buffer)?;
+            if response["id"] != id {
+                bail!("MCP response id does not match request");
+            }
+            rpc_result(response)
         })
         .await
         .context("MCP request timed out")?
@@ -399,6 +371,9 @@ impl Connector {
         if let Some(task) = self.legacy_task.take() {
             task.abort();
         }
+        if let Some(tree) = &self.tree {
+            tree.shutdown().await;
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
             let _ = child.wait().await;
@@ -421,32 +396,27 @@ fn rpc_result(v: Value) -> Result<Value> {
 pub struct McpRegistry {
     pub tools: HashMap<String, (ToolSpec, String, Arc<Mutex<Connector>>)>,
     pub statuses: Vec<Value>,
+    connectors: Vec<Arc<Mutex<Connector>>>,
 }
 impl McpRegistry {
     pub async fn prepare(servers: Vec<Server>) -> Self {
         let mut r = Self::default();
         let mut seen = std::collections::HashSet::new();
-        for server in servers {
-            if !seen.insert(server.name.clone()) {
-                continue;
-            }
+        let servers = servers
+            .into_iter()
+            .filter(|server| seen.insert(server.name.clone()))
+            .collect::<Vec<_>>();
+        let mut prepared = futures_util::stream::iter(servers).map(|server| async move {
             let mut c = match Connector::new(server.clone()) {
                 Ok(c) => c,
                 Err(_) => {
-                    r.statuses.push(json!({"server":server.name,"plugin":server.plugin,"protocol":null,"server_version":null,"error":"MCP client configuration error"}));
-                    continue;
+                    return (json!({"server":server.name,"plugin":server.plugin,"protocol":null,"server_version":null,"error":"MCP client configuration error"}), None, vec![]);
                 }
             };
-            match c.discover().await {
+            let discovery = tokio::time::timeout(Duration::from_secs_f64(server.timeout), c.discover()).await.context("MCP discovery timed out").and_then(|r| r);
+            match discovery {
                 Ok(tools) => {
-                    r.statuses.push(json!({"server":server.name,"plugin":server.plugin,"protocol":c.protocol,"server_version":c.server_version,"error":null}));
-                    let c = Arc::new(Mutex::new(c));
-                    for (spec, original) in tools {
-                        if !r.tools.contains_key(&spec.name) {
-                            r.tools
-                                .insert(spec.name.clone(), (spec, original, c.clone()));
-                        }
-                    }
+                    (json!({"server":server.name,"plugin":server.plugin,"protocol":c.protocol,"server_version":c.server_version,"error":null}), Some(c), tools)
                 }
                 Err(e) => {
                     c.close().await;
@@ -457,18 +427,27 @@ impl McpRegistry {
                     } else {
                         e.to_string()
                     };
-                    r.statuses.push(json!({"server":server.name,"plugin":server.plugin,"protocol":null,"server_version":null,"error":error}));
+                    (json!({"server":server.name,"plugin":server.plugin,"protocol":null,"server_version":null,"error":error}), None, vec![])
                 }
+            }
+        }).buffered(4);
+        while let Some((status, connector, tools)) = prepared.next().await {
+            r.statuses.push(status);
+            if let Some(connector) = connector {
+                let connector = Arc::new(Mutex::new(connector));
+                for (spec, original) in tools {
+                    r.tools
+                        .entry(spec.name.clone())
+                        .or_insert((spec, original, connector.clone()));
+                }
+                r.connectors.push(connector);
             }
         }
         r
     }
     pub async fn close(&self) {
-        let mut closed = std::collections::HashSet::new();
-        for (_, _, c) in self.tools.values() {
-            if closed.insert(Arc::as_ptr(c) as usize) {
-                c.lock().await.close().await;
-            }
+        for c in &self.connectors {
+            c.lock().await.close().await;
         }
     }
 }

@@ -129,6 +129,11 @@ pub fn prefix(text: &str, max: usize) -> &str {
     }
     &text[..end]
 }
+pub fn terminal_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .collect()
+}
 pub fn suffix(text: &str, max: usize) -> &str {
     let mut start = text.len().saturating_sub(max);
     while !text.is_char_boundary(start) {
@@ -174,6 +179,7 @@ pub fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
 }
 pub fn bundled_path() -> Option<std::ffi::OsString> {
     let runtime = std::env::var_os("MINICODE_RESOURCES")
+        .filter(|p| !p.is_empty())
         .map(|p| PathBuf::from(p).join("runtime"))
         .or_else(|| {
             std::env::current_exe()

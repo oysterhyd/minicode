@@ -187,9 +187,10 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
       }
       if (event.event === 'agent_event' && event.item?.type === 'approval_decision') approvalRef.current = null
       if (event.event === 'run_done' || event.event === 'run_error') {
+        const cancelled = cancelPendingRef.current
         cancelPendingRef.current = false
         approvalRef.current = null
-        drainAllowedRef.current = event.event === 'run_done' && event.result?.exit_reason === 'completed'
+        drainAllowedRef.current = !cancelled && event.event === 'run_done' && event.result?.exit_reason === 'completed'
         void refreshState()
         void refreshSessions()
         queueMicrotask(drainQueue)
@@ -282,7 +283,6 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
     }
     operationRef.current = true
     stateRevision.current += 1
-    if (/^\/(new|resume)(?:\s|$)/i.test(text)) updateQueue([])
     let succeeded = false
     const continuing = /^\/continue(?:\s|$)/i.test(text)
     if (continuing) {
@@ -306,6 +306,7 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
         resetScreen([])
       }
       if (result.action === 'new') {
+        updateQueue([])
         drainAllowedRef.current = false
         updateFeed({ ...emptyFeed(), sessionId: null })
         const state = await client.request<AgentState>('getState', { workspace: workspaceRef.current })
@@ -317,6 +318,7 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
         const detail = await client.request<SessionDetail>('getSession', { sessionId: result.sessionId, workspace: workspaceRef.current })
         const state = await client.request<AgentState>('selectSession', { sessionId: result.sessionId, workspace: workspaceRef.current })
         if (!activeRef.current) return
+        updateQueue([])
         workspaceRef.current = detail.summary.workspace
         updateAgent(state)
         drainAllowedRef.current = false

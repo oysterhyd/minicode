@@ -22,7 +22,9 @@ impl Configuration {
         if self.path.metadata()?.len() > 4_000_000 {
             bail!("harness configuration exceeds the size limit")
         }
-        let value: Value = serde_json::from_slice(&fs::read(&self.path)?)?;
+        let bytes = fs::read(&self.path)?;
+        let value: Value =
+            serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes))?;
         if !value.is_object() || !value["services"].is_array() || !value["agents"].is_array() {
             bail!("harness configuration must contain services and agents lists")
         }
@@ -43,7 +45,11 @@ impl Configuration {
         Ok(value)
     }
     pub fn write(&self, data: &Value) -> Result<()> {
-        util::atomic_write(&self.path, &serde_json::to_vec_pretty(data)?)
+        let bytes = serde_json::to_vec_pretty(data)?;
+        if bytes.len() > 4_000_000 {
+            bail!("harness configuration exceeds the size limit");
+        }
+        util::atomic_write(&self.path, &bytes)
     }
     pub fn model_key(service: &Value, model: &Value) -> String {
         let name = model["modelId"].as_str().unwrap_or_default();
@@ -57,8 +63,13 @@ impl Configuration {
         }
     }
     pub fn credentials(&self, s: &Value) -> (String, String) {
-        let url = s["baseUrl"].as_str().unwrap_or_default().to_string();
-        let mut key = s["apiKey"].as_str().unwrap_or_default().to_string();
+        let url = s["baseUrl"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        let mut key = s["apiKey"].as_str().unwrap_or_default().trim().to_string();
         if key.is_empty() {
             key = match s["id"].as_str().unwrap_or_default() {
                 "anthropic" => std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
@@ -68,7 +79,7 @@ impl Configuration {
                 _ => String::new(),
             };
         }
-        (url, key)
+        (url, key.trim().to_string())
     }
     pub fn public(&self) -> Result<Value> {
         let mut data = self.read()?;
@@ -134,6 +145,7 @@ impl Configuration {
             .map(|s| s["id"].clone())
             .unwrap_or_else(|| json!(util::id()));
         s["builtin"] = json!(existing.is_some_and(|s| s["builtin"] == true));
+        s["apiKey"] = json!(s["apiKey"].as_str().unwrap_or_default().trim());
         if s["apiKey"].as_str().unwrap_or_default().is_empty() {
             s["apiKey"] = existing.map(|s| s["apiKey"].clone()).unwrap_or(json!(""));
         }

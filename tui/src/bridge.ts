@@ -9,18 +9,18 @@ export type BridgeApi = {
   close: () => void | Promise<void>
 }
 
-const EVENTS = new Set(['agent_event', 'text_delta', 'approval', 'approval_auto', 'run_done', 'run_error', 'bridge_error'])
+const EVENTS = new Set(['agent_event', 'text_delta', 'reasoning_delta', 'approval', 'approval_auto', 'run_done', 'run_error', 'bridge_error'])
 
 export class BridgeClient implements BridgeApi {
   private nextId = 1
-  private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
+  private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   private events = new EventEmitter()
   private closed = false
   private failure: Error | null = null
   private closePromise?: Promise<void>
   private reader: readline.Interface
 
-  constructor(private readonly child: ChildProcess) {
+  constructor(private readonly child: ChildProcess, private readonly requestTimeoutMs = 35000) {
     if (!child.stdout || !child.stdin) throw new Error('Agent bridge requires piped stdio')
     this.reader = readline.createInterface({ input: child.stdout })
     this.reader.on('line', line => this.onLine(line))
@@ -41,12 +41,20 @@ export class BridgeClient implements BridgeApi {
     }
     const id = this.nextId++
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve: value => resolve(value as T), reject })
       try {
-        this.child.stdin!.write(JSON.stringify({ id, method, params }) + '\n', error => {
+        const line = JSON.stringify({ id, method, params }) + '\n'
+        if (Buffer.byteLength(line, 'utf8') > 4_000_000) throw new Error('request exceeds the size limit')
+        const timer = setTimeout(() => {
+          this.pending.delete(id)
+          reject(new Error(`Agent bridge 请求超时：${method}。请检查会话状态后重试。`))
+        }, this.requestTimeoutMs)
+        this.pending.set(id, { resolve: value => resolve(value as T), reject, timer })
+        this.child.stdin!.write(line, error => {
           if (error) this.fail(error)
         })
       } catch (error) {
+        const pending = this.pending.get(id)
+        if (pending) clearTimeout(pending.timer)
         this.pending.delete(id)
         reject(error instanceof Error ? error : new Error(String(error)))
       }
@@ -85,7 +93,7 @@ export class BridgeClient implements BridgeApi {
     })
     const deadline = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 3000) })
     try {
-      // EOF lets Python cancel the run, persist checkpoints and close tool/MCP
+      // EOF lets the agent cancel the run, persist checkpoints and close tool/MCP
       // processes before its loop exits. Force termination is only a fallback.
       try { this.child.stdin?.end() } catch { /* deadline still terminates a broken pipe's owner */ }
       if (!await Promise.race([exited, deadline])) {
@@ -127,6 +135,7 @@ export class BridgeClient implements BridgeApi {
     const pending = this.pending.get(message.id as number)
     if (!pending) return
     this.pending.delete(message.id as number)
+    clearTimeout(pending.timer)
     if ('error' in message) pending.reject(new Error(String(message.error)))
     else pending.resolve(message.result)
   }
@@ -139,7 +148,7 @@ export class BridgeClient implements BridgeApi {
   }
 
   private rejectAll(error: Error): void {
-    for (const request of this.pending.values()) request.reject(error)
+    for (const request of this.pending.values()) { clearTimeout(request.timer); request.reject(error) }
     this.pending.clear()
   }
 }

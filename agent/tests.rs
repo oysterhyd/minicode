@@ -751,3 +751,218 @@ fn provider_payload_ownership_keeps_both_wire_formats_exact() {
         json!({"model":"fake","messages":[{"role":"user","content":[{"type":"text","text":"hello 中文"}]},{"role":"assistant","content":[{"type":"text","text":"answer"},{"type":"tool_use","id":"one","name":"read","input":{"path":"file"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"one","content":"result","is_error":false}]}],"stream":true,"max_tokens":32,"system":"system"})
     );
 }
+
+#[tokio::test]
+async fn empty_file_is_a_successful_read() {
+    let (_dir, ctx) = fixture();
+    fs::write(ctx.workspace.join("empty.txt"), "").unwrap();
+    let result = tools::execute("read", &json!({"path":"empty.txt"}), &ctx).await;
+    assert!(result.success, "{:?}", result.error);
+    assert!(result.output.contains("empty"));
+    let beyond = tools::execute("read", &json!({"path":"empty.txt","offset":2}), &ctx).await;
+    assert!(!beyond.success);
+}
+
+#[tokio::test]
+async fn multiline_edits_preserve_crlf_for_small_and_large_files() {
+    let (_dir, ctx) = fixture();
+    for (name, padding) in [("small.txt", 0), ("large.txt", 300_000)] {
+        let before = "x".repeat(padding) + "one\r\ntwo\r\n";
+        fs::write(ctx.workspace.join(name), before).unwrap();
+        let result = tools::execute(
+            "edit",
+            &json!({"path":name,"old_text":"one\ntwo\n","new_text":"one\nchanged\n"}),
+            &ctx,
+        )
+        .await;
+        assert!(result.success, "{:?}", result.error);
+        assert!(
+            fs::read_to_string(ctx.workspace.join(name))
+                .unwrap()
+                .ends_with("one\r\nchanged\r\n")
+        );
+    }
+}
+
+#[tokio::test]
+async fn scoped_search_results_always_use_workspace_relative_paths() {
+    let (_dir, ctx) = fixture();
+    fs::create_dir(ctx.workspace.join("src")).unwrap();
+    fs::write(ctx.workspace.join("src/file.txt"), "needle").unwrap();
+    for path in ["src", "src/file.txt"] {
+        let result = tools::execute("grep", &json!({"path":path,"pattern":"needle"}), &ctx).await;
+        assert!(result.success);
+        assert!(
+            result.output.starts_with("src/file.txt:1:"),
+            "{}",
+            result.output
+        );
+    }
+}
+
+#[test]
+fn manual_compaction_keeps_original_constraints_and_recent_messages() {
+    let (_dir, ctx) = fixture();
+    let original = "Keep this entire original request. ".repeat(40) + "FINAL_CONSTRAINT";
+    let mut messages = vec![
+        Message::user(&original),
+        Message {
+            role: "assistant".into(),
+            content: vec![Block::text("first reply")],
+        },
+        Message::user("second task"),
+        Message {
+            role: "assistant".into(),
+            content: vec![Block::text("second reply\n".repeat(200))],
+        },
+        Message::user("latest task"),
+    ];
+    assert!(
+        context::compact(
+            &ctx.store,
+            &ctx.session,
+            "",
+            &[],
+            &mut messages,
+            200_000,
+            true
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(messages.first().unwrap().text(), original);
+    assert_eq!(messages.last().unwrap().text(), "latest task");
+    assert!(messages.iter().any(|m| m.text().contains("[artifact:")));
+}
+
+#[test]
+fn plugin_fingerprints_distinguish_filename_content_boundary_collisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    fs::write(first.join("a"), "bc").unwrap();
+    fs::write(second.join("ab"), "c").unwrap();
+    assert_ne!(
+        crate::extensions::fingerprint(&first).unwrap(),
+        crate::extensions::fingerprint(&second).unwrap()
+    );
+}
+
+#[test]
+fn reimporting_identical_media_with_a_new_name_keeps_old_messages_readable() {
+    let (_dir, ctx) = fixture();
+    let bytes = b"\x89PNG\r\n\x1a\n";
+    let first = ctx
+        .attachments
+        .import_bytes(bytes, "first.png", "image/png")
+        .unwrap();
+    let second = ctx
+        .attachments
+        .import_bytes(bytes, "renamed.png", "image/png")
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        ctx.attachments.encoded(&first).unwrap(),
+        ctx.attachments.encoded(&second).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn ordinary_command_newlines_do_not_create_an_artifact() {
+    let (_dir, ctx) = fixture();
+    let command = if cfg!(windows) {
+        "Write-Output 'hello'"
+    } else {
+        "printf 'hello\\n'"
+    };
+    let result = tools::run_command(command, &ctx.workspace, 10.0, &ctx)
+        .await
+        .unwrap();
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.output, "hello");
+    assert!(
+        ctx.store
+            .with(
+                |c| Ok(c.query_row("SELECT COUNT(*) FROM artifacts", [], |r| r.get::<_, i64>(0))?)
+            )
+            .unwrap()
+            == 0
+    );
+}
+
+#[tokio::test]
+async fn shell_preserves_quoted_command_text() {
+    let (_dir, ctx) = fixture();
+    let result = tools::run_command("echo '1>/dev/null'", &ctx.workspace, 10.0, &ctx)
+        .await
+        .unwrap();
+    assert!(result.success);
+    assert_eq!(result.output, "1>/dev/null");
+}
+
+#[tokio::test]
+async fn failed_acceptance_invalidates_previous_passing_evidence() {
+    let (_dir, ctx) = fixture();
+    let spec: crate::goals::Spec = serde_json::from_value(
+        json!({"items":[{"id":"file","type":"artifact","path":"required.txt"}]}),
+    )
+    .unwrap();
+    let mut goal = crate::goals::Goal::new(spec, &ctx.workspace).unwrap();
+    fs::write(ctx.workspace.join("required.txt"), "ok").unwrap();
+    assert_eq!(goal.check(&ctx).await.unwrap()["passed"], true);
+    assert!(goal.evidence.is_some());
+    fs::remove_file(ctx.workspace.join("required.txt")).unwrap();
+    assert_eq!(goal.check(&ctx).await.unwrap()["passed"], false);
+    assert!(goal.evidence.is_none());
+}
+
+#[tokio::test]
+async fn protected_paths_cannot_pass_by_becoming_directories() {
+    let (_dir, ctx) = fixture();
+    let spec: crate::goals::Spec = serde_json::from_value(
+        json!({"items":[{"id":"protected","type":"protected","path":"protected.txt"}]}),
+    )
+    .unwrap();
+    let mut goal = crate::goals::Goal::new(spec.clone(), &ctx.workspace).unwrap();
+    assert_eq!(goal.check(&ctx).await.unwrap()["passed"], true);
+    fs::create_dir(ctx.workspace.join("protected.txt")).unwrap();
+    assert_eq!(goal.check(&ctx).await.unwrap()["passed"], false);
+    let mut directory = crate::goals::Goal::new(spec, &ctx.workspace).unwrap();
+    assert_eq!(directory.check(&ctx).await.unwrap()["passed"], false);
+}
+
+#[tokio::test]
+async fn cancelling_a_live_descendant_releases_its_working_directory() {
+    let (_dir, ctx) = fixture();
+    let cwd = ctx.workspace.join("command-cwd");
+    fs::create_dir(&cwd).unwrap();
+    let child_ctx = ctx.clone();
+    let child_cwd = cwd.clone();
+    let task = tokio::spawn(async move {
+        tools::run_command("node -e \"require('fs').writeFileSync('child.pid',String(process.pid));setInterval(()=>{},1000)\"", &child_cwd, 20.0, &child_ctx).await
+    });
+    for _ in 0..500 {
+        if cwd.join("child.pid").exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(cwd.join("child.pid").exists(), "command did not start");
+    ctx.cancel.cancel();
+    assert!(task.await.unwrap().is_err());
+    fs::remove_dir_all(&cwd).unwrap();
+}
+
+#[test]
+fn running_sessions_cannot_be_deleted_from_a_second_store() {
+    let (_dir, ctx) = fixture();
+    let other = Store::open(&ctx.store.path).unwrap();
+    let lock = ctx.store.activation(&ctx.session).unwrap();
+    assert!(other.delete(&ctx.session).is_err());
+    assert!(ctx.store.require(&ctx.session).is_ok());
+    drop(lock);
+    other.delete(&ctx.session).unwrap();
+    assert!(ctx.store.require(&ctx.session).is_err());
+}

@@ -54,6 +54,7 @@ type conversation struct {
 	Attachments                   []model.Attachment
 	Uploading                     bool
 	Busy, Loading, Loaded, Unread bool
+	CancelPending                 bool
 	Error                         string
 	StartedAt                     time.Time
 	List                          ui.ListState
@@ -65,6 +66,7 @@ type conversation struct {
 	reasoningText                 strings.Builder
 	version                       uint64
 	refreshVersion                uint64
+	stateVersion                  uint64
 	refreshPending                bool
 }
 
@@ -312,8 +314,13 @@ func (d *desktop) refresh(v *conversation, full bool) {
 }
 
 func (d *desktop) refreshState(v *conversation) {
+	v.stateVersion++
+	version := v.stateVersion
 	var state model.State
 	d.request(v, "getState", nil, &state, func(err error) {
+		if version != v.stateVersion {
+			return
+		}
 		if err != nil {
 			d.error(v, err)
 		} else {
@@ -324,8 +331,13 @@ func (d *desktop) refreshState(v *conversation) {
 
 func (d *desktop) changeState(method string, params map[string]any) {
 	v := d.current()
+	v.stateVersion++
+	version := v.stateVersion
 	var state model.State
 	d.request(v, method, params, &state, func(err error) {
+		if version != v.stateVersion {
+			return
+		}
 		if err != nil {
 			d.error(v, err)
 		} else {
@@ -485,6 +497,7 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 	}
 	if v.Workspace == "" {
 		v.Error = "请先选择本地工作区"
+		v.Draft, v.Attachments = text, attachments
 		return
 	}
 	if problem := d.attachmentProblem(v, attachments); problem != "" {
@@ -499,6 +512,7 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 	}
 	v.Error = ""
 	v.Busy = true
+	v.CancelPending = false
 	v.Loaded = true
 	v.StartedAt = time.Now()
 	d.rememberPrompt(text)
@@ -531,7 +545,7 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 
 func (d *desktop) submit() {
 	v := d.current()
-	if v.Uploading {
+	if v.Uploading || v.Loading {
 		return
 	}
 	if v.Busy && strings.TrimSpace(v.Draft) == "" && len(v.Attachments) == 0 {
@@ -556,7 +570,16 @@ func (d *desktop) submit() {
 }
 
 func (d *desktop) cancel(v *conversation) {
-	d.request(v, "cancelTurn", nil, nil, func(err error) { d.error(v, err) })
+	if !v.Busy || v.CancelPending {
+		return
+	}
+	v.CancelPending = true
+	d.request(v, "cancelTurn", nil, nil, func(err error) {
+		if err != nil {
+			v.CancelPending = false
+			d.error(v, err)
+		}
+	})
 }
 
 func (d *desktop) decide(item *model.FeedItem, granted, remember bool) {
@@ -640,8 +663,18 @@ func (d *desktop) slash(text string, v *conversation) {
 		SessionID string       `json:"sessionId"`
 		State     *model.State `json:"state"`
 	}
+	continuing := command[0] == "/continue" && !v.Busy
+	if continuing {
+		v.Busy = true
+		v.CancelPending = false
+		v.StartedAt = time.Now()
+	}
 	d.request(v, "runSlash", map[string]any{"text": text}, &result, func(err error) {
 		if err != nil {
+			if continuing {
+				v.Busy = false
+				v.StartedAt = time.Time{}
+			}
 			d.error(v, err)
 			return
 		}
@@ -658,8 +691,6 @@ func (d *desktop) slash(text string, v *conversation) {
 			v.Items = nil
 			v.rebuildRows()
 		case "continue":
-			v.Busy = true
-			v.StartedAt = time.Now()
 			if result.SessionID != "" {
 				v.SessionID = result.SessionID
 			}
@@ -711,18 +742,13 @@ func (d *desktop) flushEvents() {
 
 func (d *desktop) handleEvent(event bridge.Event) {
 	if event.Event == "bridge_error" {
-		if !strings.Contains(event.Error, "Error") && !strings.Contains(event.Error, "exited") && !strings.Contains(event.Error, "invalid") && !strings.Contains(event.Error, "Traceback") {
+		if !event.Fatal && !strings.Contains(event.Error, "Error") && !strings.Contains(event.Error, "exited") && !strings.Contains(event.Error, "invalid") && !strings.Contains(event.Error, "Traceback") {
 			return
 		}
 		for _, v := range d.views {
 			v.Error = event.Error
-			if strings.Contains(event.Error, "exited") {
-				if v.reasoning != nil {
-					v.reasoning.Interrupted = true
-				}
-				v.finishStream()
-				v.removeThinking()
-				v.Busy = false
+			if event.Fatal || strings.Contains(event.Error, "exited") || strings.Contains(event.Error, "invalid") {
+				d.finish(v, bridge.Event{Event: "run_error", Error: event.Error, Fatal: true})
 			}
 		}
 		return
@@ -956,6 +982,9 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 }
 
 func (d *desktop) finish(v *conversation, event bridge.Event) {
+	v.stateVersion++
+	cancelled := v.CancelPending
+	v.CancelPending = false
 	var result model.RunResult
 	_ = json.Unmarshal(event.Result, &result)
 	if v.reasoning != nil && v.reasoning.Pending {
@@ -990,9 +1019,16 @@ func (d *desktop) finish(v *conversation, event bridge.Event) {
 		}
 	}
 	ok := event.Event == "run_done" && (result.ExitReason == "" || result.ExitReason == "completed")
+	v.State.Running = false
+	v.State.TaskPending = !ok
+	v.State.Phase = "paused"
+	if ok {
+		v.State.Phase = "idle"
+	}
 	if !v.StartedAt.IsZero() {
 		v.append(&model.FeedItem{ID: fmt.Sprint("summary-", d.next.Add(1)), Kind: "summary", Text: fmt.Sprint(tools), StartedAt: v.StartedAt, EndedAt: time.Now(), Success: ok, Interrupted: result.ExitReason == "cancelled"})
 	}
+	v.StartedAt = time.Time{}
 	if result.ExitReason != "" && result.ExitReason != "completed" && result.ExitReason != "cancelled" {
 		reason := result.Error
 		if reason == "" {
@@ -1000,11 +1036,13 @@ func (d *desktop) finish(v *conversation, event bridge.Event) {
 		}
 		v.append(&model.FeedItem{ID: fmt.Sprint("pause-", d.next.Add(1)), Kind: "notice", Tone: "warning", Text: "任务已暂停：" + reason + "。可输入 /continue 继续"})
 	}
-	d.refreshState(v)
-	d.refresh(v, true)
-	d.refreshSessions(v)
+	if !event.Fatal {
+		d.refreshState(v)
+		d.refresh(v, true)
+		d.refreshSessions(v)
+	}
 	d.signal(v, "任务已结束", v.title(d.sessions))
-	if ok && len(v.Queue) > 0 {
+	if ok && !cancelled && len(v.Queue) > 0 {
 		next := v.Queue[0]
 		v.Queue = v.Queue[1:]
 		d.sendAttached(next.Text, v, next.Attachments)

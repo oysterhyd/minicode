@@ -149,7 +149,12 @@ impl Attachments {
             bail!("not an attachment")
         };
         let saved = self.get(asset_id)?;
-        if saved != *block {
+        // Names belong to individual message references. Identical bytes can
+        // be imported again under a different filename without changing them.
+        if !matches!(&saved, Block::Media { asset_id: saved_id, kind: saved_kind, mime_type: saved_mime, size: saved_size, .. }
+            if saved_id == asset_id && saved_mime == mime_type && saved_size == size
+                && matches!(block, Block::Media { kind, .. } if kind == saved_kind))
+        {
             bail!("附件元数据不一致，请重新添加")
         }
         let mut data = vec![];

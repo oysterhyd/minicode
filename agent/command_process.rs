@@ -50,6 +50,12 @@ impl ProcessTree {
                 && info.ActiveProcesses > 0
         }
     }
+    pub fn terminate(&self) {
+        use std::os::windows::io::AsRawHandle;
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0.as_raw_handle(), 1);
+        }
+    }
 }
 #[cfg(unix)]
 pub struct ProcessTree(i32);
@@ -63,12 +69,27 @@ impl ProcessTree {
     pub fn active(&self) -> bool {
         unsafe { libc::kill(-self.0, 0) == 0 }
     }
+    pub fn terminate(&self) {
+        unsafe {
+            libc::kill(-self.0, libc::SIGKILL);
+        }
+    }
+}
+impl ProcessTree {
+    pub async fn shutdown(&self) {
+        self.terminate();
+        #[cfg(windows)]
+        {
+            let started = std::time::Instant::now();
+            while self.active() && started.elapsed() < std::time::Duration::from_secs(2) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
 }
 #[cfg(unix)]
 impl Drop for ProcessTree {
     fn drop(&mut self) {
-        unsafe {
-            libc::kill(-self.0, libc::SIGKILL);
-        }
+        self.terminate();
     }
 }

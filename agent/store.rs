@@ -32,7 +32,11 @@ impl Store {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         if path != Path::new(":memory:") {
-            fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
+            fs::create_dir_all(
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )?;
         }
         let mut c = Connection::open(&path)?;
         c.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -269,6 +273,7 @@ impl Store {
         self.with(|c|{c.execute("INSERT INTO session_meta(session_id,pinned) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET pinned=excluded.pinned",params![id,pinned])?;Ok(())})
     }
     pub fn delete(&self, id: &str) -> Result<()> {
+        let _ownership = self.activation(id)?;
         self.require(id)?;
         self.transaction(|c| {
             for table in [

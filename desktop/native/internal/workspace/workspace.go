@@ -22,12 +22,34 @@ const PreviewLimit = 1 << 20
 const FileLimit = 5000
 
 type Service struct {
-	Environment []string
-	slots       chan struct{}
+	Environment   []string
+	slots         chan struct{}
+	gitExecutable string
 }
 
 func New(environment []string) *Service {
-	return &Service{Environment: environment, slots: make(chan struct{}, 4)}
+	s := &Service{Environment: environment, slots: make(chan struct{}, 4), gitExecutable: "git"}
+	name := "git"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	for i := len(environment) - 1; i >= 0; i-- {
+		key, value, ok := strings.Cut(environment[i], "=")
+		if !ok || !strings.EqualFold(key, "PATH") {
+			continue
+		}
+		for _, dir := range filepath.SplitList(value) {
+			if dir == "" {
+				continue
+			}
+			if executable, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+				s.gitExecutable = executable
+				break
+			}
+		}
+		break
+	}
+	return s
 }
 
 func Resolve(root, relative string) (string, error) {
@@ -103,7 +125,7 @@ func (s *Service) Git(ctx context.Context, root string, args ...string) (string,
 	defer func() { <-s.slots }()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, s.gitExecutable, args...)
 	cmd.Dir = root
 	cmd.Env = s.Environment
 	hideWindow(cmd)
@@ -249,18 +271,19 @@ func (s *Service) Changes(ctx context.Context, root string) ([]model.Change, err
 		return []model.Change{}, nil
 	}
 	// Status and statistics are independent reads and share a bounded worker pool.
-	var status, stats string
+	var status, stats, prefix string
 	var statusErr, statsErr error
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		status, statusErr = s.Git(ctx, root, "-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "-uall")
+		status, statusErr = s.Git(ctx, root, "-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "-uall", "--", ".")
 	}()
 	go func() {
 		defer wg.Done()
-		stats, statsErr = s.Git(ctx, root, "-c", "core.quotePath=false", "diff", "--numstat", "-z", "--no-ext-diff", "HEAD")
+		stats, statsErr = s.Git(ctx, root, "-c", "core.quotePath=false", "diff", "--relative", "--numstat", "-z", "--no-ext-diff", "HEAD", "--", ".")
 	}()
+	go func() { defer wg.Done(); prefix, _ = s.Git(ctx, root, "rev-parse", "--show-prefix") }()
 	wg.Wait()
 	if statusErr != nil {
 		if strings.Contains(statusErr.Error(), "not a git repository") {
@@ -269,13 +292,24 @@ func (s *Service) Changes(ctx context.Context, root string) ([]model.Change, err
 		return nil, statusErr
 	}
 	entries := ParseStatus(status)
+	prefix = strings.TrimRight(prefix, "\r\n")
+	if prefix != "" {
+		kept := entries[:0]
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Path, prefix) {
+				entry.Path = strings.TrimPrefix(entry.Path, prefix)
+				kept = append(kept, entry)
+			}
+		}
+		entries = kept
+	}
 	totals := ParseNumstat(stats)
 	if statsErr != nil && len(entries) > 0 {
-		staged, e := s.Git(ctx, root, "diff", "--numstat", "-z", "--no-ext-diff", "--cached")
+		staged, e := s.Git(ctx, root, "diff", "--relative", "--numstat", "-z", "--no-ext-diff", "--cached", "--", ".")
 		if e == nil {
 			totals = ParseNumstat(staged)
 		}
-		unstaged, e := s.Git(ctx, root, "diff", "--numstat", "-z", "--no-ext-diff")
+		unstaged, e := s.Git(ctx, root, "diff", "--relative", "--numstat", "-z", "--no-ext-diff", "--", ".")
 		if e == nil {
 			for path, stat := range ParseNumstat(unstaged) {
 				old := totals[path]
@@ -328,7 +362,7 @@ func (s *Service) Diff(ctx context.Context, root, relative string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	output, err := s.Git(ctx, root, "diff", "HEAD", "--no-ext-diff", "--", relative)
+	output, err := s.Git(ctx, root, "--literal-pathspecs", "diff", "--relative", "HEAD", "--no-ext-diff", "--", relative)
 	unborn := false
 	if err != nil {
 		_, headErr := s.Git(ctx, root, "rev-parse", "--verify", "--quiet", "HEAD")
@@ -345,7 +379,7 @@ func (s *Service) Diff(ctx context.Context, root, relative string) (string, erro
 		return strings.ToValidUTF8(output, "\uFFFD"), nil
 	}
 	if _, err := os.Stat(path); err == nil {
-		_, trackedErr := s.Git(ctx, root, "ls-files", "--error-unmatch", "--", relative)
+		_, trackedErr := s.Git(ctx, root, "--literal-pathspecs", "ls-files", "--error-unmatch", "--", relative)
 		if unborn || trackedErr != nil {
 			text, truncated, err := Read(root, relative)
 			if err != nil {
@@ -375,7 +409,7 @@ func (s *Service) Stage(ctx context.Context, root, relative string) error {
 	if _, err := Resolve(root, relative); err != nil {
 		return err
 	}
-	_, err := s.Git(ctx, root, "add", "--", relative)
+	_, err := s.Git(ctx, root, "--literal-pathspecs", "add", "--", relative)
 	return err
 }
 
@@ -383,7 +417,7 @@ func (s *Service) StageAll(ctx context.Context, root string) error {
 	if _, err := Resolve(root, "."); err != nil {
 		return err
 	}
-	_, err := s.Git(ctx, root, "add", "-A")
+	_, err := s.Git(ctx, root, "add", "-A", "--", ".")
 	return err
 }
 
@@ -391,15 +425,15 @@ func (s *Service) Unstage(ctx context.Context, root, relative string) error {
 	if _, err := Resolve(root, relative); err != nil {
 		return err
 	}
-	if _, err := s.Git(ctx, root, "restore", "--staged", "--", relative); err == nil {
+	if _, err := s.Git(ctx, root, "--literal-pathspecs", "restore", "--staged", "--", relative); err == nil {
 		return nil
 	}
 	_, headErr := s.Git(ctx, root, "rev-parse", "--verify", "--quiet", "HEAD")
 	if headErr != nil {
 		// A repository without its first commit has no HEAD to restore from.
-		_, err := s.Git(ctx, root, "rm", "--cached", "--", relative)
+		_, err := s.Git(ctx, root, "--literal-pathspecs", "rm", "--cached", "--", relative)
 		return err
 	}
-	_, err := s.Git(ctx, root, "reset", "-q", "HEAD", "--", relative)
+	_, err := s.Git(ctx, root, "--literal-pathspecs", "reset", "-q", "HEAD", "--", relative)
 	return err
 }

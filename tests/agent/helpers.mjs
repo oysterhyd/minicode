@@ -12,8 +12,8 @@ export function profile(turns=[]){
   const script=path.join(root,'script.json');fs.writeFileSync(script,JSON.stringify({turns}))
   return {root,workspace,script,db:path.join(root,'sessions.db'),connections:new Set()}
 }
-export function connect(fixture){
-  const env={...process.env,HOME:fixture.root,USERPROFILE:fixture.root,MINICODE_DB_PATH:fixture.db,MINICODE_FAKE_SCRIPT:fixture.script,ANTHROPIC_API_KEY:'',COMMANDCODE_API_KEY:'',MINICODE_RESOURCES:''}
+export function connect(fixture,extraEnv={}){
+  const env={...process.env,HOME:fixture.root,USERPROFILE:fixture.root,MINICODE_DB_PATH:fixture.db,MINICODE_FAKE_SCRIPT:fixture.script,ANTHROPIC_API_KEY:'',COMMANDCODE_API_KEY:'',MINICODE_RESOURCES:'',...extraEnv}
   const child=spawn(executable,['bridge'],{cwd:projectRoot,env,stdio:['pipe','pipe','pipe'],windowsHide:true})
   const events=[],pending=new Map();let seq=0,output='',errors='',closed=false
   child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');child.stderr.on('data',s=>{errors+=s})

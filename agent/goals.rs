@@ -126,12 +126,19 @@ pub struct Goal {
 }
 impl Goal {
     pub fn new(spec: Spec, workspace: &Path) -> Result<Self> {
+        spec.validate()?;
         let mut protected = BTreeMap::new();
         let mut unresolved = BTreeMap::new();
         for item in spec.items.iter().filter(|i| i.r#type == "protected") {
             let raw = item.path.as_ref().unwrap();
             match util::in_workspace(workspace, raw) {
                 Ok(path) => {
+                    if path.exists() && !path.is_file() {
+                        unresolved.insert(
+                            raw.clone(),
+                            "protected 检查只支持普通文件，请为目录列出需要保护的文件".into(),
+                        );
+                    }
                     protected.insert(
                         raw.clone(),
                         if path.is_file() {
@@ -225,7 +232,9 @@ impl Goal {
                     .protected
                     .get(raw)
                     .context("missing protected baseline")?;
-                if &current == expected {
+                if path.exists() && !path.is_file() {
+                    (false, "受保护路径变成了目录或非普通文件".into())
+                } else if &current == expected {
                     (true, "受保护文件未发生改变".into())
                 } else {
                     (false, "受保护文件内容在快照后被修改".into())
@@ -245,6 +254,7 @@ impl Goal {
         if passed {
             self.evidence = Some(report.clone());
         } else {
+            self.evidence = None;
             self.attempts += 1;
         }
         self.save(&ctx.store, &ctx.session)?;

@@ -13,6 +13,7 @@ pub mod paging;
 pub mod provider;
 pub mod report;
 pub mod runtime;
+mod sse;
 pub mod store;
 pub mod tools;
 pub mod util;

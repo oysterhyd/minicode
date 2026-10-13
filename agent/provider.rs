@@ -66,17 +66,24 @@ impl Provider {
         if model == "fake" {
             p.name = "fake".into();
             p.modalities = vec!["image".into(), "pdf".into(), "audio".into(), "video".into()];
-            p.fake = Some(if let Ok(path) = std::env::var("MINICODE_FAKE_SCRIPT") {
-                let bytes = fs::read(path)?;
-                if bytes.len() > 16_000_000 {
-                    bail!("fake script exceeds the size limit")
-                }
-                let v: Value = serde_json::from_slice(&bytes)?;
-                validate_fake(&v)?;
-                v
-            } else {
-                json!({"turns":[],"exhausted_text":"(fake provider：未提供脚本，这里是一条演示回复。)"})
-            });
+            p.fake = Some(
+                if let Some(path) = std::env::var("MINICODE_FAKE_SCRIPT")
+                    .ok()
+                    .filter(|path| !path.trim().is_empty())
+                {
+                    let bytes = fs::read(path)?;
+                    if bytes.len() > 16_000_000 {
+                        bail!("fake script exceeds the size limit")
+                    }
+                    let v: Value = serde_json::from_slice(
+                        bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes),
+                    )?;
+                    validate_fake(&v)?;
+                    v
+                } else {
+                    json!({"turns":[],"exhausted_text":"(fake provider：未提供脚本，这里是一条演示回复。)"})
+                },
+            );
             return Ok(p);
         }
         let catalog: Value = serde_json::from_str(include_str!("assets/models.json"))?;
@@ -132,6 +139,11 @@ impl Provider {
                 p.url = url;
                 p.key = key;
             }
+        }
+        p.key = p.key.trim().to_string();
+        p.url = p.url.trim().trim_end_matches('/').to_string();
+        if p.style == "anthropic" {
+            p.effort = "off".into();
         }
         if p.key.is_empty() || p.url.is_empty() {
             bail!("请在设置中配置、启用并选择一个可用的 AI 模型")
@@ -269,7 +281,7 @@ impl Provider {
             ));
         }
         let mut stream = response.bytes_stream();
-        let mut pending = vec![];
+        let mut decoder = crate::sse::Decoder::default();
         let mut captured = 0;
         let mut content = String::new();
         let mut reasoning = String::new();
@@ -291,182 +303,167 @@ impl Provider {
             if captured > 64_000_000 {
                 bail!("SSE stream exceeds the capture limit")
             }
-            for part in bytes.split_inclusive(|b| *b == b'\r' || *b == b'\n') {
-                let finished = matches!(part.last(), Some(b'\r' | b'\n'));
-                pending.extend_from_slice(&part[..part.len() - usize::from(finished)]);
-                if pending.len() > 16_000_000 {
-                    bail!("SSE line exceeds the capture limit")
+            for event in decoder.push(&bytes)? {
+                let data = event.data.trim();
+                if data == "[DONE]" {
+                    ended = true;
+                    break 'stream;
                 }
-                if finished {
-                    let line = std::str::from_utf8(&pending).context("invalid SSE UTF-8")?;
-                    let Some(data) = line.strip_prefix("data:") else {
-                        pending.clear();
-                        continue;
-                    };
-                    let data = data.trim_start();
-                    if data == "[DONE]" {
-                        ended = true;
-                        break 'stream;
-                    }
-                    if data.is_empty() {
-                        pending.clear();
-                        continue;
-                    }
-                    let value: Value =
-                        serde_json::from_str(data).context("invalid provider SSE JSON")?;
-                    pending.clear();
-                    let mut text = None;
-                    let mut thought = None;
-                    if self.style == "anthropic" {
-                        match value["type"].as_str() {
-                            Some("error") => bail!("provider stream error"),
-                            Some("message_start") => {
-                                let initial = &value["message"]["usage"];
-                                usage = parse_usage(initial, "anthropic");
+                if data.is_empty() {
+                    continue;
+                }
+                let value: Value =
+                    serde_json::from_str(data).context("invalid provider SSE JSON")?;
+                let mut text = None;
+                let mut thought = None;
+                if self.style == "anthropic" {
+                    match value["type"].as_str() {
+                        Some("error") => bail!("provider stream error"),
+                        Some("message_start") => {
+                            let initial = &value["message"]["usage"];
+                            usage = parse_usage(initial, "anthropic");
+                        }
+                        Some("content_block_start") => {
+                            let index = value["index"]
+                                .as_u64()
+                                .context("invalid content block index")?
+                                as usize;
+                            let block = &value["content_block"];
+                            match block["type"].as_str() {
+                                Some("tool_use") => {
+                                    order.push(index);
+                                    let id = util::string(block, "id")?.to_string();
+                                    let name = util::string(block, "name")?.to_string();
+                                    response_bytes += id.len() + name.len();
+                                    calls.insert(
+                                        index,
+                                        CallBuffer {
+                                            id,
+                                            name,
+                                            initial: block["input"].clone(),
+                                            ..CallBuffer::default()
+                                        },
+                                    );
+                                }
+                                Some("text") => {
+                                    order.push(index);
+                                    text = block["text"].as_str();
+                                }
+                                Some("thinking") => thought = block["thinking"].as_str(),
+                                _ => {}
                             }
-                            Some("content_block_start") => {
-                                let index = value["index"]
+                        }
+                        Some("content_block_delta") => {
+                            let delta = &value["delta"];
+                            match delta["type"].as_str() {
+                                Some("text_delta") => text = delta["text"].as_str(),
+                                Some("thinking_delta") => thought = delta["thinking"].as_str(),
+                                Some("input_json_delta") => {
+                                    let index =
+                                        value["index"].as_u64().context("invalid tool index")?
+                                            as usize;
+                                    let call = calls
+                                        .get_mut(&index)
+                                        .context("tool delta without start")?;
+                                    let piece = delta["partial_json"].as_str().unwrap_or_default();
+                                    response_bytes += piece.len();
+                                    call.arguments.push_str(piece);
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some("message_delta") => {
+                            stop = value["delta"]["stop_reason"].as_str().map(str::to_string);
+                            let u = parse_usage(&value["usage"], "anthropic");
+                            usage.output_tokens = u.output_tokens;
+                            usage.available |= u.available;
+                        }
+                        Some("message_stop") => ended = true,
+                        _ => {}
+                    }
+                } else {
+                    if value.get("error").is_some() {
+                        bail!("provider stream error")
+                    }
+                    if value["usage"].is_object() {
+                        usage = parse_usage(&value["usage"], "openai")
+                    }
+                    if let Some(choice) = value["choices"].as_array().and_then(|v| v.first()) {
+                        if let Some(reason) = choice["finish_reason"].as_str() {
+                            if reason == "content_filter" {
+                                bail!("provider rejected the response: content_filter")
+                            }
+                            stop = Some(
+                                match reason {
+                                    "tool_calls" => "tool_use",
+                                    "length" => "max_tokens",
+                                    _ => "end_turn",
+                                }
+                                .into(),
+                            );
+                        }
+                        let delta = &choice["delta"];
+                        text = delta["content"].as_str();
+                        thought = delta["reasoning_content"]
+                            .as_str()
+                            .or(delta["reasoning"].as_str());
+                        if let Some(deltas) = delta["tool_calls"].as_array() {
+                            for d in deltas {
+                                let index = d["index"]
                                     .as_u64()
-                                    .context("invalid content block index")?
-                                    as usize;
-                                let block = &value["content_block"];
-                                match block["type"].as_str() {
-                                    Some("tool_use") => {
-                                        order.push(index);
-                                        let id = util::string(block, "id")?.to_string();
-                                        let name = util::string(block, "name")?.to_string();
-                                        response_bytes += id.len() + name.len();
-                                        calls.insert(
-                                            index,
-                                            CallBuffer {
-                                                id,
-                                                name,
-                                                initial: block["input"].clone(),
-                                                ..CallBuffer::default()
-                                            },
-                                        );
-                                    }
-                                    Some("text") => {
-                                        order.push(index);
-                                        text = block["text"].as_str();
-                                    }
-                                    Some("thinking") => thought = block["thinking"].as_str(),
-                                    _ => {}
+                                    .map(|x| x as usize)
+                                    .unwrap_or(calls.len());
+                                calls.entry(index).or_insert_with(|| {
+                                    order.push(index);
+                                    CallBuffer::default()
+                                });
+                                let c = calls.get_mut(&index).unwrap();
+                                if let Some(id) = d["id"].as_str().filter(|s| !s.is_empty()) {
+                                    response_bytes += id.len();
+                                    c.id = id.into();
                                 }
-                            }
-                            Some("content_block_delta") => {
-                                let delta = &value["delta"];
-                                match delta["type"].as_str() {
-                                    Some("text_delta") => text = delta["text"].as_str(),
-                                    Some("thinking_delta") => thought = delta["thinking"].as_str(),
-                                    Some("input_json_delta") => {
-                                        let index =
-                                            value["index"].as_u64().context("invalid tool index")?
-                                                as usize;
-                                        let call = calls
-                                            .get_mut(&index)
-                                            .context("tool delta without start")?;
-                                        let piece =
-                                            delta["partial_json"].as_str().unwrap_or_default();
-                                        response_bytes += piece.len();
-                                        call.arguments.push_str(piece);
-                                    }
-                                    _ => {}
+                                if let Some(name) =
+                                    d["function"]["name"].as_str().filter(|s| !s.is_empty())
+                                {
+                                    response_bytes += name.len();
+                                    c.name = name.into();
                                 }
+                                if let Some(piece) = d["function"]["arguments"].as_str() {
+                                    response_bytes += piece.len();
+                                    c.arguments.push_str(piece);
+                                }
+                                first.get_or_insert(started.elapsed().as_secs_f64());
+                                last = Some(started.elapsed().as_secs_f64());
                             }
-                            Some("message_delta") => {
-                                stop = value["delta"]["stop_reason"].as_str().map(str::to_string);
-                                let u = parse_usage(&value["usage"], "anthropic");
-                                usage.output_tokens = u.output_tokens;
-                                usage.available |= u.available;
-                            }
-                            Some("message_stop") => ended = true,
-                            _ => {}
                         }
+                    }
+                }
+                if let Some(text) = text.filter(|s| !s.is_empty()) {
+                    first.get_or_insert(started.elapsed().as_secs_f64());
+                    last = Some(started.elapsed().as_secs_f64());
+                    response_bytes += text.len();
+                    if self.style == "anthropic" {
+                        texts
+                            .entry(value["index"].as_u64().unwrap_or(0) as usize)
+                            .or_default()
+                            .push_str(text);
                     } else {
-                        if value.get("error").is_some() {
-                            bail!("provider stream error")
-                        }
-                        if value["usage"].is_object() {
-                            usage = parse_usage(&value["usage"], "openai")
-                        }
-                        if let Some(choice) = value["choices"].as_array().and_then(|v| v.first()) {
-                            if let Some(reason) = choice["finish_reason"].as_str() {
-                                if reason == "content_filter" {
-                                    bail!("provider rejected the response: content_filter")
-                                }
-                                stop = Some(
-                                    match reason {
-                                        "tool_calls" => "tool_use",
-                                        "length" => "max_tokens",
-                                        _ => "end_turn",
-                                    }
-                                    .into(),
-                                );
-                            }
-                            let delta = &choice["delta"];
-                            text = delta["content"].as_str();
-                            thought = delta["reasoning_content"]
-                                .as_str()
-                                .or(delta["reasoning"].as_str());
-                            if let Some(deltas) = delta["tool_calls"].as_array() {
-                                for d in deltas {
-                                    let index = d["index"]
-                                        .as_u64()
-                                        .map(|x| x as usize)
-                                        .unwrap_or(calls.len());
-                                    calls.entry(index).or_insert_with(|| {
-                                        order.push(index);
-                                        CallBuffer::default()
-                                    });
-                                    let c = calls.get_mut(&index).unwrap();
-                                    if let Some(id) = d["id"].as_str().filter(|s| !s.is_empty()) {
-                                        response_bytes += id.len();
-                                        c.id = id.into();
-                                    }
-                                    if let Some(name) =
-                                        d["function"]["name"].as_str().filter(|s| !s.is_empty())
-                                    {
-                                        response_bytes += name.len();
-                                        c.name = name.into();
-                                    }
-                                    if let Some(piece) = d["function"]["arguments"].as_str() {
-                                        response_bytes += piece.len();
-                                        c.arguments.push_str(piece);
-                                    }
-                                    first.get_or_insert(started.elapsed().as_secs_f64());
-                                    last = Some(started.elapsed().as_secs_f64());
-                                }
-                            }
-                        }
+                        content.push_str(text);
                     }
-                    if let Some(text) = text.filter(|s| !s.is_empty()) {
-                        first.get_or_insert(started.elapsed().as_secs_f64());
-                        last = Some(started.elapsed().as_secs_f64());
-                        response_bytes += text.len();
-                        if self.style == "anthropic" {
-                            texts
-                                .entry(value["index"].as_u64().unwrap_or(0) as usize)
-                                .or_default()
-                                .push_str(text);
-                        } else {
-                            content.push_str(text);
-                        }
-                        emit(json!({"event":"text_delta","text":text}));
-                    }
-                    if let Some(thought) = thought.filter(|s| !s.is_empty()) {
-                        first.get_or_insert(started.elapsed().as_secs_f64());
-                        last = Some(started.elapsed().as_secs_f64());
-                        response_bytes += thought.len();
-                        reasoning.push_str(thought);
-                        emit(json!({"event":"reasoning_delta","text":thought}));
-                    }
-                    if calls.len() > 128 || response_bytes > 16_000_000 {
-                        bail!("provider response exceeds the capture limit")
-                    }
-                    if self.style == "anthropic" && ended {
-                        break 'stream;
-                    }
+                    emit(json!({"event":"text_delta","text":text}));
+                }
+                if let Some(thought) = thought.filter(|s| !s.is_empty()) {
+                    first.get_or_insert(started.elapsed().as_secs_f64());
+                    last = Some(started.elapsed().as_secs_f64());
+                    response_bytes += thought.len();
+                    reasoning.push_str(thought);
+                    emit(json!({"event":"reasoning_delta","text":thought}));
+                }
+                if calls.len() > 128 || response_bytes > 16_000_000 {
+                    bail!("provider response exceeds the capture limit")
+                }
+                if self.style == "anthropic" && ended {
+                    break 'stream;
                 }
             }
         }
@@ -477,11 +474,12 @@ impl Provider {
         if !content.is_empty() {
             blocks.push(Block::text(content))
         }
+        let truncated = stop.as_deref() == Some("max_tokens");
         for index in order {
             if let Some(text) = texts.remove(&index).filter(|s| !s.is_empty()) {
                 blocks.push(Block::text(text));
             }
-            if let Some(call) = calls.remove(&index) {
+            if let Some(call) = calls.remove(&index).filter(|_| !truncated) {
                 let input = if call.arguments.is_empty() {
                     if call.initial.is_object() {
                         call.initial
@@ -501,6 +499,9 @@ impl Provider {
                     input,
                 });
             }
+        }
+        if truncated && blocks.is_empty() {
+            blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
         }
         let estimated = context::estimate(system, messages, specs);
         if usage.available && usage.input_tokens > 0 && estimated > 0 {
@@ -721,7 +722,8 @@ fn parse_openai(v: &Value) -> Result<Response> {
     if let Some(text) = message["content"].as_str().filter(|s| !s.is_empty()) {
         blocks.push(Block::text(text))
     }
-    if let Some(calls) = message["tool_calls"].as_array() {
+    let truncated = choice["finish_reason"] == "length";
+    if let Some(calls) = message["tool_calls"].as_array().filter(|_| !truncated) {
         for call in calls {
             let input: Value = serde_json::from_str(util::string(&call["function"], "arguments")?)?;
             if !input.is_object() {
@@ -733,6 +735,9 @@ fn parse_openai(v: &Value) -> Result<Response> {
                 input,
             });
         }
+    }
+    if truncated && blocks.is_empty() {
+        blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
     }
     Ok(Response {
         blocks,
@@ -747,19 +752,23 @@ fn parse_openai(v: &Value) -> Result<Response> {
 }
 fn parse_anthropic(v: &Value) -> Result<Response> {
     let mut blocks = vec![];
+    let truncated = v["stop_reason"] == "max_tokens";
     for b in v["content"]
         .as_array()
         .context("missing provider content")?
     {
         match b["type"].as_str() {
             Some("text") => blocks.push(Block::text(util::string(b, "text")?)),
-            Some("tool_use") => blocks.push(Block::ToolUse {
+            Some("tool_use") if !truncated => blocks.push(Block::ToolUse {
                 id: util::string(b, "id")?.into(),
                 name: util::string(b, "name")?.into(),
                 input: b["input"].clone(),
             }),
             _ => {}
         }
+    }
+    if truncated && blocks.is_empty() {
+        blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
     }
     Ok(Response {
         blocks,

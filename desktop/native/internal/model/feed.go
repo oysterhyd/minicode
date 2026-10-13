@@ -111,6 +111,14 @@ func History(detail Detail) []*FeedItem {
 	starts := map[string]Event{}
 	decisions := map[string]Event{}
 	children := map[string]string{}
+	persisted := map[string]map[string]any{}
+	for _, message := range detail.Messages {
+		for _, block := range message.Content {
+			if String(block["type"]) == "tool_result" {
+				persisted[String(block["tool_use_id"])] = block
+			}
+		}
+	}
 	for _, event := range detail.Events {
 		id := String(event.Data["call_id"])
 		switch event.Type {
@@ -160,7 +168,21 @@ func History(detail Detail) []*FeedItem {
 				result, ok := results[callID]
 				output := String(result.Data["output_detail"])
 				if output == "" {
-					output = String(result.Data["error"])
+					output = String(result.Data["output_preview"])
+				}
+				messageResult, delivered := persisted[callID]
+				if output == "" && delivered {
+					output = String(messageResult["content"])
+				}
+				if errorText := String(result.Data["error"]); errorText != "" && !strings.Contains(output, errorText) {
+					if output != "" {
+						output += "\n"
+					}
+					output += errorText
+				}
+				success := Bool(result.Data["success"])
+				if !ok && delivered {
+					success = !Bool(messageResult["is_error"])
 				}
 				var images []Attachment
 				if Bool(result.Data["success"]) {
@@ -170,7 +192,7 @@ func History(detail Detail) []*FeedItem {
 					ChildSessionID: children[String(args["kind"])+":"+String(args["task"])],
 					ArtifactID:     String(result.Data["artifact_id"]), Output: output,
 					Attachments: images,
-					Success:     Bool(result.Data["success"]), Pending: false, Interrupted: !ok,
+					Success:     success, Pending: false, Interrupted: !ok && !delivered,
 					StartedAt: Time(starts[callID].Timestamp), EndedAt: Time(result.Timestamp)})
 			}
 		}

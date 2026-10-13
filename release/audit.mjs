@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process'
 const args=process.argv.slice(2),root=path.resolve(args.find(a=>!a.startsWith('--'))||'.')
 const source=args.includes('--source'),history=args.includes('--history')
 const secrets=new Set()
-for(const [key,value]of Object.entries(process.env))if(/(API_?KEY|ACCESS_TOKEN|AUTH_TOKEN|SECRET|PASSWORD)$/i.test(key)&&value.length>=8)secrets.add(value)
+for(const [key,value]of Object.entries(process.env))if(/(API_?KEY|PRIVATE_?KEY|SIGNING_?KEY|TOKEN|SECRET|PASSWORD)$/i.test(key)&&value.length>=8)secrets.add(value)
 function visit(value){if(!value||typeof value!=='object')return;for(const [key,item]of Object.entries(value)){if(/api.?key|token|secret|password|authorization/i.test(key)&&typeof item==='string'&&item.length>=8)secrets.add(item);visit(item)}}
 for(const file of ['.minicode/desktop-config.json','.zcode/v2/provider_config.json']){const p=path.join(os.homedir(),file);if(fs.existsSync(p))visit(JSON.parse(fs.readFileSync(p,'utf8').replace(/^\uFEFF/,'')))}
 const bytes=[...secrets].map(s=>Buffer.from(s)),overlap=Math.max(1,...bytes.map(b=>b.length))-1

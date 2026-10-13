@@ -214,6 +214,8 @@
         "max_results": {
           "anyOf": [
             {
+              "minimum": 1,
+              "maximum": 1000,
               "type": "integer"
             },
             {

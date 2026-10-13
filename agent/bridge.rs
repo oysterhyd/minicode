@@ -121,12 +121,20 @@ impl Router {
             }
             return Ok(());
         }
+        let mut reload_session = None;
         let different = if let Some(runtime) = &c.runtime {
             let r = runtime.lock().await;
-            r.workspace != workspace || session.is_some_and(|s| s != r.session)
+            let stale = r.workspace == workspace
+                && session.is_none_or(|s| s == r.session)
+                && self.store.messages(&r.session)? != r.messages;
+            if stale {
+                reload_session = Some(r.session.clone());
+            }
+            r.workspace != workspace || session.is_some_and(|s| s != r.session) || stale
         } else {
             true
         };
+        let session = session.or(reload_session.as_deref());
         if different {
             let settings = c.settings.lock().unwrap().clone();
             let summary = session.map(|id| self.store.require(id)).transpose()?;
@@ -181,16 +189,11 @@ impl Router {
             c.catalog = Some(r.catalog.clone());
             c.workspace = Some(workspace.into());
             c.runtime = Some(Arc::new(tokio::sync::Mutex::new(r)));
+            c.settings.lock().unwrap().registry_dirty = false;
         } else if c.settings.lock().unwrap().registry_dirty {
             if let Some(runtime) = &c.runtime {
                 let mut r = runtime.lock().await;
-                let active = r.catalog.lock().await.active.clone();
-                let mut catalog = Catalog::scan(workspace, self.configuration.clone(), true)?;
-                for name in active.keys() {
-                    if catalog.skills.contains_key(name) {
-                        catalog.load(name)?;
-                    }
-                }
+                let catalog = r.catalog.lock().await.refresh()?;
                 r.catalog = Arc::new(tokio::sync::Mutex::new(catalog));
                 c.catalog = Some(r.catalog.clone());
             }
@@ -386,9 +389,18 @@ impl Router {
             }
         }
         if ["saveService", "deleteService"].contains(&method) {
+            let models = self.configuration.models()?;
+            let default = self.configuration.default_model()?;
             for c in self.clients.values() {
                 let c = c.lock().await;
                 let mut settings = c.settings.lock().unwrap();
+                if settings.model != "fake"
+                    && !models
+                        .iter()
+                        .any(|m| m["id"] == settings.model && m["available"] == true)
+                {
+                    settings.model = default.clone();
+                }
                 if c.runtime.is_some() {
                     settings.pending_model = true;
                 } else {
@@ -554,7 +566,11 @@ impl Router {
                 let mut model = p["model"].as_str().unwrap_or_default().to_string();
                 if choice == "fake"
                     || (choice == "auto"
-                        && (model == "fake" || std::env::var_os("MINICODE_FAKE_SCRIPT").is_some()))
+                        && (model == "fake"
+                            || (method == "setTuiProvider"
+                                && std::env::var("MINICODE_FAKE_SCRIPT")
+                                    .ok()
+                                    .is_some_and(|s| !s.trim().is_empty()))))
                 {
                     model = "fake".into();
                 } else if choice != "auto" {
@@ -600,6 +616,12 @@ impl Router {
                 }
                 if !busy && let Some(runtime) = &c.runtime {
                     let mut r = runtime.lock().await;
+                    let mut provider = provider;
+                    if provider.identity().is_some() && provider.identity() == r.provider.identity()
+                    {
+                        provider.index = r.provider.index;
+                        provider.call_counter = r.provider.call_counter;
+                    }
                     r.provider = provider;
                     store.update(
                         &r.session,
@@ -615,14 +637,24 @@ impl Router {
                 if !["off", "low", "medium", "high", "xhigh", "max"].contains(&effort.as_str()) {
                     bail!("无效 reasoning effort")
                 }
+                let model = c.settings.lock().unwrap().model.clone();
+                let provider = if model.is_empty() {
+                    None
+                } else {
+                    let provider =
+                        crate::provider::Provider::new(&model, &effort, &self.configuration)?;
+                    if effort != "off" && provider.effort != effort {
+                        bail!("当前模型不支持 reasoning effort");
+                    }
+                    Some(provider)
+                };
                 if !c.busy()
                     && let Some(runtime) = &c.runtime
                 {
                     let mut r = runtime.lock().await;
-                    if r.provider.name != "commandcode" {
-                        bail!("当前模型不支持 reasoning effort")
-                    };
-                    r.provider.effort = effort.clone();
+                    if let Some(provider) = provider {
+                        r.provider.effort = provider.effort;
+                    }
                 }
                 {
                     let busy = c.busy();
@@ -813,7 +845,14 @@ impl Router {
                         .iter()
                         .any(|m| m["id"] == model && m["available"] == true)
                 {
-                    bail!("请在设置中配置、启用并选择一个可用的 AI 模型")
+                    if model.contains("::") {
+                        bail!("请在设置中配置、启用并选择一个可用的 AI 模型");
+                    }
+                    crate::provider::Provider::new(
+                        &model,
+                        &c.settings.lock().unwrap().effort,
+                        &self.configuration,
+                    )?;
                 }
                 self.ensure(c, &workspace, p["sessionId"].as_str(), Some(&model))
                     .await?;
@@ -824,6 +863,10 @@ impl Router {
                             &model,
                             &c.settings.lock().unwrap().effort,
                             &self.configuration,
+                        )?;
+                        store.update(
+                            &r.session,
+                            &json!({"model":model,"provider":r.provider.name}),
                         )?;
                     }
                     attachments.check(&blocks, &r.provider.modalities, &r.provider.style)?;
@@ -950,7 +993,7 @@ impl Router {
                         .compact(&c.hooks(self.event_sink(&c.client_key)))
                         .await?;
                     Ok(
-                        json!({"message":if changed{"上下文已压缩。"}else{"上下文未超过阈值，无需压缩。"},"state":c.state(&self.store)?}),
+                        json!({"message":if changed{"上下文已压缩。"}else{"当前没有可压缩的历史。"},"state":c.state(&self.store)?}),
                     )
                 }
             }
@@ -1055,7 +1098,12 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
     for (k, v) in draft.as_object().context("service must be an object")? {
         service[k] = v.clone();
     }
-    if service["apiKey"].as_str().unwrap_or_default().is_empty() {
+    if service["apiKey"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
         service["apiKey"] = existing["apiKey"].clone();
     }
     let (url, key) = configuration.credentials(&service);

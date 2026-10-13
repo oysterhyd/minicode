@@ -3,6 +3,8 @@
 当前工作区路径：{{workspace}}
 命令环境：Windows PowerShell。bash 工具实际运行 PowerShell，不是 cmd.exe；不要使用 cd /d。用工具的 cwd 参数指定工作目录。命令没有交互式标准输入；需要用户输入的命令必须改用明确参数。前台命令默认 300 秒后会被强制结束（timeout_s 可调，上限 3600 秒）；长时间命令请用 background 参数，后台任务不受默认 300 秒限制。
 
+丢弃命令输出使用 PowerShell 的 > $null 或 2> $null，不使用 /dev/null。工具保留你提交的命令文本，不会自动翻译 shell 语法。
+
 可用工具清单：{{tools}}
 注意：所有文件路径都相对于工作区；不要访问工作区之外的任何路径。
 

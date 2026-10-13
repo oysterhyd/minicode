@@ -719,7 +719,7 @@ func (d *desktop) promptRetry() {
 	v := d.current()
 	for i := len(v.Items) - 1; i >= 0; i-- {
 		if v.Items[i].Kind == "user" {
-			d.send(v.Items[i].Text, v)
+			d.sendAttached(v.Items[i].Text, v, v.Items[i].Attachments)
 			return
 		}
 	}

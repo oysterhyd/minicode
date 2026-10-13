@@ -1,3 +1,11 @@
+# v2.0.3 代码审查核验
+
+2026-10-13，本地 Rust 46 项、后端集成 66 项、Ink TUI 87 项全部通过；TUI 包含真实 Rust 桥接，无跳过。Rust fmt / Clippy、Go 全量 / vet / vendor UI 专项和原生 Windows 编译通过。实际原生审批窗口已隔离捕获并检查。
+
+20 题 B0 / B1 / B2 共 60 次通过；3 个场景共 9 次符合既定结果（7 次通过，counter_retry 的 B0 / B1 为预设首轮失败）。原始运行结果位于本地 output/audit-2.0.3；逐项触发条件和修复行为见 [2.0.3 修复说明](../docs/fixes-2.0.3.md)。源文件与 Git 历史凭据审计通过，并新增签名私钥泄漏拒绝复现。发行构建沿用原 Ed25519 公钥和仓库中的签名 Secret。
+
+安装包及公开资产核验记录将在签名发行完成后补充。
+
 # v2.0.2 性能与发行核验
 
 运行源码 `d7cc31e0aae20896ac652c9bc4f270e75bbd4c96`。[main CI](https://github.com/oysterhyd/minicode/actions/runs/38273721751) 与 [标签 CI](https://github.com/oysterhyd/minicode/actions/runs/38273725828)各五项通过。[完整 Windows 发行构建](https://github.com/oysterhyd/minicode/actions/runs/38273725954)通过 Rust 32 项、后端 47 项、Ink 84 项；压缩发行 JS 的同一套 84 项也全部通过。Go 全量、vendor UI 专项、静态检查、60 次任务与 9 次场景评测符合预期。

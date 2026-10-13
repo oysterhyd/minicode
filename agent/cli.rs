@@ -13,7 +13,7 @@ use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -179,7 +179,14 @@ pub async fn main() -> Result<()> {
         .unwrap_or(util::data_dir().join("sessions.db"));
     match cli.command {
         Commands::Bridge => bridge::serve(Store::open(path)?).await,
-        Commands::Tui { args } => launch_tui(&args),
+        Commands::Tui { args } => launch_tui(
+            &args,
+            &if path == Path::new(":memory:") {
+                path.clone()
+            } else {
+                util::canonical(&path)?
+            },
+        ),
         Commands::Run { task, options } => {
             let store = Store::open(path)?;
             let (mut runtime, hooks) = prepare(&store, None, &options).await?;
@@ -305,6 +312,9 @@ async fn prepare(
     session: Option<&str>,
     options: &RunOptions,
 ) -> Result<(Runtime, Hooks)> {
+    if !options.max_seconds.is_finite() || options.max_seconds < 0.0 {
+        bail!("max_seconds must be finite and nonnegative");
+    }
     let configuration = Configuration::default();
     let mut settings = Settings::new(&configuration)?;
     let summary = session.map(|id| store.require(id)).transpose()?;
@@ -371,8 +381,10 @@ async fn prepare(
     )
     .await?;
     if let Some(script) = &options.script {
-        let value: Value = serde_json::from_slice(&fs::read(script)?)?;
-        runtime.provider.set_script(value)?;
+        let bytes = fs::read(script)?;
+        let value: Value =
+            serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes))?;
+        runtime.set_script(value)?;
     }
     if provider != "auto" && runtime.provider.name != provider {
         bail!("模型不属于 provider {provider}")
@@ -380,25 +392,43 @@ async fn prepare(
     let sink: Sink = Arc::new(|event| {
         let event_type = event["event"].as_str().unwrap_or_default();
         if event_type == "text_delta" {
-            print!("{}", event["text"].as_str().unwrap_or_default());
+            print!(
+                "{}",
+                util::terminal_text(event["text"].as_str().unwrap_or_default())
+            );
             let _ = io::stdout().flush();
         } else if event_type == "agent_event" {
             let item = &event["item"];
             match item["type"].as_str() {
                 Some("tool_call_start") => println!(
                     "\n▶ {} {}",
-                    item["data"]["name"].as_str().unwrap_or_default(),
+                    util::terminal_text(item["data"]["name"].as_str().unwrap_or_default()),
                     item["data"]["arguments"]
                 ),
-                Some("tool_call_result") => println!(
-                    "{} {}",
-                    if item["data"]["success"] == true {
-                        "✓"
-                    } else {
-                        "✗"
-                    },
-                    item["data"]["output_detail"].as_str().unwrap_or_default()
-                ),
+                Some("tool_call_result") => {
+                    let mut output = item["data"]["output_detail"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    if let Some(error) = item["data"]["error"]
+                        .as_str()
+                        .filter(|error| !error.is_empty() && !output.contains(error))
+                    {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        output.push_str(error);
+                    }
+                    println!(
+                        "{} {}",
+                        if item["data"]["success"] == true {
+                            "✓"
+                        } else {
+                            "✗"
+                        },
+                        util::terminal_text(&output)
+                    );
+                }
                 _ => {}
             }
         }
@@ -425,10 +455,45 @@ fn banner(runtime: &Runtime) {
         runtime.workspace.display()
     );
 }
+type ConsoleInput = tokio::sync::mpsc::UnboundedReceiver<io::Result<String>>;
+
+fn console_input() -> ConsoleInput {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    // A detached reader must not keep Tokio's blocking pool alive when the user
+    // cancels an approval without entering another line.
+    std::thread::spawn(move || {
+        loop {
+            let mut line = String::new();
+            match io::stdin().read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if sender.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+    receiver
+}
+
 async fn run(
     runtime: &mut Runtime,
     text: Option<String>,
+    hooks: Hooks,
+) -> Result<crate::models::RunResult> {
+    run_with_input(runtime, text, hooks, &mut console_input()).await
+}
+
+async fn run_with_input(
+    runtime: &mut Runtime,
+    text: Option<String>,
     mut hooks: Hooks,
+    input: &mut ConsoleInput,
 ) -> Result<crate::models::RunResult> {
     hooks.cancel = CancellationToken::new();
     let approvals = hooks.approvals.clone();
@@ -442,65 +507,114 @@ async fn run(
         }
     });
     let cancel = hooks.cancel.clone();
-    let task = tokio::spawn(async move {
-        loop {
-            tokio::select! {_ = cancel.cancelled()=>break,Some(event)=receiver.recv()=>{
-                println!("\n审批：{}\n允许执行？[y/N]",event["request"]["summary"].as_str().unwrap_or_default());let line=tokio::task::spawn_blocking(||{let mut s=String::new();io::stdin().read_line(&mut s).map(|_|s)}).await??;
-                if let Some((_,tx))=approvals.lock().unwrap().remove(event["approvalId"].as_str().unwrap_or_default()){let _=tx.send(matches!(line.trim().to_lowercase().as_str(),"y"|"yes"));}
-            },else=>break}
+    let running = runtime.run(text, vec![], hooks);
+    tokio::pin!(running);
+    let signal = tokio::signal::ctrl_c();
+    tokio::pin!(signal);
+    let mut cancelled = false;
+    let mut input_open = true;
+    let mut waiting = VecDeque::<String>::new();
+    loop {
+        tokio::select! {
+            result = &mut running => return result,
+            _ = &mut signal, if !cancelled => { cancelled = true; cancel.cancel(); }
+            Some(event) = receiver.recv() => {
+                let id = event["approvalId"].as_str().unwrap_or_default().to_string();
+                if !input_open {
+                    if let Some((_, tx)) = approvals.lock().unwrap().remove(&id) { let _ = tx.send(false); }
+                } else {
+                    println!("\n审批：{}\n允许执行？[y/N]", event["request"]["summary"].as_str().unwrap_or_default());
+                    waiting.push_back(id);
+                }
+            }
+            line = input.recv(), if input_open && !waiting.is_empty() => {
+                let granted = match line {
+                    Some(Ok(line)) => matches!(line.trim().to_lowercase().as_str(), "y" | "yes"),
+                    other => {
+                        input_open = false;
+                        if let Some(Err(error)) = other { eprintln!("读取输入失败：{error}"); }
+                        false
+                    }
+                };
+                if let Some(id) = waiting.pop_front()
+                    && let Some((_, tx)) = approvals.lock().unwrap().remove(&id) {
+                    let _ = tx.send(granted);
+                }
+                if !input_open {
+                    for id in waiting.drain(..) {
+                        if let Some((_, tx)) = approvals.lock().unwrap().remove(&id) { let _ = tx.send(false); }
+                    }
+                }
+            }
         }
-        Ok::<(), anyhow::Error>(())
-    });
-    let cancel = hooks.cancel.clone();
-    let ctrl = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            cancel.cancel();
-        }
-    });
-    let result = runtime.run(text, vec![], hooks).await;
-    task.abort();
-    ctrl.abort();
-    result
+    }
 }
+
 async fn chat(mut runtime: Runtime, hooks: Hooks) -> Result<()> {
     banner(&runtime);
     println!("/help 查看命令 · Ctrl+C 取消 · Ctrl+D 退出");
+    let mut input = console_input();
     loop {
         print!("\n❯ ");
         io::stdout().flush()?;
-        let line = tokio::task::spawn_blocking(|| {
-            let mut s = String::new();
-            io::stdin().read_line(&mut s).map(|n| (n, s))
-        })
-        .await??;
-        if line.0 == 0 {
+        let Some(line) = input.recv().await else {
             break;
-        }
-        let text = line.1.trim().to_string();
+        };
+        let text = line?.trim().to_string();
         if ["exit", "quit", "/exit", "/quit"].contains(&text.as_str()) {
             break;
         }
         if text.is_empty() {
             continue;
         }
-        if text == "/continue" {
+        let result = if text.starts_with('/') {
+            chat_command(&mut runtime, &hooks, &text, &mut input).await
+        } else {
+            run_with_input(&mut runtime, Some(text), hooks.clone(), &mut input)
+                .await
+                .map(|result| {
+                    println!(
+                        "\n{} · Token {}",
+                        result.exit_reason,
+                        result.total_usage.total()
+                    );
+                })
+        };
+        if let Err(error) = result {
+            eprintln!("错误：{error}");
+        }
+    }
+    Ok(())
+}
+
+async fn chat_command(
+    runtime: &mut Runtime,
+    hooks: &Hooks,
+    text: &str,
+    input: &mut ConsoleInput,
+) -> Result<()> {
+    let (verb, arg) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    let arg = arg.trim();
+    match verb.to_lowercase().as_str() {
+        "/continue" => {
             if !runtime.pending {
-                println!("当前没有暂停的任务");
-                continue;
+                bail!("当前没有暂停的任务");
             }
-            let result = run(&mut runtime, None, hooks.clone()).await?;
+            let result = run_with_input(runtime, None, hooks.clone(), input).await?;
             println!("\n{}", result.exit_reason);
-            continue;
         }
-        if text == "/compact" {
-            runtime.compact(&hooks).await?;
-            continue;
+        "/compact" => {
+            println!(
+                "{}",
+                if runtime.compact(hooks).await? {
+                    "上下文已压缩。"
+                } else {
+                    "当前没有可压缩的历史。"
+                }
+            );
         }
-        if text == "/clear" {
-            print!("\x1b[2J\x1b[H");
-            continue;
-        }
-        if text == "/help" || text == "/?" {
+        "/clear" => print!("\x1b[2J\x1b[H"),
+        "/help" | "/?" => {
             for c in serde_json::from_str::<Vec<Value>>(include_str!("assets/commands.json"))? {
                 println!(
                     "{}  {}",
@@ -508,97 +622,145 @@ async fn chat(mut runtime: Runtime, hooks: Hooks) -> Result<()> {
                     c["summary"].as_str().unwrap()
                 );
             }
-            continue;
         }
-        if text == "/sessions" {
+        "/sessions" => {
             for s in runtime.store.sessions()? {
                 println!("{} {}", s["session_id"], s["title"]);
             }
-            continue;
         }
-        if let Some(arg) = text.strip_prefix("/model ") {
+        "/model" | "/effort" => {
+            if arg.is_empty() {
+                println!(
+                    "model: {} · effort: {}",
+                    runtime.provider.configuration_id, runtime.provider.effort
+                );
+                return Ok(());
+            }
             let config = runtime.catalog.lock().await.configuration.clone();
-            let provider = crate::provider::Provider::new(
-                arg,
-                &hooks.settings.lock().unwrap().effort,
-                &config,
+            let settings = hooks.settings.lock().unwrap().clone();
+            let (model, effort) = if verb.eq_ignore_ascii_case("/model") {
+                (arg, settings.effort.as_str())
+            } else {
+                if !["off", "low", "medium", "high", "xhigh", "max"].contains(&arg) {
+                    bail!("无效 reasoning effort");
+                }
+                (settings.model.as_str(), arg)
+            };
+            let mut provider = crate::provider::Provider::new(model, effort, &config)?;
+            if verb.eq_ignore_ascii_case("/effort") && effort != "off" && provider.effort != effort
+            {
+                bail!("当前模型不支持 reasoning effort");
+            }
+            if provider.identity().is_some() && provider.identity() == runtime.provider.identity() {
+                provider.index = runtime.provider.index;
+                provider.call_counter = runtime.provider.call_counter;
+            }
+            runtime.store.update(
+                &runtime.session,
+                &json!({"model":model,"provider":provider.name}),
             )?;
             runtime.provider = provider;
-            hooks.settings.lock().unwrap().model = arg.into();
-            continue;
+            let mut settings = hooks.settings.lock().unwrap();
+            settings.model = model.into();
+            settings.effort = runtime.provider.effort.clone();
+            settings.pending_model = false;
         }
-        if let Some(arg) = text.strip_prefix("/effort ") {
-            if !["off", "low", "medium", "high", "xhigh", "max"].contains(&arg) {
-                bail!("无效 reasoning effort")
-            };
-            runtime.provider.effort = arg.into();
-            hooks.settings.lock().unwrap().effort = arg.into();
-            continue;
+        "/permissions" => {
+            if arg.is_empty() {
+                println!("permissions: {}", hooks.settings.lock().unwrap().mode);
+            } else {
+                let mode = arg.to_lowercase().replace('-', "_");
+                if !["default", "accept_edits", "bypass"].contains(&mode.as_str()) {
+                    bail!("无效权限模式");
+                }
+                hooks.settings.lock().unwrap().mode = mode;
+            }
         }
-        if let Some(arg) = text.strip_prefix("/permissions ") {
-            if !["default", "accept_edits", "bypass"].contains(&arg) {
-                bail!("无效权限模式")
-            };
-            hooks.settings.lock().unwrap().mode = arg.into();
-            continue;
-        }
-        if let Some(arg) = text.strip_prefix("/skill ") {
+        "/skill" => {
             let mut catalog = runtime.catalog.lock().await;
-            if let Some(name) = arg.strip_prefix("off ") {
+            if arg.is_empty() {
+                println!("{}", catalog.listing());
+            } else if let Some(name) = arg.strip_prefix("off ") {
                 catalog.unload(name)?;
-                runtime.event(&hooks, "skill_deactivated", json!({"name":name}))?;
+                runtime.event(hooks, "skill_deactivated", json!({"name":name}))?;
             } else {
                 let s = catalog.load(arg)?;
                 runtime.event(
-                    &hooks,
+                    hooks,
                     "skill_activated",
                     json!({"name":arg,"sha256":s.digest,"path":s.path}),
                 )?;
             }
-            continue;
         }
-        if text == "/new" {
-            let options = RunOptions {
-                workspace: Some(runtime.workspace.clone()),
-                model: Some(runtime.provider.configuration_id.clone()),
-                provider: "auto".into(),
-                ..RunOptions::default()
-            };
-            let (new, _) = prepare(&runtime.store, None, &options).await?;
-            runtime = new;
-            continue;
-        }
-        if let Some(id) = text.strip_prefix("/resume ") {
-            let id = resolve(&runtime.store, id)?;
-            let settings = hooks.settings.lock().unwrap().clone();
+        "/new" | "/resume" => {
+            let mut settings = hooks.settings.lock().unwrap().clone();
+            settings.always_allow.clear();
+            settings.pending_model = false;
+            settings.registry_dirty = false;
             let configuration = runtime.catalog.lock().await.configuration.clone();
-            let s = runtime.store.require(&id)?;
-            runtime = Runtime::new(
-                Path::new(util::string(&s, "workspace")?),
-                util::string(&s, "model")?,
-                Some(&id),
+            let session = if verb.eq_ignore_ascii_case("/resume") {
+                Some(resolve(&runtime.store, arg)?)
+            } else {
+                None
+            };
+            let summary = session
+                .as_deref()
+                .map(|id| runtime.store.require(id))
+                .transpose()?;
+            let workspace = summary
+                .as_ref()
+                .and_then(|s| s["workspace"].as_str())
+                .map(PathBuf::from)
+                .unwrap_or(runtime.workspace.clone());
+            if let Some(summary) = &summary {
+                settings.model = util::string(summary, "model")?.into();
+                if let Some(saved) = runtime
+                    .store
+                    .events(session.as_deref().unwrap(), -1)?
+                    .iter()
+                    .rev()
+                    .find(|e| ["budget_changed", "session_start"].contains(&e.r#type.as_str()))
+                {
+                    settings.budget.max_total_tokens = saved.data["budget"]["max_total_tokens"]
+                        .as_i64()
+                        .unwrap_or(0);
+                }
+            }
+            let mut next = Runtime::new(
+                &workspace,
+                &settings.model,
+                session.as_deref(),
                 runtime.store.clone(),
                 configuration,
                 &settings,
             )
             .await?;
-            continue;
+            if next.provider.name == "fake"
+                && let Some(script) = runtime.provider.fake.clone()
+            {
+                next.set_script(script)?;
+            }
+            if session.is_none() {
+                let active = runtime.catalog.lock().await.active.clone();
+                let mut catalog = next.catalog.lock().await;
+                for (name, digest) in active {
+                    if catalog.load(&name)?.digest != digest {
+                        bail!("activated skill changed before session start: {name}");
+                    }
+                }
+            }
+            *runtime = next;
+            *hooks.settings.lock().unwrap() = settings;
+            *hooks.snapshot.lock().unwrap() = Snapshot::default();
+            println!("会话 {}", runtime.session);
         }
-        if text.starts_with('/') {
-            println!("未知命令：{text}");
-            continue;
-        }
-        let result = run(&mut runtime, Some(text), hooks.clone()).await?;
-        println!(
-            "\n{} · Token {}",
-            result.exit_reason,
-            result.total_usage.total()
-        );
+        _ => bail!("未知命令：{verb}"),
     }
     Ok(())
 }
+
 fn runtime_dir() -> Option<PathBuf> {
-    if let Some(resources) = std::env::var_os("MINICODE_RESOURCES") {
+    if let Some(resources) = std::env::var_os("MINICODE_RESOURCES").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(resources).join("runtime"));
     }
     let exe = std::env::current_exe().ok()?;
@@ -609,7 +771,7 @@ fn runtime_dir() -> Option<PathBuf> {
         None
     }
 }
-fn launch_tui(args: &[String]) -> Result<()> {
+fn launch_tui(args: &[String], database: &Path) -> Result<()> {
     let runtime = runtime_dir();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let entry = runtime
@@ -633,6 +795,7 @@ fn launch_tui(args: &[String]) -> Result<()> {
     command
         .arg(entry)
         .args(args)
+        .env("MINICODE_DB_PATH", database)
         .env("MINICODE_AGENT", std::env::current_exe()?);
     let status = command.status()?;
     if !status.success() {
@@ -772,7 +935,12 @@ fn report(
         }
     }
     if format == "text" {
-        println!("{}", sections.join("\n\n"));
+        let text = util::terminal_text(&sections.join("\n\n"));
+        if let Some(path) = output {
+            util::atomic_write(path, text.as_bytes())?;
+        } else {
+            println!("{text}");
+        }
     } else if format == "html" {
         let path = output
             .map(PathBuf::from)

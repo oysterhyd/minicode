@@ -20,6 +20,7 @@ type Event struct {
 	Text       string          `json:"text"`
 	ApprovalID string          `json:"approvalId"`
 	Error      string          `json:"error"`
+	Fatal      bool            `json:"fatal"`
 	Item       json.RawMessage `json:"item"`
 	Request    json.RawMessage `json:"request"`
 	Result     json.RawMessage `json:"result"`
@@ -119,6 +120,8 @@ func (c *Client) read(reader io.Reader) {
 	}
 	if err := scanner.Err(); err != nil {
 		c.fail(fmt.Errorf("Agent bridge stream: %w", err))
+	} else {
+		c.fail(errors.New("Agent bridge output closed"))
 	}
 }
 
@@ -135,7 +138,7 @@ func (c *Client) fail(err error) {
 		delete(c.pending, id)
 	}
 	c.mu.Unlock()
-	c.emit(Event{Event: "bridge_error", Error: err.Error()})
+	c.emit(Event{Event: "bridge_error", Error: err.Error(), Fatal: true})
 }
 
 func (c *Client) Request(ctx context.Context, method string, params any, target any) error {
@@ -194,9 +197,7 @@ func (c *Client) Request(ctx context.Context, method string, params any, target 
 }
 
 func (c *Client) Close() error {
-	c.writer.Lock()
 	err := c.input.Close()
-	c.writer.Unlock()
 	select {
 	case <-c.done:
 	case <-time.After(3 * time.Second):

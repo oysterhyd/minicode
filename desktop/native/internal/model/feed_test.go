@@ -8,6 +8,17 @@ import (
 	"testing"
 )
 
+func TestHistoryRecoversDeliveredResultsWithoutToolEvents(t *testing.T) {
+	detail := Detail{Messages: []Message{
+		{Role: "assistant", Content: []map[string]any{{"type": "tool_use", "id": "one", "name": "read"}, {"type": "tool_use", "id": "two", "name": "write"}}},
+		{Role: "user", Content: []map[string]any{{"type": "tool_result", "tool_use_id": "one", "content": "persisted failure", "is_error": true}}},
+	}}
+	items := History(detail)
+	if len(items) != 2 || items[0].Output != "persisted failure" || items[0].Success || items[0].Interrupted || !items[1].Interrupted {
+		t.Fatalf("history lost persisted result: %+v", items)
+	}
+}
+
 func TestReasoningIndexPreservesLegacyGreedyMatching(t *testing.T) {
 	rng := rand.New(rand.NewSource(19))
 	for range 300 {

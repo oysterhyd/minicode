@@ -1,6 +1,6 @@
 [package]
 name = "minicode"
-version = "2.0.2"
+version = "2.0.3"
 edition = "2024"
 rust-version = "1.88"
 description = "MiniCode native agent runtime, CLI and NDJSON bridge"

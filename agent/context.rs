@@ -163,7 +163,7 @@ pub fn compact(
         kept_tokens += estimate("", &messages[start..keep_start], &[]);
         kept_units += 1;
         keep_start = start;
-        if kept_tokens >= 20_000 && kept_units >= 1 {
+        if (force || kept_tokens >= 20_000) && kept_units >= 1 {
             break;
         }
     }
@@ -174,10 +174,10 @@ pub fn compact(
         .filter(|b| *b <= keep_start)
         .collect::<Vec<_>>();
     if let Some(end) = paired_prefix(messages, &candidates) {
-        let head = units.first().copied().unwrap_or(0);
+        // Keep the original request verbatim: it contains the user's scope and
+        // constraints, which must not be replaced by a 240-character summary.
+        let head = units.get(1).copied().unwrap_or(0);
         let archive = &messages[head..end];
-        let serialized = serde_json::to_string(archive)?;
-        let artifact = store.spill(id, "history", &serialized)?;
         let mut goals = vec![];
         let mut refs = vec![];
         let mut findings = vec![];
@@ -206,14 +206,25 @@ pub fn compact(
         refs.sort();
         refs.dedup();
         refs.truncate(40);
-        let summary = Message::user(format!(
-            "此前历史已归档，完整消息见 [artifact:{artifact}]。\n目标：\n{}\n关键文件：{}\n失败与待解决问题：\n{}",
-            goals.join("\n"),
-            refs.join(", "),
-            findings.join("\n")
-        ));
-        archived = units.iter().filter(|&&b| b >= head && b < end).count();
-        messages.splice(head..end, [summary]);
+        let summary = |artifact: &str| {
+            Message::user(format!(
+                "此前历史已归档，完整消息见 [artifact:{artifact}]。\n目标：\n{}\n关键文件：{}\n失败与待解决问题：\n{}",
+                goals.join("\n"),
+                refs.join(", "),
+                findings.join("\n")
+            ))
+        };
+        if estimate(
+            "",
+            std::slice::from_ref(&summary("history_000000000000")),
+            &[],
+        ) < estimate("", archive, &[])
+        {
+            let serialized = serde_json::to_string(archive)?;
+            let artifact = store.spill(id, "history", &serialized)?;
+            archived = units.iter().filter(|&&b| b >= head && b < end).count();
+            messages.splice(head..end, [summary(&artifact)]);
+        }
     }
     if estimate(system, messages, specs) > trigger {
         let total = messages
