@@ -185,7 +185,12 @@ test('global CLI --db is forwarded as an absolute path to the TUI launcher', asy
   })
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /DB=/)
-  assert.equal(path.resolve(result.stdout.trim().slice(3)), path.join(f.workspace, 'selected.db'))
+  const actual = result.stdout.trim().slice(3)
+  assert.equal(path.isAbsolute(actual), true)
+  // Windows runners may expose TEMP through an 8.3 alias. Compare the existing
+  // directories by identity; selected.db does not exist until the real TUI opens it.
+  assert.equal(fs.realpathSync.native(path.dirname(actual)), fs.realpathSync.native(f.workspace))
+  assert.equal(path.basename(actual), 'selected.db')
 })
 
 test('archived tool ids remain reserved after manual compaction', async t => {
