@@ -161,9 +161,11 @@ npm run build --prefix tui
 ./target/release/minicode tui --provider fake
 ```
 
-TUI 使用紧凑对话布局和底部输入区。`Ctrl+J` 换行，`Ctrl+O` 展开工具输出，
-`Ctrl+C` 中断当前回合，空输入时两次 `Ctrl+C` 退出；审批使用 `Y` / `A` / `N`。
-运行中提交的多条消息按顺序排队，取消或暂停后可按 `Enter` 手动发送下一条。
+TUI 的布局与交互参照 Claude Code：欢迎面板、`●` 工具行与 `⎿` 结果树、带行号和词级高亮的 Diff，
+审批时底部输入区换成选项面板（`↑` `↓` + `Enter`，或直接按 `Y` / `A` / `N`，`Esc` 拒绝）。
+`Ctrl+J` 换行，`Ctrl+O` 展开工具输出，`Shift+Tab` 切换自动接受编辑，空输入时按 `?` 查看快捷键；
+`Ctrl+C` 中断当前回合，空输入时两次 `Ctrl+C` 退出。运行中提交的多条消息按顺序排队，取消或暂停后可按 `Enter` 手动发送下一条。
+浅色终端会根据 `COLORFGBG` 自动切换配色，也可用 `MINICODE_THEME=light|dark` 指定。
 
 启动桌面端开发环境：
 
@@ -196,6 +198,7 @@ Windows 安装包的构建入口位于 [`release/`](release/README.md)，桌面�
 | [1.3.2 优化报告](docs/performance-1.3.2.md) | 功能审查、代码简化、耗时、分配及发行体积。 |
 | [2.0.2 优化报告](docs/performance-2.0.2.md) | Rust / Desktop / TUI 功能审查、前后实测与发行验证。 |
 | [2.0.3 修复说明](docs/fixes-2.0.3.md) | 按功能列出缺陷、修复行为、独立复现与升级注意事项。 |
+| [界面重设计](docs/ui-redesign-3.0.md) | MyGo 0.5.5 升级、Desktop macOS 风格界面与 Claude Code 风格 TUI。 |
 | [架构](docs/architecture.md) | 运行核心、工具、会话存储与扩展契约。 |
 | [MCP 示例](examples/mcp_docs/plugin.json) | 本地文档工具插件的 manifest 与示例实现。 |
 | [许可证](LICENSE) | MIT 许可证。 |

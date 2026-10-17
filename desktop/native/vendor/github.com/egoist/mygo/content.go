@@ -6,9 +6,12 @@ import (
 	"image"
 	"image/png"
 	"math"
+	"slices"
 
+	"github.com/egoist/mygo/i18n"
 	"github.com/egoist/mygo/internal/platform"
 	"github.com/egoist/mygo/internal/surface"
+	"github.com/egoist/mygo/transfer"
 )
 
 // Content is what a window shows in place of a web page: a user interface
@@ -29,9 +32,11 @@ func (w *Window) attachContent() {
 		panic("mygo: the backend " + backend().Name() + " created no surface for the window's Content")
 	}
 	w.conn = &surface.Conn{
-		Surface:   s,
-		Window:    w,
-		Clipboard: backend().Clipboard(),
+		Surface:        s,
+		Window:         w,
+		Clipboard:      backend().Clipboard(),
+		StartDataDrag:  w.startDataDrag,
+		CancelDataDrag: w.cancelDataDrag,
 		StartDrag: func() {
 			if w.native != nil {
 				w.native.StartDrag()
@@ -42,8 +47,12 @@ func (w *Window) attachContent() {
 				w.native.TitleBarDoubleClicked()
 			}
 		},
+		Escape:        w.escape,
 		IsDark:        func() bool { return backend().Theme().IsDark() },
 		Preferences:   func() platform.Preferences { return backend().Theme().Preferences() },
+		Locale:        func() string { return App.Locale() },
+		RightToLeft:   appRightToLeft,
+		Region:        func() i18n.Region { return App.Region() },
 		UIFont:        func() string { return backend().Theme().UIFont() },
 		FontRendering: func() platform.FontRendering { return backend().Theme().FontRendering() },
 		TitleBar: func() platform.TitleBar {
@@ -68,6 +77,7 @@ func (w *Window) attachContent() {
 		},
 		DevTools:   w.devTools,
 		Invalidate: w.Invalidate,
+		Ready:      w.readyToShow,
 		Post: func(fn func()) {
 			postMain(func() {
 				if w.native != nil {
@@ -75,6 +85,7 @@ func (w *Window) attachContent() {
 				}
 			})
 		},
+		PlaceWebViews: w.placeWebViews,
 		PopupMenu: func(m *platform.Menu, x, y float64, chosen func(int)) {
 			pos := &platform.Point{X: int(math.Round(x)), Y: int(math.Round(y))}
 			menu := NewMenu(contentMenu(m, chosen))
@@ -82,7 +93,7 @@ func (w *Window) attachContent() {
 			// event that asked for it, which the surface is handling.
 			postMain(func() {
 				if w.native != nil {
-					menu.popup(w, pos)
+					menu.popup(w, pos, m.RightToLeft)
 				}
 			})
 		},
@@ -207,12 +218,44 @@ func (w *Window) captureContent() ([]byte, error) {
 // SurfaceEvent passes the surface's events to the Content. Files the
 // Content does not take go to OnFileDrop, when it has listeners.
 func (h *windowHandler) SurfaceEvent(ev platform.SurfaceEvent) bool {
+	resolveDataDrag(ev.Drag)
 	c := h.w.conn
 	if c == nil || c.Event == nil {
 		return false
 	}
 	if c.Event(ev) {
 		return true
+	}
+	if d := ev.Drag; d != nil {
+		switch ev.Kind {
+		case platform.DataDragLeave:
+			c.Event(platform.SurfaceEvent{Kind: platform.FileDragLeave})
+		case platform.DataDragOver, platform.DataDrop:
+			if d.HasFiles || slices.Contains(d.Offer.Formats, transfer.FileList) {
+				d.Operation = transfer.Negotiate(d.Offer.Operations, transfer.Copy, d.Offer.Suggested)
+				if d.Operation == transfer.None {
+					return false
+				}
+				fileEvent := platform.SurfaceEvent{Kind: platform.FileDragOver, X: ev.X, Y: ev.Y}
+				if ev.Kind == platform.DataDrop {
+					fileEvent.Kind = platform.FileDrop
+					paths := ev.Files
+					if len(paths) == 0 {
+						paths, _ = d.Data.Files()
+					}
+					if len(paths) == 0 {
+						d.Operation = transfer.None
+						return false
+					}
+					fileEvent.Files = paths
+				}
+				d.Formats = []transfer.Format{transfer.FileList}
+				if h.SurfaceEvent(fileEvent) {
+					return true
+				}
+			}
+		}
+		d.Operation = transfer.None
 	}
 	switch ev.Kind {
 	case platform.FileDragOver:
@@ -245,6 +288,17 @@ func (w *Window) detachContent() {
 
 // contentThemeChanged tells the Contents of the windows that the system
 // appearance changed. Main thread only.
+// contentLocaleChanged tells the windows of native UI that the language
+// the app shows or the regional formats changed, which they draw anew.
+// Main thread only.
+func contentLocaleChanged() {
+	for _, w := range Windows() {
+		if c := w.conn; c != nil && c.LocaleChanged != nil {
+			c.LocaleChanged()
+		}
+	}
+}
+
 func contentThemeChanged() {
 	for _, w := range Windows() {
 		if c := w.conn; c != nil && c.ThemeChanged != nil {

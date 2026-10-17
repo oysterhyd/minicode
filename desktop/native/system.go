@@ -110,3 +110,18 @@ func (d *desktop) applyAppearance() {
 	}
 	mygo.Theme.SetSource(source)
 }
+
+// vibrancy is the material behind the window: Mica, which the sidebar and
+// title bar show through, unless the settings ask for a solid sidebar.
+func (d *desktop) vibrancy() mygo.Vibrancy {
+	if d.preferences.SolidSidebar {
+		return mygo.VibrancyNone
+	}
+	return mygo.VibrancyMica
+}
+
+func (d *desktop) applyVibrancy() {
+	if d.window != nil {
+		d.window.SetVibrancy(d.vibrancy())
+	}
+}

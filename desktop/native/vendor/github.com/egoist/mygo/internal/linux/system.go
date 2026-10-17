@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
 
 	"github.com/egoist/mygo/internal/platform"
+	"github.com/egoist/mygo/transfer"
 )
 
 var (
@@ -22,6 +24,7 @@ var (
 	cbMonitorsChanged ptr
 	cbNotification    ptr
 	cbPowerSignal     ptr
+	cbNetworkChanged  ptr
 )
 
 func initSystemCallbacks() {
@@ -48,6 +51,10 @@ func initSystemCallbacks() {
 		if id, ok := notifications[dbusID]; ok {
 			theBackend.h.NotificationClicked(id)
 		}
+	})
+	// The network-changed signal of GNetworkMonitor (network.go).
+	cbNetworkChanged = purego.NewCallback(func(monitor, available, data ptr) {
+		theBackend.h.NetworkChanged(theBackend.Network().Status())
 	})
 
 	settings := gtkSettingsGetDefault()
@@ -101,10 +108,17 @@ func pngFromPixbuf(pix ptr) []byte {
 
 type clipboard struct{}
 
-func clip() ptr { return gtkClipboardGet(gdkAtomIntern(cs("CLIPBOARD"), false)) }
+func clip() ptr {
+	cb := gtkClipboardGet(gdkAtomIntern(cs("CLIPBOARD"), false))
+	if !clipboardConnected {
+		connect(cb, "owner-change", cbClipboardOwner, 0)
+		clipboardConnected = true
+	}
+	return cb
+}
 
-func (clipboard) ReadText() string      { return takeStr(gtkClipboardWaitForText(clip())) }
-func (clipboard) WriteText(text string) { gtkClipboardSetText(clip(), cs(text), -1) }
+func (clipboard) ReadText() string        { return takeStr(gtkClipboardWaitForText(clip())) }
+func (c clipboard) WriteText(text string) { _ = c.WriteData(transfer.TextData(text), nil) }
 
 func (clipboard) ReadHTML() string {
 	sd := gtkClipboardWaitForContents(clip(), gdkAtomIntern(cs("text/html"), false))
@@ -120,9 +134,9 @@ func (clipboard) ReadHTML() string {
 	return string(unsafe.Slice(*(**byte)(unsafe.Pointer(&data)), n))
 }
 
-// WriteHTML stores the markup as text: GTK 3 only offers rich targets
-// through ownership callbacks.
-func (c clipboard) WriteHTML(markup string) { c.WriteText(markup) }
+func (c clipboard) WriteHTML(markup string) {
+	_ = c.WriteData(transfer.New(transfer.NewItem(transfer.Bytes(transfer.HTML, []byte(markup)), transfer.Bytes(transfer.Text, []byte(markup)))), nil)
+}
 
 func (clipboard) ReadImage() []byte {
 	pix := gtkClipboardWaitForImage(clip())
@@ -133,14 +147,13 @@ func (clipboard) ReadImage() []byte {
 	return pngFromPixbuf(pix)
 }
 
-func (clipboard) WriteImage(png []byte) error {
+func (c clipboard) WriteImage(png []byte) error {
 	pix, err := pixbufFromPNG(png)
 	if err != nil {
 		return err
 	}
 	defer gObjectUnref(pix)
-	gtkClipboardSetImage(clip(), pix)
-	return nil
+	return c.WriteData(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, png))), nil)
 }
 
 func (clipboard) Clear() { gtkClipboardClear(clip()) }
@@ -341,6 +354,17 @@ func portalColorScheme() (uint32, bool) {
 	return gVariantGetUint32(inner), true
 }
 
+// doubleClick reads the double click as GTK's settings have it from the
+// desktop.
+func doubleClick() platform.DoubleClick {
+	ms, distance := int32(400), int32(5) // GTK's defaults
+	if settings := gtkSettingsGetDefault(); settings != 0 {
+		gObjectGetPtr(settings, cs("gtk-double-click-time"), unsafe.Pointer(&ms), 0)
+		gObjectGetPtr(settings, cs("gtk-double-click-distance"), unsafe.Pointer(&distance), 0)
+	}
+	return platform.DoubleClick{Time: time.Duration(ms) * time.Millisecond, DX: float64(distance), DY: float64(distance)}
+}
+
 // Preferences reads GTK's animations setting, and the accent, contrast
 // and text size the desktop portal gives, as GNOME's and KDE's do.
 func (t theme) Preferences() platform.Preferences {
@@ -504,6 +528,13 @@ func (b *Backend) NotificationsSupported() bool {
 	_, err := bus()
 	return err == nil
 }
+
+// WebViewAvailable reports whether a window showing a web page can have
+// one: WebKitGTK, JavaScriptCore and libsoup, which it needs. Windows
+// showing native UI need GTK alone, so an app whose windows all do runs
+// without them. Loading the libraries is as much as can be known before a
+// page loads.
+func (b *Backend) WebViewAvailable() bool { return webKit() == nil }
 
 func (b *Backend) ShowNotification(n *platform.Notification, done func(error)) {
 	done(b.showNotification(n))

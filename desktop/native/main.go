@@ -142,9 +142,9 @@ func main() {
 				d.client = client
 			}
 		}
-		background := "#f5f5f3"
+		background := "#f3f1ea"
 		if mygo.Theme.IsDark() {
-			background = "#141416"
+			background = "#1f1e1d"
 		}
 		d.window = mygo.NewWindow(mygo.WindowOptions{
 			Title: "MiniCode", Width: 1500, Height: 940, MinWidth: 1030, MinHeight: 680,
@@ -158,7 +158,7 @@ func main() {
 					d.frameObserved()
 				}
 			}),
-			BackgroundColor: background,
+			BackgroundColor: background, Vibrancy: d.vibrancy(),
 		})
 		d.notify = func(title, body, id string) {
 			if d.window.IsFocused() {

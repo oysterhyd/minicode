@@ -22,6 +22,25 @@
 // input, such as Clicked, where they are built. What an element keeps
 // between frames (focus, scrolling, text being edited, animations) follows
 // its position among its siblings, or its Key.
+// Constructors return checked Element values that expire before the next
+// build pass; one frame can contain several passes. Keep elements and custom
+// parts out of app state and background goroutines. Handle provides persistent
+// control identity for focus, commands and committed bounds; FocusBind connects
+// desired focus to app data, and FocusedValue reads actual focus.
+//
+// Views receive a stable *Context for their window, with its parent scope
+// changing inside Children callbacks. Capture Services for persistent
+// clipboard/URL callbacks and background redraws instead of storing Context.
+// A control takes the user's input as its constructor returns, as Dear
+// ImGui's and egui's widgets do: what it binds, a local copy too, holds
+// the edit when the next statement reads it, and inline actions see the
+// edits of the controls built before them. A container takes its input
+// with its children, as the call that built it returns. Input follows the
+// options of the frame the user acted on: Disabled, ReadOnly or Step set
+// in a build govern the input of the frames after it. Changed and
+// Submitted report input; OnClick, OnShortcut, OnChange and OnSubmit run
+// after construction, before the rebuild.
+// Input queries such as Clicked remain available.
 //
 // Widgets take the theme's look, whose Spacing sizes them all. Each is
 // built on a base without a look, such as ButtonBase, CheckboxBase,

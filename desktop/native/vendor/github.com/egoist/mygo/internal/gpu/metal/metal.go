@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+	"weak"
 
 	"github.com/ebitengine/purego"
 	"github.com/ebitengine/purego/objc"
@@ -47,6 +48,22 @@ func EffectSource(src string) string {
 	return "#define EFFECT\n" + shaderSource + "\n" + head + "\n" + src + "\n" + tail
 }
 
+// shaderEffectSource is the tail of a shader's library (see
+// ShaderSource).
+//
+//go:embed shadereffect.metal
+var shaderEffectSource string
+
+// ShaderSource returns the source of the library of a shader of package
+// ui/shader, whose code src ends with shaderMain: as an effect's, with a
+// tail of its own (shader_ps), which reads the shader's uniforms and
+// images. The shader's effect holds it whole (scene.Effect's Metal), so
+// that apps drawing no shader do not carry the tail.
+func ShaderSource(src string) string {
+	head, _, _ := strings.Cut(effectSource, "\n// effect\n")
+	return "#define EFFECT\n" + shaderSource + "\n" + head + "\n" + src + "\n" + shaderEffectSource
+}
+
 type id = uintptr
 
 // Metal and Core Graphics structs passed by value.
@@ -65,6 +82,7 @@ const (
 	// pixelFormatRGBA16Float holds the components of wide colors, which
 	// leave 0 to 1.
 	pixelFormatRGBA16Float = 115
+	pixelFormatRGBA32Float = 125
 
 	usageShaderRead   = 1
 	usageRenderTarget = 4
@@ -75,6 +93,7 @@ const (
 	loadActionClear        = 2
 	storeActionStore       = 1
 	primitiveTriStrip      = 4
+	blendZero              = 0
 	blendOne               = 1
 	blendOneMinusSrc1Color = 16
 	blendOneMinusSrc1A     = 18
@@ -105,9 +124,6 @@ var (
 	selectors         = map[string]objc.SEL{}
 
 	dispatchDataCreate, dispatchRelease uintptr
-
-	// IOSurface's functions, for frames drawn in memory.
-	ioSurfaceLock, ioSurfaceUnlock, ioSurfaceBaseAddress, ioSurfaceBytesPerRow, ioSurfaceID uintptr
 
 	// Timers that trim the drawables of renderers drawing nothing for a
 	// while (see trim), by the handle in their info.
@@ -163,15 +179,9 @@ func load() error {
 		colorSpace := sym(cg, "CGColorSpaceCreateWithName")
 		system := lib("/usr/lib/libSystem.B.dylib")
 		cf := lib("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
-		ioSurface := lib("/System/Library/Frameworks/IOSurface.framework/IOSurface")
 		if errLoad != nil {
 			return
 		}
-		ioSurfaceLock = sym(ioSurface, "IOSurfaceLock")
-		ioSurfaceUnlock = sym(ioSurface, "IOSurfaceUnlock")
-		ioSurfaceBaseAddress = sym(ioSurface, "IOSurfaceGetBaseAddress")
-		ioSurfaceBytesPerRow = sym(ioSurface, "IOSurfaceGetBytesPerRow")
-		ioSurfaceID = sym(ioSurface, "IOSurfaceGetID")
 		dispatchDataCreate = sym(system, "dispatch_data_create")
 		dispatchRelease = sym(system, "dispatch_release")
 		timeNow := sym(cf, "CFAbsoluteTimeGetCurrent")
@@ -309,11 +319,44 @@ type texture struct {
 	lastFrame uint64
 }
 
+// drawState is what drawing scenes into a target keeps from frame to
+// frame: a frame's, and each canvas's.
+type drawState struct {
+	b gpu.Builder
+	// Each frame slot owns its instances, including those of canvases,
+	// and the texture of the stops of its gradients (gpu.Builder.Stops).
+	instBufs [ringSize]id
+	instCaps [ringSize]int
+	stops    [ringSize]texture
+}
+
+func (d *drawState) release() {
+	for i := range d.instBufs {
+		release(&d.instBufs[i])
+		d.instCaps[i] = 0
+		release(&d.stops[i].tex)
+		d.stops[i] = texture{}
+	}
+	d.b.Release()
+}
+
+// canvasTexture is the texture a canvas (scene.NewCanvas) is drawn into,
+// and what drawing it keeps, for as long as the canvas lives: what it holds
+// is drawn once, not again when shown.
+type canvasTexture struct {
+	texture
+	drawState
+	canvas weak.Pointer[scene.Image]
+}
+
 // formatState is what a renderer draws into targets of a pixel format
 // with.
 type formatState struct {
 	format   uint
 	pipeline id
+	// holePipe draws holes (scene.OpHole), taking their coverage away, and
+	// opaquePipe the cores of opaque fills (gpu.Batch.Opaque), without blending.
+	holePipe, opaquePipe id
 	// downPipe and blurPipe draw the passes computing the backdrops of
 	// effects, into the textures of backdrop, the second only along rows.
 	downPipe, blurPipe id
@@ -325,6 +368,16 @@ type formatState struct {
 // Renderer draws scenes into a CAMetalLayer it adds to a view's layer.
 type Renderer struct {
 	device, queue, sampler id
+	// shaderBytes holds the uniforms of the shader being drawn, laid out.
+	shaderBytes []byte
+	// lib is the library of the shader, which the pipelines of the classes
+	// of batches are made from as they are first used.
+	lib id
+	// source, unless empty, is the shader's source for tests that draw with
+	// another (the upstream one), which has no function constants; pipes are the
+	// pipelines of the classes and the worker that makes them.
+	source string
+	pipes  pipeState
 	// formats has what draws into BGRA8 targets, as frames do, and into
 	// RGBA16Float ones, as frames showing colors outside the sRGB gamut do
 	// (SetWide), made for the first of those; cur is that of the target
@@ -342,28 +395,35 @@ type Renderer struct {
 	bounds            cgRect
 	scale             float64
 
-	instBuf id
-	instCap int
-	mask    texture
-	color   texture
-	empty   id // a texture to bind where there is none
-	images  map[uint64]*texture
-	frame   uint64
-	// last is the command buffer of the last frame, which the next waits
-	// for before it changes what the GPU reads.
-	last    id
-	err     error
-	checked bool
+	// synced tells that the layer presents with the Core Animation
+	// transaction, and holes that the last frame had holes (web views
+	// under it). waited tells that the last frame, presented as soon as
+	// drawn, waited for its drawable; behind that the last Render drew
+	// nothing to catch up with the display, and skippedAt when one last
+	// did.
+	synced, holes, waited, behind bool
+	skippedAt                     time.Time
 
-	// Frames drawn in memory (PresentPixels): pixelFrames counts them,
-	// pixelDamage has what each of the last changed, and shown the frame
-	// each drawable holds, by the ID of its IOSurface, unless the GPU drew
-	// into it since.
-	pixelFrames uint64
-	pixelDamage [pixelHistory][]image.Rectangle
-	shown       map[uint32]uint64
-	// lastGPU is when the GPU last drew a frame.
-	lastGPU time.Time
+	mask   texture
+	color  texture
+	empty  id // a texture to bind where there is none
+	images map[uint64]*texture
+	// canvases are the textures canvases are drawn into.
+	canvases map[uint64]*canvasTexture
+	// blurred are the textures of the images the frame draws blurred
+	// (gpu.Builder.BlurredImage), the first used of them, and blurTmp the
+	// textures their passes go through; stopsTex is the texture of the
+	// stops of the scene drawn.
+	blurred  []texture
+	used     int
+	blurTmp  [2]texture
+	stopsTex id
+	frame    uint64
+	// Command buffers retain every resource used by their frame slot.
+	inflight    [ringSize]id
+	slot, inUse int
+	err         error
+	checked     bool
 
 	// lastRender is when the last frame drew; trimTimer trims the
 	// drawables once none has for a while, armed until it fires, and
@@ -373,7 +433,8 @@ type Renderer struct {
 	trimHandle         uintptr
 	trimArmed, trimmed bool
 
-	b gpu.Builder
+	// drawState is the frames'.
+	drawState
 }
 
 // New creates a renderer drawing into a CAMetalLayer that it adds to
@@ -398,18 +459,22 @@ func New(layer uintptr) (r *Renderer, err error) {
 		}
 		send(ml, "setDevice:", r.device)
 		send(ml, "setPixelFormat:", pixelFormatBGRA8Unorm)
-		// Frames drawn in memory are copied into drawables, which the
-		// CPU writes then.
+		// Effects read their backdrops from the drawable, which their
+		// passes sample then.
 		send(ml, "setFramebufferOnly:", 0)
-		// Frames wait for the last to finish, so two drawables do,
-		// rather than the three Core Animation makes otherwise while a
-		// window animates: one less frame of memory.
+		// Two drawables are too few: on a ProMotion display, frames
+		// waited for one most of each refresh, and skipping a refresh to
+		// catch up (render) helped for a few frames only. Three, as Core
+		// Animation makes while a window animates, also let both instance
+		// slots have a frame in flight while the display shows a third.
+		// They cost a frame of memory until the window idles (trim).
 		if respondsTo(ml, "setMaximumDrawableCount:") {
-			send(ml, "setMaximumDrawableCount:", 2)
+			send(ml, "setMaximumDrawableCount:", 3)
 		}
-		// Frames show with the window's other changes, as during a live
-		// resize, instead of a moment after them.
+		// The first frame shows with the window's other changes; render
+		// decides for each frame.
 		send(ml, "setPresentsWithTransaction:", 1)
+		r.synced = true
 		send(ml, "setColorspace:", srgb)
 		send(ml, "setOpaque:", 0)
 		send(ml, "setAutoresizingMask:", layerWidthSizable|layerHeightSizable)
@@ -429,6 +494,8 @@ func newRenderer() (r *Renderer, err error) {
 		return nil, err
 	}
 	r = &Renderer{images: map[uint64]*texture{}}
+	r.b.Classes = true
+	r.b.Opaque = true // Metal's GPUs discard what opaque cores cover
 	r.formats = [2]formatState{{format: pixelFormatBGRA8Unorm}, {format: pixelFormatRGBA16Float}}
 	r.cur = &r.formats[0]
 	pool(func() { err = r.init() })
@@ -446,43 +513,85 @@ func (r *Renderer) init() (err error) {
 		"newBufferWithLength:options:"); err != nil {
 		return err
 	}
-	r.queue = send(r.device, "newCommandQueue")
-	if r.queue == 0 {
+	return nil
+}
+
+// initGPU makes what only drawing on the GPU needs. A window presenting
+// CPU frames needs the device and layer alone: neither a command queue
+// nor shaders, samplers and textures.
+func (r *Renderer) initGPU() error {
+	if r.queue != 0 {
+		return nil
+	}
+	queue := send(r.device, "newCommandQueue")
+	if queue == 0 {
 		return errors.New("metal: no command queue")
 	}
-	if err := r.makePipelines(r.cur); err != nil {
-		return err
-	}
+	defer release(&queue)
 	sd := send(send(class("MTLSamplerDescriptor"), "alloc"), "init")
 	defer release(&sd)
 	send(sd, "setMinFilter:", filterLinear)
 	send(sd, "setMagFilter:", filterLinear)
-	r.sampler = send(r.device, "newSamplerStateWithDescriptor:", sd)
-	if r.empty = r.newTexture(1, 1, pixelFormatRGBA8Unorm, usageShaderRead, []byte{0, 0, 0, 0}, 4); r.empty == 0 || r.sampler == 0 {
+	sampler := send(r.device, "newSamplerStateWithDescriptor:", sd)
+	defer release(&sampler)
+	empty := r.newTexture(1, 1, pixelFormatRGBA8Unorm, usageShaderRead, []byte{0, 0, 0, 0}, 4)
+	defer release(&empty)
+	if empty == 0 || sampler == 0 {
 		return errors.New("metal: cannot create a texture")
 	}
+	r.queue, r.sampler, r.empty = queue, sampler, empty
+	queue, sampler, empty = 0, 0, 0
 	return nil
 }
 
 // makePipelines makes the pipelines of f's format, or none.
 func (r *Renderer) makePipelines(f *formatState) (err error) {
-	var errObj id
-	lib := r.compiledLibrary()
-	if lib == 0 {
-		lib = send(r.device, "newLibraryWithSource:options:error:", nsString(shaderSource), 0, uintptr(unsafe.Pointer(&errObj)))
+	if r.lib == 0 {
+		var errObj id
+		var lib id
+		src := shaderSource
+		if r.source != "" {
+			src = r.source // a test's, never the compiled library
+		} else {
+			lib = r.compiledLibrary()
+		}
+		if lib == 0 {
+			lib = send(r.device, "newLibraryWithSource:options:error:", nsString(src), 0, uintptr(unsafe.Pointer(&errObj)))
+		}
+		if lib == 0 {
+			return fmt.Errorf("metal: cannot compile the shader: %s", describe(errObj))
+		}
+		r.lib = lib
 	}
-	if lib == 0 {
-		return fmt.Errorf("metal: cannot compile the shader: %s", describe(errObj))
-	}
-	defer release(&lib)
+	lib := r.lib
+	defer func() {
+		if err == nil {
+			r.startPipelines(f)
+		}
+	}()
 	defer func() {
 		if err != nil {
 			release(&f.pipeline)
+			release(&f.holePipe)
+			release(&f.opaquePipe)
 			release(&f.downPipe)
 			release(&f.blurPipe)
 		}
 	}()
-	if f.pipeline, err = r.newPipeline(lib, "ps", f.format); err != nil {
+	if f.pipeline, err = r.newPipeline(lib, "ps", f.format, blendOver); err != nil {
+		return err
+	}
+	if f.holePipe, err = r.newPipeline(lib, "ps", f.format, blendHole); err != nil {
+		return err
+	}
+	if f.format == pixelFormatRGBA16Float {
+		// Opaque cores are exactly 1 in coverage only to within the rasterizer's
+		// interpolation of the fragment's position, whose noise (a unit in the
+		// last place of a half, in the columns where the position crosses a
+		// power of two) blending hides in the destination's alpha but a plain
+		// write keeps: float16 targets blend them, byte for byte as whole fills.
+		f.opaquePipe = send(f.pipeline, "retain")
+	} else if f.opaquePipe, err = r.newPipeline(lib, "ps", f.format, blendNone); err != nil {
 		return err
 	}
 	if f.downPipe, err = r.passPipeline(lib, "down", f.format); err != nil {
@@ -514,11 +623,11 @@ func (r *Renderer) SetWide(on bool) bool {
 }
 
 // setLayerWide has the layer's drawables hold the colors outside the sRGB
-// gamut, or not: the system makes others, which hold no frame drawn in
-// memory.
-func (r *Renderer) setLayerWide(on bool) {
+// gamut, or not, and reports whether that changed: the system makes
+// others, which hold no frame drawn in memory.
+func (r *Renderer) setLayerWide(on bool) (changed bool) {
 	if r.layerWide == on || r.layer == 0 {
-		return
+		return false
 	}
 	format, space := uintptr(pixelFormatBGRA8Unorm), srgb
 	if on {
@@ -531,19 +640,74 @@ func (r *Renderer) setLayerWide(on bool) {
 	send(r.layer, "setColorspace:", space)
 	send(tx, "commit")
 	r.layerWide = on
-	clear(r.shown)
+	return true
 }
+
+// blendMode is how a pipeline blends the shader's colors with the target.
+type blendMode int
+
+const (
+	blendOver blendMode = iota // premultiplied colors over what is drawn
+	blendHole                  // takes the coverage of holes away
+	blendNone                  // none: writes the colors, for opaque cores
+)
 
 // newPipeline returns a pipeline drawing instances with the vertex
 // function vs and the fragment function fs of lib, blending premultiplied
-// colors over what is drawn.
-func (r *Renderer) newPipeline(lib id, fs string, format uint) (id, error) {
+// colors over what is drawn, or as mode says.
+func (r *Renderer) newPipeline(lib id, fs string, format uint, mode blendMode) (id, error) {
+	return r.newClassPipeline(lib, fs, format, mode, gpu.ClassGeneral, true)
+}
+
+// classConstants are the function constants (the second, continuous corners,
+// being the batch's) (shader.metal) of each class
+// of batches: whether the fragment function has the code of instances under a
+// transform, continuous corners, plain fills, other fills, shadows, glyphs,
+// subpixel glyphs and images.
+var classConstants = [gpu.NumClasses][8]bool{
+	gpu.ClassPlain:    {2: true},
+	gpu.ClassFill:     {3: true},
+	gpu.ClassShadow:   {4: true},
+	gpu.ClassGlyph:    {5: true},
+	gpu.ClassSubpixel: {6: true},
+	gpu.ClassImage:    {7: true},
+}
+
+// specialized returns the function fs of lib with the constants of class cl
+// (owned). A function that has none (a library of an effect compiled before
+// they existed) is returned as it is; for the general class, the constants are
+// all true.
+func (r *Renderer) specialized(lib id, fs string, cl gpu.Class, continuous bool) (fn id, errObj id) {
+	if cl == gpu.ClassGeneral {
+		fn = send(lib, "newFunctionWithName:", nsString(fs))
+		if fn == 0 || send(send(fn, "functionConstantsDictionary"), "count") == 0 {
+			return fn, 0
+		}
+		release(&fn)
+	}
+	values := send(send(class("MTLFunctionConstantValues"), "alloc"), "init")
+	defer release(&values)
+	const dataTypeBool = 53
+	for i, on := range classConstants[cl] {
+		v := byte(0)
+		if on || cl == gpu.ClassGeneral || i == 1 && continuous {
+			v = 1
+		}
+		send(values, "setConstantValue:type:atIndex:", uintptr(unsafe.Pointer(&v)), dataTypeBool, uintptr(i))
+	}
+	fn = send(lib, "newFunctionWithName:constantValues:error:", nsString(fs), values, uintptr(unsafe.Pointer(&errObj)))
+	return fn, errObj
+}
+
+// newClassPipeline is newPipeline with the fragment function specialized for
+// the class cl.
+func (r *Renderer) newClassPipeline(lib id, fs string, format uint, mode blendMode, cl gpu.Class, continuous bool) (id, error) {
 	vsFn := send(lib, "newFunctionWithName:", nsString("vs"))
 	defer release(&vsFn)
-	fsFn := send(lib, "newFunctionWithName:", nsString(fs))
+	fsFn, fnErr := r.specialized(lib, fs, cl, continuous)
 	defer release(&fsFn)
 	if vsFn == 0 || fsFn == 0 {
-		return 0, fmt.Errorf("metal: the shader has no vs or %s", fs)
+		return 0, fmt.Errorf("metal: the shader has no vs or %s: %s", fs, describe(fnErr))
 	}
 	desc := send(send(class("MTLRenderPipelineDescriptor"), "alloc"), "init")
 	defer release(&desc)
@@ -552,12 +716,20 @@ func (r *Renderer) newPipeline(lib id, fs string, format uint) (id, error) {
 	ca := send(send(desc, "colorAttachments"), "objectAtIndexedSubscript:", 0)
 	send(ca, "setPixelFormat:", uintptr(format))
 	// Premultiplied colors over what is drawn.
-	send(ca, "setBlendingEnabled:", 1)
-	send(ca, "setSourceRGBBlendFactor:", blendOne)
+	src := uintptr(blendOne)
+	if mode == blendHole {
+		src = blendZero
+	}
+	if mode == blendNone {
+		send(ca, "setBlendingEnabled:", 0)
+	} else {
+		send(ca, "setBlendingEnabled:", 1)
+	}
+	send(ca, "setSourceRGBBlendFactor:", src)
 	// Dual-source blending: the shader's second color is the source's
 	// alpha of each channel.
 	send(ca, "setDestinationRGBBlendFactor:", blendOneMinusSrc1Color)
-	send(ca, "setSourceAlphaBlendFactor:", blendOne)
+	send(ca, "setSourceAlphaBlendFactor:", src)
 	send(ca, "setDestinationAlphaBlendFactor:", blendOneMinusSrc1A)
 	var errObj id
 	pipe := send(r.device, "newRenderPipelineStateWithDescriptor:error:", desc, uintptr(unsafe.Pointer(&errObj)))
@@ -587,9 +759,23 @@ func (r *Renderer) effectPipeline(e *scene.Effect) id {
 		f.effects = map[*scene.Effect]*effectPipe{}
 	}
 	f.effects[e] = p
-	src := EffectSource(e.Metal.Source)
+	src, fn := EffectSource(e.Metal.Source), "effect_ps"
+	if e.Shader != nil {
+		src, fn = e.Metal.Source, "shader_ps" // ShaderSource's
+	}
 	var lib id
-	if len(e.Metal.Compiled) > 0 && e.Metal.Sum == gpu.SourceSum(src) {
+	if e.Shader != nil {
+		// Made as the shader compiled (PrecompileShader).
+		if shared, pipe, ok := sharedShader(r.device, src, f.format); ok {
+			if pipe != 0 {
+				release(&shared)
+				p.pipe = pipe
+				return p.pipe
+			}
+			lib = shared
+		}
+	}
+	if lib == 0 && len(e.Metal.Compiled) > 0 && e.Metal.Sum == gpu.SourceSum(src) {
 		lib = r.libraryFromData(e.Metal.Compiled)
 	}
 	if lib == 0 {
@@ -599,7 +785,7 @@ func (r *Renderer) effectPipeline(e *scene.Effect) id {
 		}
 	}
 	if lib != 0 {
-		p.pipe, p.err = r.newPipeline(lib, "effect_ps", f.format)
+		p.pipe, p.err = r.newPipeline(lib, fn, f.format, blendOver)
 		release(&lib)
 	}
 	if p.err != nil && r.err == nil {
@@ -698,6 +884,9 @@ func (r *Renderer) syncAtlas(t *texture, a *scene.Atlas, format uint) error {
 	if full {
 		rects = []image.Rectangle{image.Rect(0, 0, a.W, a.H)}
 	}
+	if len(rects) > 0 {
+		r.waitLast() // frames in flight read this texture
+	}
 	for _, rc := range rects {
 		src := a.Pix[(rc.Min.Y*a.W+rc.Min.X)*a.BPP:]
 		region := mtlRegion{X: uint(rc.Min.X), Y: uint(rc.Min.Y), W: uint(rc.Dx()), H: uint(rc.Dy()), D: 1}
@@ -710,6 +899,13 @@ func (r *Renderer) syncAtlas(t *texture, a *scene.Atlas, format uint) error {
 // imageTexture returns the texture of an image, uploading it when new or
 // changed.
 func (r *Renderer) imageTexture(img *scene.Image) uintptr {
+	if img.Scene != nil {
+		// A canvas, drawn before the scene showing it.
+		if c := r.canvases[img.ID()]; c != nil {
+			return c.tex
+		}
+		return 0
+	}
 	t := r.images[img.ID()]
 	if t == nil {
 		tex := r.newTexture(img.W, img.H, pixelFormatRGBA8Unorm, usageShaderRead, img.Pix, img.W*4)
@@ -718,7 +914,15 @@ func (r *Renderer) imageTexture(img *scene.Image) uintptr {
 		}
 		t = &texture{tex: tex, w: img.W, h: img.H, ver: img.Version()}
 		r.images[img.ID()] = t
+	} else if t.w != img.W || t.h != img.H {
+		tex := r.newTexture(img.W, img.H, pixelFormatRGBA8Unorm, usageShaderRead, img.Pix, img.W*4)
+		if tex == 0 {
+			return 0
+		}
+		release(&t.tex)
+		t.tex, t.w, t.h, t.ver = tex, img.W, img.H, img.Version()
 	} else if t.ver != img.Version() {
+		r.waitLast() // frames in flight read this texture
 		msgReplaceRegion(t.tex, sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), mtlRegion{W: uint(img.W), H: uint(img.H), D: 1}, 0, unsafe.Pointer(&img.Pix[0]), uint(img.W*4))
 		t.ver = img.Version()
 	}
@@ -726,22 +930,61 @@ func (r *Renderer) imageTexture(img *scene.Image) uintptr {
 	return t.tex
 }
 
-// waitLast waits for the GPU to finish the last frame, so that this one
-// can change the buffers and textures it read.
-func (r *Renderer) waitLast() {
-	if r.last == 0 {
+// ringSize bounds frames in flight. Each slot owns the main target's and
+// every canvas's instance buffer, so CPU encoding can overlap GPU drawing.
+// A slot is reused only after its previous frame completes; in-place atlas
+// and image updates wait for all slots. Two slots bound the extra queueing
+// when the GPU is slower than the display. Native presentation can still
+// wait for a drawable, independently of these buffers.
+const ringSize = 2
+
+// waitSlot waits for the GPU to finish the frame that last used the slot's
+// instance buffer.
+func (r *Renderer) waitSlot(slot int) {
+	cb := r.inflight[slot]
+	if cb == 0 {
 		return
 	}
-	send(r.last, "waitUntilCompleted")
-	if int(send(r.last, "status")) == statusError && r.err == nil {
-		r.err = fmt.Errorf("metal: a frame failed: %s", describe(send(r.last, "error")))
+	send(cb, "waitUntilCompleted")
+	if int(send(cb, "status")) == statusError && r.err == nil {
+		r.err = fmt.Errorf("metal: a frame failed: %s", describe(send(cb, "error")))
 	}
-	release(&r.last)
+	release(&r.inflight[slot])
+}
+
+// waitLast waits for the GPU to finish the frames in flight, so that this
+// one can change the textures they read, or the renderer free what they use.
+func (r *Renderer) waitLast() {
+	for i := range r.inflight {
+		// The newest first: the queue finishes frames in order, so the
+		// others are done when it is.
+		r.waitSlot((r.slot + ringSize - 1 - i) % ringSize)
+	}
+}
+
+// track records cb, committed, as the frame drawn with the instance buffer
+// encode used, and moves on to the next.
+func (r *Renderer) track(cb id) {
+	r.inflight[r.inUse] = send(cb, "retain")
+	r.slot = (r.inUse + 1) % ringSize
 }
 
 // encode encodes drawing s into target, returning the autoreleased
 // command buffer, not yet committed.
 func (r *Renderer) encode(s *scene.Scene, target id) (id, error) {
+	if err := r.initGPU(); err != nil {
+		return 0, err
+	}
+	if r.cur.pipeline == 0 {
+		if err := r.makePipelines(r.cur); err != nil {
+			return 0, err
+		}
+	}
+	r.inUse = r.slot
+	r.waitSlot(r.inUse)
+	if r.err != nil {
+		return 0, r.err
+	}
 	r.frame++
 	if err := r.syncAtlas(&r.mask, s.MaskAtlas, pixelFormatR8Unorm); err != nil {
 		return 0, err
@@ -749,38 +992,111 @@ func (r *Renderer) encode(s *scene.Scene, target id) (id, error) {
 	if err := r.syncAtlas(&r.color, s.ColorAtlas, pixelFormatRGBA8Unorm); err != nil {
 		return 0, err
 	}
-	r.b.Wide = r.cur.format == pixelFormatRGBA16Float
-	r.b.Build(s, r.imageTexture)
-	if n := len(r.b.Instances); n > r.instCap {
-		release(&r.instBuf)
-		capacity := max(n*3/2, 1024)
-		r.instBuf = send(r.device, "newBufferWithLength:options:", uintptr(capacity*gpu.InstanceSize), 0) // shared storage
-		if r.instBuf == 0 {
-			r.instCap = 0
-			return 0, errors.New("metal: cannot create the instance buffer")
-		}
-		r.instCap = capacity
-	}
-	if n := len(r.b.Instances); n > 0 {
-		dst := unsafe.Slice((*gpu.Instance)(ptr(send(r.instBuf, "contents"))), n)
-		copy(dst, r.b.Instances)
-	}
-
-	if err := r.fitBackdrop(); err != nil {
-		return 0, err
-	}
+	r.pipes.fallbacks = 0
+	r.used = 0
 	cb := send(r.queue, "commandBuffer")
 	if !r.checked {
-		if err := need(cb, "command buffer", "renderCommandEncoderWithDescriptor:", "commit", "waitUntilScheduled", "waitUntilCompleted", "status", "blitCommandEncoder"); err != nil {
+		if err := need(cb, "command buffer", "renderCommandEncoderWithDescriptor:", "commit", "presentDrawable:", "waitUntilScheduled", "waitUntilCompleted", "status", "blitCommandEncoder"); err != nil {
 			return 0, err
 		}
 	}
-	enc, err := r.begin(cb, target, loadActionClear, s)
+	// Canvases first, into textures of their own, which the frame samples.
+	var err error
+	s.EachCanvas(func(c *scene.Image) {
+		if err == nil {
+			err = r.drawCanvas(cb, c)
+		}
+	})
 	if err != nil {
 		return 0, err
 	}
+	r.b.Wide = r.cur.format == pixelFormatRGBA16Float
+	if err := r.drawInto(cb, s, target, &r.drawState); err != nil {
+		return 0, err
+	}
+	return cb, nil
+}
+
+// drawCanvas draws a canvas into its texture, unless it holds its version
+// already.
+func (r *Renderer) drawCanvas(cb id, c *scene.Image) error {
+	if r.canvases == nil {
+		r.canvases = map[uint64]*canvasTexture{}
+	}
+	t := r.canvases[c.ID()]
+	if t == nil {
+		t = &canvasTexture{canvas: weak.Make(c)}
+		r.canvases[c.ID()] = t
+	}
+	t.lastFrame = r.frame
+	if t.tex != 0 && t.w == c.W && t.h == c.H && t.ver == c.Version() {
+		return nil
+	}
+	if t.tex == 0 || t.w != c.W || t.h != c.H {
+		release(&t.tex)
+		if t.tex = r.newTexture(c.W, c.H, pixelFormatBGRA8Unorm, usageRenderTarget|usageShaderRead, nil, 0); t.tex == 0 {
+			return errors.New("metal: cannot create a canvas's texture")
+		}
+		t.w, t.h = c.W, c.H
+	}
+	// In BGRA8, in sRGB, whatever the frame's format.
+	saved := r.cur
+	defer func() { r.cur = saved }()
+	r.cur = &r.formats[0]
+	if r.cur.pipeline == 0 {
+		if err := r.makePipelines(r.cur); err != nil {
+			return err
+		}
+	}
+	cs := c.Scene
+	cs.Width, cs.Height = c.W, c.H
+	t.b.Wide = false
+	t.b.Opaque, t.b.Classes = r.b.Opaque, r.b.Classes
+	t.b.NoCull, t.b.NoShadowSplit, t.b.NoRingSplit = r.b.NoCull, r.b.NoShadowSplit, r.b.NoRingSplit
+	t.b.NoClasses, t.b.GeneralClasses = r.b.NoClasses, r.b.GeneralClasses
+	t.b.GeneralFill, t.b.NoClipSkip = r.b.GeneralFill, r.b.NoClipSkip
+	if err := r.drawInto(cb, cs, t.tex, &t.drawState); err != nil {
+		return err
+	}
+	t.ver = c.Version()
+	return nil
+}
+
+// drawInto encodes drawing s into target with d, in the format r.cur is.
+func (r *Renderer) drawInto(cb id, s *scene.Scene, target id, d *drawState) error {
+	d.b.ClipSkip = true
+	d.b.BlurredImage = func(img *scene.Image, bk scene.Backdrop) uintptr { return r.blurImage(cb, img, bk) }
+	s = d.b.Build(s, r.imageTexture)
+	d.b.BlurredImage = nil
+	if err := r.syncStops(d); err != nil {
+		return err
+	}
+	instBuf := &d.instBufs[r.inUse]
+	instCap := &d.instCaps[r.inUse]
+	if n := len(d.b.Instances); n > *instCap {
+		release(instBuf)
+		capacity := max(n*3/2, 1024)
+		*instBuf = send(r.device, "newBufferWithLength:options:", uintptr(capacity*gpu.InstanceSize), 0) // shared storage
+		if *instBuf == 0 {
+			*instCap = 0
+			return errors.New("metal: cannot create the instance buffer")
+		}
+		*instCap = capacity
+	}
+	if n := len(d.b.Instances); n > 0 {
+		dst := unsafe.Slice((*gpu.Instance)(ptr(send(*instBuf, "contents"))), n)
+		copy(dst, d.b.Instances)
+	}
+
+	if err := r.fitBackdrop(&d.b); err != nil {
+		return err
+	}
+	enc, err := r.begin(cb, target, loadActionClear, s, &d.b)
+	if err != nil {
+		return err
+	}
 	bound, pipe := r.empty, r.cur.pipeline
-	for _, b := range r.b.Batches {
+	for _, b := range d.b.Batches {
 		// Metal requires scissor rectangles within the target.
 		sc := b.Scissor
 		sc.Left, sc.Top = max(sc.Left, 0), max(sc.Top, 0)
@@ -788,18 +1104,25 @@ func (r *Renderer) encode(s *scene.Scene, target id) (id, error) {
 		if b.Count == 0 || sc.Empty() {
 			continue
 		}
-		want := r.cur.pipeline
-		if b.Effect != nil {
+		var want id
+		switch {
+		case b.Effect != nil:
 			if want = r.effectPipeline(b.Effect); want == 0 {
 				continue
 			}
+		case b.Hole:
+			want = r.pipeFor(r.cur, b.Class, b.Continuous, blendHole)
+		case b.Opaque:
+			want = r.pipeFor(r.cur, b.Class, b.Continuous, blendNone)
+		default:
+			want = r.pipeFor(r.cur, b.Class, b.Continuous, blendOver)
 		}
 		if b.Backdrop != 0 {
 			// The effect shows what is drawn so far.
 			send(enc, "endEncoding")
-			r.readBackdrop(cb, target, r.b.Backdrops[b.Backdrop-1])
-			if enc, err = r.begin(cb, target, loadActionLoad, s); err != nil {
-				return 0, err
+			r.readBackdrop(cb, target, d.b.Backdrops[b.Backdrop-1])
+			if enc, err = r.begin(cb, target, loadActionLoad, s, &d.b); err != nil {
+				return err
 			}
 			send(enc, "setFragmentTexture:atIndex:", r.cur.backdrop[0].tex, 3)
 			bound, pipe = r.empty, r.cur.pipeline
@@ -812,19 +1135,47 @@ func (r *Renderer) encode(s *scene.Scene, target id) (id, error) {
 			bound = b.Image
 			send(enc, "setFragmentTexture:atIndex:", bound, 2)
 		}
+		send(enc, "setFragmentTexture:atIndex:", or(id(b.ClipMask), r.empty), 4)
+		if b.Shader != nil {
+			r.bindShader(enc, b)
+		}
 		offset := uintptr(b.Start * gpu.InstanceSize)
-		send(enc, "setVertexBuffer:offset:atIndex:", r.instBuf, offset, 0)
-		send(enc, "setFragmentBuffer:offset:atIndex:", r.instBuf, offset, 0)
+		send(enc, "setVertexBuffer:offset:atIndex:", *instBuf, offset, 0)
+		send(enc, "setFragmentBuffer:offset:atIndex:", *instBuf, offset, 0)
 		msgSetScissor(enc, sel("setScissorRect:"), mtlScissorRect{uint(sc.Left), uint(sc.Top), uint(sc.Right - sc.Left), uint(sc.Bottom - sc.Top)})
 		send(enc, "drawPrimitives:vertexStart:vertexCount:instanceCount:", primitiveTriStrip, 0, 4, uintptr(b.Count))
 	}
 	send(enc, "endEncoding")
-	return cb, nil
+	return nil
+}
+
+// maxBytes is the most setFragmentBytes takes; larger uniforms go in a
+// buffer of their own.
+const maxBytes = 4096
+
+// bindShader binds what the shader of batch b reads: its uniforms, laid
+// out as its effect says, in buffer 2, and its images in textures 5 to 8.
+func (r *Renderer) bindShader(enc id, b gpu.Batch) {
+	r.shaderBytes = b.Effect.Shader.Pack(r.shaderBytes, b.Uniforms)
+	if n := len(r.shaderBytes); n > 0 && n <= maxBytes {
+		send(enc, "setFragmentBytes:length:atIndex:", uintptr(unsafe.Pointer(&r.shaderBytes[0])), uintptr(n), 2)
+	} else if n > 0 {
+		buf := send(r.device, "newBufferWithBytes:length:options:", uintptr(unsafe.Pointer(&r.shaderBytes[0])), uintptr(n), 0)
+		send(enc, "setFragmentBuffer:offset:atIndex:", buf, 0, 2)
+		release(&buf) // the encoder keeps it
+	}
+	for i, t := range b.Textures {
+		if i == gpu.BackdropImage && b.Backdrop != 0 {
+			// A shader reading its backdrop reads it as this image.
+			t = uintptr(r.cur.backdrop[0].tex)
+		}
+		send(enc, "setFragmentTexture:atIndex:", or(id(t), r.empty), uintptr(5+i))
+	}
 }
 
 // begin starts encoding the drawing of s into target, which it clears or
 // keeps (load), with the state the instances draw with.
-func (r *Renderer) begin(cb, target id, load uintptr, s *scene.Scene) (id, error) {
+func (r *Renderer) begin(cb, target id, load uintptr, s *scene.Scene, b *gpu.Builder) (id, error) {
 	rpd := send(class("MTLRenderPassDescriptor"), "renderPassDescriptor")
 	ca := send(send(rpd, "colorAttachments"), "objectAtIndexedSubscript:", 0)
 	send(ca, "setTexture:", target)
@@ -848,7 +1199,7 @@ func (r *Renderer) begin(cb, target id, load uintptr, s *scene.Scene) (id, error
 	// The frame's size, and whether its target keeps colors outside the
 	// sRGB gamut.
 	globals := [4]float32{float32(s.Width), float32(s.Height), 0, 0}
-	if r.b.Wide {
+	if b.Wide {
 		globals[2] = 1
 	}
 	send(enc, "setVertexBytes:length:atIndex:", uintptr(unsafe.Pointer(&globals[0])), unsafe.Sizeof(globals), 1)
@@ -858,7 +1209,90 @@ func (r *Renderer) begin(cb, target id, load uintptr, s *scene.Scene) (id, error
 	send(enc, "setFragmentTexture:atIndex:", or(r.color.tex, r.empty), 1)
 	send(enc, "setFragmentTexture:atIndex:", r.empty, 2)
 	send(enc, "setFragmentTexture:atIndex:", r.empty, 3)
+	send(enc, "setFragmentTexture:atIndex:", or(r.stopsTex, r.empty), 9)
 	return enc, nil
+}
+
+// syncStops uploads the stops of the gradients d's builder built into the
+// texture of the frame's slot, which r.stopsTex then is, or 0 for none.
+func (r *Renderer) syncStops(d *drawState) error {
+	r.stopsTex = 0
+	w, h := d.b.StopsSize()
+	if w == 0 {
+		return nil
+	}
+	t := &d.stops[r.inUse]
+	if t.tex == 0 || t.w != w || t.h < h {
+		release(&t.tex)
+		if t.tex = r.newTexture(w, h, pixelFormatRGBA32Float, usageShaderRead, nil, 0); t.tex == 0 {
+			*t = texture{}
+			return errors.New("metal: cannot create the texture of the stops of gradients")
+		}
+		t.w, t.h = w, h
+	}
+	// The slot's last frame, which read it, is done (waitSlot).
+	data := d.b.Stops
+	for len(data) < 4*w*h {
+		data = append(data, 0)
+	}
+	d.b.Stops = data[:len(d.b.Stops)]
+	msgReplaceRegion(t.tex, sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), mtlRegion{W: uint(w), H: uint(h), D: 1}, 0, unsafe.Pointer(&data[0]), uint(w*16))
+	r.stopsTex = t.tex
+	return nil
+}
+
+// blurImage encodes into cb the passes blurring the area of img that bk
+// says (gpu.Builder.BlurredImage) into a texture of the frame's own, in
+// BGRA8 whatever the frame's format, as internal/raster computes them,
+// and returns it, or 0.
+func (r *Renderer) blurImage(cb id, img *scene.Image, bk scene.Backdrop) uintptr {
+	src := id(r.imageTexture(img))
+	w, h := bk.Size()
+	f := &r.formats[0]
+	if src == 0 || w <= 0 || h <= 0 {
+		return 0
+	}
+	if f.downPipe == 0 {
+		if err := r.makePipelines(f); err != nil {
+			return 0
+		}
+	}
+	for i := range r.blurTmp {
+		t := &r.blurTmp[i]
+		if t.w < w || t.h < h {
+			release(&t.tex)
+			nw, nh := max(w, t.w), max(h, t.h)
+			if t.tex = r.newTexture(nw, nh, pixelFormatBGRA8Unorm, usageRenderTarget|usageShaderRead, nil, 0); t.tex == 0 {
+				*t = texture{}
+				return 0
+			}
+			t.w, t.h = nw, nh
+		}
+	}
+	if r.used == len(r.blurred) {
+		r.blurred = append(r.blurred, texture{})
+	}
+	out := &r.blurred[r.used]
+	r.used++
+	if out.tex == 0 || out.w != w || out.h != h {
+		release(&out.tex)
+		if out.tex = r.newTexture(w, h, pixelFormatBGRA8Unorm, usageRenderTarget|usageShaderRead, nil, 0); out.tex == 0 {
+			*out = texture{}
+			return 0
+		}
+		out.w, out.h = w, h
+	}
+	p := gpu.ImageDownPass(bk)
+	if bk.Radius == 0 {
+		r.pass(cb, f.downPipe, src, out.tex, w, h, &p)
+		return uintptr(out.tex)
+	}
+	r.pass(cb, f.downPipe, src, r.blurTmp[0].tex, w, h, &p)
+	p = gpu.ImageBlurPass(bk, [2]int32{1, 0})
+	r.pass(cb, f.blurPipe, r.blurTmp[0].tex, r.blurTmp[1].tex, w, h, &p)
+	p = gpu.ImageBlurPass(bk, [2]int32{0, 1})
+	r.pass(cb, f.blurPipe, r.blurTmp[1].tex, out.tex, w, h, &p)
+	return uintptr(out.tex)
 }
 
 // readBackdrop encodes the passes computing the backdrop bk of what
@@ -896,9 +1330,9 @@ func (r *Renderer) pass(cb, pipe, src, dst id, w, h int, p *gpu.Pass) {
 
 // fitBackdrop makes the textures of backdrops as large as the scene built
 // needs.
-func (r *Renderer) fitBackdrop() error {
+func (r *Renderer) fitBackdrop(b *gpu.Builder) error {
 	f := r.cur
-	w, h := r.b.BackdropSize()
+	w, h := b.BackdropSize()
 	if w == 0 || f.backdrop[0].w >= w && f.backdrop[0].h >= h {
 		return nil
 	}
@@ -917,6 +1351,21 @@ func (r *Renderer) fitBackdrop() error {
 	return nil
 }
 
+// hasHoles reports whether s has holes (scene.OpHole), where it shows
+// web views under it.
+func hasHoles(s *scene.Scene) bool {
+	for i := range s.Ops {
+		if s.Ops[i].Kind == scene.OpHole {
+			return true
+		}
+	}
+	return false
+}
+
+// Behind reports whether the last Render drew nothing, to catch up with
+// the display: the window draws the frame again at the next refresh.
+func (r *Renderer) Behind() bool { return r.behind }
+
 func or(a, b id) id {
 	if a != 0 {
 		return a
@@ -933,8 +1382,13 @@ func (r *Renderer) Render(s *scene.Scene) (err error) {
 	return err
 }
 
+// behindAfter is how long a frame presented as soon as drawn waits for its
+// drawable before the next skips a refresh (Behind), at most once a
+// second: a drawable frees within a millisecond or so while frames show at
+// the refresh after they present.
+const behindAfter = 4 * time.Millisecond
+
 func (r *Renderer) render(s *scene.Scene) error {
-	r.waitLast()
 	if r.err != nil {
 		return r.err
 	}
@@ -946,30 +1400,58 @@ func (r *Renderer) render(s *scene.Scene) error {
 	if r.wide {
 		r.cur = &r.formats[1]
 	}
-	r.setLayerWide(r.wide)
-	r.fit(s.Width, s.Height, scale)
+	changed := r.setLayerWide(r.wide)
+	changed = r.fit(s.Width, s.Height, scale) || changed
+	// A frame changing the layer, or showing web views, which move with
+	// the window's other changes, presents with the Core Animation
+	// transaction, so that they show together, as during a live resize.
+	// Others present as soon as the GPU has them, sparing a commit of the
+	// transaction for each.
+	holes := hasHoles(s)
+	sync := changed || holes || r.holes
+	r.holes = holes
+	now := time.Now()
+	r.behind = !sync && r.waited && now.Sub(r.lastRender) < 50*time.Millisecond && now.Sub(r.skippedAt) > time.Second
+	r.waited = false
+	if r.behind {
+		// The last frame waited for a drawable, as the display held the
+		// others until its next refresh: the frames following it would wait as
+		// long, most of each refresh, blocking the main thread. Drawing
+		// none for a refresh catches up.
+		r.skippedAt = now
+		return nil
+	}
+	if sync != r.synced {
+		on := uintptr(0)
+		if sync {
+			on = 1
+		}
+		send(r.layer, "setPresentsWithTransaction:", on)
+		r.synced = sync
+	}
 	drawable := send(r.layer, "nextDrawable")
 	if drawable == 0 {
 		return nil // none came within a second: skip the frame
 	}
+	r.waited = !sync && time.Since(now) > behindAfter
 	texture := send(drawable, "texture")
-	// The GPU draws all of the drawable, which holds no frame drawn in
-	// memory anymore.
-	if surface := send(texture, "iosurface"); surface != 0 {
-		delete(r.shown, surfaceID(surface))
-	}
 	cb, err := r.encode(s, texture)
 	if err != nil {
 		return err
 	}
-	send(cb, "commit")
-	send(cb, "waitUntilScheduled")
-	send(drawable, "present")
-	r.last = send(cb, "retain")
+	if sync {
+		send(cb, "commit")
+		send(cb, "waitUntilScheduled")
+		send(drawable, "present")
+	} else {
+		send(cb, "presentDrawable:", drawable)
+		send(cb, "commit")
+	}
+	r.track(cb)
 	r.lastRender = time.Now()
-	r.lastGPU = r.lastRender
 	r.armTrim()
-	// Forget the textures of images no frame drew for a while.
+	// Forget the textures of images no frame drew for a while, and those
+	// of canvases gone.
 	if r.frame%120 == 0 {
 		for key, t := range r.images {
 			if r.frame-t.lastFrame > 240 {
@@ -977,16 +1459,23 @@ func (r *Renderer) render(s *scene.Scene) error {
 				delete(r.images, key)
 			}
 		}
+		for key, t := range r.canvases {
+			if t.canvas.Value() == nil {
+				release(&t.tex)
+				t.drawState.release()
+				delete(r.canvases, key)
+			}
+		}
 	}
 	return nil
 }
 
 // fit sizes the layer and its drawables for frames of w×h pixels at
-// scale, and as its view.
-func (r *Renderer) fit(w, h int, scale float64) {
+// scale, and as its view, and reports whether they changed.
+func (r *Renderer) fit(w, h int, scale float64) (changed bool) {
 	bounds := msgRect(r.superlayer, sel("bounds"))
 	if w == r.w && h == r.h && scale == r.scale && bounds == r.bounds && !r.trimmed {
-		return
+		return false
 	}
 	// Without animating the change, as layers do by default.
 	tx := class("CATransaction")
@@ -997,81 +1486,11 @@ func (r *Renderer) fit(w, h int, scale float64) {
 	msgSetSize(r.layer, sel("setDrawableSize:"), cgSize{float64(w), float64(h)})
 	send(tx, "commit")
 	r.w, r.h, r.scale, r.bounds, r.trimmed = w, h, scale, bounds, false
-	clear(r.shown) // new drawables
+	return true
 }
 
-// pixelHistory is how many frames drawn in memory a drawable may lag
-// behind for PresentPixels to copy only what changed since.
-const pixelHistory = 4
-
-// PresentPixels shows a frame drawn in memory without the GPU, which takes
-// longer to start than the CPU takes to draw small changes, and whose
-// driver holds memory for a couple of seconds after each frame it draws.
-// pix holds rows of stride bytes of premultiplied BGRA, width×height pixels
-// at scale, and damage is where it changed since the last frame drawn in
-// memory. Only what changed since the frame the next drawable holds goes
-// into it, through its IOSurface.
-func (r *Renderer) PresentPixels(pix []byte, stride, width, height int, scale float64, damage []image.Rectangle) (err error) {
-	if width <= 0 || height <= 0 || r.layer == 0 {
-		return nil
-	}
-	if ioSurfaceLock == 0 || len(pix) < (height-1)*stride+width*4 {
-		return errors.New("metal: cannot present pixels")
-	}
-	pool(func() { err = r.presentPixels(pix, stride, width, height, scale, damage) })
-	return err
-}
-
-func (r *Renderer) presentPixels(pix []byte, stride, width, height int, scale float64, damage []image.Rectangle) error {
-	r.waitLast()
-	if r.err != nil {
-		return r.err
-	}
-	if scale <= 0 {
-		scale = 1
-	}
-	r.setLayerWide(false)
-	r.fit(width, height, scale)
-	r.pixelFrames++
-	n := r.pixelFrames
-	r.pixelDamage[n%pixelHistory] = append(r.pixelDamage[n%pixelHistory][:0], damage...)
-	drawable := send(r.layer, "nextDrawable")
-	if drawable == 0 {
-		return nil // none came within a second: skip the frame
-	}
-	surface := send(send(drawable, "texture"), "iosurface")
-	if surface == 0 {
-		return errors.New("metal: a drawable without an IOSurface")
-	}
-	if kr, _, _ := purego.SyscallN(ioSurfaceLock, surface, 0, 0); kr != 0 {
-		return fmt.Errorf("metal: cannot lock a drawable (%#x)", kr)
-	}
-	base, _, _ := purego.SyscallN(ioSurfaceBaseAddress, surface)
-	bpr, _, _ := purego.SyscallN(ioSurfaceBytesPerRow, surface)
-	dst := unsafe.Slice((*byte)(ptr(base)), int(bpr)*height)
-	key := surfaceID(surface)
-	frame := image.Rect(0, 0, width, height)
-	for _, rc := range r.changedSince(key, n, width, height) {
-		copyRect(dst, int(bpr), pix, stride, rc.Intersect(frame))
-	}
-	purego.SyscallN(ioSurfaceUnlock, surface, 0, 0)
-	if r.shown == nil {
-		r.shown = map[uint32]uint64{}
-	}
-	r.shown[key] = n
-	send(drawable, "present")
-	r.lastRender = time.Now()
-	r.armTrim()
-	if !r.lastGPU.IsZero() && r.lastRender.Sub(r.lastGPU) > trimAfter {
-		r.releaseTextures()
-		r.lastGPU = time.Time{}
-	}
-	return nil
-}
-
-// releaseTextures frees what only frames the GPU draws use, once only
-// frames drawn in memory came for a while; the next frame the GPU draws
-// makes them again, uploading the atlases whole.
+// releaseTextures frees what the GPU's frames use, once the window is
+// idle. The next frame makes them again, uploading the atlases whole.
 func (r *Renderer) releaseTextures() {
 	release(&r.mask.tex)
 	release(&r.color.tex)
@@ -1079,42 +1498,29 @@ func (r *Renderer) releaseTextures() {
 		release(&t.tex)
 		delete(r.images, key)
 	}
-	release(&r.instBuf)
-	r.instCap = 0
+	for key, t := range r.canvases {
+		release(&t.tex)
+		t.drawState.release()
+		delete(r.canvases, key)
+	}
+	r.drawState.release()
+	for i := range r.blurred {
+		release(&r.blurred[i].tex)
+	}
+	r.blurred, r.used = nil, 0
+	for i := range r.blurTmp {
+		release(&r.blurTmp[i].tex)
+		r.blurTmp[i] = texture{}
+	}
 	for i := range r.formats {
 		for j := range r.formats[i].backdrop {
 			release(&r.formats[i].backdrop[j].tex)
 			r.formats[i].backdrop[j] = texture{}
 		}
 	}
-}
-
-// changedSince returns what changed between the frame drawn in memory the
-// drawable of IOSurface key holds and frame n: everything when it holds
-// none or one too old.
-func (r *Renderer) changedSince(key uint32, n uint64, width, height int) []image.Rectangle {
-	shown, ok := r.shown[key]
-	if !ok || n-shown > pixelHistory {
-		return []image.Rectangle{image.Rect(0, 0, width, height)}
-	}
-	var rects []image.Rectangle
-	for k := shown + 1; k <= n; k++ {
-		rects = append(rects, r.pixelDamage[k%pixelHistory]...)
-	}
-	return rects
-}
-
-// copyRect copies rc of src, rows of srcStride bytes of 4-byte pixels,
-// into dst, rows of dstStride bytes. Both hold rc.
-func copyRect(dst []byte, dstStride int, src []byte, srcStride int, rc image.Rectangle) {
-	for y := rc.Min.Y; y < rc.Max.Y; y++ {
-		copy(dst[y*dstStride+rc.Min.X*4:y*dstStride+rc.Max.X*4], src[y*srcStride+rc.Min.X*4:])
-	}
-}
-
-func surfaceID(surface id) uint32 {
-	n, _, _ := purego.SyscallN(ioSurfaceID, surface)
-	return uint32(n)
+	r.b.Release()
+	r.b.Classes = true
+	r.b.Opaque = true // Release empties the builder
 }
 
 // trimAfter is how long a window draws nothing before its spare drawables
@@ -1164,6 +1570,8 @@ func (r *Renderer) trim() {
 		return
 	}
 	pool(func() {
+		r.waitLast()
+		r.releaseTextures()
 		tx := class("CATransaction")
 		send(tx, "begin")
 		send(tx, "setDisableActions:", 1)
@@ -1171,7 +1579,6 @@ func (r *Renderer) trim() {
 		send(tx, "commit")
 	})
 	r.trimmed = true
-	clear(r.shown)
 }
 
 // renderOffscreen draws s into a texture of its own and returns its
@@ -1208,12 +1615,14 @@ func (r *Renderer) renderOffscreen(s *scene.Scene) (pix []byte, err error) {
 
 // Release frees the renderer's GPU objects and takes its layer out.
 func (r *Renderer) Release() {
+	r.b.Release()
 	if r.trimTimer != 0 {
 		purego.SyscallN(cfRunLoopTimerInvalidate, r.trimTimer)
 		purego.SyscallN(cfRelease, r.trimTimer)
 		delete(trimTimers, r.trimHandle)
 		r.trimTimer = 0
 	}
+	r.stopPipelines()
 	pool(func() {
 		r.waitLast()
 		if r.layer != 0 {
@@ -1230,13 +1639,25 @@ func (r *Renderer) Release() {
 		for i := range r.formats {
 			f := &r.formats[i]
 			release(&f.pipeline)
+			release(&f.holePipe)
+			release(&f.opaquePipe)
 			release(&f.downPipe)
 			release(&f.blurPipe)
 			for _, p := range f.effects {
 				release(&p.pipe)
 			}
 		}
+		release(&r.lib)
 		release(&r.queue)
 		release(&r.device)
 	})
+}
+
+// FrameInfo describes the last frame for MYGO_FRAME_STATS.
+func (r *Renderer) FrameInfo() string {
+	info := r.b.Summary()
+	if n := r.pipes.fallbacks; n > 0 {
+		info += fmt.Sprintf(", %d batches awaiting specialized pipelines", n)
+	}
+	return info
 }

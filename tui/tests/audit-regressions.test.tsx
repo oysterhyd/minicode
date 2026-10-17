@@ -480,7 +480,7 @@ test('narrow terminal wraps long CJK drafts and renders wide Markdown tables wit
   client.emit({ event: 'text_delta', sessionId: 'active', text: '| Feature | Description |\n|---|---|\n| TUI | 中文说明'.repeat(1) + '很长的说明'.repeat(10) + ' |' })
   await delay(40)
   const frame = stripAnsi(ui.lastFrame() || '')
-  assert.ok(frame.slice(frame.indexOf('❯ table')).split('\n').every(line => displayWidth(line) <= 38), frame)
+  assert.ok(frame.slice(frame.indexOf('> table')).split('\n').every(line => displayWidth(line) <= 38), frame)
 })
 
 test('a cancellation requested before sendPrompt responds is applied again after session assignment', async () => {

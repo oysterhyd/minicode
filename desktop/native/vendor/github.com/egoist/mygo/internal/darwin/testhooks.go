@@ -5,11 +5,15 @@ package darwin
 import (
 	"fmt"
 	"math"
+	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
 	"github.com/ebitengine/purego/objc"
+	"github.com/egoist/mygo/internal/platform"
+	"github.com/egoist/mygo/transfer"
 )
 
 // The functions in this file drive native UI the way a user would, for the
@@ -58,6 +62,13 @@ func TestPerformKeyEquivalent(key string, shift bool) bool {
 	return handled
 }
 
+// TestOnScreen reports whether some of a window shows on screen, as the
+// window server reports once it put the window there.
+func TestOnScreen(handle uintptr) bool {
+	const occlusionStateVisible = 1 << 1
+	return sendInt(id(handle), "occlusionState")&occlusionStateVisible != 0
+}
+
 // TestEndSheet ends the sheet attached to a window as if its first button
 // was clicked, and reports whether there was one.
 func TestEndSheet(handle uintptr) bool {
@@ -71,18 +82,90 @@ func TestEndSheet(handle uintptr) bool {
 
 // TestClick sends a left mouse down and up at a point of a window's content
 // (top-left origin, in points), like a user click.
-func TestClick(handle uintptr, x, y float64) {
+func TestClick(handle uintptr, x, y float64) { testClick(handle, x, y, false) }
+
+// TestAppClick is TestClick through the application's event queue, where
+// event monitors see the click as they see the user's, as those of
+// transient popovers that close on clicks elsewhere. The application has
+// handled the click when it returns (handlePosted).
+func TestAppClick(handle uintptr, x, y float64) { testClick(handle, x, y, true) }
+
+// TestAppPress is half of TestAppClick: the left mouse down, or the up,
+// which a user's click handles apart, a frame or more later.
+func TestAppPress(handle uintptr, x, y float64, down bool) {
+	typ := uint(2) // NSEventTypeLeftMouseUp
+	if down {
+		typ = 1 // NSEventTypeLeftMouseDown
+	}
+	testMouse(handle, x, y, true, typ)
+}
+
+func testClick(handle uintptr, x, y float64, viaApp bool) {
+	testMouse(handle, x, y, viaApp, 1, 2) // NSEventTypeLeftMouseDown, LeftMouseUp
+}
+
+func testMouse(handle uintptr, x, y float64, viaApp bool, types ...uint) {
 	withPool(func() {
 		win := id(handle)
 		content := msgRect(send(win, "contentView"), sel("frame"))
 		loc := NSPoint{x, content.Size.Height - y}
 		number := sendInt(win, "windowNumber")
-		for _, typ := range []uint{1, 2} { // NSEventTypeLeftMouseDown, LeftMouseUp
+		for _, typ := range types {
 			ev := msgMouseEvent(class("NSEvent"), sel("mouseEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:clickCount:pressure:"),
 				typ, loc, 0, 0, number, 0, 0, 1, 1)
-			send(win, "sendEvent:", uintptr(ev))
+			if viaApp {
+				send(theBackend.app, "postEvent:atStart:", uintptr(ev), 0)
+			} else {
+				send(win, "sendEvent:", uintptr(ev))
+			}
 		}
 	})
+	if viaApp {
+		handlePosted()
+	}
+}
+
+// testHandledSubtype marks the application-defined event handlePosted
+// posts after the events a test posted.
+const testHandledSubtype = 0x6d74 // 'mt'
+
+// testHandledMark tells handlePosted's events apart. Main thread only.
+var testHandledMark int
+
+// handlePosted handles the events posted to the application's queue, up to
+// an event it posts after them, before it returns: it takes them from the
+// queue and sends them as the run loop does, so that event monitors and
+// transient popovers see them as they see the user's. A test that posts
+// input so knows that the application handled it before it checks what
+// the input did, rather than waiting a while. It gives up after 10
+// seconds, which only a hung application would take.
+func handlePosted() {
+	testHandledMark++
+	mark := testHandledMark
+	withPool(func() {
+		ev := msgOtherEvent(class("NSEvent"), sel("otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:"),
+			nsEventTypeApplicationDefined, NSPoint{}, 0, 0, 0, 0, testHandledSubtype, mark, 0)
+		send(theBackend.app, "postEvent:atStart:", uintptr(ev), 0)
+	})
+	mode := nsString("kCFRunLoopDefaultMode")
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		done := false
+		withPool(func() {
+			until := msgDateSince(class("NSDate"), sel("dateWithTimeIntervalSinceNow:"), 0.5)
+			ev := msgNextEvent(theBackend.app, sel("nextEventMatchingMask:untilDate:inMode:dequeue:"), ^uint64(0), until, mode, true)
+			if ev == 0 {
+				return
+			}
+			if sendInt(ev, "type") == nsEventTypeApplicationDefined && int16(sendInt(ev, "subtype")) == testHandledSubtype && sendInt(ev, "data1") == mark {
+				done = true
+				return
+			}
+			send(theBackend.app, "sendEvent:", uintptr(ev))
+		})
+		if done {
+			return
+		}
+	}
 }
 
 // TestDrag presses the primary button at the first of points, in points
@@ -175,11 +258,40 @@ func TestTrafficLights(handle uintptr) (x, y float64) {
 	return math.Min(a.X, b.X), msgRect(win, sel("frame")).Size.Height - math.Max(a.Y, b.Y)
 }
 
+// TestSetWindowAppearance gives a window its own dark or light appearance,
+// apart from the application's.
+func TestSetWindowAppearance(handle uintptr, dark bool) {
+	name := "NSAppearanceNameAqua"
+	if dark {
+		name = "NSAppearanceNameDarkAqua"
+	}
+	withPool(func() {
+		send(id(handle), "setAppearance:", uintptr(send(class("NSAppearance"), "appearanceNamed:", uintptr(nsString(name)))))
+	})
+}
+
 // TestWebViewAttached reports whether a window's web view is in its view
 // hierarchy.
 func TestWebViewAttached(handle uintptr) bool {
 	w := theBackend.byNSWindow[id(handle)]
 	return w != nil && send(w.web, "window") == w.win
+}
+
+// TestIsFrontmost reports whether the application is the frontmost one,
+// which NSApp's isActive does not tell while a nonactivating panel is the
+// key window: it reports the app active then.
+func TestIsFrontmost() bool {
+	var front bool
+	withPool(func() {
+		app := send(send(class("NSWorkspace"), "sharedWorkspace"), "frontmostApplication")
+		front = app != 0 && sendInt(app, "processIdentifier") == os.Getpid()
+	})
+	return front
+}
+
+// TestCollectionBehavior returns a window's NSWindowCollectionBehavior.
+func TestCollectionBehavior(handle uintptr) uint {
+	return uint(sendInt(id(handle), "collectionBehavior"))
 }
 
 // TestDockInspector opens the web inspector of a window docked to it, and
@@ -273,6 +385,19 @@ func TestDockMenu(click int) []string {
 	return titles
 }
 
+// TestRecentDocuments returns the paths of the documents the app recorded
+// with App.AddRecentDocument and did not clear, in the order the system
+// keeps them.
+func TestRecentDocuments() []string {
+	var paths []string
+	withPool(func() {
+		for _, u := range arrayItems(send(send(class("NSDocumentController"), "sharedDocumentController"), "recentDocumentURLs")) {
+			paths = append(paths, goString(send(u, "path")))
+		}
+	})
+	return paths
+}
+
 // TestFullScreenHidesToolbar reports whether a window asks to hide its
 // toolbar with the menu bar when it enters full screen.
 func TestFullScreenHidesToolbar(handle uintptr) bool {
@@ -359,18 +484,45 @@ func TestClickAndType(handle uintptr, x, y float64, text string) bool {
 
 // TestKey presses and releases the key of virtual key code code, typing
 // chars, in a window showing native UI, as the keyboard does: the events
-// go through the window to its surface, and the input method.
+// go through the window to its first responder, the surface and its input
+// method or a web view.
 func TestKey(handle uintptr, code uint16, chars string) bool {
+	return TestKeyShift(handle, code, chars, false)
+}
+
+// TestAppKey posts a key down and up to the application's event queue,
+// which sends it to the key window as it does the user's keys, to a page
+// or native UI. The application has handled the key when it returns
+// (handlePosted).
+func TestAppKey(code uint16, chars string) {
+	withPool(func() {
+		number := sendInt(send(theBackend.app, "keyWindow"), "windowNumber")
+		s := nsString(chars)
+		for _, typ := range []uint{10, 11} { // NSEventTypeKeyDown, KeyUp
+			ev := msgKeyEvent(class("NSEvent"), sel("keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:"),
+				typ, NSPoint{}, 0, 0, number, 0, s, s, false, code)
+			send(theBackend.app, "postEvent:atStart:", uintptr(ev), 0)
+		}
+	})
+	handlePosted()
+}
+
+// TestKeyShift is TestKey with Shift held when shift is set.
+func TestKeyShift(handle uintptr, code uint16, chars string, shift bool) bool {
 	w := theBackend.byNSWindow[id(handle)]
 	if w == nil || w.surface == nil {
 		return false
+	}
+	var flags uint
+	if shift {
+		flags = 1 << 17 // NSEventModifierFlagShift
 	}
 	withPool(func() {
 		number := sendInt(w.win, "windowNumber")
 		s := nsString(chars)
 		for _, typ := range []uint{10, 11} { // NSEventTypeKeyDown, KeyUp
 			ev := msgKeyEvent(class("NSEvent"), sel("keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:"),
-				typ, NSPoint{}, 0, 0, number, 0, s, s, false, code)
+				typ, NSPoint{}, flags, 0, number, 0, s, s, false, code)
 			send(w.win, "sendEvent:", uintptr(ev))
 		}
 	})
@@ -419,7 +571,11 @@ func TestInputClient(handle uintptr) (selected [2]int, document string) {
 	withPool(func() {
 		doc, _, _ := w.surface.document()
 		var actual nsRange
-		document = stringOf(w.surface.substring(nsRange{Length: uint(units(doc))}, &actual))
+		length := uint(units(doc))
+		if w.surface.input.Client != nil {
+			length = 1<<31 - 1
+		}
+		document = stringOf(w.surface.substring(nsRange{Length: length}, &actual))
 	})
 	return [2]int{int(r.Location), int(r.Length)}, document
 }
@@ -429,13 +585,16 @@ var (
 	testDragInfo id
 	testDragAt   NSPoint
 	testDragPB   id
+	testDragMask uint = 1
 )
 
 // TestDropFiles drags files over (x, y), in points from the top-left
 // corner of a window's content, and drops them there, as Finder would:
 // it calls the surface's dragging methods with an NSDraggingInfo of its
-// own. It reports whether the surface took the files over that point and
-// whether it took the drop.
+// own, and puts on the pasteboard the file reference URLs of the files
+// that exist at those paths, with no symbolic links. It reports whether
+// the surface took the files over that point and whether it took the
+// drop.
 func TestDropFiles(handle uintptr, x, y float64, paths []string) (over, dropped bool) {
 	w := theBackend.byNSWindow[id(handle)]
 	if w == nil || w.surface == nil {
@@ -445,18 +604,23 @@ func TestDropFiles(handle uintptr, x, y float64, paths []string) (over, dropped 
 		classDef("MyGoTestDraggingInfo", "NSObject", nil, []objc.MethodDef{
 			method("draggingLocation", func(self id, _ objc.SEL) NSPoint { return testDragAt }),
 			method("draggingPasteboard", func(self id, _ objc.SEL) id { return testDragPB }),
-			method("draggingSourceOperationMask", func(self id, _ objc.SEL) uint { return 1 }),
+			method("draggingSourceOperationMask", func(self id, _ objc.SEL) uint { return testDragMask }),
 		})
 		testDragInfo = send(send(class("MyGoTestDraggingInfo"), "alloc"), "init")
 		testDragPB = retain(send(class("NSPasteboard"), "pasteboardWithUniqueName"))
 	})
 	withPool(func() {
 		content := msgRect(send(w.win, "contentView"), sel("frame"))
+		testDragMask = 1
 		testDragAt = NSPoint{x, content.Size.Height - y}
 		send(testDragPB, "clearContents")
 		var urls []id
 		for _, p := range paths {
-			urls = append(urls, send(class("NSURL"), "fileURLWithPath:", uintptr(nsString(p))))
+			u := fileURL(p)
+			if ref := send(u, "fileReferenceURL"); ref != 0 && goString(send(send(ref, "filePathURL"), "path")) == p {
+				u = ref
+			}
+			urls = append(urls, u)
 		}
 		send(testDragPB, "writeObjects:", uintptr(nsArray(urls...)))
 		v := w.surface.view
@@ -469,6 +633,38 @@ func TestDropFiles(handle uintptr, x, y float64, paths []string) (over, dropped 
 		dropped = sendBool(v, "prepareForDragOperation:", uintptr(testDragInfo)) && sendBool(v, "performDragOperation:", uintptr(testDragInfo))
 	})
 	return over, dropped
+}
+
+// TestDropData exercises native source pasteboard providers and the
+// destination protocol with serialized data (no core session token).
+func TestDropData(handle uintptr, x, y float64, data transfer.Data, operations transfer.Operation) (operation transfer.Operation, dropped bool) {
+	w := theBackend.byNSWindow[id(handle)]
+	if w == nil || w.surface == nil {
+		return
+	}
+	TestDropFiles(handle, -1, -1, nil)
+	withPool(func() {
+		testDragMask = macOperations(operations)
+		content := msgRect(send(w.win, "contentView"), sel("frame"))
+		testDragAt = NSPoint{x, content.Size.Height - y}
+		src := &macDataSource{r: platform.DragRequest{Data: data.Snapshot()}}
+		defer func() {
+			send(testDragPB, "clearContents")
+			for _, p := range src.providers {
+				delete(macDragProviders, p)
+				release(p)
+			}
+		}()
+		send(testDragPB, "clearContents")
+		send(testDragPB, "writeObjects:", uintptr(nsArray(src.pasteboardItems()...)))
+		v := w.surface.view
+		operation = goOperations(uint(send(v, "draggingEntered:", uintptr(testDragInfo))))
+		if operation != transfer.None {
+			dropped = sendBool(v, "performDragOperation:", uintptr(testDragInfo))
+		}
+		send(v, "draggingExited:", uintptr(testDragInfo))
+	})
+	return
 }
 
 // TestAccessNode is an element of native UI as assistive technology reads
@@ -607,4 +803,69 @@ func TestObserve(handle uintptr) (stop func()) {
 			}
 		})
 	}
+}
+
+// TestDocumentChrome describes what a window's title bar shows of its
+// document: the title, the file of the proxy icon, whether the icon
+// shows, and the dot of an edited document.
+func TestDocumentChrome(handle uintptr) (title, file string, icon, edited bool) {
+	withPool(func() {
+		w := id(handle)
+		title = goString(send(w, "title"))
+		if u := send(w, "representedURL"); u != 0 {
+			file = goString(send(u, "path"))
+		}
+		const documentIconButton = 4 // NSWindowDocumentIconButton
+		if b := send(w, "standardWindowButton:", documentIconButton); b != 0 {
+			icon = !sendBool(b, "isHidden")
+		}
+		edited = sendBool(w, "isDocumentEdited")
+	})
+	return
+}
+
+// TestSheet returns the texts of the alert attached to a window as a
+// sheet, and its button titles in the order the alert was given them
+// (their tags), which TestEndSheetButton takes.
+func TestSheet(handle uintptr) (texts, buttons []string, ok bool) {
+	withPool(func() {
+		sheet := send(id(handle), "attachedSheet")
+		if sheet == 0 {
+			return
+		}
+		ok = true
+		tagged := map[int]string{}
+		var walk func(v id)
+		walk = func(v id) {
+			switch {
+			case sendBool(v, "isKindOfClass:", uintptr(class("NSButton"))):
+				if t := goString(send(v, "title")); t != "" {
+					tagged[sendInt(v, "tag")-nsAlertFirstButtonReturn] = t
+				}
+			case sendBool(v, "isKindOfClass:", uintptr(class("NSTextField"))):
+				if t := goString(send(v, "stringValue")); t != "" {
+					texts = append(texts, t)
+				}
+			}
+			for _, sub := range arrayItems(send(v, "subviews")) {
+				walk(sub)
+			}
+		}
+		walk(send(sheet, "contentView"))
+		for i := 0; i < len(tagged); i++ {
+			buttons = append(buttons, tagged[i])
+		}
+	})
+	return
+}
+
+// TestEndSheetButton ends the alert attached to a window as a sheet as if
+// its button i, in the order the alert was given them, was clicked.
+func TestEndSheetButton(handle uintptr, i int) bool {
+	sheet := send(id(handle), "attachedSheet")
+	if sheet == 0 {
+		return false
+	}
+	send(id(handle), "endSheet:returnCode:", uintptr(sheet), uintptr(nsAlertFirstButtonReturn+i))
+	return true
 }

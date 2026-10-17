@@ -168,12 +168,14 @@ test('ctrl+o expands collapsed bash output', async () => {
     await delay(40)
     const collapsed = lastFrame() || ''
     assert.match(collapsed, /Bash|seq 6/)
-    assert.doesNotMatch(collapsed, /⎿/)
+    assert.match(collapsed, /⎿/)
+    assert.match(collapsed, /\+3 行 \(ctrl\+o 展开\)/)
     stdin.write('\x0f')
     await delay(40)
     const opened = lastFrame() || ''
     assert.match(opened, /⎿/)
-    assert.match(opened, /6/)
+    assert.doesNotMatch(opened, /\+3 行/)
+    assert.match(opened, /^ {5}6$/m)
   } finally {
     unmount()
   }
@@ -193,7 +195,7 @@ test('approval block is answered with y', async () => {
       request: { tool_name: 'write', arguments: { path: 'new.txt', content: 'hello' }, summary: 'write new.txt' },
     })
     await delay(40)
-    assert.match(lastFrame() || '', /需要你的批准/)
+    assert.match(lastFrame() || '', /写入文件[\s\S]*是否继续？[\s\S]*❯ 1\. 是/)
     stdin.write('y')
     await delay(40)
     const resolved = client.requests.find(item => item.method === 'resolveApproval')

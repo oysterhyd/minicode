@@ -4,7 +4,6 @@ import (
 	"image"
 	"math"
 	"runtime"
-	"time"
 
 	"github.com/egoist/mygo/internal/scene"
 )
@@ -17,9 +16,6 @@ import (
 // in the middle of the display list redraws the boxes of the operations
 // that changed, clipped as they draw. Glyphs whose pixels changed in an
 // atlas, and images whose pixels changed, count as changed.
-//
-// Scenes shown without it, as the GPU draws them, are Skipped: it compares
-// the next scene with them, and draws what they changed with the next.
 type Renderer struct {
 	// Image holds the last scene drawn, in mem.
 	Image Image
@@ -28,16 +24,15 @@ type Renderer struct {
 	// d draws the bands of large damage.
 	d drawer
 	// valid tells that the last scene, of w×h pixels, is remembered to
-	// compare the next with. stale is where Image does not show it, as
-	// scenes were skipped, and redraw tells that it shows none of it.
+	// compare the next with.
 	valid   bool
 	w, h    int
-	stale   []image.Rectangle
-	redraw  bool
 	clear   scene.Color
 	ops     []scene.Op
 	glyphs  []scene.Glyph
+	stops   []scene.Stop
 	effects []scene.EffectOp
+	words   []uint32
 	// bounds is where each operation of the last scene drew; versions has
 	// the versions of its images.
 	bounds, next []image.Rectangle
@@ -45,8 +40,6 @@ type Renderer struct {
 	mask, color  atlasMark
 	damage       []image.Rectangle
 	clips        []image.Rectangle
-	// cpu is how long the cores took to draw the last scene (CPU).
-	cpu time.Duration
 }
 
 // atlasMark is the state of an atlas a scene drew from.
@@ -78,55 +71,17 @@ func (m *atlasMark) set(a *scene.Atlas) {
 // Render draws s, and returns the rectangles of Image it changed. s may
 // change once Render returns.
 func (r *Renderer) Render(s *scene.Scene) []image.Rectangle {
-	if r.whole(s) || r.blank(s) {
+	drawCanvases(s)
+	if r.whole(s) || r.Image.W != s.Width || r.Image.H != s.Height {
+		// A new size, or Image was released (Release).
 		r.resize(s.Width, s.Height)
 		r.damage = append(r.damage[:0], image.Rect(0, 0, s.Width, s.Height))
-	} else {
-		r.addStale(s)
 	}
-	r.cpu = 0
 	for _, d := range r.damage {
-		r.cpu += r.d.draw(&r.Image, s, d, r.next)
+		r.d.draw(&r.Image, s, d, r.next)
 	}
-	r.stale, r.redraw = r.stale[:0], false
 	r.remember(s)
 	return r.damage
-}
-
-// CPU returns how long the cores took to draw the last scene Rendered,
-// together: a large area draws on several cores at once, which takes the
-// CPU a multiple of the time drawing lasts.
-func (r *Renderer) CPU() time.Duration { return r.cpu }
-
-// Skip notes that s was shown without Render, as when the GPU drew it:
-// Changes compares the next scene with s, and the next Render draws what s
-// changed too. s may change once Skip returns.
-func (r *Renderer) Skip(s *scene.Scene) {
-	if r.whole(s) {
-		r.redraw = true
-	} else if !r.redraw {
-		for _, d := range r.damage {
-			r.stale = addRect(r.stale, d)
-		}
-	}
-	r.remember(s)
-}
-
-// blank reports whether Image shows nothing of the last scene that s can
-// be drawn over: it was skipped whole, or Image was released.
-func (r *Renderer) blank(s *scene.Scene) bool {
-	return r.redraw || r.Image.W != s.Width || r.Image.H != s.Height
-}
-
-// addStale adds to the damage where Image does not show the last scene,
-// with the effects of s reading their backdrops that meets.
-func (r *Renderer) addStale(s *scene.Scene) {
-	for _, d := range r.stale {
-		r.damage = addRect(r.damage, d)
-	}
-	if len(r.stale) > 0 {
-		r.addBackdrops(s)
-	}
 }
 
 // pixels is the memory of a Renderer's image (allocPixels).
@@ -151,29 +106,6 @@ func (r *Renderer) resize(w, h int) {
 func (r *Renderer) Release() {
 	r.mem.free()
 	*r = Renderer{}
-}
-
-// ReleaseImage frees the image, but keeps the last scene to compare the
-// next with (Changes): the next Render draws everything. Image must not be
-// used meanwhile.
-func (r *Renderer) ReleaseImage() {
-	r.mem.free()
-	r.mem, r.Image = nil, Image{}
-}
-
-// Changes returns how many pixels Render would draw for s, and how many
-// of them changed since the last scene, drawn or skipped.
-func (r *Renderer) Changes(s *scene.Scene) (draw, changed int) {
-	all := s.Width * s.Height
-	if r.whole(s) {
-		return all, all
-	}
-	changed = area(r.damage)
-	if r.blank(s) {
-		return all, changed
-	}
-	r.addStale(s)
-	return area(r.damage), changed
 }
 
 func area(rects []image.Rectangle) int {
@@ -256,7 +188,7 @@ func (r *Renderer) addBackdrops(s *scene.Scene) {
 			if fx.Effect == nil || !fx.Effect.Backdrop {
 				continue
 			}
-			need := scene.BackdropOf(op.Rect, fx.Blur, s.Width, s.Height).Area.Union(r.next[i])
+			need := scene.BackdropOf(op.Transform.Bounds(op.Rect), fx.Blur, s.Width, s.Height).Area.Union(r.next[i])
 			for _, d := range r.damage {
 				if d.Overlaps(need) && !need.In(d) {
 					r.damage = addRect(r.damage, need)
@@ -288,46 +220,83 @@ func (r *Renderer) same(i int, s *scene.Scene, j int, maskRects, colorRects []im
 	ga, gb := r.glyphs[:0], s.Glyphs[:0]
 	if a.Kind == scene.OpGlyphs && b.Kind == scene.OpGlyphs {
 		ga, gb = r.glyphs[a.Start:a.End], s.Glyphs[b.Start:b.End]
+	} else if a.Kind == scene.OpEffect && b.Kind == scene.OpEffect && int(sa) < len(r.effects) && int(sb) < len(s.Effects) {
+		// A shader's effect filling mask glyphs.
+		x, y := r.effects[sa].Glyphs, s.Effects[sb].Glyphs
+		ga, gb = r.glyphs[x[0]:x[1]], s.Glyphs[y[0]:y[1]]
 	}
 	a.Start, a.End, b.Start, b.End = 0, 0, 0, 0
+	// Gradients' stops are compared by what Stops point at.
+	if !sameStops(r.stops, a.Stops, s.Stops, b.Stops) {
+		return false
+	}
+	a.Stops, b.Stops = [2]int32{}, [2]int32{}
 	// The CPU draws the sRGB colors, not those outside its gamut, which
 	// Wide points at in each scene's own table.
 	a.Wide, b.Wide = 0, 0
 	if a != b {
 		return false
 	}
+	if !sameGlyphs(ga, gb, maskRects, colorRects) {
+		return false
+	}
 	switch b.Kind {
-	case scene.OpGlyphs:
-		if len(ga) != len(gb) {
-			return false
-		}
-		for k := range gb {
-			g := &gb[k]
-			if ga[k] != *g {
-				x := ga[k]
-				x.Wide = g.Wide
-				if x != *g {
-					return false
-				}
-			}
-			rects := maskRects
-			if g.Colored {
-				rects = colorRects
-			}
-			at := image.Rect(int(g.U), int(g.V), int(g.U)+int(g.UW), int(g.V)+int(g.VH))
-			for _, c := range rects {
-				if c.Overlaps(at) {
-					return false
-				}
-			}
-		}
 	case scene.OpImage:
 		if b.Image != nil && b.Image.Version() != r.versions[i] {
 			return false
 		}
 	case scene.OpEffect:
-		if int(sa) >= len(r.effects) || int(sb) >= len(s.Effects) || r.effects[sa] != s.Effects[sb] {
+		if int(sa) >= len(r.effects) || int(sb) >= len(s.Effects) || !r.effects[sa].Same(&s.Effects[sb]) {
 			return false
+		}
+	}
+	return true
+}
+
+// sameStops reports whether stops sa[a[0]:a[1]] of the last scene are
+// those sb[b[0]:b[1]] of the new one.
+func sameStops(sa []scene.Stop, a [2]int32, sb []scene.Stop, b [2]int32) bool {
+	if a[1]-a[0] != b[1]-b[0] {
+		return false
+	}
+	if a[1] <= a[0] {
+		return true
+	}
+	if int(a[1]) > len(sa) || int(b[1]) > len(sb) || a[0] < 0 || b[0] < 0 {
+		return false
+	}
+	for i := range a[1] - a[0] {
+		if sa[a[0]+i] != sb[b[0]+i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sameGlyphs reports whether glyphs ga of the last scene draw what gb do,
+// none of them in an area of the atlases that changed.
+func sameGlyphs(ga, gb []scene.Glyph, maskRects, colorRects []image.Rectangle) bool {
+	if len(ga) != len(gb) {
+		return false
+	}
+	for k := range gb {
+		g := &gb[k]
+		if ga[k] != *g {
+			x := ga[k]
+			x.Wide = g.Wide
+			if x != *g {
+				return false
+			}
+		}
+		rects := maskRects
+		if g.Colored {
+			rects = colorRects
+		}
+		at := image.Rect(int(g.U), int(g.V), int(g.U)+int(g.UW), int(g.V)+int(g.VH))
+		for _, c := range rects {
+			if c.Overlaps(at) {
+				return false
+			}
 		}
 	}
 	return true
@@ -364,17 +333,23 @@ func (r *Renderer) opBounds(s *scene.Scene, out []image.Rectangle) []image.Recta
 		op := &s.Ops[i]
 		var b image.Rectangle
 		switch op.Kind {
-		case scene.OpFill, scene.OpImage, scene.OpEffect:
-			b = outset(op.Rect, 1)
+		case scene.OpFill, scene.OpImage, scene.OpEffect, scene.OpHole:
+			b = outset(op.Transform.Bounds(op.Rect), 1)
 		case scene.OpShadow:
-			b = outset(op.Rect, 1.5*op.Blur+1)
+			if op.Inset {
+				b = outset(op.Transform.Bounds(op.Cast), 1)
+			} else {
+				e := 1.5*op.Blur + 1
+				box := scene.Rect{X: op.Rect.X - e, Y: op.Rect.Y - e, W: op.Rect.W + 2*e, H: op.Rect.H + 2*e}
+				b = outset(op.Transform.Bounds(box), 1)
+			}
 		case scene.OpGlyphs:
 			for _, g := range s.Glyphs[op.Start:op.End] {
-				b = b.Union(outset(scene.Rect{X: g.X, Y: g.Y, W: g.W, H: g.H}, 1))
+				b = b.Union(outset(op.Transform.Mul(g.Transform).Bounds(scene.Rect{X: g.X, Y: g.Y, W: g.W, H: g.H}), 1))
 			}
 		case scene.OpPushClip:
 			// A clip that changes changes everything it cuts.
-			b = outset(op.Rect, 1)
+			b = outset(op.Transform.Bounds(op.Rect), 1)
 			r.clips = append(r.clips, clip)
 			clip = clip.Intersect(b)
 		case scene.OpPopClip:
@@ -398,9 +373,33 @@ func (r *Renderer) remember(s *scene.Scene) {
 	r.valid = true
 	r.w, r.h = s.Width, s.Height
 	r.clear = s.Clear
+	if len(r.ops) > len(s.Ops) {
+		clear(r.ops[len(s.Ops):])
+	}
 	r.ops = append(r.ops[:0], s.Ops...)
 	r.glyphs = append(r.glyphs[:0], s.Glyphs...)
+	r.stops = append(r.stops[:0], s.Stops...)
+	if len(r.effects) > len(s.Effects) {
+		clear(r.effects[len(s.Effects):])
+	}
 	r.effects = append(r.effects[:0], s.Effects...)
+	// The uniforms' words, which the scene reuses next frame (Words), kept
+	// apart.
+	r.words = r.words[:0]
+	for i := range r.effects {
+		r.words = append(r.words, r.effects[i].Uniforms...)
+		r.words = append(r.words, r.effects[i].WideUniforms...)
+	}
+	at := 0
+	for i := range r.effects {
+		fx := &r.effects[i]
+		n, w := len(fx.Uniforms), len(fx.WideUniforms)
+		fx.Uniforms = r.words[at : at+n : at+n]
+		if fx.WideUniforms != nil {
+			fx.WideUniforms = r.words[at+n : at+n+w : at+n+w]
+		}
+		at += n + w
+	}
 	r.bounds, r.next = r.next, r.bounds
 	r.versions = r.versions[:0]
 	for i := range s.Ops {

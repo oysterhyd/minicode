@@ -1,8 +1,8 @@
 package raster
 
 import (
+	"math"
 	"runtime"
-	"time"
 
 	"github.com/egoist/mygo/internal/scene"
 )
@@ -16,6 +16,9 @@ type drawer struct {
 	job   bandJob
 	bd    backdrop
 	fx    map[*scene.Effect]scene.EffectPixels
+	// blurred holds, by op, the images of the scene drawn that blur theirs
+	// (blurImages).
+	blurred []*blurredImage
 }
 
 // pixels returns what draws e on the CPU, made the first time, or nil for
@@ -61,9 +64,8 @@ const (
 // for.
 const texelWork = 64 << 10
 
-// read computes the backdrop b of dst, and returns how long the cores
-// took, together.
-func (bd *backdrop) read(dst *Image, b scene.Backdrop) time.Duration {
+// read computes the backdrop b of dst.
+func (bd *backdrop) read(dst *Image, b scene.Backdrop) {
 	img := &bd.img
 	img.Backdrop = b
 	img.W, img.H = b.Size()
@@ -73,40 +75,38 @@ func (bd *backdrop) read(dst *Image, b scene.Backdrop) time.Duration {
 	}
 	img.Pix, bd.tmp = img.Pix[:n], bd.tmp[:n]
 	if n == 0 {
-		return 0
+		return
 	}
 	bd.dst = dst
 	k := b.Down
-	busy := bd.run(averagePass, img.H, img.W*k*k)
+	bd.run(averagePass, img.H, img.W*k*k)
 	if b.Radius == 0 {
-		return busy
+		return
 	}
 	bd.weights = bd.weights[:0]
 	for i := 0; i <= b.Radius; i++ {
 		bd.weights = append(bd.weights, scene.BlurWeight(i, b.Sigma))
 	}
 	taps := 2*b.Radius + 1
-	busy += bd.run(rowsPass, img.H, img.W*taps)
-	return busy + bd.run(columnsPass, img.W, img.H*taps)
+	bd.run(rowsPass, img.H, img.W*taps)
+	bd.run(columnsPass, img.W, img.H*taps)
 }
 
 // run does lines 0 to n-1 of pass, each work texels times taps, on
-// several cores when they are worth it, and returns how long the cores
-// took, together.
-func (bd *backdrop) run(pass, n, work int) time.Duration {
-	start := time.Now()
+// several cores when they are worth it.
+func (bd *backdrop) run(pass, n, work int) {
 	bd.pass = pass
 	workers := max(min(runtime.GOMAXPROCS(0), n*work/texelWork, maxWorkers), 1)
 	if workers == 1 {
 		for i := range n {
 			bd.line(0, i)
 		}
-		return time.Since(start)
+		return
 	}
 	if bd.lines.do == nil {
 		bd.lines.do = bd.line
 	}
-	return bd.lines.run(workers, n)
+	bd.lines.run(workers, n)
 }
 
 // line does line i of the pass.
@@ -234,6 +234,75 @@ func (r *renderer) effect(op *scene.Op, px scene.EffectPixels, b *scene.Backdrop
 				continue
 			}
 			blend(p, c, cov)
+		}
+	}
+}
+
+// maskedEffect draws a shader's effect filling mask glyphs (fx.Glyphs) with
+// px, as glyphs draws mask glyphs: each pixel the shader's color times the
+// glyph's coverage, corrected for that color.
+func (r *renderer) maskedEffect(op *scene.Op, fx *scene.EffectOp, px scene.EffectPixels) {
+	atlas := r.s.MaskAtlas
+	if atlas == nil {
+		return
+	}
+	opacity := opacityOf(op.Opacity)
+	text := r.s.Text
+	for _, g := range r.s.Glyphs[fx.Glyphs[0]:fx.Glyphs[1]] {
+		if g.Colored || g.Subpixel {
+			continue
+		}
+		boost := float32(0)
+		if g.Thin {
+			boost = scene.ThinBoost
+		}
+		box := scene.Rect{X: float32(math.Round(float64(g.X))), Y: float32(math.Round(float64(g.Y))), W: float32(g.UW), H: float32(g.VH)}
+		m := op.Transform.Mul(g.Transform)
+		if !m.Set {
+			gx, gy := int(box.X), int(box.Y)
+			x0, y0 := max(gx, r.x0), max(gy, r.y0)
+			x1, y1 := min(gx+int(g.UW), r.x1), min(gy+int(g.VH), r.y1)
+			for y := y0; y < y1; y++ {
+				row := r.dst.Pix[y*r.dst.Stride:]
+				cl, ch := r.clipSolid(y)
+				ay := int(g.V) + y - gy
+				for x := x0; x < x1; x++ {
+					mk := atlas.Pix[ay*atlas.W+int(g.U)+x-gx]
+					if mk == 0 {
+						continue
+					}
+					cov := opacity
+					if x < cl || x >= ch {
+						if cov *= r.clipCoverage(x, y); cov == 0 {
+							continue
+						}
+					}
+					c := px.Color(float32(x)+0.5, float32(y)+0.5, nil)
+					a := scene.TextCoverage(float32(mk)/255, unpremul(c), text.Contrast, boost, text.GammaRatios)
+					blend(row[4*x:4*x+4], c, cov*a)
+				}
+			}
+			continue
+		}
+		inv, ok := m.Inverse()
+		if !ok {
+			continue
+		}
+		shape := newShape(box, [4]float32{})
+		x0, y0, x1, y1 := r.pixelBounds(m.Bounds(box))
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				wx, wy := float32(x)+0.5, float32(y)+0.5
+				cov := r.clipCoverage(x, y) * transformedCoverage(&shape, m, inv, wx, wy) * opacity
+				if cov <= 0 {
+					continue
+				}
+				lx, ly := inv.Point(wx, wy)
+				s := atlasSample(atlas, float32(g.U)+lx-box.X, float32(g.V)+ly-box.Y, int(g.U), int(g.V), int(g.UW), int(g.VH))
+				c := px.Color(lx, ly, nil)
+				a := scene.TextCoverage(s[0], unpremul(c), text.Contrast, boost, text.GammaRatios)
+				blend(r.dst.Pix[y*r.dst.Stride+4*x:][:4], c, cov*a)
+			}
 		}
 	}
 }

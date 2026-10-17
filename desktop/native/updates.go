@@ -54,7 +54,7 @@ func (d *desktop) checkUpdateButton(c *ui.Context, p palette) {
 	if u == nil {
 		return
 	}
-	if button(c, p, tr("检查更新"), "RefreshCw", false).Disabled(!u.Enabled()).Clicked() {
+	if button(c, p, tr("检查更新"), "RefreshCw", false).AlignSelf(ui.Start).Disabled(!u.Enabled()).Clicked() {
 		u.Check()
 	}
 	if !u.Enabled() {

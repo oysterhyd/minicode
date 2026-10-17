@@ -78,7 +78,7 @@ func (d *inspDetails) hash() uint64 {
 }
 
 // describe returns the details of e.
-func describe(rt *engine, e *Element) inspDetails {
+func describe(rt *engine, e *node) inspDetails {
 	d := inspDetails{name: elementName(e), id: e.id, source: rt.insp.source}
 	sel := d.name
 	if k, ok := rt.insp.keys[e.id]; ok {
@@ -104,7 +104,7 @@ func describe(rt *engine, e *Element) inspDetails {
 }
 
 // ownStyles returns the styles e sets, as CSS declarations.
-func ownStyles(rt *engine, e *Element) []inspDecl {
+func ownStyles(rt *engine, e *node) []inspDecl {
 	var ds []inspDecl
 	add := func(name, value string) { ds = append(ds, inspDecl{name: name, value: value}) }
 	addColor := func(name string, c Color) {
@@ -155,6 +155,9 @@ func ownStyles(rt *engine, e *Element) []inspDecl {
 	if e.self != alignAuto {
 		add("align-self", cssAlign(e.self))
 	}
+	if e.dir&dirSet != 0 {
+		add("direction", Direction(e.dir&dirRTL).String())
+	}
 	switch {
 	case e.attach != 0:
 		at, self := e.attach.anchors()
@@ -204,7 +207,15 @@ func ownStyles(rt *engine, e *Element) []inspDecl {
 		if e.borderStyle == BorderDashed {
 			style = "dashed"
 		}
-		ds = append(ds, inspDecl{name: "border", value: v + " " + style + " " + colorText(e.borderC), color: e.borderC, swatch: true})
+		if e.grads != nil && e.grads.border != borderColor {
+			add("border", v+" "+style)
+			add("border-image", "gradient")
+		} else {
+			ds = append(ds, inspDecl{name: "border", value: v + " " + style + " " + colorText(e.borderC), color: e.borderC, swatch: true})
+		}
+	}
+	if e.blur > 0 {
+		add("filter", "blur("+num(e.blur)+"px)")
 	}
 	if v, ok := edgesCSS(e.radius); ok {
 		add("border-radius", v)
@@ -225,9 +236,14 @@ func ownStyles(rt *engine, e *Element) []inspDecl {
 	}
 	if e.kind == kindBox || e.kind == kindText && e.bg.A > 0 {
 		switch {
+		case e.fill == fillGradient && len(e.grad.Stops) > 0:
+			add("background", fmt.Sprintf("linear-gradient(%sdeg, %d stops)", num(e.grad.Angle), len(e.grad.Stops)))
 		case e.fill == fillGradient:
 			g := e.grad
 			add("background", fmt.Sprintf("linear-gradient(%sdeg, %s, %s)", num(g.Angle), colorText(g.From), colorText(g.To)))
+		case e.fill == fillConic:
+			g := e.grads.conic
+			add("background", fmt.Sprintf("conic-gradient(from %sdeg, %d stops)", num(g.Angle), len(g.Stops)))
 		case e.fill == fillStripes:
 			add("background", "stripes "+colorText(e.stripes.c))
 		case e.fill == fillMaterial:
@@ -242,7 +258,11 @@ func ownStyles(rt *engine, e *Element) []inspDecl {
 		}
 	}
 	for _, sh := range e.shadows {
-		add("box-shadow", fmt.Sprintf("%s %s %s %s %s", pxText(sh.x), pxText(sh.y), pxText(sh.blur), pxText(sh.spread), colorText(sh.color)))
+		inset := ""
+		if sh.inset {
+			inset = "inset "
+		}
+		add("box-shadow", fmt.Sprintf("%s%s %s %s %s %s", inset, pxText(sh.x), pxText(sh.y), pxText(sh.blur), pxText(sh.spread), colorText(sh.color)))
 	}
 	if e.opacitySet && e.opacity < 1 {
 		add("opacity", num(e.opacity))
@@ -293,7 +313,7 @@ func ownStyles(rt *engine, e *Element) []inspDecl {
 }
 
 // textStyles returns the text styles of ts in set, as CSS declarations.
-func textStyles(ts *textStyle, set uint16) []inspDecl {
+func textStyles(ts *textStyle, set uint32) []inspDecl {
 	var ds []inspDecl
 	add := func(name, value string) { ds = append(ds, inspDecl{name: name, value: value}) }
 	if set&setFamily != 0 {
@@ -331,6 +351,9 @@ func textStyles(ts *textStyle, set uint16) []inspDecl {
 	if set&setFeatures != 0 {
 		add("font-feature-settings", ts.features)
 	}
+	if set&setLang != 0 {
+		add("lang", ts.lang)
+	}
 	var deco []string
 	if set&setUnderline != 0 && ts.underline {
 		if ts.wavy {
@@ -348,11 +371,14 @@ func textStyles(ts *textStyle, set uint16) []inspDecl {
 	if set&setBackground != 0 {
 		ds = append(ds, inspDecl{name: "background-color", value: colorText(ts.background), color: ts.background, swatch: true})
 	}
+	if set&setSelection != 0 {
+		ds = append(ds, inspDecl{name: "selection-color", value: colorText(ts.selection), color: ts.selection, swatch: true})
+	}
 	return ds
 }
 
 // computed returns the values e has as laid out, by name.
-func computed(e *Element) []inspDecl {
+func computed(e *node) []inspDecl {
 	var ds []inspDecl
 	add := func(name, value string) { ds = append(ds, inspDecl{name: name, value: value}) }
 	display := "flex"
@@ -365,6 +391,7 @@ func computed(e *Element) []inspDecl {
 		display = "image"
 	}
 	add("display", display)
+	add("direction", Direction(e.dir&dirRTL).String())
 	if e.kind == kindBox && !e.grid {
 		dir := "column"
 		if e.row {
@@ -406,7 +433,7 @@ func computed(e *Element) []inspDecl {
 
 // properties returns what e is, its state, and what assistive technology
 // sees of it.
-func properties(rt *engine, e *Element) []inspSection {
+func properties(rt *engine, e *node) []inspSection {
 	yes := func(b bool) string {
 		if b {
 			return "true"
@@ -511,7 +538,8 @@ func edgesCSS(v [4]float32) (string, bool) {
 }
 
 func anchorText(a Anchor) string {
-	return [...]string{"top left", "top", "top right", "left", "center", "right", "bottom left", "bottom", "bottom right"}[min(int(a), 8)]
+	return [...]string{"top left", "top", "top right", "left", "center", "right", "bottom left", "bottom", "bottom right",
+		"top start", "start", "bottom start", "top end", "end", "bottom end"}[min(int(a), 14)]
 }
 
 func cursorText(c Cursor) string {

@@ -3,15 +3,14 @@
 package windows
 
 import (
-	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
-	"strings"
 	"syscall"
 	"unsafe"
+
+	"github.com/egoist/mygo/internal/webview2"
 )
 
 // Vtable indices of the WebView2 interfaces used here, from WebView2.h
@@ -35,34 +34,35 @@ const (
 	ctl2PutDefaultBackgroundColor        = 27
 
 	// ICoreWebView2
-	wvGetSettings                         = 3
-	wvGetSource                           = 4
-	wvNavigate                            = 5
-	wvNavigateToString                    = 6
-	wvAddNavigationStarting               = 7
-	wvAddContentLoading                   = 9
-	wvAddPermissionRequested              = 23
-	wvAddNavigationCompleted              = 15
-	wvAddProcessFailed                    = 25
-	wvAddScriptToExecuteOnDocumentCreated = 27
-	wvExecuteScript                       = 29
-	wvCapturePreview                      = 30
-	wvReload                              = 31
-	wvAddWebMessageReceived               = 34
-	wvCallDevToolsProtocolMethod          = 36
-	wvGetCanGoBack                        = 38
-	wvGetCanGoForward                     = 39
-	wvGoBack                              = 40
-	wvGoForward                           = 41
-	wvStop                                = 43
-	wvAddNewWindowRequested               = 44
-	wvAddDocumentTitleChanged             = 46
-	wvGetDocumentTitle                    = 48
-	wvOpenDevToolsWindow                  = 51
-	wvAddWebResourceRequested             = 55
-	wvAddWebResourceRequestedFilter       = 57
-	wvRemoveWebResourceRequestedFilter    = 58
-	wvAddWindowCloseRequested             = 59
+	wvGetSettings                            = 3
+	wvGetSource                              = 4
+	wvNavigate                               = 5
+	wvNavigateToString                       = 6
+	wvAddNavigationStarting                  = 7
+	wvAddContentLoading                      = 9
+	wvAddPermissionRequested                 = 23
+	wvAddNavigationCompleted                 = 15
+	wvAddProcessFailed                       = 25
+	wvAddScriptToExecuteOnDocumentCreated    = 27
+	wvRemoveScriptToExecuteOnDocumentCreated = 28
+	wvExecuteScript                          = 29
+	wvCapturePreview                         = 30
+	wvReload                                 = 31
+	wvAddWebMessageReceived                  = 34
+	wvCallDevToolsProtocolMethod             = 36
+	wvGetCanGoBack                           = 38
+	wvGetCanGoForward                        = 39
+	wvGoBack                                 = 40
+	wvGoForward                              = 41
+	wvStop                                   = 43
+	wvAddNewWindowRequested                  = 44
+	wvAddDocumentTitleChanged                = 46
+	wvGetDocumentTitle                       = 48
+	wvOpenDevToolsWindow                     = 51
+	wvAddWebResourceRequested                = 55
+	wvAddWebResourceRequestedFilter          = 57
+	wvRemoveWebResourceRequestedFilter       = 58
+	wvAddWindowCloseRequested                = 59
 
 	// ICoreWebView2Settings, ICoreWebView2Settings2
 	setPutIsScriptEnabled                = 4
@@ -79,6 +79,7 @@ const (
 	navStartingGetURI             = 3
 	navStartingGetIsUserInitiated = 4
 	navStartingPutCancel          = 8
+	navStarting3GetNavigationKind = 12
 	navCompletedGetIsSuccess      = 3
 	navCompletedGetWebErrorStatus = 4
 	msgTryGetWebMessageAsString   = 5
@@ -133,33 +134,44 @@ var (
 	iidICoreWebView2Controller2                  = guid("c979903e-d4ca-4228-92eb-47ee3fa96eab")
 	iidICoreWebView2Settings2                    = guid("ee9a0f68-f46c-4e32-ac23-ef8cac224d2a")
 	iidICoreWebView2WebMessageReceivedEventArgs2 = guid("06fc7ab7-c90c-4297-9389-33ca01cf6d5e")
+	iidICoreWebView2NavigationStartingEventArgs3 = guid("ddffe494-4942-4bd2-ab73-35b8ff40e19f")
 	iidICoreWebView2File                         = guid("f2c19559-6bc1-4583-a757-90021be9afec")
 	iidICoreWebView2_4                           = guid("20d02d59-6df2-42dc-bd06-f98a694b1302")
 	iidICoreWebView2_13                          = guid("f75f09a8-667e-4983-88d6-c8773f315e84")
 	iidICoreWebView2Profile2                     = guid("fa740d4b-5eae-4344-a8ad-74be31925397")
 )
 
-// The WebView2 Runtime channels, most stable first.
-var webView2Channels = []string{
-	"{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}", // Stable (Evergreen)
-	"{2CD8A007-E189-409D-A2C8-9AF4EF3C72AA}", // Beta
-	"{0D50BFEC-CD6A-4F9A-964C-C7416E3ACB10}", // Dev
-	"{65C35B14-6C1D-4122-AC46-7148CC9D6497}", // Canary
-}
-
 const (
-	hkeyCurrentUser  = 0x80000001
-	hkeyLocalMachine = 0x80000002
-	keyQueryValue    = 0x0001
-	keyWow6432Key    = 0x0200
+	hkeyCurrentUser = 0x80000001
+	keyQueryValue   = 0x0001
 )
 
-// errNoWebView2 explains how to get the runtime.
-var errNoWebView2 = errors.New("mygo: the Microsoft Edge WebView2 Runtime is not installed; get it from https://go.microsoft.com/fwlink/p/?LinkId=2124703")
+// createEnvironment starts creating the WebView2 environment, in language,
+// the app's (envOptions), or the system's for ""; done runs on the main
+// thread with it, or with an error. A runtime that fails to create one with
+// the options is asked for one without them.
+func createEnvironment(userData, language string, done func(env uintptr, err error)) error {
+	err := createEnvironmentWith(userData, language, func(env uintptr, err error) {
+		if err != nil && language != "" {
+			// A runtime that takes no options of ours: one without them,
+			// in the language of the system.
+			log.Printf("%v; creating it again without its language", err)
+			if err := createEnvironmentWith(userData, "", done); err != nil {
+				done(0, err)
+			}
+			return
+		}
+		done(env, err)
+	})
+	if err != nil && language != "" {
+		return createEnvironmentWith(userData, "", done)
+	}
+	return err
+}
 
-// createEnvironment starts creating the WebView2 environment; done runs on
-// the main thread with it, or with an error.
-func createEnvironment(userData string, done func(env uintptr, err error)) error {
+// createEnvironmentWith creates the environment as createEnvironment does,
+// with the options of language, or none for "".
+func createEnvironmentWith(userData, language string, done func(env uintptr, err error)) error {
 	completed := func(hr, env uintptr) {
 		if failed(hr) || env == 0 {
 			done(0, hresultError("creating the WebView2 environment", hr))
@@ -169,36 +181,34 @@ func createEnvironment(userData string, done func(env uintptr, err error)) error
 		done(env, nil)
 	}
 	dataDir := u16(userData)
+	var options uintptr
+	if language != "" {
+		options = newEnvOptions(language)
+		defer release(options) // the environment takes its own reference
+	}
 
 	// An official loader next to the executable wins.
-	if exe, err := os.Executable(); err == nil {
-		loader := filepath.Join(filepath.Dir(exe), "WebView2Loader.dll")
-		if _, err := os.Stat(loader); err == nil {
-			proc := syscall.NewLazyDLL(loader).NewProc("CreateCoreWebView2EnvironmentWithOptions")
-			if proc.Find() == nil {
-				hr := withHandler(completed, func(h uintptr) uintptr {
-					r, _, _ := proc.Call(0, uintptr(unsafe.Pointer(dataDir)), 0, h)
-					return r
-				})
-				if failed(hr) {
-					return hresultError("CreateCoreWebView2EnvironmentWithOptions", hr)
-				}
-				return nil
-			}
+	if proc := loaderProc(); proc != nil {
+		hr := withHandler(completed, func(h uintptr) uintptr {
+			r, _, _ := proc.Call(0, uintptr(unsafe.Pointer(dataDir)), options, h)
+			return r
+		})
+		if failed(hr) {
+			return hresultError("CreateCoreWebView2EnvironmentWithOptions", hr)
 		}
+		return nil
 	}
 
-	// Otherwise the installed runtime's client library, as the loader
-	// does: a fixed version runtime named by
-	// WEBVIEW2_BROWSER_EXECUTABLE_FOLDER, else the Evergreen runtime.
-	client, runtimeType := "", uintptr(0)
-	if dir := os.Getenv("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"); dir != "" {
-		client, runtimeType = clientDLL(dir), 1
-	} else {
-		client = installedClientDLL()
+	// Otherwise the runtime's client library, as the loader does: a fixed
+	// version runtime named by WEBVIEW2_BROWSER_EXECUTABLE_FOLDER, else the
+	// Evergreen runtime.
+	dir, fixed, err := webview2.Find()
+	if err != nil {
+		return fmt.Errorf("mygo: %w", err)
 	}
-	if client == "" {
-		return errNoWebView2
+	client, runtimeType := webview2.ClientDLL(dir), uintptr(0)
+	if fixed {
+		runtimeType = 1
 	}
 	dll := syscall.NewLazyDLL(client)
 	proc := dll.NewProc("CreateWebViewEnvironmentWithOptionsInternal")
@@ -206,7 +216,7 @@ func createEnvironment(userData string, done func(env uintptr, err error)) error
 		return fmt.Errorf("mygo: unsupported WebView2 Runtime at %s: %w", client, err)
 	}
 	hr := withHandler(completed, func(h uintptr) uintptr {
-		r, _, _ := proc.Call(1, runtimeType, uintptr(unsafe.Pointer(dataDir)), 0, h)
+		r, _, _ := proc.Call(1, runtimeType, uintptr(unsafe.Pointer(dataDir)), options, h)
 		return r
 	})
 	if failed(hr) {
@@ -215,89 +225,46 @@ func createEnvironment(userData string, done func(env uintptr, err error)) error
 	return nil
 }
 
-func clientDLL(runtimeDir string) string {
-	arch := "x64"
-	if runtime.GOARCH == "arm64" {
-		arch = "arm64"
+// loaderProc returns the official WebView2 loader next to the executable and
+// its CreateCoreWebView2EnvironmentWithOptions, or nil when there is no
+// loader to use. createEnvironment calls what it returns, and
+// WebViewAvailable asks for it, so the two cannot disagree: a DLL of that
+// name with no such export is no loader, and a runtime is looked for
+// instead.
+func loaderProc() *syscall.LazyProc {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
 	}
-	p := filepath.Join(runtimeDir, "EBWebView", arch, "EmbeddedBrowserWebView.dll")
-	if _, err := os.Stat(p); err != nil {
-		return ""
+	path := filepath.Join(filepath.Dir(exe), "WebView2Loader.dll")
+	if _, err := os.Stat(path); err != nil {
+		return nil
 	}
-	return p
+	proc := syscall.NewLazyDLL(path).NewProc("CreateCoreWebView2EnvironmentWithOptions")
+	if proc.Find() != nil {
+		return nil
+	}
+	return proc
 }
 
-// installedClientDLL finds the newest installed runtime, per machine or
-// per user, in the channel order.
-func installedClientDLL() string {
-	for _, channel := range webView2Channels {
-		best, bestVersion := "", []int(nil)
-		for _, root := range []uintptr{hkeyLocalMachine, hkeyCurrentUser} {
-			dir := regString(root, `SOFTWARE\Microsoft\EdgeUpdate\ClientState\`+channel, "EBWebView")
-			if dir == "" {
-				continue
-			}
-			if p := clientDLL(dir); p != "" {
-				if v := parseVersion(filepath.Base(dir)); best == "" || compareVersions(v, bestVersion) > 0 {
-					best, bestVersion = p, v
-				}
-			}
-		}
-		if best != "" {
-			return best
-		}
+// WebViewAvailable reports whether a window showing a web page can have
+// one: the WebView2 Runtime is installed, or a loader next to the
+// executable loads a fixed version runtime or the installed one itself. It
+// starts nothing; once a window showing a page created the environment, it
+// says whether that worked. It reads the registry and the disk only, so any
+// goroutine may call it, before Init too.
+func (b *Backend) WebViewAvailable() bool {
+	switch b.envResult.Load() {
+	case 1:
+		return true
+	case 2:
+		return false
 	}
-	return ""
-}
-
-func parseVersion(s string) []int {
-	var v []int
-	for _, part := range strings.Split(s, ".") {
-		n, err := strconv.Atoi(part)
-		if err != nil {
-			return nil
-		}
-		v = append(v, n)
+	if loaderProc() != nil {
+		return true
 	}
-	return v
-}
-
-func compareVersions(a, b []int) int {
-	for i := 0; i < len(a) || i < len(b); i++ {
-		var x, y int
-		if i < len(a) {
-			x = a[i]
-		}
-		if i < len(b) {
-			y = b[i]
-		}
-		if x != y {
-			if x < y {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
-}
-
-// regString reads a string value from the 32-bit view of the registry,
-// where EdgeUpdate records its clients.
-func regString(root uintptr, path, name string) string {
-	var key uintptr
-	if r, _, _ := procRegOpenKeyExW.Call(root, uintptr(unsafe.Pointer(u16(path))), 0, keyQueryValue|keyWow6432Key, uintptr(unsafe.Pointer(&key))); r != 0 {
-		return ""
-	}
-	defer procRegCloseKey.Call(key)
-	var typ, size uint32
-	if r, _, _ := procRegQueryValueExW.Call(key, uintptr(unsafe.Pointer(u16(name))), 0, uintptr(unsafe.Pointer(&typ)), 0, uintptr(unsafe.Pointer(&size))); r != 0 || size == 0 {
-		return ""
-	}
-	buf := make([]uint16, size/2+1)
-	if r, _, _ := procRegQueryValueExW.Call(key, uintptr(unsafe.Pointer(u16(name))), 0, uintptr(unsafe.Pointer(&typ)), uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size))); r != 0 {
-		return ""
-	}
-	return syscall.UTF16ToString(buf)
+	_, _, err := webview2.Find()
+	return err == nil
 }
 
 // regDWORD reads a DWORD value, reporting whether it exists.

@@ -28,32 +28,46 @@ func toolTarget(item *model.FeedItem) string {
 	return item.Name
 }
 
+// feedWidth is the measure of the conversation, as Claude keeps its column.
+const feedWidth = 800
+
 func (d *desktop) feed(c *ui.Context, p palette) {
 	v := d.current()
-	ui.Column(c).Grow(1).FillWidth().Children(func() {
+	ui.Column(c).Fill().Children(func() {
 		if v.Loading {
 			ui.Row(c).Grow(1).Center().Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在恢复会话…")) })
 			return
 		}
 		v.List.FollowEnd = true
+		if !reduceMotion(c) {
+			v.List.FollowAnimation = &ui.Smooth
+		} else {
+			v.List.FollowAnimation = nil
+		}
 		v.List.Key = func(i int) any { return v.Rows[i].ID }
+		bottom := max(150, d.dockHeight) + 12
 		ui.List(c, &v.List, len(v.Rows), func(i int) {
 			row := v.Rows[i]
-			ui.Column(c).FillWidth().MaxWidth(820).Margin(0, ui.Auto).Padding(0, 32).Children(func() {
+			ui.Column(c).FillWidth().MaxWidth(feedWidth).Margin(0, ui.Auto).Padding(0, 32).Children(func() {
 				if row.Tools != nil {
 					if len(row.Tools) > 1 {
 						d.toolGroup(c, p, row)
 					} else {
-						d.tool(c, p, row.Tools[0], false)
+						d.toolGroup(c, p, row)
 					}
 				} else {
 					d.message(c, p, row.Item, i == len(v.Rows)-1)
 				}
 			})
-		}).Grow(1).Gap(14).Padding(28, 0, 24, 0).Label(tr("对话记录")).Role(ui.RoleList)
+		}).Grow(1).Gap(18).Padding(8, 0, bottom, 0).ScrollbarInsets(8, 0, bottom-12, 0).Label(tr("对话记录")).Role(ui.RoleList)
 		if !v.List.AtEnd() {
-			ui.Row(c).Absolute().Bottom(14).LeftPercent(40).Children(func() {
-				if button(c, p, tr("回到最新"), "ArrowDown", false).Radius(99).Background(p.Elevated).Clicked() {
+			ui.Row(c).Absolute().Bottom(bottom - 4).Left(0).Right(0).Justify(ui.Center).PassThrough().Children(func() {
+				back := glassy(ui.ButtonBase(c).Label(tr("回到最新")).Height(32).Padding(0, 14, 0, 12).Gap(6), 99, ui.Transparent).Transition(enterMotion)
+				back.Children(func() {
+					icon(c, "ArrowDown", 14, p.Text2)
+					ui.Text(c, tr("回到最新")).NoWrap().FontSize(p.font(12.04)).FontWeight(550).TextColor(p.Text2)
+				})
+				if back.Clicked() {
 					v.List.ScrollToEnd()
 				}
 			})
@@ -65,17 +79,17 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 	v := d.current()
 	switch item.Kind {
 	case "user":
-		turn := ui.Column(c).AlignItems(ui.End).Gap(2).Margin(6, 0, 0, 0).Transition(enterMotion)
+		turn := ui.Column(c).AlignItems(ui.End).Gap(6).Margin(10, 0, 0, 0).Transition(enterMotion)
 		turn.Children(func() {
 			if len(item.Attachments) > 0 {
 				d.attachmentChips(c, p, item.Attachments, false)
 			}
-			ui.Text(c, item.Text).MaxWidthPercent(85).Padding(9, 14).Radius(18).Background(p.Subtle).Border(1, p.BorderSubtle).FontSize(p.font(13.72)).LineHeight(1.6).Selectable()
-			actions := ui.Row(c).Height(26).Gap(2)
+			ui.Text(c, item.Text).MaxWidthPercent(82).Padding(10, 16).Radius(20).Background(p.Subtle).FontSize(p.font(14)).LineHeight(1.6).TextColor(p.Text).Selectable()
+			actions := ui.Row(c).Height(26).Gap(2).Margin(-2, 0, 0, 0)
 			if !turn.Hovered() && !turn.FocusWithin() {
 				actions.Opacity(0)
 			}
-			actions.Children(func() {
+			actions.Transition(fastMotion).Children(func() {
 				if iconButton(c, p, "Copy", tr("复制消息")).Size(26, 26).Clicked() {
 					c.WriteClipboard(item.Text)
 				}
@@ -87,41 +101,42 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 			})
 		})
 	case "assistant":
-		turn := ui.Column(c).Gap(2).Transition(enterMotion)
+		turn := ui.Column(c).Gap(6).Transition(enterMotion)
 		turn.Children(func() {
 			d.markdown(c, p, item.Text)
 			if item.Pending {
-				e := ui.Box(c).Size(7, 14).Radius(2).Background(p.Accent)
-				e.OpacityLoop("caret", time.Second, ui.Linear, 0, 1)
+				pulse(c, 8, 16, 2, p.Text3, time.Second, 0.15, 1)
 			} else {
-				actions := ui.Row(c).Height(26).Gap(2)
+				actions := ui.Row(c).Height(28).Gap(2).Margin(2, 0, 0, -4)
 				if !last && !turn.Hovered() && !turn.FocusWithin() {
 					actions.Opacity(0)
 				}
-				actions.Children(func() {
-					if iconButton(c, p, "Copy", tr("复制回复")).Size(26, 26).Clicked() {
+				actions.Transition(fastMotion).Children(func() {
+					if last {
+						ui.Box(c).Size(28, 28).Center().Children(func() { spark(c, 16, p.Accent, false) })
+					}
+					if iconButton(c, p, "Copy", tr("复制回复")).Size(28, 28).Clicked() {
 						c.WriteClipboard(item.Text)
 					}
-					if !v.Busy && last && iconButton(c, p, "RotateCcw", tr("重新生成")).Size(26, 26).Clicked() {
+					if !v.Busy && last && iconButton(c, p, "RotateCcw", tr("重新生成")).Size(28, 28).Clicked() {
 						d.promptRetry()
 					}
 				})
 			}
 		})
 	case "thinking":
-		ui.Row(c).Height(26).Gap(10).Children(func() {
-			orb := ui.Box(c).Size(10, 10).Radius(99).Background(p.Accent).Shadow(0, 0, 0, 4, p.AccentSoft)
-			orb.OpacityLoop("breathe", 1600*time.Millisecond, ui.Bounce(ui.EaseInOut), 0.4, 1)
-			ui.Text(c, tr(item.Text)).SingleLine().Grow(1).Basis(0).MinWidth(0).FontSize(p.font(12.6)).TextColor(p.Text3)
+		ui.Row(c).Height(28).Gap(10).Transition(enterMotion).Children(func() {
+			spark(c, 18, p.Accent, true)
+			shimmer(c, p, tr(item.Text)).Grow(1).Basis(0).MinWidth(0)
 			if elapsed := time.Since(item.StartedAt); elapsed >= 2*time.Second {
-				muted(c, p, fmt.Sprintf("%ds", int(elapsed.Seconds()))).NoWrap().Shrink(0).FontSize(p.font(10.92))
+				muted(c, p, formatDuration(elapsed)).NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(p.Text4)
 			}
 		})
 		c.After(time.Second)
 	case "reasoning":
 		d.reasoningView(c, p, item)
 	case "notice":
-		color := p.Info
+		color := p.Text3
 		name := "Info"
 		if item.Tone == "warning" {
 			color = p.Warning
@@ -131,12 +146,12 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 			color = p.Danger
 			name = "CircleAlert"
 		}
-		ui.Row(c).Gap(8).Padding(7, 0).Transition(enterMotion).Children(func() {
-			icon(c, name, 14, color)
-			ui.Text(c, localizeNotice(item.Text)).Grow(1).FontSize(p.font(11.76)).TextColor(p.Text2).Selectable()
+		ui.Row(c).Gap(8).Padding(4, 0).AlignItems(ui.Start).Transition(enterMotion).Children(func() {
+			ui.Box(c).Height(20).Center().Children(func() { icon(c, name, 14, color) })
+			ui.Text(c, localizeNotice(item.Text)).Grow(1).FontSize(p.font(12.32)).TextColor(p.Text2).Selectable()
 		})
 	case "summary":
-		label, name, color := tr("已完成"), "CircleCheck", p.Success
+		label, name, color := tr("已完成"), "CircleCheck", p.Text4
 		if item.Interrupted {
 			label, name, color = tr("已停止"), "CircleSlash", p.Warning
 		} else if !item.Success {
@@ -146,15 +161,50 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 		if item.Text != "" && item.Text != "0" {
 			text += " · " + item.Text + tr(" 个操作")
 		}
-		ui.Row(c).Height(28).Gap(8).Children(func() {
+		ui.Row(c).Height(24).Gap(10).Children(func() {
 			ui.Box(c).Grow(1).Height(1).Background(p.BorderSubtle)
-			icon(c, name, 13, color)
-			ui.Text(c, text).NoWrap().Shrink(0).FontSize(p.font(10.64)).TextColor(p.Text3)
+			icon(c, name, 12, color)
+			ui.Text(c, text).NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(p.Text4)
 			ui.Box(c).Grow(1).Height(1).Background(p.BorderSubtle)
 		})
 	case "approval":
 		d.approval(c, p, item)
 	}
+}
+
+// shimmer sets text with a soft band of light moving across it, the way
+// Claude shows a step in progress, in frames that only paint.
+func shimmer(c *ui.Context, p palette, text string) ui.Element {
+	still := reduceMotion(c)
+	e := ui.Text(c, text).SingleLine().FontSize(p.font(13)).TextColor(p.Text2)
+	e.DrawOver(func(painter *ui.Painter, r ui.Rect) {
+		if still || r.W <= 0 {
+			return
+		}
+		painter.AnimationFrame()
+		period := int64(2200)
+		t := float32(painter.Now().UnixMilli()%period) / float32(period)
+		band := max(48, r.W*0.35)
+		x := r.X - band + (r.W+2*band)*t
+		veil := p.Main.Alpha(0.62)
+		painter.Clip(r, 0, func() {
+			painter.Fill(ui.Rect{X: r.X, Y: r.Y, W: max(0, x-r.X), H: r.H}, veil, 0)
+			painter.FillGradient(ui.Rect{X: x, Y: r.Y, W: band / 2, H: r.H}, ui.LinearGradient{From: veil, To: ui.Transparent, Angle: 90}, 0)
+			painter.FillGradient(ui.Rect{X: x + band/2, Y: r.Y, W: band / 2, H: r.H}, ui.LinearGradient{From: ui.Transparent, To: veil, Angle: 90}, 0)
+			painter.Fill(ui.Rect{X: x + band, Y: r.Y, W: max(0, r.X+r.W-x-band), H: r.H}, veil, 0)
+		})
+	})
+	return e
+}
+
+// disclosure is a chevron that turns down as what it discloses opens.
+func disclosure(c *ui.Context, p palette, open bool) {
+	chevron := ui.Box(c).Size(14, 14).Center().Shrink(0).Children(func() { icon(c, "ChevronRight", 12, p.Text4) })
+	turn := float32(0)
+	if open {
+		turn = 90
+	}
+	chevron.AnimatePose(ui.Pose{Rotate: turn}, ui.Snappy)
 }
 
 func (d *desktop) reasoningView(c *ui.Context, p palette, item *model.FeedItem) {
@@ -164,29 +214,28 @@ func (d *desktop) reasoningView(c *ui.Context, p palette, item *model.FeedItem) 
 	if !stored {
 		open = item.Pending
 	}
-	root := ui.Column(c).Key(key).FillWidth().Border(1, p.BorderSubtle).Radius(10).Background(p.Panel)
+	root := ui.Column(c.Key(key)).FillWidth().Gap(6).Transition(enterMotion)
 	scroll := ui.Local(root, "scroll", func() ui.ScrollState { return ui.ScrollState{} })
 	root.Children(func() {
-		head := ui.ButtonBase(c).Label(tr("思考过程")).Description(tr("模型接口返回的推理内容")).Expanded(open).FillWidth().Height(34).Padding(0, 12).Gap(8).Justify(ui.Start)
+		label := tr("思考过程")
+		if !item.Pending && !item.StartedAt.IsZero() && !item.EndedAt.IsZero() {
+			label = trf("思考了 %s", formatDuration(item.EndedAt.Sub(item.StartedAt)))
+		} else if item.Interrupted {
+			label = tr("思考已中断")
+		}
+		head := ui.ButtonBase(c).Label(tr("思考过程")).Description(tr("模型接口返回的推理内容")).Expanded(open).Height(28).Padding(0, 8, 0, 6).Gap(6).Radius(9).Justify(ui.Start).Transition(fastMotion)
 		if head.Hovered() {
 			head.Background(p.Hover)
 		}
 		head.Children(func() {
 			if item.Pending {
-				spinner(c, p)
+				spark(c, 14, p.Accent, true)
+				shimmer(c, p, tr("正在思考…")).FontSize(p.font(12.6))
 			} else {
-				icon(c, "Sparkles", 14, p.Text3)
+				icon(c, "Clock", 14, p.Text3)
+				ui.Text(c, label).NoWrap().FontSize(p.font(12.6)).TextColor(p.Text3)
 			}
-			ui.Text(c, tr("思考过程")).NoWrap().FontSize(p.font(11.76)).FontWeight(550).TextColor(p.Text2)
-			ui.Spacer(c)
-			status := tr("已完成")
-			if item.Pending {
-				status = tr("生成中")
-			} else if item.Interrupted {
-				status = tr("已中断")
-			}
-			muted(c, p, status).NoWrap().Shrink(0).FontSize(p.font(10.36))
-			icon(c, map[bool]string{true: "ChevronDown", false: "ChevronRight"}[open], 12, p.Text4)
+			disclosure(c, p, open)
 		})
 		if head.Clicked() {
 			v.Open[key] = !open
@@ -195,18 +244,76 @@ func (d *desktop) reasoningView(c *ui.Context, p palette, item *model.FeedItem) 
 			if item.Pending && scroll.Y >= scroll.MaxY-1 {
 				scroll.Y = math.MaxFloat32
 			}
-			ui.Scroll(c).FillWidth().MaxHeight(180).TrackScroll(scroll).Padding(0, 12, 12, 12).Children(func() {
-				ui.Text(c, item.Text).FillWidth().Selectable().FontSize(p.font(11.48)).LineHeight(1.6).TextColor(p.Text2)
+			ui.Scroll(c).FillWidth().MaxHeight(220).TrackScroll(scroll).Margin(0, 0, 4, 13).Padding(2, 12, 2, 14).BorderWidth(0, 0, 0, 2).BorderColor(p.Border).Transition(enterMotion).Children(func() {
+				ui.Text(c, item.Text).FillWidth().Selectable().FontSize(p.font(12.6)).LineHeight(1.65).TextColor(p.Text3)
 			})
 		}
 	})
 }
 
+// toolMeta is the short result a step shows at its end: lines read,
+// matches found, lines changed, the exit of a command.
+func (d *desktop) toolMeta(c *ui.Context, p palette, item *model.FeedItem) {
+	if item.Pending {
+		return
+	}
+	lines := func(s string) int {
+		s = strings.TrimRight(s, "\n")
+		if s == "" {
+			return 0
+		}
+		return strings.Count(s, "\n") + 1
+	}
+	small := func(text string, color ui.Color) {
+		ui.Text(c, text).NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(color)
+	}
+	if !item.Success && !item.Interrupted {
+		small(tr("失败"), p.Danger)
+		return
+	}
+	switch item.Name {
+	case "read":
+		if n := lines(item.Output); n > 0 {
+			small(trf("%d 行", n), p.Text4)
+		}
+	case "grep":
+		if n := lines(item.Output); n > 0 {
+			small(trf("%d 处匹配", n), p.Text4)
+		}
+	case "edit", "write":
+		add, del := 0, 0
+		for _, line := range d.itemDiff(item) {
+			switch line.Type {
+			case "add":
+				add++
+			case "remove":
+				del++
+			}
+		}
+		if add+del > 0 {
+			d.diffStat(c, p, add, del)
+		}
+	case "bash":
+		if item.Success {
+			ui.Row(c).Gap(4).Shrink(0).Children(func() {
+				icon(c, "Check", 12, p.Success)
+				small(tr("完成"), p.Success)
+			})
+		}
+	}
+	if !item.StartedAt.IsZero() && !item.EndedAt.IsZero() {
+		small(fmt.Sprintf("%.1fs", item.EndedAt.Sub(item.StartedAt).Seconds()), p.Text4)
+	}
+}
+
+// toolGroup is the activity of a turn: what the agent did, in a card that
+// sums it up, and opens on a timeline of each step.
 func (d *desktop) toolGroup(c *ui.Context, p palette, row model.FeedRow) {
 	v := d.current()
 	running := false
 	counts := map[string]int{}
 	failed := 0
+	var elapsed time.Duration
 	for _, item := range row.Tools {
 		if item.Pending {
 			running = true
@@ -215,13 +322,21 @@ func (d *desktop) toolGroup(c *ui.Context, p palette, row model.FeedRow) {
 		if !item.Success && !item.Pending && !item.Interrupted {
 			failed++
 		}
+		if !item.StartedAt.IsZero() && !item.EndedAt.IsZero() {
+			elapsed += item.EndedAt.Sub(item.StartedAt)
+		}
 	}
+	single := len(row.Tools) == 1
 	open, stored := v.Open["group-"+row.ID]
 	if !stored {
-		open = running || d.preferences.ExpandTools
+		open = running || d.preferences.ExpandTools || single
+	}
+	if single {
+		d.tool(c, p, row.Tools[0], false)
+		return
 	}
 	var names []string
-	for _, entry := range []struct{ Name, Format string }{{"edit", tr("编辑 %d 个文件")}, {"write", tr("写入 %d 个文件")}, {"read", tr("读取 %d 次")}, {"grep", tr("搜索 %d 次")}, {"bash", tr("运行 %d 条命令")}, {"delegate", tr("委派 %d 次")}} {
+	for _, entry := range []struct{ Name, Format string }{{"read", tr("读取 %d")}, {"grep", tr("搜索 %d")}, {"edit", tr("编辑 %d")}, {"write", tr("写入 %d")}, {"bash", tr("命令 %d")}, {"delegate", tr("委派 %d")}} {
 		if count := counts[entry.Name]; count > 0 {
 			names = append(names, fmt.Sprintf(entry.Format, count))
 		}
@@ -229,7 +344,10 @@ func (d *desktop) toolGroup(c *ui.Context, p palette, row model.FeedRow) {
 	if failed > 0 {
 		names = append(names, fmt.Sprintf(tr("%d 个失败"), failed))
 	}
-	group := ui.Column(c).Border(1, p.BorderSubtle).Radius(12).Background(p.Panel).Transition(fastMotion)
+	if elapsed > 0 && !running {
+		names = append(names, fmt.Sprintf(tr("%.1f 秒"), elapsed.Seconds()))
+	}
+	group := ui.Column(c).Border(1, p.BorderSubtle).Radius(16).Background(p.Elevated.Alpha(0.6)).Clip().Transition(fastMotion)
 	if open {
 		group.BorderColor(p.Border)
 	}
@@ -238,41 +356,57 @@ func (d *desktop) toolGroup(c *ui.Context, p palette, row model.FeedRow) {
 		if running {
 			label = fmt.Sprintf(tr("正在执行 %d 个操作"), len(row.Tools))
 		}
-		head := ui.ButtonBase(c).Label(label).FillWidth().MinHeight(42).Gap(8).Radius(12).Padding(8, 12)
+		head := ui.ButtonBase(c).Label(label).Expanded(open).FillWidth().Height(46).Gap(10).Padding(0, 14).Transition(fastMotion)
 		if head.Hovered() {
 			head.Background(p.Hover)
 		}
 		head.Children(func() {
-			icon(c, "Layers", 14, p.Text3)
-			ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(3).Children(func() {
-				ui.Text(c, label).NoWrap().FontSize(p.font(12.04)).FontWeight(550).TextColor(p.Text2)
-				if len(names) > 0 {
-					muted(c, p, strings.Join(names, "、")).SingleLine().FontSize(p.font(10.92))
-				}
-			})
-			icon(c, map[bool]string{true: "ChevronDown", false: "ChevronRight"}[open], 12, p.Text4)
+			if running {
+				ring(c, 15, p.Text3)
+			} else {
+				icon(c, "Layers", 15, p.Text3)
+			}
+			ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(13)).FontWeight(550).TextColor(p.Text)
+			ui.Spacer(c)
+			if len(names) > 0 {
+				ui.Text(c, strings.Join(names, " · ")).SingleLine().Shrink(1).FontSize(p.font(11.76)).TextColor(p.Text3)
+			}
+			disclosure(c, p, open)
 		})
 		if head.Clicked() {
 			v.Open["group-"+row.ID] = !open
 		}
 		if open {
-			ui.Column(c).Padding(0, 6, 6, 6).Transition(enterMotion).Children(func() {
-				for _, item := range row.Tools {
-					d.tool(c, p, item, false)
+			ui.Column(c).Padding(6, 10, 10, 10).BorderWidth(1, 0, 0, 0).BorderColor(p.BorderSubtle).Transition(ui.ElementTransition{Duration: 240 * time.Millisecond, Ease: ui.CubicBezier(0.2, 0.8, 0.2, 1), Enter: &ui.Motion{Collapse: true}, Exit: &ui.Motion{Collapse: true}}).Children(func() {
+				for i, item := range row.Tools {
+					d.step(c, p, item, i < len(row.Tools)-1)
 				}
 			})
 		}
 		if !open {
 			for _, item := range row.Tools {
 				if item.Success && len(item.Attachments) > 0 {
-					ui.Column(c).Padding(0, 12, 12).Children(func() { d.readImages(c, p, item.Attachments) })
+					ui.Column(c).Padding(0, 14, 14).Children(func() { d.readImages(c, p, item.Attachments) })
 				}
 			}
 		}
 	})
 }
 
+// tool shows one step on its own, as a group of one.
 func (d *desktop) tool(c *ui.Context, p palette, item *model.FeedItem, force bool) {
+	ui.Column(c).Border(1, p.BorderSubtle).Radius(16).Background(p.Elevated.Alpha(0.6)).Padding(4, 10).Clip().Children(func() {
+		d.stepWith(c, p, item, false, force)
+	})
+}
+
+func (d *desktop) step(c *ui.Context, p palette, item *model.FeedItem, more bool) {
+	d.stepWith(c, p, item, more, false)
+}
+
+// stepWith is a step of the timeline: its icon on the line that joins the
+// steps, what it did and to what, its result, and what it showed, opened.
+func (d *desktop) stepWith(c *ui.Context, p palette, item *model.FeedItem, more, force bool) {
 	v := d.current()
 	meta := toolNames[item.Name]
 	meta.Label, meta.Done = tr(meta.Label), tr(meta.Done)
@@ -289,156 +423,181 @@ func (d *desktop) tool(c *ui.Context, p palette, item *model.FeedItem, force boo
 	}
 	open, stored := v.Open["tool-"+item.ID]
 	if !stored {
-		open = force || d.preferences.ExpandTools || (item.Pending && item.Name == "bash" && !waiting)
+		open = force || d.preferences.ExpandTools || (item.Pending && item.Name == "bash" && !waiting) || ((item.Name == "edit" || item.Name == "write") && item.Success)
 	}
-	ui.Column(c).Children(func() {
-		head := ui.ButtonBase(c).Label(meta.Label+" "+toolTarget(item)).FillWidth().Height(30).Gap(8).Padding(0, 6).Radius(8)
-		if head.Hovered() {
-			head.Background(p.Hover)
-		}
-		head.Children(func() {
-			if item.Pending && !waiting {
-				spinner(c, p)
-			} else {
-				color := p.Text3
-				if !item.Success && !item.Pending && !item.Interrupted {
-					color = p.Danger
-				}
-				icon(c, meta.Icon, 14, color)
-			}
-			label := meta.Done
-			if item.Pending {
-				label = meta.Label
-			}
-			ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(11.76)).TextColor(p.Text2)
-			ui.Text(c, toolTarget(item)).Grow(1).Basis(0).MinWidth(0).SingleLine().Font("Cascadia Mono, Consolas").FontSize(p.font(10.92)).TextColor(p.Text3)
-			if waiting {
-				badge(c, p, tr("等待批准"), p.Warning, p.WarningSoft)
-			} else if item.Interrupted {
-				badge(c, p, tr("已中断"), p.Warning, p.WarningSoft)
-			} else if item.Auto {
-				badge(c, p, tr("自动批准"), p.Success, p.SuccessSoft)
-			}
-			if !item.StartedAt.IsZero() && !item.EndedAt.IsZero() {
-				muted(c, p, fmt.Sprintf("%.1fs", item.EndedAt.Sub(item.StartedAt).Seconds())).NoWrap().Shrink(0).FontSize(p.font(10.08))
-			}
-			name := "ChevronRight"
-			if open {
-				name = "ChevronDown"
-			}
-			icon(c, name, 12, p.Text4)
-		})
-		if head.Clicked() {
-			v.Open["tool-"+item.ID] = !open
-		}
-		if item.Success && len(item.Attachments) > 0 {
-			ui.Column(c).Margin(4, 0, 8, 20).Children(func() { d.readImages(c, p, item.Attachments) })
-		}
-		if open {
-			ui.Column(c).Margin(4, 0, 4, 20).Padding(10, 12).Border(1, p.BorderSubtle).Radius(8).Background(p.Panel).Gap(8).Transition(enterMotion).Children(func() {
-				switch item.Name {
-				case "bash":
-					d.terminal(c, p, model.String(item.Args["command"]), item.Output)
-				case "edit", "write":
-					if item.Success || item.Pending {
-						d.diffView(c, p, d.itemDiff(item), item.ID, 40)
-					} else if item.Output != "" {
-						logText(c, p, item.Output, 180)
-					}
+	ui.Row(c).AlignItems(ui.Stretch).Gap(10).Children(func() {
+		ui.Column(c).Width(20).AlignItems(ui.Center).Shrink(0).Children(func() {
+			ui.Box(c).Height(34).Center().Children(func() {
+				switch {
+				case item.Pending && !waiting:
+					ring(c, 14, p.Text3)
+				case !item.Success && !item.Pending && !item.Interrupted:
+					icon(c, meta.Icon, 15, p.Danger)
 				default:
-					if item.Output != "" {
-						logText(c, p, item.Output, 280)
-					} else {
-						data, _ := json.MarshalIndent(item.Args, "", "  ")
-						logText(c, p, string(data), 220)
-					}
-				}
-				if item.ChildSessionID != "" && button(c, p, tr("查看子助手会话"), "ArrowUpRight", false).Clicked() {
-					for _, session := range d.sessions {
-						if session.ID == item.ChildSessionID {
-							d.openSession(session)
-							return
-						}
-					}
-					var detail model.Detail
-					d.request(v, "getSession", map[string]any{"sessionId": item.ChildSessionID}, &detail, func(err error) {
-						if err != nil {
-							d.error(v, err)
-						} else {
-							d.openSession(detail.Summary)
-						}
-					})
-				}
-				if item.ArtifactID != "" {
-					a := v.Artifacts[item.ID]
-					if a == nil && button(c, p, tr("查看完整归档输出"), "Archive", false).Clicked() {
-						d.loadArtifact(item)
-					}
-					if a != nil {
-						if a.Text != "" {
-							logText(c, p, a.Text, 320)
-						}
-						if a.Error != "" {
-							ui.Text(c, a.Error).TextColor(p.Danger)
-						}
-						if a.HasMore && button(c, p, tr("加载更多"), "ChevronDown", false).Disabled(a.Loading).Clicked() {
-							d.loadArtifact(item)
-						}
-						if a.Loading {
-							spinner(c, p)
-						}
-					}
+					icon(c, meta.Icon, 15, p.Text3)
 				}
 			})
-		}
+			if more {
+				ui.Box(c).Width(1).Grow(1).Background(p.BorderSubtle)
+			}
+		})
+		ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() {
+			head := ui.ButtonBase(c).Label(meta.Label+" "+toolTarget(item)).Expanded(open).FillWidth().Height(34).Gap(8).Padding(0, 6).Radius(9).Transition(fastMotion)
+			if head.Hovered() {
+				head.Background(p.Hover)
+			}
+			head.Children(func() {
+				label := meta.Label
+				if !item.Pending {
+					label = strings.TrimPrefix(meta.Done, "已")
+				}
+				ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(12.6)).TextColor(p.Text)
+				target := toolTarget(item)
+				if item.Name == "grep" {
+					target = fmt.Sprintf("\"%s\"", model.String(item.Args["pattern"]))
+					if path := model.String(item.Args["path"]); path != "" {
+						target += tr(" 于 ") + path
+					}
+				}
+				ui.Text(c, target).Grow(1).Basis(0).MinWidth(0).SingleLine().Font(monoFont).FontSize(p.font(11.48)).TextColor(p.Text3)
+				switch {
+				case waiting:
+					badge(c, p, tr("等待批准"), p.Warning, p.WarningSoft)
+				case item.Interrupted:
+					badge(c, p, tr("已中断"), p.Warning, p.WarningSoft)
+				case item.Auto:
+					badge(c, p, tr("自动批准"), p.Text3, p.Hover)
+				}
+				d.toolMeta(c, p, item)
+			})
+			if head.Clicked() {
+				v.Open["tool-"+item.ID] = !open
+			}
+			if item.Success && len(item.Attachments) > 0 {
+				ui.Column(c).Margin(2, 0, 8, 6).Children(func() { d.readImages(c, p, item.Attachments) })
+			}
+			if open {
+				ui.Column(c).Margin(0, 0, 8, 6).Gap(8).Transition(ui.ElementTransition{Duration: 220 * time.Millisecond, Ease: ui.CubicBezier(0.2, 0.8, 0.2, 1), Enter: &ui.Motion{Collapse: true}, Exit: &ui.Motion{Collapse: true}}).Children(func() {
+					d.toolDetail(c, p, v, item)
+				})
+			}
+		})
 	})
 }
 
+func (d *desktop) toolDetail(c *ui.Context, p palette, v *conversation, item *model.FeedItem) {
+	switch item.Name {
+	case "bash":
+		d.terminal(c, p, model.String(item.Args["command"]), item.Output)
+	case "edit", "write":
+		if item.Success || item.Pending {
+			d.diffView(c, p, d.itemDiff(item), item.ID, 40)
+		} else if item.Output != "" {
+			logText(c, p, item.Output, 180)
+		}
+	default:
+		if item.Output != "" {
+			logText(c, p, item.Output, 280)
+		} else {
+			data, _ := json.MarshalIndent(item.Args, "", "  ")
+			logText(c, p, string(data), 220)
+		}
+	}
+	if item.ChildSessionID != "" && button(c, p, tr("查看子助手会话"), "ArrowUpRight", false).Clicked() {
+		for _, session := range d.sessions {
+			if session.ID == item.ChildSessionID {
+				d.openSession(session)
+				return
+			}
+		}
+		var detail model.Detail
+		d.request(v, "getSession", map[string]any{"sessionId": item.ChildSessionID}, &detail, func(err error) {
+			if err != nil {
+				d.error(v, err)
+			} else {
+				d.openSession(detail.Summary)
+			}
+		})
+	}
+	if item.ArtifactID != "" {
+		a := v.Artifacts[item.ID]
+		if a == nil && button(c, p, tr("查看完整归档输出"), "Archive", false).Clicked() {
+			d.loadArtifact(item)
+		}
+		if a != nil {
+			if a.Text != "" {
+				logText(c, p, a.Text, 320)
+			}
+			if a.Error != "" {
+				ui.Text(c, a.Error).TextColor(p.Danger)
+			}
+			if a.HasMore && button(c, p, tr("加载更多"), "ChevronDown", false).Disabled(a.Loading).Clicked() {
+				d.loadArtifact(item)
+			}
+			if a.Loading {
+				spinner(c, p)
+			}
+		}
+	}
+}
+
 func (d *desktop) terminal(c *ui.Context, p palette, command, output string) {
-	ui.Column(c).Padding(10, 12).Radius(8).Background(p.Terminal).Gap(8).Children(func() {
+	ui.Column(c).Padding(10, 14).Radius(12).Background(p.Terminal).Border(1, p.CodeBorder).Gap(6).Children(func() {
 		if command != "" {
-			ui.RichText(c, ui.Span{Text: "$ ", Color: p.Accent}, ui.Span{Text: command, Color: p.TerminalText}).Font("Cascadia Mono, Consolas").FontSize(p.font(11.76)).Selectable()
+			ui.RichText(c, ui.Span{Text: "$ ", Color: p.TerminalDim}, ui.Span{Text: command, Color: p.TerminalText}).Font(monoFont).FontSize(p.font(12.04)).Selectable()
 		}
 		if output != "" {
 			text := output
-			ui.TextAreaBase(c, &text).ReadOnly(true).Label(tr("命令输出")).Height(min(280, float32(strings.Count(output, "\n")+1)*18+12)).Font("Cascadia Mono, Consolas").FontSize(p.font(11.76)).TextColor(p.TerminalText).LineHeight(1.6)
+			ui.TextAreaBase(c, &text).ReadOnly(true).Label(tr("命令输出")).Height(min(280, float32(strings.Count(output, "\n")+1)*19+8)).Font(monoFont).FontSize(p.font(11.76)).TextColor(p.TerminalDim).LineHeight(1.6)
 		}
 	})
 }
 func logText(c *ui.Context, p palette, source string, maxHeight float32) {
 	text := source
-	ui.TextAreaBase(c, &text).ReadOnly(true).Label(tr("工具输出")).Height(min(maxHeight, float32(strings.Count(source, "\n")+1)*18+8)).Font("Cascadia Mono, Consolas").FontSize(p.font(11.2)).TextColor(p.Text2).LineHeight(1.6)
+	ui.Column(c).Radius(12).Background(p.Code).Border(1, p.CodeBorder).Padding(8, 12).Children(func() {
+		ui.TextAreaBase(c, &text).ReadOnly(true).Label(tr("工具输出")).Height(min(maxHeight, float32(strings.Count(source, "\n")+1)*18+8)).Font(monoFont).FontSize(p.font(11.48)).TextColor(p.Text2).LineHeight(1.6)
+	})
 }
 
 func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 	if item.ApprovalID == "" {
 		label := tr("已拒绝")
-		name, color := "ShieldX", p.Text3
+		name, color := "ShieldX", p.Text4
 		if item.Granted {
 			label = tr("已批准")
-			name, color = "ShieldCheck", p.Success
+			name, color = "ShieldCheck", p.Text3
 		}
-		ui.Row(c).Gap(8).Height(28).Children(func() {
+		ui.Row(c).Gap(8).Height(26).Children(func() {
 			icon(c, name, 14, color)
-			ui.Text(c, label+" · "+toolTarget(item)).SingleLine().FontSize(p.font(11.76)).TextColor(p.Text3)
+			ui.Text(c, label+" · "+toolTarget(item)).SingleLine().FontSize(p.font(12.04)).TextColor(p.Text3)
 		})
 		return
 	}
-	card := ui.Column(c).Radius(12).Clip().Border(1, p.Accent.Alpha(0.55)).Background(p.AccentSofter).Transition(enterMotion).Role(ui.RoleGroup).Label(tr("需要你的批准"))
+	card := ui.Column(c).Radius(18).Clip().Border(1, p.Border).Background(p.Elevated).Transition(ui.ElementTransition{Duration: 260 * time.Millisecond, Ease: ui.CubicBezier(0.2, 0.8, 0.2, 1), Enter: &ui.Motion{Y: 10, Scale: 0.98}}).Role(ui.RoleGroup).Label(tr("需要你的批准"))
+	card.Shadow(0, 10, 30, -10, ui.RGBA(0, 0, 0, 0.16))
+	question, iconName := tr("允许 MiniCode 编辑这个文件吗？"), "PencilLine"
+	switch item.Name {
+	case "bash":
+		question, iconName = tr("允许 MiniCode 运行这条命令吗？"), "Terminal"
+	case "write":
+		question, iconName = tr("允许 MiniCode 写入这个文件吗？"), "FilePlus2"
+	case "edit":
+	default:
+		question, iconName = trf("允许 MiniCode 使用 %s 吗？", item.Name), "Wrench"
+	}
 	card.Children(func() {
-		ui.Row(c).Padding(14, 16).Gap(10).Children(func() {
-			icon(c, "ShieldAlert", 18, p.Accent)
+		ui.Row(c).Padding(16, 18, 12, 18).Gap(12).Children(func() {
+			ui.Box(c).Size(34, 34).Radius(10).Background(p.WarningSoft).Center().Shrink(0).Children(func() { icon(c, iconName, 17, p.Warning) })
 			ui.Column(c).Grow(1).Gap(2).Children(func() {
-				ui.Text(c, tr("需要你的批准")).FontSize(p.font(12.6)).FontWeight(650)
-				muted(c, p, tr("Agent 请求")+toolTarget(item)).FontSize(p.font(10.92)).SingleLine()
+				ui.Text(c, question).FontSize(p.font(14)).FontWeight(600).TextColor(p.Text)
+				muted(c, p, tr("需要你的批准")+" · "+toolTarget(item)).FontSize(p.font(11.48)).SingleLine()
 			})
-			badge(c, p, tr("等待确认"), p.AccentText, p.AccentSoft)
 		})
-		ui.Column(c).Padding(0, 16, 14, 16).Children(func() {
+		ui.Column(c).Padding(0, 18, 14, 18).Children(func() {
 			if item.Name == "bash" {
 				d.terminal(c, p, model.String(item.Args["command"]), "")
 			} else {
-				ui.Text(c, model.String(item.Args["path"])).Font("Cascadia Mono, Consolas").FontSize(p.font(11.2)).TextColor(p.Text2).Margin(0, 0, 8, 0)
+				ui.Text(c, model.String(item.Args["path"])).Font(monoFont).FontSize(p.font(11.48)).TextColor(p.Text2).Margin(0, 0, 8, 0)
 				if item.Name == "edit" {
 					d.diffView(c, p, d.itemDiff(item), item.ID, 40)
 				} else {
@@ -451,15 +610,27 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 				}
 			}
 		})
-		ui.Row(c).Padding(12, 16).Gap(8).BorderWidth(1, 0, 0, 0).BorderColor(p.Border).Children(func() {
-			if button(c, p, tr("批准执行"), "Check", true).Disabled(item.Deciding).Clicked() {
-				d.decide(item, true, false)
+		ui.Row(c).Padding(12, 18, 16, 18).Gap(8).Justify(ui.End).Children(func() {
+			key := func(label, k string, primary bool) ui.Element {
+				b := styleButton(ui.ButtonBase(c).Label(label), p, primary).Height(34).Radius(11).Padding(0, 12, 0, 14)
+				b.Children(func() {
+					ui.Text(c, label).NoWrap()
+					color, bg := p.Text3, p.Hover
+					if primary {
+						color, bg = p.InkText.Alpha(0.7), p.InkText.Alpha(0.14)
+					}
+					ui.Text(c, k).Font(monoFont).FontSize(p.font(10.36)).Padding(1, 5).Radius(5).TextColor(color).Background(bg)
+				})
+				return b
 			}
-			if button(c, p, tr("本会话始终允许 ")+item.Name, "CheckCheck", false).Background(p.Elevated).Disabled(item.Deciding).Clicked() {
+			if key(tr("拒绝"), "N", false).Disabled(item.Deciding).Clicked() {
+				d.decide(item, false, false)
+			}
+			if key(tr("本会话始终允许 ")+item.Name, "A", false).Disabled(item.Deciding).Clicked() {
 				d.decide(item, true, true)
 			}
-			if button(c, p, tr("拒绝"), "X", false).Disabled(item.Deciding).Clicked() {
-				d.decide(item, false, false)
+			if key(tr("批准执行"), "Y", true).Disabled(item.Deciding).Clicked() {
+				d.decide(item, true, false)
 			}
 		})
 	})
@@ -485,41 +656,48 @@ func (d *desktop) diffView(c *ui.Context, p palette, lines []content.DiffLine, i
 	if limit > 0 && !expanded {
 		count = min(limit, count)
 	}
-	ui.Column(c).Clip().Radius(6).Font("Cascadia Mono, Consolas").FontSize(p.font(11.76)).Children(func() {
+	frame := ui.Column(c).Clip().Radius(12).Border(1, p.CodeBorder).Background(p.Code).Padding(4, 0).Font(monoFont).FontSize(p.font(11.76))
+	if id == "preview-row" {
+		// The preview lists the lines one by one; each is a bare row.
+		frame.Radius(0).Border(0, ui.Transparent).Padding(0).Background(ui.Transparent)
+	}
+	frame.Children(func() {
 		for _, line := range lines[:count] {
-			bg, color, gutter, sign := ui.Transparent, p.Text2, p.Subtle, " "
+			bg, color, number, sign := ui.Transparent, p.Text2, p.Text4, " "
 			switch line.Type {
 			case "add":
-				bg, color, gutter, sign = p.AddBG, p.AddText, p.AddGutter, "+"
+				bg, color, number, sign = p.AddBG, p.AddText, p.AddText.Alpha(0.7), "+"
 			case "remove":
-				bg, color, gutter, sign = p.RemoveBG, p.RemoveText, p.RemoveGutter, "−"
+				bg, color, number, sign = p.RemoveBG, p.RemoveText, p.RemoveText.Alpha(0.7), "−"
 			case "hunk":
-				bg, color = p.Subtle, p.Text3
+				color = p.Text4
 			case "meta":
 				color = p.Text3
 			}
 			ui.Row(c).Background(bg).AlignItems(ui.Stretch).Children(func() {
-				if line.Type != "meta" {
-					old, new := "", ""
-					if line.OldLine > 0 {
-						old = fmtInt(line.OldLine)
+				if line.Type != "meta" && line.Type != "hunk" {
+					n := line.NewLine
+					if line.Type == "remove" || n <= 0 {
+						n = line.OldLine
 					}
-					if line.NewLine > 0 {
-						new = fmtInt(line.NewLine)
+					label := ""
+					if n > 0 {
+						label = fmtInt(n)
 					}
-					ui.Text(c, old).Width(34).TextAlign(ui.End).Padding(2, 5).Background(gutter).TextColor(p.Text3).FontSize(p.font(10.36))
-					ui.Text(c, new).Width(34).TextAlign(ui.End).Padding(2, 5).Background(gutter).TextColor(p.Text3).FontSize(p.font(10.36))
+					ui.Text(c, label).Width(44).TextAlign(ui.End).Padding(2, 8, 2, 4).TextColor(number).FontSize(p.font(10.64))
 					ui.Text(c, sign).Width(16).TextColor(color).Padding(2, 0)
 				}
-				ui.Text(c, func() string {
-					if line.Text == "" {
-						return " "
-					}
-					return line.Text
-				}()).Grow(1).Padding(2, 5).TextColor(color).NoWrap().Selectable().LineHeight(1.55)
+				text := line.Text
+				if text == "" {
+					text = " "
+				}
+				row := ui.Text(c, text).Grow(1).Padding(2, 10, 2, 0).TextColor(color).NoWrap().Selectable().LineHeight(1.6)
+				if line.Type == "hunk" {
+					row.Padding(2, 14).FontSize(p.font(10.64))
+				}
 			})
 		}
-		if count < len(lines) && button(c, p, fmt.Sprintf(tr("显示全部 %d 行"), len(lines)), "ChevronDown", false).FillWidth().Border(0, ui.Transparent).Clicked() {
+		if count < len(lines) && button(c, p, fmt.Sprintf(tr("显示全部 %d 行"), len(lines)), "ChevronDown", false).FillWidth().Border(0, ui.Transparent).Radius(0).Clicked() {
 			v.Open["diff-all-"+id] = true
 		}
 	})

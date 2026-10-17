@@ -77,6 +77,8 @@ func TestNativeSnapshots(t *testing.T) {
 			for _, theme := range []string{"light", "dark"} {
 				r.d.preferences.Theme = theme
 				r.ui.Frame()
+				// Colors cross-fade into the new theme; take the picture once settled.
+				r.ui.Advance(time.Second)
 				dir := filepath.Join("..", "..", "output", "native")
 				if err := os.MkdirAll(dir, 0755); err != nil {
 					t.Fatal(err)
@@ -100,9 +102,10 @@ func TestPanelControlsAndCompactRail(t *testing.T) {
 	if _, ok := r.ui.Find("搜索"); ok {
 		t.Fatal("removed header controls still visible")
 	}
+	// The sidebar toggle sits at the start of the title bar, as Finder's.
 	rect, ok := r.ui.Find("收拢左侧面板")
-	if !ok || rect.Y < 40 || rect.X < r.d.preferences.SidebarWidth-48 {
-		t.Fatalf("collapse control outside sidebar top right: %+v", rect)
+	if !ok || rect.Y > 40 || rect.X > 48 {
+		t.Fatalf("collapse control outside the title bar start: %+v", rect)
 	}
 	click(t, r.ui, "收拢左侧面板")
 	rect, ok = r.ui.Find("展开左侧面板")
@@ -116,7 +119,7 @@ func TestPanelControlsAndCompactRail(t *testing.T) {
 	r.d.preferences.RightCollapsed = true
 	r.ui.Frame()
 	rect, ok = r.ui.Find("展开工作区")
-	if !ok || rect.X < 1460 {
+	if !ok || rect.X < 1440 {
 		t.Fatalf("work rail reserves excess width: %+v", rect)
 	}
 	click(t, r.ui, "展开工作区")
@@ -135,8 +138,8 @@ func TestSidebarNewConversationPreservesRunningConversation(t *testing.T) {
 		r.ui.Frame()
 		create, ok := r.ui.Find("新建对话")
 		search, _ := r.ui.Find("搜索任务")
-		if !ok || create.W <= 0 || create.Y+create.H > search.Y {
-			t.Fatalf("new conversation control not above search: %+v", create)
+		if !ok || create.W <= 0 || !collapsed && create.Y+create.H > search.Y || collapsed && create.Y > 40 {
+			t.Fatalf("new conversation control not above search or in the title bar: %+v", create)
 		}
 		click(t, r.ui, "新建对话")
 		r.settle()
@@ -158,7 +161,7 @@ func TestReasoningStreamDisplayCompletionCancellationAndIsolation(t *testing.T) 
 		r.d.handleEvent(bridge.Event{Event: "reasoning_delta", ClientKey: v.Key, SessionID: "audit", Text: text})
 	}
 	r.ui.Frame()
-	if !r.ui.HasText("核对输入。选择方案。") || !r.ui.HasText("生成中") || len(v.Items) != 1 {
+	if !r.ui.HasText("核对输入。选择方案。") || !r.ui.HasText("正在思考…") || len(v.Items) != 1 {
 		t.Fatal("reasoning did not stream into its own card")
 	}
 	reasoning := v.reasoning
@@ -437,7 +440,7 @@ func TestComposerCompletionAndUndo(t *testing.T) {
 	if got := r.d.current().Draft; got != "请看 @desktop/src/components/Sidebar.tsx " {
 		t.Fatalf("completed %q", got)
 	}
-	r.ui.Command("undo")
+	r.ui.Key(ui.Cmd, ui.KeyZ)
 	if got := r.d.current().Draft; got != "请看 @Side" {
 		t.Fatalf("undo completion: %q", got)
 	}

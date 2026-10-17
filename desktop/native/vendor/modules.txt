@@ -14,9 +14,10 @@ github.com/ebitengine/purego/internal/cgo
 github.com/ebitengine/purego/internal/fakecgo
 github.com/ebitengine/purego/internal/strings
 github.com/ebitengine/purego/objc
-# github.com/egoist/mygo v0.2.15
+# github.com/egoist/mygo v0.5.5
 ## explicit; go 1.27.1
 github.com/egoist/mygo
+github.com/egoist/mygo/i18n
 github.com/egoist/mygo/internal/accelerator
 github.com/egoist/mygo/internal/bridge
 github.com/egoist/mygo/internal/darwin
@@ -26,9 +27,12 @@ github.com/egoist/mygo/internal/gpu/d3d11
 github.com/egoist/mygo/internal/gpu/d3d11/device
 github.com/egoist/mygo/internal/gpu/gl
 github.com/egoist/mygo/internal/gpu/metal
+github.com/egoist/mygo/internal/i18nlink
+github.com/egoist/mygo/internal/l10n
 github.com/egoist/mygo/internal/linux
 github.com/egoist/mygo/internal/platform
 github.com/egoist/mygo/internal/raster
+github.com/egoist/mygo/internal/rope
 github.com/egoist/mygo/internal/scene
 github.com/egoist/mygo/internal/surface
 github.com/egoist/mygo/internal/svg
@@ -37,15 +41,20 @@ github.com/egoist/mygo/internal/tsgen
 github.com/egoist/mygo/internal/unsupported
 github.com/egoist/mygo/internal/update
 github.com/egoist/mygo/internal/vec
+github.com/egoist/mygo/internal/watchdriver
+github.com/egoist/mygo/internal/web
+github.com/egoist/mygo/internal/webview2
 github.com/egoist/mygo/internal/windows
 github.com/egoist/mygo/plugins/glass
 github.com/egoist/mygo/plugins/updater
 github.com/egoist/mygo/plugins/updater/internal/frontend
 github.com/egoist/mygo/plugins/updater/internal/markdown
 github.com/egoist/mygo/plugins/updater/native
+github.com/egoist/mygo/transfer
 github.com/egoist/mygo/ui
 # github.com/go-text/typesetting v0.3.5
 ## explicit; go 1.19
+github.com/go-text/typesetting/bidi
 github.com/go-text/typesetting/internal/unicodedata
 github.com/go-text/typesetting/language
 github.com/go-text/typesetting/segmenter
@@ -85,3 +94,9 @@ golang.org/x/image/riff
 golang.org/x/image/vp8
 golang.org/x/image/vp8l
 golang.org/x/image/webp
+# golang.org/x/text v0.43.0
+## explicit; go 1.26.0
+golang.org/x/text/internal/language
+golang.org/x/text/internal/language/compact
+golang.org/x/text/internal/tag
+golang.org/x/text/language

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"minicode.desktop/internal/content"
@@ -26,41 +27,13 @@ func statusLetter(status string) string {
 
 func (d *desktop) workPanel(c *ui.Context, p palette) {
 	v := d.current()
-	ui.Row(c).Height(42).Padding(6).Gap(2).BorderWidth(0, 0, 1, 0).BorderColor(p.Border).Children(func() {
-		for i, tab := range workTabs {
-			b := button(c, p, tab.Label, tab.Icon, false).Label(tr(tab.Label)).Height(28).Padding(0, 8).FontSize(p.font(11.2)).Border(0, ui.Transparent)
-			b.Role(ui.RoleTab)
-			b.Children(func() {
-				count := ""
-				if i == 0 && len(v.Changes) > 0 {
-					count = fmtInt(len(v.Changes))
-				} else if i == 3 && len(v.Tasks) > 0 {
-					done := 0
-					for _, task := range v.Tasks {
-						if task.Status == "done" {
-							done++
-						}
-					}
-					count = fmt.Sprintf("%d/%d", done, len(v.Tasks))
-				}
-				if count != "" {
-					badge(c, p, count, p.AccentText, p.AccentSoft)
-				}
-			})
-			if i == d.tab {
-				b.Background(p.Active).TextColor(p.Text)
-			}
-			if b.Clicked() {
-				d.tab = i
-				d.preview = nil
-				d.fileQuery = ""
-			}
-		}
+	ui.Row(c).Height(48).Padding(8, 8, 6, 10).Gap(6).Shrink(0).Children(func() {
+		d.workTabs(c, p)
 		ui.Spacer(c)
-		if iconButton(c, p, "RefreshCw", tr("刷新工作区")).Size(24, 24).Clicked() {
+		if iconButton(c, p, "RefreshCw", tr("刷新工作区")).Clicked() {
 			d.refresh(v, true)
 		}
-		if iconButton(c, p, "PanelRightClose", tr("收拢右侧面板")).Size(24, 24).Clicked() {
+		if iconButton(c, p, "PanelRightClose", tr("收拢右侧面板")).Clicked() {
 			d.preferences.RightCollapsed = true
 			d.persist()
 		}
@@ -76,42 +49,47 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 			a += change.Additions
 			r += change.Deletions
 		}
-		ui.Row(c).Padding(10, 10, 8, 12).Gap(6).Children(func() {
-			muted(c, p, tr("未提交的改动")).Grow(1).FontSize(p.font(10.36))
+		ui.Row(c).Padding(10, 12, 8, 16).Gap(8).Children(func() {
+			ui.Text(c, tr("未提交的改动")).Grow(1).FontSize(p.font(11.2)).FontWeight(600).TextColor(p.Text2)
 			d.diffStat(c, p, a, r)
-			if button(c, p, tr("全部暂存"), "Plus", false).Height(26).FontSize(p.font(10.64)).Padding(0, 8).Disabled(len(v.Changes) == 0).Clicked() {
+			if button(c, p, tr("全部暂存"), "Plus", false).Height(26).Radius(9).FontSize(p.font(10.64)).Padding(0, 9).Disabled(len(v.Changes) == 0).Clicked() {
 				d.stage("", true, false)
 			}
 		})
 		ui.List(c, nil, len(v.Changes), func(i int) {
 			change := v.Changes[i]
-			row := ui.ButtonBase(c).Label(basename(change.Path)+" "+dirname(change.Path)+" "+statusLetter(change.Status)).FillWidth().Height(44).Padding(6, 10).Gap(8).Radius(8)
+			row := ui.ButtonBase(c).Label(basename(change.Path)+" "+dirname(change.Path)+" "+statusLetter(change.Status)).FillWidth().Height(46).Padding(6, 10).Gap(10).Radius(12).Cursor(ui.CursorDefault).Transition(fastMotion)
 			if row.Hovered() {
 				row.Background(p.Hover)
 			}
 			row.Children(func() {
-				icon(c, "FileCode2", 14, p.Text3)
+				ui.Box(c).Size(28, 28).Shrink(0).Radius(8).Background(p.Subtle).Border(1, p.BorderSubtle).Center().Children(func() {
+					icon(c, "FileCode2", 14, p.Text2)
+				})
 				ui.Column(c).Grow(1).Gap(2).Children(func() {
 					ui.Text(c, basename(change.Path)).SingleLine().FontSize(p.font(12.04)).FontWeight(550)
 					muted(c, p, dirname(change.Path)).FontSize(p.font(10.08)).SingleLine()
 				})
 				d.diffStat(c, p, change.Additions, change.Deletions)
-				color, bg := p.Warning, p.WarningSoft
-				if change.Status == "??" {
-					color, bg = p.Success, p.SuccessSoft
+				color := p.Warning
+				switch statusLetter(change.Status) {
+				case "U", "A":
+					color = p.Success
+				case "D":
+					color = p.Danger
 				}
-				badge(c, p, statusLetter(change.Status), color, bg)
+				ui.Text(c, statusLetter(change.Status)).Width(14).TextAlign(ui.Center).Font(monoFont).FontSize(p.font(10.64)).FontWeight(600).TextColor(color)
 			})
 			if row.Clicked() {
 				d.openPreview("diff", change.Path, change.Status)
 			}
-		}).Grow(1).Padding(0, 6).Children(func() {
+		}).Grow(1).Padding(0, 8).Children(func() {
 			if len(v.Changes) == 0 {
 				empty(c, p, tr("工作区没有未提交的改动。"))
 			}
 		})
 	case 1:
-		ui.Row(c).Height(40).Padding(6, 10).Gap(7).Children(func() {
+		ui.Row(c).Height(32).Margin(4, 12, 8, 12).Padding(0, 10).Gap(7).Radius(10).Background(p.Active).Children(func() {
 			icon(c, "Search", 13, p.Text3)
 			ui.TextInputBase(c, &d.fileQuery).Label(tr("搜索文件")).Placeholder(tr("搜索文件")).Grow(1).FontSize(p.font(11.76))
 		})
@@ -126,13 +104,13 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 		ui.List(c, nil, len(items), func(i int) {
 			item := items[i]
 			d.terminal(c, p, model.String(item.Args["command"]), item.Output)
-		}).Grow(1).Padding(10).Gap(8).Children(func() {
+		}).Grow(1).Padding(4, 12, 12, 12).Gap(10).Children(func() {
 			if len(items) == 0 {
 				empty(c, p, tr("Agent 运行的终端命令会显示在这里。"))
 			}
 		})
 	case 3:
-		ui.Scroll(c).Grow(1).Padding(10, 8).Gap(8).Children(func() {
+		ui.Scroll(c).Grow(1).Padding(6, 12, 12, 12).Gap(8).Children(func() {
 			done := 0
 			for _, task := range v.Tasks {
 				if task.Status == "done" {
@@ -144,28 +122,15 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 				muted(c, p, fmt.Sprintf("%d / %d", done, len(v.Tasks))).FontSize(p.font(10.36))
 			})
 			if len(v.Tasks) > 0 {
-				ui.Row(c).Height(4).Margin(2, 8, 8, 8).Radius(99).Clip().Background(p.Active).Children(func() {
-					ui.Box(c).WidthPercent(100 * float32(done) / float32(len(v.Tasks))).FillHeight().Background(p.Success)
+				ui.Row(c).Height(6).Margin(2, 6, 8, 6).Radius(99).Clip().Background(p.Active).Children(func() {
+					ui.Box(c).WidthPercent(100 * float32(done) / float32(len(v.Tasks))).FillHeight().Radius(99).Background(p.Ink).Transition(panelMotion)
 				})
 			}
-			for _, task := range v.Tasks {
-				ui.Row(c).Height(32).Padding(4, 8).Gap(9).Children(func() {
-					name, color := "CircleDashed", p.Text3
-					switch task.Status {
-					case "done":
-						name, color = "CircleCheck", p.Success
-					case "running":
-						color = p.Accent
-					case "failed":
-						name, color = "CircleAlert", p.Danger
+			if len(v.Tasks) > 0 {
+				group(c, p, func() {
+					for _, task := range v.Tasks {
+						d.taskRow(c, p, task)
 					}
-					icon(c, name, 17, color)
-					text := ui.Text(c, task.Title).Grow(1).SingleLine().FontSize(p.font(11.9))
-					if task.Status == "done" {
-						text.Strikethrough().TextColor(p.Text3)
-					}
-					label := map[string]string{"done": tr("完成"), "running": tr("进行中"), "failed": tr("失败"), "pending": tr("待执行")}[task.Status]
-					muted(c, p, label).FontSize(p.font(10.08))
 				})
 			}
 			if len(v.Tasks) == 0 {
@@ -176,8 +141,107 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 	}
 }
 
+// workTabs is a segmented control of the work panel's pages, with a
+// raised thumb that springs to the chosen one and counts beside them.
+func (d *desktop) workTabs(c *ui.Context, p palette) {
+	v := d.current()
+	track := ui.Row(c).Gap(1).Padding(2).Radius(11).Background(p.Active).Role(ui.RoleTabList).Label(tr("工作区"))
+	state := ui.Local(track, "tabs", func() segmentedState {
+		return segmentedState{X: make([]float32, len(workTabs)), W: make([]float32, len(workTabs))}
+	})
+	if d.tab >= 0 && d.tab < len(state.W) && state.W[d.tab] > 0 {
+		spring := ui.Animation{Spring: ui.SpringOptions{Duration: 340 * time.Millisecond, Bounce: 0.14}}
+		x, w := track.AnimateTo("x", state.X[d.tab], spring), track.AnimateTo("w", state.W[d.tab], spring)
+		track.Draw(func(painter *ui.Painter, r ui.Rect) {
+			thumb := ui.Rect{X: r.X + x, Y: r.Y + 2, W: w, H: r.H - 4}
+			painter.Shadow(thumb, 9, 0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.12))
+			painter.Fill(thumb, p.Thumb, 9)
+		})
+	}
+	track.Children(func() {
+		origin := track.Bounds()
+		for i, tab := range workTabs {
+			count := ""
+			if i == 0 && len(v.Changes) > 0 {
+				count = fmtInt(len(v.Changes))
+			} else if i == 3 && len(v.Tasks) > 0 {
+				done := 0
+				for _, task := range v.Tasks {
+					if task.Status == "done" {
+						done++
+					}
+				}
+				count = fmt.Sprintf("%d/%d", done, len(v.Tasks))
+			}
+			current := i == d.tab
+			b := ui.ButtonBase(c).Label(tr(tab.Label)).Role(ui.RoleTab).Height(28).Padding(0, 10).Gap(6).Radius(9).
+				FontSize(p.font(11.48)).TextColor(p.Text3).Cursor(ui.CursorDefault)
+			if current {
+				b.TextColor(p.Text).FontWeight(550)
+				if state.W[i] == 0 {
+					b.Background(p.Thumb)
+				}
+			} else if b.Hovered() {
+				b.TextColor(p.Text2)
+			}
+			b.Children(func() {
+				color := p.Text3
+				if current {
+					color = p.Text
+				}
+				icon(c, tab.Icon, 13, color)
+				ui.Text(c, tr(tab.Label)).NoWrap()
+				if count != "" {
+					ui.Text(c, count).Font(monoFont).FontSize(p.font(10.08)).TextColor(p.Text3)
+				}
+			})
+			if r := b.Bounds(); r.W > 0 {
+				state.X[i], state.W[i] = r.X-origin.X, r.W
+			}
+			if b.Clicked() {
+				d.tab = i
+				d.preview = nil
+				d.fileQuery = ""
+			}
+		}
+	})
+}
+
 func empty(c *ui.Context, p palette, text string) {
-	ui.Text(c, tr(text)).Padding(18).Margin(6).FontSize(p.font(11.76)).TextColor(p.Text3).TextAlign(ui.Center).Border(1, p.Border).BorderStyle(ui.BorderDashed).Radius(8)
+	ui.Text(c, tr(text)).Padding(20).Margin(6).FontSize(p.font(11.76)).LineHeight(1.6).TextColor(p.Text3).TextAlign(ui.Center).Border(1, p.Border).BorderStyle(ui.BorderDashed).Radius(14)
+}
+
+// taskRow is one step of the plan in the tasks page's grouped list.
+func (d *desktop) taskRow(c *ui.Context, p palette, task model.Task) {
+	divided := settingsRows > 0
+	settingsRows++
+	row := ui.Row(c).FillWidth().MinHeight(30).Gap(10)
+	if divided {
+		row.Draw(func(painter *ui.Painter, r ui.Rect) {
+			painter.Fill(ui.Rect{X: r.X + 28, Y: r.Y - 6.5, W: r.W - 28, H: 1}, p.BorderSubtle, 0)
+		})
+	}
+	row.Children(func() {
+		switch task.Status {
+		case "done":
+			ui.Box(c).Size(18, 18).Shrink(0).Radius(99).Background(p.Ink).Center().Children(func() { icon(c, "Check", 11, p.InkText) })
+		case "running":
+			ui.Box(c).Size(18, 18).Shrink(0).Center().Children(func() { spark(c, 15, p.Accent, true) })
+		case "failed":
+			icon(c, "CircleAlert", 18, p.Danger)
+		default:
+			ui.Box(c).Size(18, 18).Shrink(0).Radius(99).Border(1.5, p.BorderStrong)
+		}
+		text := ui.Text(c, task.Title).Grow(1).Basis(0).MinWidth(0).SingleLine().FontSize(p.font(11.9))
+		switch task.Status {
+		case "done":
+			text.Strikethrough().TextColor(p.Text3)
+		case "running":
+			text.FontWeight(600)
+		}
+		label := map[string]string{"done": tr("完成"), "running": tr("进行中"), "failed": tr("失败"), "pending": tr("待执行")}[task.Status]
+		muted(c, p, label).FontSize(p.font(10.08))
+	})
 }
 
 func (d *desktop) diffStat(c *ui.Context, p palette, a, r int) {
@@ -185,8 +249,8 @@ func (d *desktop) diffStat(c *ui.Context, p palette, a, r int) {
 		return
 	}
 	ui.Row(c).Gap(4).Children(func() {
-		ui.Text(c, fmt.Sprintf("+%d", a)).Font("Cascadia Mono, Consolas").FontSize(p.font(10.08)).TextColor(p.Success)
-		ui.Text(c, fmt.Sprintf("−%d", r)).Font("Cascadia Mono, Consolas").FontSize(p.font(10.08)).TextColor(p.Danger)
+		ui.Text(c, fmt.Sprintf("+%d", a)).Font(monoFont).FontSize(p.font(10.36)).TextColor(p.Success)
+		ui.Text(c, fmt.Sprintf("−%d", r)).Font(monoFont).FontSize(p.font(10.36)).TextColor(p.Danger)
 	})
 }
 
@@ -257,18 +321,14 @@ func (d *desktop) fileTreeEntries(c *ui.Context, p palette, entries []treeEntry)
 	v := d.current()
 	ui.List(c, nil, len(entries), func(i int) {
 		entry := entries[i]
-		row := ui.ButtonBase(c).Label(entry.Path).FillWidth().Height(28).Padding(0, 8, 0, 8+float32(entry.Depth)*14).Gap(6).Radius(6).Role(ui.RoleTreeItem)
+		row := ui.ButtonBase(c).Label(entry.Path).FillWidth().Height(28).Padding(0, 8, 0, 8+float32(entry.Depth)*14).Gap(6).Radius(9).Role(ui.RoleTreeItem).Cursor(ui.CursorDefault)
 		if row.Hovered() {
 			row.Background(p.Hover)
 		}
 		row.Children(func() {
 			if entry.Folder {
-				name := "ChevronRight"
-				if d.folders[entry.Path] {
-					name = "ChevronDown"
-				}
-				icon(c, name, 12, p.Text4)
-				icon(c, "Folder", 14, p.Text3)
+				disclosure(c, p, d.folders[entry.Path])
+				icon(c, map[bool]string{true: "FolderOpen", false: "Folder"}[d.folders[entry.Path]], 14, p.Text3)
 			} else {
 				ui.Box(c).Width(12)
 				icon(c, "FileCode2", 14, p.Text3)
@@ -294,7 +354,7 @@ func (d *desktop) fileTreeEntries(c *ui.Context, p palette, entries []treeEntry)
 				d.openPath(v.Workspace, entry.Path)
 			}
 		})
-	}).Grow(1).Padding(0, 6).Role(ui.RoleTree).Label(tr("工作区文件"))
+	}).Grow(1).Padding(0, 8).Role(ui.RoleTree).Label(tr("工作区文件"))
 }
 
 func (d *desktop) previewView(c *ui.Context, p palette) {
@@ -333,12 +393,12 @@ func (d *desktop) previewView(c *ui.Context, p palette) {
 	if preview.Kind == "file" {
 		ui.List(c, &preview.List, len(preview.Lines), func(i int) {
 			ui.Row(c).Gap(0).AlignItems(ui.Stretch).Children(func() {
-				ui.Text(c, fmtInt(i+1)).Width(42).Padding(0, 10, 0, 0).TextAlign(ui.End).Font("Cascadia Mono, Consolas").FontSize(p.font(10.92)).TextColor(p.Text4)
+				ui.Text(c, fmtInt(i+1)).Width(42).Padding(0, 10, 0, 0).TextAlign(ui.End).Font(monoFont).FontSize(p.font(10.92)).TextColor(p.Text4)
 				codeText(c, p, preview.Lines[i])
 			})
-		}).Grow(1).Padding(6, 0).Background(p.Main).HorizontalScroll()
+		}).Grow(1).Padding(6, 0).Background(p.Main)
 	} else {
-		ui.List(c, &preview.List, len(preview.Diff), func(i int) { d.diffView(c, p, preview.Diff[i:i+1], "preview-row", 0) }).Grow(1).Background(p.Main).HorizontalScroll()
+		ui.List(c, &preview.List, len(preview.Diff), func(i int) { d.diffView(c, p, preview.Diff[i:i+1], "preview-row", 0) }).Grow(1).Background(p.Main)
 		if len(preview.Diff) == 0 {
 			muted(c, p, preview.Text).Grow(1).Padding(12)
 		}
@@ -383,8 +443,8 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 	}
 	ui.Row(c).Height(6).Margin(2, 0, 2, 0).Radius(99).Clip().Background(p.Active).Label(tr("输入与输出 token 分布")).Children(func() {
 		if known && usage.Input+usage.Output > 0 {
-			ui.Box(c).WidthPercent(inputRatio * 100).FillHeight().Background(p.Accent)
-			ui.Box(c).Grow(1).FillHeight().Background(p.Success)
+			ui.Box(c).WidthPercent(inputRatio * 100).FillHeight().Background(p.Ink)
+			ui.Box(c).Grow(1).FillHeight().Background(p.Accent)
 		}
 	})
 	values := []struct{ Label, Value string }{{tr("输入 token"), tr("未报告")}, {tr("输出 token"), tr("未报告")}, {tr("缓存命中率"), tr("未报告")}, {tr("平均生成 TPS"), tr("未记录")}}
@@ -401,7 +461,7 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 	for pair := 0; pair < 2; pair++ {
 		ui.Row(c).Gap(6).Padding(0, 6).Children(func() {
 			for _, value := range values[pair*2 : pair*2+2] {
-				ui.Column(c).Grow(1).Basis(0).Padding(10, 12).Radius(8).Border(1, p.BorderSubtle).Background(p.Main).Gap(2).Children(func() {
+				ui.Column(c).Grow(1).Basis(0).Padding(10, 12).Radius(12).Border(1, p.BorderSubtle).Background(p.Elevated).Gap(2).Children(func() {
 					muted(c, p, value.Label).FontSize(p.font(10.08))
 					ui.Text(c, value.Value).FontSize(p.font(14.7)).FontWeight(600)
 				})

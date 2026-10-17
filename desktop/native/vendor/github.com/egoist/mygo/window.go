@@ -2,9 +2,6 @@ package mygo
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log"
@@ -18,7 +15,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/egoist/mygo/internal/bridge"
 	"github.com/egoist/mygo/internal/platform"
 	"github.com/egoist/mygo/internal/surface"
 )
@@ -134,10 +130,11 @@ type WindowOptions struct {
 	// page that follows the light or dark appearance.
 	BackgroundColor string
 	// Vibrancy puts a translucent, blurred material behind a transparent
-	// page (macOS and Windows 11 22H2), e.g. VibrancySidebar, or behind
-	// native UI where it draws no background (macOS). On Windows, only a
-	// window created with a material can show one, and it has no menu bar:
-	// Alt and F10 open its menus in a popup.
+	// page, or behind native UI where it draws no background (macOS and
+	// Windows 11 22H2), e.g. VibrancySidebar; ui.Context.Vibrancy tells
+	// native UI whether it shows. On Windows, only a window created with a
+	// material can show one, and it has no menu bar: Alt and F10 open its
+	// menus in a popup.
 	Vibrancy Vibrancy
 	// Opacity of the window between 0 and 1 (default 1).
 	Opacity float64
@@ -146,16 +143,26 @@ type WindowOptions struct {
 	// Modal makes a child window modal to its Parent.
 	Modal bool
 
+	// Panel makes the window a panel, as the windows of launchers and
+	// quick entry (Spotlight, Raycast) are: it floats above the windows of
+	// all apps, on whichever Space or virtual desktop the user is on, over
+	// full-screen apps too, and stays out of the taskbar, the Dock and the
+	// app switcher. It cannot be minimized, maximized or go full screen. On
+	// macOS, showing or focusing it gives it the keyboard without
+	// activating the app, so the app the user was in stays active and gets
+	// the keyboard back when the panel hides.
+	Panel bool
+
 	// Page configures the window's web page.
 	Page PageOptions
 
 	// StateKey remembers the window's position, size, and maximized and
 	// full screen state under this key, in window-state.json in
-	// PathUserData, which is written when the window closes and when the
-	// app quits. A window created with the same key, for example at the
-	// next launch, gets them back as long as it would show on a connected
-	// display: they override X, Y, Width, Height, UseContentSize,
-	// Maximized and FullScreen.
+	// PathUserData or the store of App.SetWindowStateStore, saved when
+	// the window closes and when the app quits. A window created with the
+	// same key, for example at the next launch, gets them back as long as
+	// it would show on a connected display: they override X, Y, Width,
+	// Height, UseContentSize, Maximized and FullScreen.
 	StateKey string
 
 	// Content makes the window show a user interface MyGo draws itself,
@@ -165,11 +172,61 @@ type WindowOptions struct {
 	Content Content
 }
 
+// WindowState is what WindowOptions.StateKey remembers of a window: its
+// bounds in the normal state, which it gets back when it leaves the
+// maximized or full screen state, and that state.
+type WindowState struct {
+	X          int  `json:"x"`
+	Y          int  `json:"y"`
+	Width      int  `json:"width"`
+	Height     int  `json:"height"`
+	Maximized  bool `json:"maximized,omitempty"`
+	FullScreen bool `json:"fullScreen,omitempty"`
+}
+
+// WindowStateStore keeps the states of the windows with a
+// WindowOptions.StateKey, by key, for App.SetWindowStateStore. MyGo calls
+// it on the main thread, so it should return quickly.
+type WindowStateStore interface {
+	// LoadWindowStates returns the saved states. It is called once, when
+	// the first window with a StateKey is created. Without states (nil, or
+	// an error) windows get their options.
+	LoadWindowStates() (map[string]WindowState, error)
+	// SaveWindowStates replaces the saved states with states, which the
+	// store may keep. It is called when a window with a StateKey closes
+	// and when the app quits, if a state changed. After an error the
+	// next call saves the states again.
+	SaveWindowStates(states map[string]WindowState) error
+}
+
+// SetWindowStateStore keeps the states of windows (WindowOptions.StateKey)
+// in s, such as the app's own database, instead of window-state.json in
+// PathUserData. nil restores the file. Call it before the first window
+// with a StateKey is created, usually before Run. Browsers keep no window
+// state, and never call s.
+func (a *Application) SetWindowStateStore(s WindowStateStore) {
+	a.mu.Lock()
+	a.stateStore = s
+	a.mu.Unlock()
+}
+
 // Window is a native window hosting a web page, or the Content of package
 // ui. Create windows with NewWindow once the application is ready.
 type Window struct {
 	id     int
 	parent *Window
+	// flyout places a window NewFlyout created, at flyoutSize, the size
+	// it asked for. Main thread only.
+	flyout     *platform.Flyout
+	flyoutSize platform.Size
+	// panel is WindowOptions.Panel.
+	panel bool
+	// host is the window a web view is in, for the page of a web view
+	// (webView); webViews are the pages of a window's web views, guarded
+	// by the lock of windows.
+	host     *Window
+	webView  *WebView
+	webViews []*Window
 	// pg is the window's page, which Page returns unless the window shows
 	// native UI.
 	pg *Page
@@ -181,10 +238,17 @@ type Window struct {
 	conn         *surface.Conn
 	devTools     bool
 	invalidating atomic.Bool
+	// userScripts are the scripts the window's pages run at document
+	// start: the bridge, the preferences and the preload script. Main
+	// thread only.
+	userScripts []platform.UserScript
 	// secret starts every message of the bridge in this window's pages.
 	// Only the bridge knows it, so messages posted from elsewhere (an
 	// iframe of another origin) are ignored.
 	secret string
+	// preload is PageOptions.PreloadScript, which the scripts of the pages
+	// loaded later keep (pageScripts).
+	preload string
 
 	// native is only accessed on the main thread; nil once destroyed.
 	native    platform.Window
@@ -197,6 +261,11 @@ type Window struct {
 	// hear the room the window controls take. Main thread only.
 	hiddenTitleBar bool
 	menu           *Menu
+	// title is the title the app or the page set; representedFile and
+	// documentEdited are the document the window shows. Main thread only.
+	title           string
+	representedFile string
+	documentEdited  bool
 	// stateKey is WindowOptions.StateKey; stateTimer captures the state
 	// once it settled. Main thread only.
 	stateKey   string
@@ -206,6 +275,9 @@ type Window struct {
 	// Main thread only.
 	trusted        bool
 	trustedOrigins []string
+	// html is the document LoadHTML loaded, while it is the page's or
+	// about to be. Main thread only.
+	html *htmlDocument
 
 	mu                sync.Mutex
 	openHandler       func(WindowOpenRequest) *WindowOptions
@@ -290,13 +362,19 @@ func NewWindow(opts WindowOptions) *Window {
 	if err != nil {
 		panic(err)
 	}
+	return createWindow("NewWindow", opts, bg, nil)
+}
+
+// createWindow creates a window, or a flyout, once the application is
+// ready.
+func createWindow(caller string, opts WindowOptions, bg *background, flyout *flyoutOptions) *Window {
 	if !isMainThread() {
 		App.waitReady()
 	} else if !App.IsReady() {
-		panic("mygo: NewWindow called before the application is ready; create windows in App.WhenReady")
+		panic("mygo: " + caller + " called before the application is ready; create windows in App.WhenReady")
 	}
 	var w *Window
-	onMain(func() { w = newWindow(opts, bg, 0) })
+	onMain(func() { w = newWindow(opts, bg, 0, flyout) })
 	if w == nil {
 		// The event loop has already stopped.
 		w = &Window{}
@@ -332,20 +410,20 @@ func (w *Window) backgroundColor() *platform.Color {
 // updateBackgrounds gives windows with a light and a dark background the
 // one of the current appearance. Main thread only.
 func updateBackgrounds() {
-	for _, w := range Windows() {
+	for _, w := range pageWindows() {
 		if bg := w.background; w.native != nil && bg != nil && bg.light != bg.dark {
 			w.native.SetBackgroundColor(*w.backgroundColor())
 		}
 	}
 }
 
-func newWindow(opts WindowOptions, bg *background, native uintptr) *Window {
+func newWindow(opts WindowOptions, bg *background, native uintptr, flyout *flyoutOptions) *Window {
 	windows.Lock()
 	windows.nextID++
 	id := windows.nextID
 	windows.Unlock()
 
-	w := &Window{id: id, parent: opts.Parent, trustedOrigins: opts.Page.TrustedOrigins, secret: rand.Text(), stateKey: opts.StateKey, background: bg, content: opts.Content}
+	w := &Window{id: id, parent: opts.Parent, trustedOrigins: opts.Page.TrustedOrigins, secret: randomText(), stateKey: opts.StateKey, background: bg, content: opts.Content, panel: opts.Panel && flyout == nil}
 	w.pg = &Page{w}
 	w.hiddenTitleBar = !opts.Frameless && (opts.TitleBarStyle == TitleBarHidden || opts.TitleBarStyle == TitleBarHiddenInset)
 	w.resetPage()
@@ -357,10 +435,24 @@ func newWindow(opts WindowOptions, bg *background, native uintptr) *Window {
 		w.background = nil
 	}
 	popts.Native = native
+	if flyout != nil {
+		w.flyout = flyout.flyout
+		if t := flyout.tray; t != nil {
+			if t.native == nil {
+				panic("mygo: NewFlyout: the tray was destroyed")
+			}
+			w.flyout.Tray = t.native
+		}
+		w.flyoutSize = platform.Size{Width: popts.Width, Height: popts.Height}
+		popts.Flyout = w.flyout
+		popts.Focusable = w.flyout.Focusable
+		popts.Center = false
+	}
 	w.devTools = popts.DevTools
 	if w.stateKey != "" {
 		restoreWindowState(w.stateKey, popts)
 	}
+	w.title = popts.Title
 	nw, err := backend().NewWindow(popts, &windowHandler{w})
 	if err != nil {
 		panic(fmt.Sprintf("mygo: cannot create window: %v", err))
@@ -422,6 +514,11 @@ func (w *Window) platformOptions(o *WindowOptions) *platform.WindowOptions {
 		UserAgent:      po.UserAgent,
 		Zoom:           po.ZoomFactor,
 		Schemes:        Protocol.schemes(),
+		Panel:          o.Panel,
+	}
+	if o.Panel {
+		p.Minimizable, p.Maximizable, p.Fullscreenable = false, false, false
+		p.AlwaysOnTop, p.SkipTaskbar = true, true
 	}
 	if p.Title == "" {
 		p.Title = App.Name()
@@ -444,15 +541,11 @@ func (w *Window) platformOptions(o *WindowOptions) *platform.WindowOptions {
 	if o.Parent != nil && o.Parent.native != nil {
 		p.Parent = o.Parent.native
 	}
-	p.UserScripts = []platform.UserScript{{Source: bridge.Script(bridge.Config{
-		Platform: jsPlatform(),
-		WindowID: w.id,
-		Version:  Version,
-		Secret:   w.secret,
-	})}}
-	if po.PreloadScript != "" {
-		p.UserScripts = append(p.UserScripts, platform.UserScript{Source: po.PreloadScript})
-	}
+	w.preload = po.PreloadScript
+	p.UserScripts = w.pageScripts()
+	// Kept to replace the preferences' and the locale's (sendPreferences,
+	// pagesLocaleChanged).
+	w.userScripts = p.UserScripts
 	return p
 }
 
@@ -599,6 +692,10 @@ func (w *Window) Hide() {
 	})
 }
 
+// IsPanel reports whether the window was created with
+// WindowOptions.Panel.
+func (w *Window) IsPanel() bool { return w.panel }
+
 // IsVisible reports whether the window is shown.
 func (w *Window) IsVisible() bool { return get(w, platform.Window.IsVisible) }
 
@@ -658,11 +755,68 @@ func (w *Window) Center() { w.do(platform.Window.Center) }
 
 // SetTitle sets the native window title.
 func (w *Window) SetTitle(title string) {
-	w.do(func(n platform.Window) { n.SetTitle(title) })
+	w.do(func(n platform.Window) {
+		w.title = title
+		w.applyTitle(n)
+	})
 }
 
-// Title returns the native window title.
-func (w *Window) Title() string { return get(w, platform.Window.Title) }
+// Title returns the window title, without the mark of an edited document
+// (see SetDocumentEdited).
+func (w *Window) Title() string {
+	return get(w, func(platform.Window) string { return w.title })
+}
+
+// SetRepresentedFile tells which file the window shows, "" for none. On
+// macOS the title bar shows its icon, which the user can drag, and
+// Command-clicking the title lists the folders it is in. Other platforms
+// show nothing. Documents (NewDocuments) set it for their windows.
+func (w *Window) SetRepresentedFile(path string) {
+	if path != "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+	}
+	w.do(func(n platform.Window) {
+		w.representedFile = path
+		n.SetRepresentedFile(path)
+	})
+}
+
+// RepresentedFile returns the path SetRepresentedFile set.
+func (w *Window) RepresentedFile() string {
+	return onMainValue(func() string { return w.representedFile })
+}
+
+// SetDocumentEdited tells whether the window's document has unsaved
+// changes: a dot in the close button on macOS, and a "*" before the title
+// on Linux and Windows, as Notepad and gedit show it. Documents
+// (NewDocuments) set it for their windows.
+func (w *Window) SetDocumentEdited(edited bool) {
+	w.do(func(n platform.Window) {
+		if w.documentEdited == edited {
+			return
+		}
+		w.documentEdited = edited
+		n.SetDocumentEdited(edited)
+		w.applyTitle(n)
+	})
+}
+
+// IsDocumentEdited reports what SetDocumentEdited set.
+func (w *Window) IsDocumentEdited() bool {
+	return onMainValue(func() bool { return w.documentEdited })
+}
+
+// applyTitle gives the native window its title, marked when the document
+// is edited where the title bar has no other mark. Main thread only.
+func (w *Window) applyTitle(n platform.Window) {
+	title := w.title
+	if w.documentEdited && runtime.GOOS != "darwin" {
+		title = "*" + title
+	}
+	n.SetTitle(title)
+}
 
 // SetBounds moves and resizes the window.
 func (w *Window) SetBounds(r Rectangle) {
@@ -688,6 +842,9 @@ func (w *Window) ContentBounds() Rectangle {
 // SetSize resizes the window.
 func (w *Window) SetSize(width, height int) {
 	w.do(func(n platform.Window) {
+		if w.setFlyoutSize(width, height) {
+			return
+		}
 		b := n.Bounds()
 		b.Width, b.Height = width, height
 		n.SetBounds(b)
@@ -703,6 +860,9 @@ func (w *Window) Size() (width, height int) {
 // SetContentSize resizes the window so the page area has the given size.
 func (w *Window) SetContentSize(width, height int) {
 	w.do(func(n platform.Window) {
+		if w.setFlyoutSize(width, height) {
+			return
+		}
 		b := n.ContentBounds()
 		b.Width, b.Height = width, height
 		n.SetContentBounds(b)
@@ -822,6 +982,8 @@ func (w *Window) SetContentProtection(v bool) {
 // shows none in other windows. See WindowOptions.Vibrancy.
 func (w *Window) SetVibrancy(v Vibrancy) {
 	w.do(func(n platform.Window) { n.SetVibrancy(string(v)) })
+	// Native UI looks again whether the material shows.
+	w.Invalidate()
 }
 
 // ProgressState is the state of a progress bar; see ProgressBar.
@@ -880,7 +1042,10 @@ func (w *Window) SetSkipTaskbar(v bool) {
 }
 
 // SetVisibleOnAllWorkspaces shows the window on every workspace (macOS
-// Spaces, Linux virtual desktops), or on the current one only.
+// Spaces, Linux virtual desktops), or on the current one only. On macOS it
+// also shows over other apps in full screen, even with DisableFullScreen,
+// if the app is an accessory (ActivationPolicyAccessory, Dock.Hide): macOS
+// shows no windows of regular apps there.
 func (w *Window) SetVisibleOnAllWorkspaces(v bool) {
 	w.do(func(n platform.Window) { n.SetVisibleOnAllWorkspaces(v) })
 }
@@ -929,7 +1094,10 @@ func (p *Page) LoadURL(rawURL string) error {
 	if err != nil {
 		return err
 	}
-	p.w.page(func(n platform.Window) { n.LoadURL(resolved) })
+	p.w.page(func(n platform.Window) {
+		p.w.html = nil
+		n.LoadURL(resolved)
+	})
 	return nil
 }
 
@@ -944,7 +1112,10 @@ func (p *Page) LoadFile(path string) error {
 	if err != nil {
 		return err
 	}
-	p.w.page(func(n platform.Window) { n.LoadFile(abs, filepath.Dir(abs)) })
+	p.w.page(func(n platform.Window) {
+		p.w.html = nil
+		n.LoadFile(abs, filepath.Dir(abs))
+	})
 	return nil
 }
 
@@ -1003,9 +1174,39 @@ func (w *Window) isTrusted(rawURL string) bool {
 }
 
 // LoadHTML loads an HTML string. Relative URLs in it resolve against
-// baseURL, which may be empty.
+// baseURL, which may be empty, and the page is at baseURL, or about:blank.
+// Reloading the page, with Reload or from the page, loads html again.
 func (p *Page) LoadHTML(html, baseURL string) {
-	p.w.page(func(n platform.Window) { n.LoadHTML(html, baseURL) })
+	p.w.page(func(n platform.Window) { p.w.loadHTML(n, html, baseURL) })
+}
+
+// htmlDocument is a document LoadHTML loaded.
+type htmlDocument struct {
+	html, baseURL string
+	// shown is set once the page committed it.
+	shown bool
+}
+
+// loadHTML loads html into the page and remembers it for its reloads: web
+// views reload the page's URL instead, the base URL or a blank page. Main
+// thread only.
+func (w *Window) loadHTML(n platform.Window, html, baseURL string) {
+	w.html = &htmlDocument{html: html, baseURL: baseURL}
+	n.LoadHTML(html, baseURL)
+}
+
+// isAt reports whether url, which the page committed, is the document's,
+// fragments aside.
+func (d *htmlDocument) isAt(url string) bool {
+	base := d.baseURL
+	if base == "" {
+		base = "about:blank"
+	}
+	trim := func(u string) string {
+		u, _, _ = strings.Cut(u, "#")
+		return strings.TrimSuffix(u, "/")
+	}
+	return trim(url) == trim(base)
 }
 
 // Reload reloads the page.
@@ -1128,7 +1329,7 @@ func (p *Page) EvalContext(ctx context.Context, code string) (any, error) {
 		return nil, err
 	}
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := decodeResult(raw, &v); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -1149,7 +1350,7 @@ func EvalAs[T any](p *Page, code string) (T, error) {
 	if err != nil || len(raw) == 0 {
 		return v, err
 	}
-	err = json.Unmarshal(raw, &v)
+	err = decodeResult(raw, &v)
 	return v, err
 }
 
@@ -1159,78 +1360,6 @@ type EvalError struct {
 }
 
 func (e *EvalError) Error() string { return "mygo: javascript error: " + e.Message }
-
-const (
-	// The expression form: compile errors mean code is not an expression.
-	evalExpr = "try{return JSON.stringify({ok:true,v:await(\n%s\n)})}catch(e){return JSON.stringify({ok:false,e:String(e&&e.message||e)})}"
-	// The statement form runs code as a function body.
-	evalBody = "try{return JSON.stringify({ok:true,v:await(async()=>{\n%s\n})()})}catch(e){return JSON.stringify({ok:false,e:String(e&&e.message||e)})}"
-)
-
-// eval returns the JSON result of code, which shares the memory of the
-// page's answer.
-func (w *Window) eval(ctx context.Context, code string) (jsontext.Value, error) {
-	if w.content != nil {
-		return nil, errNoPage
-	}
-	type result struct {
-		raw string
-		err error
-	}
-	// Both the cancellation and the page may answer; the first one counts
-	// and the other must not block.
-	ch := make(chan result, 2)
-	stop := context.AfterFunc(ctx, func() { deliver(ch, result{err: ctx.Err()}) })
-	defer stop()
-
-	ran := false
-	w.do(func(n platform.Window) {
-		ran = true
-		expr := strings.TrimRight(code, " \t\r\n;")
-		n.CallAsyncFunction(fmt.Sprintf(evalExpr, expr), func(res string, err error) {
-			if err == nil {
-				deliver(ch, result{raw: res})
-				return
-			}
-			if !strings.HasPrefix(err.Error(), "SyntaxError") {
-				// It may have run (and then the page navigated or
-				// crashed): running it again could run it twice.
-				deliver(ch, result{err: err})
-				return
-			}
-			// Not an expression: run it as a function body instead. The
-			// first attempt failed to compile, so nothing ran twice.
-			onMain(func() {
-				if w.native == nil {
-					deliver(ch, result{err: errDestroyed})
-					return
-				}
-				w.native.CallAsyncFunction(fmt.Sprintf(evalBody, code), func(res string, err error) {
-					deliver(ch, result{raw: res, err: err})
-				})
-			})
-		})
-	})
-	if !ran {
-		return nil, errDestroyed
-	}
-	r := await(ch)
-	if r.err != nil {
-		return nil, r.err
-	}
-	var out struct {
-		OK bool     `json:"ok"`
-		V  rawValue `json:"v"`
-		E  string   `json:"e"`
-	}
-	if err := json.Unmarshal(stringBytes(r.raw), &out); err != nil {
-		return nil, fmt.Errorf("mygo: unexpected eval result %q: %w", r.raw, err)
-	}
-	if !out.OK {
-		return nil, &EvalError{Message: out.E}
-	}
-	return jsontext.Value(out.V), nil
-}
 
 // SetWindowOpenHandler decides what happens on window.open() and clicks on
 // target="_blank" links. The handler returns the options of the window to
@@ -1248,7 +1377,8 @@ func (p *Page) SetWindowOpenHandler(fn func(req WindowOpenRequest) *WindowOption
 
 // resetPage starts a new page context; the previous one is canceled.
 func (w *Window) resetPage() {
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), callerKey{}, w))
+	ctx := context.WithValue(context.WithValue(context.Background(), callerKey{}, w.top()), pageKey{}, w.pg)
+	ctx, cancel := context.WithCancel(ctx)
 	w.mu.Lock()
 	prev := w.pageCancel
 	w.pageCtx, w.pageCancel = ctx, cancel
@@ -1266,6 +1396,19 @@ func (w *Window) pageContext() context.Context {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.pageCtx
+}
+
+// message is a message for the page: a JSON object, in parts that are
+// joined when it is sent, so that an encoded value, which can be large, is
+// not copied into it.
+type message struct {
+	head, value, tail []byte
+}
+
+func (m message) len() int { return len(m.head) + len(m.value) + len(m.tail) }
+
+func (m message) appendTo(b []byte) []byte {
+	return append(append(append(b, m.head...), m.value...), m.tail...)
 }
 
 // maxHeldEvents bounds the events kept for a page that never becomes ready
@@ -1348,7 +1491,8 @@ func (w *Window) OnHide(fn func()) (off func()) { return w.onHide.add(fn, false)
 
 // OnReadyToShow is called once, when the first page is ready to be
 // displayed. Create the window with Hidden and call Show here to avoid a
-// visual flash.
+// visual flash. A window showing Content is ready once it drew its first
+// frame, which a hidden window may not draw until shown.
 func (w *Window) OnReadyToShow(fn func()) (off func()) { return w.onReadyToShow.add(fn, false) }
 
 // OnResize is called after the window was resized.
@@ -1436,7 +1580,6 @@ func (w *Window) readyToShow() {
 	}
 	w.readyShow = true
 	fire(&w.onReadyToShow)
-	signalDevReady()
 }
 
 // windowHandler receives native window events.
@@ -1456,6 +1599,8 @@ func (h *windowHandler) Closed() {
 	if w.native == nil {
 		return
 	}
+	w.cancelDataDrag()
+	w.destroyWebViews()
 	w.detachContent()
 	w.native = nil
 	w.destroyed.Store(true)
@@ -1516,8 +1661,14 @@ func (h *windowHandler) Blurred() {
 	fire(&h.w.onBlur)
 }
 
-func (h *windowHandler) Resized()           { h.w.stateChanged(); fire(&h.w.onResize) }
-func (h *windowHandler) Moved()             { h.w.stateChanged(); fire(&h.w.onMove) }
+func (h *windowHandler) MenuItemClicked(id int) {
+	if h.w.native != nil {
+		menuItemClicked(id, h.w)
+	}
+}
+
+func (h *windowHandler) Resized()           { h.w.stateChanged(); h.w.placeFlyouts(); fire(&h.w.onResize) }
+func (h *windowHandler) Moved()             { h.w.stateChanged(); h.w.placeFlyouts(); fire(&h.w.onMove) }
 func (h *windowHandler) Minimized()         { h.w.stateChanged(); fire(&h.w.onMinimize) }
 func (h *windowHandler) Restored()          { h.w.stateChanged(); fire(&h.w.onRestore) }
 func (h *windowHandler) Maximized()         { h.w.stateChanged(); fire(&h.w.onMaximize) }
@@ -1531,23 +1682,19 @@ func (h *windowHandler) TitleBarChanged() {
 	}
 }
 
-// sendTitleBar tells the page of a window with a hidden title bar the room
-// its controls take. The backend's script tells the first page at document
-// start; this keeps the current page, and later ones, up to date. Main
-// thread only.
-func (w *Window) sendTitleBar() {
-	if !w.hiddenTitleBar || w.native == nil {
-		return
-	}
-	if msg, err := encodeEvent(bridge.TitleBarEvent, bridge.NewTitleBar(w.native.TitleBar(), w.native.Zoom())); err == nil {
-		w.enqueue(msg, true)
-	}
-}
-
 func (h *windowHandler) Message(msg string) { h.w.handleMessage(msg) }
 
 func (h *windowHandler) WillNavigate(nav platform.Navigation) bool {
-	if !nav.IsMainFrame || nav.IsReload {
+	if doc := h.w.html; nav.IsMainFrame && nav.Reload && doc != nil && doc.shown {
+		// The reload of a document LoadHTML loaded loads it again.
+		postMain(func() {
+			if w := h.w; w.html == doc && w.native != nil {
+				w.loadHTML(w.native, doc.html, doc.baseURL)
+			}
+		})
+		return false
+	}
+	if !nav.IsMainFrame || nav.Unasked {
 		return true
 	}
 	e := &NavigateEvent{URL: nav.URL, UserInitiated: nav.UserInitiated}
@@ -1558,6 +1705,14 @@ func (h *windowHandler) WillNavigate(nav platform.Navigation) bool {
 func (h *windowHandler) NavigationStarted(string) {}
 
 func (h *windowHandler) NavigationCommitted(url string) {
+	if doc := h.w.html; doc != nil {
+		switch {
+		case doc.shown:
+			h.w.html = nil // another document replaced it
+		case doc.isAt(url):
+			doc.shown = true
+		}
+	}
 	h.w.trusted = h.w.isTrusted(url)
 	h.w.outMu.Lock()
 	h.w.domReady = false
@@ -1574,7 +1729,6 @@ func (h *windowHandler) LoadFinished() {
 
 func (h *windowHandler) LoadFailed(url string, code int, desc string) {
 	fire1(&h.w.onDidFailLoad, &LoadError{URL: url, Code: code, Description: desc})
-	signalDevReady()
 }
 
 func (h *windowHandler) TitleChanged(title string) {
@@ -1584,7 +1738,8 @@ func (h *windowHandler) TitleChanged(title string) {
 	e := &TitleEvent{Title: title}
 	fire1(&h.w.onPageTitleUpdated, e)
 	if !e.prevented && h.w.native != nil {
-		h.w.native.SetTitle(title)
+		h.w.title = title
+		h.w.applyTitle(h.w.native)
 	}
 }
 
@@ -1613,75 +1768,17 @@ func (h *windowHandler) NewWindow(req platform.NewWindowRequest) platform.Window
 	if err != nil {
 		log.Printf("mygo: window open handler: %v", err)
 	}
-	child := newWindow(o, bg, req.Native)
+	child := newWindow(o, bg, req.Native, nil)
 	return child.native
 }
 
-func (h *windowHandler) ClosedByPage() { h.w.close() }
+func (h *windowHandler) ClosedByPage() {
+	if h.w.host == nil { // a web view's page does not close its window
+		h.w.close()
+	}
+}
 
 func (h *windowHandler) RenderProcessGone(reason string) { fire1(&h.w.onRenderGone, reason) }
-
-func (h *windowHandler) SchemeRequest(req *platform.SchemeRequest) {
-	Protocol.serve(h.w, req)
-}
-
-// handleMessage routes a message posted by the page bridge. It runs on the
-// main thread.
-func (w *Window) handleMessage(msg string) {
-	msg, ok := strings.CutPrefix(msg, w.secret)
-	if !ok {
-		return // not from the bridge
-	}
-	// Calls are decoded and executed off the main thread. The page context
-	// is captured here so a navigation cannot slip in between.
-	if len(msg) > 12 && msg[:12] == `{"t":"call",` {
-		go handleCall(w, w.pageContext(), msg, w.trusted)
-		return
-	}
-	var m struct {
-		T string  `json:"t"`
-		X float64 `json:"x"` // drop
-		Y float64 `json:"y"`
-		C int64   `json:"c"` // channels
-		K string  `json:"k"`
-		N int64   `json:"n"`
-	}
-	if err := json.Unmarshal(stringBytes(msg), &m); err != nil {
-		return
-	}
-	switch m.T {
-	case "dom-ready":
-		w.outMu.Lock()
-		w.domReady = true
-		w.outbox = append(w.outbox, w.held...)
-		w.held = nil
-		w.outMu.Unlock()
-		// The script at document start may tell a later page the room of
-		// the controls before a change.
-		w.sendTitleBar()
-		w.flush()
-		fire(&w.onDOMReady)
-		w.readyToShow()
-	case "drag":
-		if w.native != nil {
-			w.native.StartDrag()
-		}
-	case "dblclick":
-		if w.native != nil {
-			w.native.TitleBarDoubleClicked()
-		}
-	case "drop":
-		if w.native != nil {
-			w.filesDropped(w.native.DroppedFiles(), int(m.X), int(m.Y))
-		}
-	case "chan-ack":
-		if c := w.channel(m.C, m.K); c != nil {
-			c.ack(m.N)
-		}
-	case "chan-close":
-		w.pageClosedChannel(m.C, m.K)
-	}
-}
 
 // filesDropped tells OnFileDrop listeners, and the app's own pages, about
 // dropped files.
@@ -1689,7 +1786,11 @@ func (w *Window) filesDropped(paths []string, x, y int) {
 	if len(paths) == 0 {
 		return
 	}
-	fire1(&w.onFileDrop, &FileDropEvent{Paths: paths, X: x, Y: y})
+	if n, ok := w.native.(*webViewNative); ok {
+		// Where the web view shows in its window.
+		x, y = x+int(n.frame.X), y+int(n.frame.Y)
+	}
+	fire1(&w.top().onFileDrop, &FileDropEvent{Paths: paths, X: x, Y: y})
 	// Local paths are none of other pages' business.
 	if w.trusted {
 		if msg, err := encodeEvent(fileDropEvent, FileDropEvent{Paths: paths, X: x, Y: y}); err == nil {

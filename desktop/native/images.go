@@ -65,7 +65,7 @@ func (d *desktop) readImages(c *ui.Context, p palette, files []model.Attachment)
 					}()
 				})
 			}
-			ui.Column(c).Key(file.AssetID).MaxWidthPercent(100).Gap(4).Children(func() {
+			ui.Column(c.Key(file.AssetID)).MaxWidthPercent(100).Gap(4).Children(func() {
 				b := ui.ButtonBase(c).Label(tr("打开图片 ")+file.Name).MaxWidthPercent(100).Radius(8).Border(1, p.Border).Background(p.Panel)
 				b.Children(func() {
 					if bitmap, ok := entry.source.(*ui.Bitmap); ok {

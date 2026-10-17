@@ -1,22 +1,24 @@
 package ui
 
 import (
-	"image"
 	"log"
 	"os"
+	"slices"
 	"time"
 
+	"github.com/egoist/mygo/i18n"
 	"github.com/egoist/mygo/internal/platform"
 	"github.com/egoist/mygo/internal/raster"
 	"github.com/egoist/mygo/internal/scene"
 	"github.com/egoist/mygo/internal/surface"
 	"github.com/egoist/mygo/internal/text"
+	"github.com/egoist/mygo/transfer"
 )
 
 // Content is a user interface for a window, the value of
 // mygo.WindowOptions.Content. Create it with View.
 type Content struct {
-	view func(*Context)
+	view func(*context)
 }
 
 // View returns the content of a window whose user interface view builds,
@@ -28,12 +30,46 @@ type Content struct {
 // input, after Context.Invalidate or Window.Invalidate, and while
 // something animates. A Content can serve several windows, each with its
 // own state.
-func View(view func(c *Context)) *Content { return &Content{view: view} }
+func coreView(view func(c *context)) *Content { return &Content{view: view} }
 
 // RegisterFont adds a TrueType or OpenType font, or collection, that text
 // can use with Font(family). An empty family keeps the font's own name.
 func RegisterFont(data []byte, family string) error {
 	return text.Shared().RegisterFont(data, family)
+}
+
+// A FontFamily is a font family text can use, as FontFamilies lists it.
+type FontFamily struct {
+	// Name is the family as Font and Theme take it.
+	Name string
+	// Monospaced is whether its regular font gives every character the
+	// same advance, as a terminal's or a code editor's font setting
+	// offers.
+	Monospaced bool
+	// Registered is whether the app registered it with RegisterFont, under
+	// Name: the name it gave, or the font's own when it gave none.
+	Registered bool
+}
+
+// FontFamilies lists the font families text can use, as a font setting
+// offers them: the app's registered ones first, then the system's, each
+// once, sorted without regard to case. A font registered under a name the
+// app gave is listed under that name alone. Browsers do not tell what
+// fonts they have: there the list holds the registered families alone,
+// and a family is Monospaced once its font has loaded.
+//
+// The first call asks the system for its families, which takes a while
+// with many fonts installed (tens of milliseconds on a Mac with hundreds),
+// without holding up the windows' text; later calls reuse that list, until
+// RegisterFont, so fonts installed while the app runs show after a
+// restart. It is safe from any goroutine.
+func FontFamilies() []FontFamily {
+	families := text.Shared().FontFamilies()
+	out := make([]FontFamily, len(families))
+	for i, f := range families {
+		out[i] = FontFamily(f)
+	}
+	return out
 }
 
 // AttachContent connects the content to a window; package mygo calls it.
@@ -49,6 +85,10 @@ func (v *Content) AttachContent(conn *surface.Conn) {
 	}
 	conn.TitleBarChanged = rt.requestFrame
 	conn.Changed = rt.changed
+	conn.LocaleChanged = func() {
+		h.textLanguage()
+		rt.changed()
+	}
 	conn.Capture = h.capture
 	conn.Detach = h.detach
 	rt.insp.enabled = conn.DevTools
@@ -58,6 +98,7 @@ func (v *Content) AttachContent(conn *surface.Conn) {
 		}
 	}
 	h.uiFont()
+	h.textLanguage()
 	// Load the fonts while the window shows up.
 	go text.Shared().Preload()
 	conn.Surface.RequestFrame()
@@ -66,11 +107,9 @@ func (v *Content) AttachContent(conn *surface.Conn) {
 // windowHost presents frames on a window's surface, with a GPU renderer
 // when the platform has one and in memory otherwise.
 type windowHost struct {
-	minicodeFrameTimer *time.Timer
-	minicodeFrameDue   time.Time
-	conn               *surface.Conn
-	rt                 *engine
-	gpu                gpuRenderer
+	conn *surface.Conn
+	rt   *engine
+	gpu  gpuRenderer
 	// gpuTried tells that the first frame tried the GPU, onGPU that its
 	// renderer drew on a GPU, degraded that one drawing in software took
 	// its place, and gpuSince when the renderer was made. After a failure,
@@ -84,26 +123,15 @@ type windowHost struct {
 	backoff  time.Duration
 	soft     raster.Renderer
 	last     *scene.Scene
-	// cpuShown tells that the frame shown is the one soft drew last.
-	cpuShown bool
-	// lastFrame is when the last frame was presented, frameEnd when it
-	// was done, and gpuSinceCPU when the first since the CPU drew one, if
-	// the GPU drew it.
-	lastFrame, frameEnd, gpuSinceCPU time.Time
+	// lastFrame is when the last frame was presented.
+	lastFrame time.Time
 	// framing tells that the surface asked for the frame being drawn.
 	framing bool
+	// told is what accelerated last told the frame being painted, asked
+	// that it did.
+	told, asked bool
 	// path is how the last frame was drawn, for MYGO_FRAME_STATS.
 	path string
-	// load measures the frames drawn in memory on a surface that gives
-	// the GPU on demand (platform.LazyGPUSurface); wantGPU tells that they
-	// cost enough to ask for it, and askedGPU that the host did.
-	load              cpuLoad
-	wantGPU, askedGPU bool
-	// cpuBurst measures the frames the CPU draws for a pixelPresenter, and
-	// cpuHeavy tells that those of the burst going on cost too much: the
-	// rest of it draws on the GPU (see gpuLoad).
-	cpuBurst cpuLoad
-	cpuHeavy bool
 	// wide tells that the GPU renderer draws the colors of scenes outside
 	// the sRGB gamut (see wideHold), until wideUntil.
 	wide      bool
@@ -112,10 +140,29 @@ type windowHost struct {
 	idleTimer *time.Timer
 	idleAt    time.Time
 	idleArmed bool
-	detached  bool
+	// afterT and repaintT are the timers of After and Painter.After.
+	afterT, repaintT *time.Timer
+	detached         bool
+	// shown tells that a frame was presented, which makes the window
+	// ready to show.
+	shown bool
+	// placed is where the surface shows the window's web views, views
+	// the web views.
+	placed []platform.WebViewPlacement
+	views  []NativeWebView
 }
 
-func (h *windowHost) framePath() string { return h.path }
+func (h *windowHost) framePath() string {
+	if h.path == "drawn on the GPU" && h.gpu != nil {
+		// The stats logger calls this only while MYGO_FRAME_STATS is enabled.
+		if f, ok := h.gpu.(interface{ FrameInfo() string }); ok {
+			return h.path + ": " + f.FrameInfo()
+		}
+	}
+	return h.path
+}
+
+func (h *windowHost) rightToLeft() bool { return h.conn.RightToLeft != nil && h.conn.RightToLeft() }
 
 // newGPU makes the GPU renderer of a surface; tests replace it.
 var newGPU = newGPURenderer
@@ -123,6 +170,23 @@ var newGPU = newGPURenderer
 // event handles an event of the surface, noting when it asks for a frame:
 // only then may renderers draw (OpenGL's context is current only then).
 func (h *windowHost) event(ev platform.SurfaceEvent) bool {
+	if ev.Kind == platform.SurfaceRenew {
+		// The next frame makes the renderer again, for the surface's new
+		// native objects.
+		if h.gpu != nil {
+			h.gpu.Release()
+			h.gpu = nil
+		}
+		h.gpuTried, h.retryAt = false, time.Time{}
+		h.conn.Surface.RequestFrame()
+		return false
+	}
+	if ev.Kind == platform.WebViewTabOut {
+		if i := slices.IndexFunc(h.placed, func(p platform.WebViewPlacement) bool { return p.WebView == ev.WebView }); i >= 0 {
+			h.rt.webViewTabOut(h.views[i], ev.Mods&platform.ModShift != 0)
+		}
+		return false
+	}
 	if ev.Kind == platform.SurfaceFrame {
 		h.framing = true
 		defer func() { h.framing = false }()
@@ -134,12 +198,6 @@ func (h *windowHost) event(ev platform.SurfaceEvent) bool {
 type gpuRenderer interface {
 	Render(s *scene.Scene) error
 	Release()
-}
-
-// pixelPresenter is a GPU renderer that also shows frames drawn in memory,
-// without the GPU, copying where they changed (Metal's).
-type pixelPresenter interface {
-	PresentPixels(pix []byte, stride, width, height int, scale float64, damage []image.Rectangle) error
 }
 
 // wideRenderer is a GPU renderer that can draw the colors of scenes outside
@@ -161,81 +219,10 @@ type wideRenderer interface {
 // nearest sRGB colors, as it would show anyway, with the CPU's frames.
 const wideHold = 2 * time.Second
 
-// Frames that change little draw on the CPU, which the renderer copies
-// into its drawables: a clock ticking, typing, the pointer over a button.
-// The CPU draws them in less time than the GPU takes to start, and spares
-// the memory Metal's driver holds for a couple of seconds after each frame
-// it draws. Frames changing more than a sixteenth of the window since the
-// last one while frames follow each other, as when scrolling or animating
-// most of it, draw on the GPU, as do frames redrawing more than
-// cpuMaxPixels. The next frame changing less draws on the CPU again, with
-// what the GPU drew meanwhile: a progress bar moving on after a page slid
-// in draws on the CPU, though frames never pause. Frames changing little
-// may still cost much to draw, as an animation repainting translucent
-// layers over gradients and shadows at the display's rate: once the CPU's
-// frames of a burst cost too much, as a surface that gives the GPU on
-// demand measures them (gpuLoad), the rest of the burst draws on the GPU,
-// which Metal does in a millisecond or two of the CPU's time, and the
-// frame after a pause on the CPU again.
-const (
-	burstGap     = 50 * time.Millisecond // frames closer follow each other
-	cpuMaxPixels = 8 << 20
-)
-
-// A surface that gives the GPU on demand (Linux's, as OpenGL loads Mesa
-// for good: some 50 MB) draws in memory until drawing on the CPU costs too
-// much: CPU time of more than gpuLoad of the time of a burst of frames
-// lasting gpuBurst or more, as scrolling or animating much of a large
-// window may, whose frames draw on several cores at once. The host
-// then asks for the GPU once the window has been idle for gpuIdle, so that
-// loading the driver delays no frame, or at once when the burst goes on
-// for gpuBurstLong, or when the CPU takes longer than a refresh of the
-// display to draw its frames, which are late anyway.
-const (
-	gpuLoad      = 0.25
-	gpuBurst     = 250 * time.Millisecond
-	gpuBurstLong = time.Second
-	gpuIdle      = 250 * time.Millisecond
-)
-
 // frameIdle is how long after the last frame the host frees the frame
 // drawn in memory, as large as the window, and the surface gives back what
 // its frames took (platform.IdleSurface). The next frame draws whole.
 const frameIdle = 2 * time.Second
-
-// cpuLoad measures how much of a burst of frames the CPU spent drawing
-// them in memory.
-type cpuLoad struct {
-	// start is when the burst's first frame began drawing, end when its
-	// last one was done; took is how long drawing its frames lasted, and
-	// busy how much CPU time it took, more on several cores.
-	start, end time.Time
-	took, busy time.Duration
-	frames     int
-}
-
-// add notes a frame begun at now that took d to draw, and cpu of CPU
-// time, and returns how long its burst has lasted and whether drawing took
-// CPU time of more than gpuLoad of it, once it lasted gpuBurst. A frame
-// begun soon after the last was done is in its burst, however long they
-// take.
-func (l *cpuLoad) add(now time.Time, d, cpu time.Duration) (lasted time.Duration, heavy bool) {
-	if now.Sub(l.end) >= burstGap {
-		l.start, l.took, l.busy, l.frames = now, 0, 0, 0
-	}
-	l.end = now.Add(d)
-	l.took += d
-	l.busy += max(cpu, d)
-	l.frames++
-	lasted = l.end.Sub(l.start)
-	return lasted, lasted >= gpuBurst && float64(l.busy) > gpuLoad*float64(lasted)
-}
-
-// slow reports whether the burst's frames took longer than interval each
-// to draw, on average.
-func (l *cpuLoad) slow(interval time.Duration) bool {
-	return l.took > time.Duration(l.frames)*interval
-}
 
 func (h *windowHost) refreshRate() float32 { return float32(h.conn.Surface.RefreshRate()) }
 
@@ -254,6 +241,7 @@ func (h *windowHost) size() (float32, float32, float32) {
 
 func (h *windowHost) present(s *scene.Scene) {
 	h.last, h.path = s, ""
+	defer h.recheck()
 	if s.Width <= 0 || s.Height <= 0 {
 		return
 	}
@@ -274,81 +262,41 @@ func (h *windowHost) present(s *scene.Scene) {
 		h.makeGPU()
 	}
 	now := time.Now()
-	burst := now.Sub(h.lastFrame) < burstGap
-	if now.Sub(h.frameEnd) >= burstGap {
-		// A pause, after the last frame was done however long it took:
-		// the CPU's frames start a burst of their own.
-		h.cpuHeavy, h.cpuBurst = false, cpuLoad{}
-	}
 	h.lastFrame = now
-	defer func() { h.frameEnd = time.Now() }()
 	h.armIdle(frameIdle)
-	if !h.useWide(s, now) && h.drawOnCPU(s, burst) {
-		h.gpuSinceCPU = time.Time{}
-		if h.path == "" {
-			h.path = "drawn on the CPU"
-		}
-		return
-	}
+	h.useWide(s, now)
+	defer h.ready()
 	if h.render(s) {
-		h.cpuShown = false
-		h.gpuDrew(s, now)
 		h.path = "drawn on the GPU"
 		if h.degraded {
 			h.path = "drawn by the GPU renderer in software"
 		}
+		if behind(h.gpu) {
+			h.path = "skipped to catch up with the display"
+			h.conn.Surface.RequestFrame()
+		}
 		return
 	}
 	h.path = "drawn in memory"
-	drawing := time.Now()
 	damage := h.soft.Render(s)
-	// What other cores took to draw with this one.
-	others := max(h.soft.CPU()-time.Since(drawing), 0)
 	m := &h.soft.Image
 	if d, ok := h.conn.Surface.(platform.DamageSurface); ok {
 		d.PresentDamage(m.Pix, m.Stride, m.W, m.H, damage)
 	} else {
 		h.conn.Surface.PresentPixels(m.Pix, m.Stride, m.W, m.H)
 	}
-	took := time.Since(now)
-	h.noteCPU(now, took, took+others)
 }
 
-// noteCPU notes that drawing and presenting a frame begun at now in memory
-// took d, and cpu of CPU time, and, on a surface that gives the GPU on
-// demand, asks for it once that costs too much (see gpuLoad).
-func (h *windowHost) noteCPU(now time.Time, d, cpu time.Duration) {
-	if _, ok := h.conn.Surface.(platform.LazyGPUSurface); !ok || h.askedGPU || h.conn.Post == nil {
+// ready tells the window, after the first frame, that it is ready to show:
+// once the frame returns, as its listeners may show the window.
+func (h *windowHost) ready() {
+	if h.shown {
 		return
 	}
-	lasted, heavy := h.load.add(now, d, cpu)
-	interval := time.Second / 60
-	if hz := h.refreshRate(); hz > 0 {
-		interval = time.Duration(float32(time.Second) / hz)
+	h.shown = true
+	if h.conn.Ready != nil && h.conn.Post != nil {
+		h.conn.Post(h.conn.Ready)
 	}
-	switch {
-	case !heavy:
-	case lasted >= gpuBurstLong || h.load.slow(interval):
-		// The surface cannot change while it draws a frame.
-		h.askedGPU = true
-		h.conn.Post(h.useGPU)
-	case !h.wantGPU:
-		h.wantGPU = true
-		h.armIdle(gpuIdle)
-	}
-}
-
-// useGPU asks the surface for the GPU, which it gives from the next frame
-// on, or has none to give: either way the host asks no more.
-func (h *windowHost) useGPU() {
-	h.wantGPU, h.askedGPU = false, true
-	g, ok := h.conn.Surface.(platform.LazyGPUSurface)
-	if h.detached || !ok || !g.UseGPU() {
-		return
-	}
-	// The next frame makes the GPU renderer, which draws it whole.
-	h.gpuTried = false
-	h.soft.Release()
 }
 
 // armIdle has idle run d from now, unless it runs sooner already.
@@ -368,23 +316,15 @@ func (h *windowHost) armIdle(d time.Duration) {
 	}
 }
 
-// idle runs on the main thread after frames stop: it asks for the GPU
-// that the last burst wanted once the window is idle for gpuIdle, then
-// frees the frame drawn in memory, and has the surface give back memory,
-// once it is for frameIdle. A frame since rearms it for the rest.
+// idle runs on the main thread after frames stop: it frees the frame drawn
+// in memory, and has the surface give back memory, once the window is idle
+// for frameIdle. A frame since rearms it.
 func (h *windowHost) idle() {
 	h.idleArmed = false
 	if h.detached {
 		return
 	}
 	since := time.Since(h.lastFrame)
-	if h.wantGPU {
-		if since < gpuIdle {
-			h.armIdle(gpuIdle - since)
-			return
-		}
-		h.useGPU()
-	}
 	if since < frameIdle {
 		h.armIdle(frameIdle - since)
 		return
@@ -393,42 +333,6 @@ func (h *windowHost) idle() {
 	if s, ok := h.conn.Surface.(platform.IdleSurface); ok {
 		s.Idle()
 	}
-}
-
-// drawOnCPU draws s on the CPU and has the GPU renderer present it, when
-// it changes little (see pixelPresenter) and the CPU's frames of the burst
-// cost little, and reports whether it did.
-func (h *windowHost) drawOnCPU(s *scene.Scene, burst bool) bool {
-	p, ok := h.gpu.(pixelPresenter)
-	if !ok || h.cpuHeavy {
-		return false
-	}
-	draw, changed := h.soft.Changes(s)
-	if draw > cpuMaxPixels || burst && changed > s.Width*s.Height/16 {
-		return false
-	}
-	drawing := time.Now()
-	damage := h.soft.Render(s)
-	// What other cores took to draw with this one.
-	others := max(h.soft.CPU()-time.Since(drawing), 0)
-	defer func() {
-		took := time.Since(drawing)
-		h.noteCPUFrame(drawing, took, took+others)
-	}()
-	if len(damage) == 0 && h.cpuShown {
-		// The frame shown is the same: a drawing asking for frames that
-		// did not move, as a spinner between its steps.
-		h.path = "unchanged"
-		return true
-	}
-	m := &h.soft.Image
-	if err := p.PresentPixels(m.Pix, m.Stride, m.W, m.H, float64(s.Scale), damage); err != nil {
-		log.Printf("mygo: presenting a frame drawn in memory: %v", err)
-		h.cpuShown = false
-		return false
-	}
-	h.cpuShown = true
-	return true
 }
 
 // useWide has the GPU renderer draw the colors of s outside the sRGB gamut
@@ -451,33 +355,6 @@ func (h *windowHost) useWide(s *scene.Scene, now time.Time) bool {
 func (h *windowHost) screenWide() bool {
 	w, ok := h.conn.Surface.(platform.WideGamutSurface)
 	return ok && w.WideGamut()
-}
-
-// noteCPUFrame notes that drawing and presenting a frame begun at now on
-// the CPU, for the GPU renderer to present, took d, and cpu of CPU time,
-// and draws the rest of the burst on the GPU once its frames cost too
-// much (see gpuLoad).
-func (h *windowHost) noteCPUFrame(now time.Time, d, cpu time.Duration) {
-	if _, heavy := h.cpuBurst.add(now, d, cpu); heavy {
-		h.cpuHeavy = true
-	}
-}
-
-// gpuDrew notes that the GPU drew s, where frames drawn on the CPU show
-// too: the CPU's frame compares the next one with s, so that a frame
-// changing little draws on the CPU again. Once the GPU has drawn alone for
-// a second, as while it animates much of the window, the CPU's frame frees
-// its pixels, which the CPU then draws whole.
-func (h *windowHost) gpuDrew(s *scene.Scene, now time.Time) {
-	if _, ok := h.gpu.(pixelPresenter); !ok {
-		return
-	}
-	h.soft.Skip(s)
-	if h.gpuSinceCPU.IsZero() {
-		h.gpuSinceCPU = now
-	} else if now.Sub(h.gpuSinceCPU) > time.Second && h.soft.Image.Pix != nil {
-		h.soft.ReleaseImage()
-	}
 }
 
 // render draws s with the GPU renderer and reports whether it did. One
@@ -512,7 +389,6 @@ func (h *windowHost) render(s *scene.Scene) bool {
 // again from time to time.
 func (h *windowHost) makeGPU() {
 	retry := h.gpuTried
-	h.cpuShown = false
 	h.gpuTried, h.retryAt = true, time.Time{}
 	n := h.conn.Surface.Native()
 	if os.Getenv("MYGO_GPU") == "0" || n == (platform.SurfaceNative{}) {
@@ -546,10 +422,39 @@ func (h *windowHost) makeGPU() {
 	h.wide = false // the renderer draws sRGB until told otherwise
 }
 
+// accelerated reports whether the frame draws on a GPU (Painter.Accelerated).
+// The first frame makes its GPU renderer as it paints rather than as it
+// presents, to tell.
+func (h *windowHost) accelerated() bool {
+	if h.framing && !h.gpuTried {
+		h.makeGPU()
+	}
+	h.told, h.asked = h.gpu != nil && !software(h.gpu), true
+	return h.told
+}
+
+// recheck paints the window again when the frame presented draws on a GPU
+// and accelerated told its painters otherwise, or the other way round: the
+// GPU went away or came back as it presented.
+func (h *windowHost) recheck() {
+	if h.asked && h.told != (h.gpu != nil && !software(h.gpu)) && h.conn.Invalidate != nil {
+		h.invalidate()
+	}
+	h.asked = false
+}
+
 // software reports whether a renderer draws on the CPU, as Direct3D's WARP.
 func software(r gpuRenderer) bool {
 	s, ok := r.(interface{ Software() bool })
 	return ok && s.Software()
+}
+
+// behind reports whether r drew nothing of the last frame, to catch up
+// with the display (Metal's): the window draws another at the next
+// refresh.
+func behind(r gpuRenderer) bool {
+	b, ok := r.(interface{ Behind() bool })
+	return ok && b.Behind()
 }
 
 // retryLater has a frame make a GPU renderer again after a wait, which
@@ -591,6 +496,40 @@ func (h *windowHost) detach() {
 
 func (h *windowHost) requestFrame() { h.conn.Surface.RequestFrame() }
 
+func (h *windowHost) afterTimer(at time.Time) {
+	switch {
+	case at.IsZero():
+		if h.afterT != nil {
+			h.afterT.Stop()
+		}
+	case h.afterT != nil:
+		h.afterT.Reset(max(time.Until(at), time.Millisecond))
+	default:
+		h.afterT = time.AfterFunc(max(time.Until(at), time.Millisecond), h.invalidate)
+	}
+}
+
+func (h *windowHost) repaintTimer(at time.Time) {
+	if at.IsZero() {
+		if h.repaintT != nil {
+			h.repaintT.Stop()
+		}
+		return
+	}
+	d := max(time.Until(at), time.Millisecond)
+	if h.repaintT == nil {
+		h.repaintT = time.AfterFunc(d, func() { h.post(h.rt.repaintNow) })
+	} else {
+		h.repaintT.Reset(d)
+	}
+}
+
+func (h *windowHost) startDataDrag(data transfer.Data, local any, options transfer.DragOptions, x, y float32) error {
+	return h.conn.StartDataDrag(data, local, options, float64(x), float64(y))
+}
+func (h *windowHost) cancelDataDrag()                    { h.conn.CancelDataDrag() }
+func (h *windowHost) setDropFormats(f []transfer.Format) { h.conn.Surface.SetDropFormats(f) }
+
 func (h *windowHost) post(fn func()) {
 	if h.conn.Post != nil {
 		h.conn.Post(fn)
@@ -627,9 +566,33 @@ func (h *windowHost) readClipboard() string {
 	return h.conn.Clipboard.ReadText()
 }
 
+func (h *windowHost) clipboardFormats() []transfer.Format {
+	if h.conn.Clipboard == nil {
+		return nil
+	}
+	return h.conn.Clipboard.Formats()
+}
+
 func (h *windowHost) writeClipboard(s string) {
 	if h.conn.Clipboard != nil {
 		h.conn.Clipboard.WriteText(s)
+	}
+}
+
+func (h *windowHost) readClipboardData(formats []transfer.Format) transfer.Data {
+	if h.conn.Clipboard == nil {
+		return transfer.Data{}
+	}
+	d, err := h.conn.Clipboard.ReadData(formats)
+	if err != nil && len(d.Items()) == 0 {
+		return transfer.Data{}
+	}
+	return d
+}
+
+func (h *windowHost) writeClipboardData(d transfer.Data) {
+	if h.conn.Clipboard != nil {
+		h.conn.Clipboard.WriteData(d, nil)
 	}
 }
 
@@ -645,6 +608,12 @@ func (h *windowHost) titleBarDoubleClicked() {
 	}
 }
 
+func (h *windowHost) escape() {
+	if h.conn.Escape != nil {
+		h.conn.Escape()
+	}
+}
+
 func (h *windowHost) isDark() bool { return h.conn.IsDark != nil && h.conn.IsDark() }
 
 func (h *windowHost) preferences() platform.Preferences {
@@ -652,6 +621,26 @@ func (h *windowHost) preferences() platform.Preferences {
 		return platform.Preferences{}
 	}
 	return h.conn.Preferences()
+}
+
+func (h *windowHost) locale() string {
+	if h.conn.Locale == nil {
+		return ""
+	}
+	return h.conn.Locale()
+}
+
+func (h *windowHost) region() i18n.Region {
+	if h.conn.Region == nil {
+		return i18n.Region{}
+	}
+	return h.conn.Region()
+}
+
+// textLanguage makes the language the app shows that of the text the
+// text engine lays out without one, as Painter.Shape does.
+func (h *windowHost) textLanguage() {
+	text.Shared().SetLanguage(h.locale())
 }
 
 func (h *windowHost) titleBar() TitleBar {
@@ -662,11 +651,50 @@ func (h *windowHost) titleBar() TitleBar {
 	return TitleBar{Height: float32(t.Height), Left: float32(t.Left), Right: float32(t.Right)}
 }
 
+func (h *windowHost) vibrancy() bool {
+	s, ok := h.conn.Surface.(platform.MaterialSurface)
+	return ok && s.ShowsMaterial()
+}
+
 func (h *windowHost) invalidate() { h.conn.Invalidate() }
 
 func (h *windowHost) openURL(u string, done func(error)) {
 	if h.conn.OpenURL != nil {
 		h.conn.OpenURL(u, done)
+	}
+}
+
+// placeWebViews gives the surface where the frame shows the window's web
+// views, unless it is where the last frame showed them.
+func (h *windowHost) placeWebViews(views []placedWebView) {
+	list := make([]platform.WebViewPlacement, 0, len(views))
+	natives := make([]NativeWebView, 0, len(views))
+	for _, v := range views {
+		if n := v.v.SurfaceWebView(h.conn); n != nil {
+			list = append(list, platform.WebViewPlacement{WebView: n, Frame: v.frame, Clip: v.clip, Covers: v.covers})
+			natives = append(natives, v.v)
+		}
+	}
+	if slices.EqualFunc(list, h.placed, func(a, b platform.WebViewPlacement) bool {
+		return a.WebView == b.WebView && a.Frame == b.Frame && a.Clip == b.Clip && slices.Equal(a.Covers, b.Covers)
+	}) {
+		return
+	}
+	h.placed, h.views = list, natives
+	if h.conn.PlaceWebViews != nil {
+		h.conn.PlaceWebViews(list)
+	} else {
+		h.conn.Surface.PlaceWebViews(list)
+	}
+}
+
+func (h *windowHost) platformWebView(v NativeWebView) platform.WebView {
+	return v.SurfaceWebView(h.conn)
+}
+
+func (h *windowHost) tabIntoWebView(v NativeWebView, back bool) {
+	if n := v.SurfaceWebView(h.conn); n != nil {
+		n.TabInto(back)
 	}
 }
 

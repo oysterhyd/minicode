@@ -26,10 +26,10 @@ import {
 } from './caret.js'
 import { applyDesktopEvent, emptyFeed, pendingApproval, type FeedState } from './feed.js'
 import { AssistantMarkdown } from './components/AssistantMarkdown.js'
-import { ApprovalBlock } from './components/ApprovalBlock.js'
+import { ApprovalBlock, ApprovalPanel, approvalRows } from './components/ApprovalBlock.js'
 import { Banner, type BannerProps } from './components/Banner.js'
-import { Prompt, SlashMenu } from './components/Prompt.js'
-import { Notice, Spinner, StatusLine } from './components/StatusLine.js'
+import { Prompt, SlashMenu, slashMenuRows } from './components/Prompt.js'
+import { NEXT_PERMISSION, Notice, ShortcutPanel, shortcutLayout, Spinner, StatusLine } from './components/StatusLine.js'
 import { ThoughtLine, ToolLine } from './components/ToolLine.js'
 import { UserBubble } from './components/UserBubble.js'
 import { TranscriptViewport, type TranscriptScroll } from './components/TranscriptViewport.js'
@@ -49,7 +49,7 @@ import type {
 } from './types.js'
 import { emptyState, historyItems } from './types.js'
 import { terminalText } from './format.js'
-import { ACCENT, clearTranscript, useTerminalInput, useTerminalSize } from './terminal.js'
+import { clearTranscript, theme, useTerminalInput, useTerminalSize } from './terminal.js'
 
 const LIVE_SLASH = /^\/(help|\?|model|effort|permissions|skill)(?:\s|$)/i
 
@@ -69,9 +69,11 @@ function lastUserIndex(items: FeedItem[]): number {
   return items.reduce((found, item, index) => item.kind === 'user' ? index : found, -1)
 }
 
-function FeedRow({ item, now, expanded, detailOnly }: { item: FrozenItem; now: number; expanded: Set<string>; detailOnly?: boolean }) {
+function FeedRow({ item, now, expanded, detailOnly, recent }: {
+  item: FrozenItem; now: number; expanded: Set<string>; detailOnly?: boolean; recent?: string[]
+}) {
   if (item.kind === 'banner') {
-    return <Banner version={item.version} workspace={item.workspace} model={item.model} permissionMode={item.permissionMode} />
+    return <Banner version={item.version} workspace={item.workspace} model={item.model} permissionMode={item.permissionMode} recent={recent} />
   }
   if (item.kind === 'thought') return <ThoughtLine item={item} now={now} />
   if (item.kind === 'user') return <UserBubble text={item.text || ''} />
@@ -99,6 +101,10 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
   const [banner, setBanner] = useState<BannerProps | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [scrolled, setScrolled] = useState(false)
+  const [approvalChoice, setApprovalChoice] = useState(0)
+  const [showShortcuts, setShowShortcuts] = useState(false)
+  const approvalChoiceRef = useRef({ id: '', choice: 0 })
+  const shortcutsRef = useRef(false)
   const transcriptRef = useRef<TranscriptScroll>(null)
   const returnButtonRef = useRef<DOMElement>(null)
   const feedRef = useRef(feed)
@@ -430,6 +436,16 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
     }
   }
 
+  async function cyclePermission() {
+    const mode = NEXT_PERMISSION[agentRef.current.permissionMode] || 'default'
+    try {
+      const state = await client.request<AgentState>('setPermissionMode', { mode, workspace: workspaceRef.current })
+      if (activeRef.current) updateAgent(state)
+    } catch (error) {
+      addNotice(cleanError(error), 'error')
+    }
+  }
+
   function moveCaret(nextCaret: number) {
     const at = clamp(nextCaret, draftRef.current)
     setCaret(at)
@@ -506,6 +522,11 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
     }
     if (!readyRef.current) return
     ctrlCRef.current = 0
+    if (shortcutsRef.current) {
+      shortcutsRef.current = false
+      setShowShortcuts(false)
+      if (key.escape || input === '?') return
+    }
     if (key.escape) {
       if (waiting) {
         void decide(false)
@@ -518,11 +539,29 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
       if (text.startsWith('/')) replaceDraft('')
       return
     }
-    if (waiting && !text) {
+    if (waiting?.approvalId) {
+      const id = waiting.approvalId
+      const choice = approvalChoiceRef.current.id === id ? approvalChoiceRef.current.choice : 0
+      const choose = (next: number) => {
+        approvalChoiceRef.current = { id, choice: next }
+        setApprovalChoice(next)
+      }
       const letter = input.toLowerCase()
-      if (letter === 'y') { void decide(true); return }
-      if (letter === 'a') { void decide(true, true); return }
-      if (letter === 'n') { void decide(false); return }
+      if (!key.ctrl && !key.meta) {
+        if (letter === 'y' || input === '1') { void decide(true); return }
+        if (letter === 'a' || input === '2') { void decide(true, true); return }
+        if (letter === 'n' || input === '3') { void decide(false); return }
+      }
+      if (key.upArrow) { choose((choice + 2) % 3); return }
+      if (key.downArrow || (key.tab && !key.shift)) { choose((choice + 1) % 3); return }
+      if (key.return) { void decide(choice !== 2, choice === 1); return }
+      // The panel replaces the prompt; keep the draft untouched until it closes.
+      if (!key.ctrl && !(key.tab && key.shift)) return
+    }
+    if (input === '?' && !text && !key.ctrl && !key.meta) {
+      shortcutsRef.current = true
+      setShowShortcuts(true)
+      return
     }
     if (key.return) {
       if (key.shift || (key.ctrl && input === 'j')) {
@@ -552,6 +591,10 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
         return
       }
       void send(text)
+      return
+    }
+    if (key.tab && key.shift) {
+      void cyclePermission()
       return
     }
     if (key.tab && matches.length) {
@@ -659,20 +702,28 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
   const visibleItems = [...frozenItems, ...layout.live]
   const promptHeight = Math.min(Math.max(1, Math.min(6, Math.floor(terminal.rows / 3))),
     promptRows(draft, caret, terminal.columns - 4).rows.length) + 2 + (queued.length ? 1 : 0)
-  const menuHeight = draft.startsWith('/')
-    ? Math.min(matches.length || 1, Math.max(1, Math.min(8, Math.floor(terminal.rows / 3)))) + 2 : 0
-  const connecting = !ready && !feed.error
-  const liveHeight = Math.max(0, terminal.rows - promptHeight - menuHeight - (feed.busy && !waiting ? 4 : 0) - 1 - (connecting ? 1 : 0) - (scrolled ? 1 : 0))
   const menuTitle = matches[0]?.kind === 'value'
     ? SUBMENU_TITLES[draft.split(/\s/, 1)[0].toLowerCase()]
-    : '命令'
+    : undefined
+  const menuOpen = draft.startsWith('/') && !waiting
+  const menuHeight = menuOpen
+    ? Math.min(matches.length || 1, slashMenuRows(terminal.rows)) + (menuTitle ? 1 : 0) : 0
+  const shortcutsOpen = showShortcuts && !draft && !waiting
+  const footerHeight = menuOpen ? 0 : shortcutsOpen ? shortcutLayout(terminal.columns).rows : 1
+  const choice = waiting && approvalChoiceRef.current.id === waiting.approvalId ? approvalChoice : 0
+  const connecting = !ready && !feed.error
+  const bottomHeight = waiting
+    ? approvalRows(waiting, choice, terminal.columns).length
+    : promptHeight + menuHeight + footerHeight + (feed.busy ? 3 : 0)
+  const liveHeight = Math.max(0, terminal.rows - bottomHeight - (connecting ? 1 : 0) - (scrolled ? 1 : 0))
+  const recent = sessions.filter(row => row.session_id !== feed.sessionId).map(row => row.title || row.session_id.slice(0, 8))
 
   return (
     <Box flexDirection="column" width={terminal.columns} height={terminal.rows} overflowY="hidden">
       <TranscriptViewport height={liveHeight} scrollRef={transcriptRef} onScrollChange={setScrolled}>
         {visibleItems.map((item, index) => (
           <Box key={item.kind === 'banner' ? 'banner' : `${item.id}-${index}`} flexShrink={0} flexDirection="column">
-            <FeedRow item={item} now={item.kind === 'tool' || item.kind === 'thought' ? (item.endedAt || now) : now} expanded={expanded} />
+            <FeedRow item={item} now={item.kind === 'tool' || item.kind === 'thought' ? (item.endedAt || now) : now} expanded={expanded} recent={recent} />
           </Box>
         ))}
         {feed.error && feed.items.at(-1)?.text !== feed.error ? <Notice text={feed.error} tone="error" /> : null}
@@ -681,22 +732,25 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
         {feed.busy && !waiting ? (
           <Spinner
             startedAt={feed.startedAt || now}
-            now={now}
             tokens={Math.max(0, (agent.usage?.output_tokens || 0) - outputStart)}
             hint={Boolean(lastExpandableTool(feed.items, lastUserIndex(feed.items)))}
           />
         ) : null}
-        {draft.startsWith('/') ? <SlashMenu items={matches} selected={slashIndex} title={menuTitle} /> : null}
         {scrolled ? (
           <Box justifyContent="center" flexShrink={0}>
             <Box ref={returnButtonRef}>
-              <Text color={ACCENT} bold inverse> ↓ 返回最新 </Text>
+              <Text color={theme.claude} bold inverse> ↓ 返回最新 </Text>
             </Box>
           </Box>
         ) : null}
-        <Prompt value={draft} caret={caret} busy={feed.busy} waiting={Boolean(waiting)}
-          queued={queued.length ? `已排队 ${queued.length} 条：${queued[0].split('\n')[0]}${!feed.busy ? ' · Enter 发送' : ''}` : undefined} />
-        <StatusLine state={agent} />
+        {waiting ? <ApprovalPanel item={waiting} choice={choice} columns={terminal.columns} /> : (
+          <>
+            <Prompt value={draft} caret={caret} busy={feed.busy}
+              queued={queued.length ? `> ${queued[0].split('\n')[0]}  (已排队 ${queued.length} 条${!feed.busy ? ' · Enter 发送' : ''})` : undefined} />
+            {menuOpen ? <SlashMenu items={matches} selected={slashIndex} title={menuTitle} />
+              : shortcutsOpen ? <ShortcutPanel /> : <StatusLine state={agent} />}
+          </>
+        )}
         {connecting ? <Text dimColor>正在连接运行核心…</Text> : null}
       </Box>
     </Box>

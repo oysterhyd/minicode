@@ -23,7 +23,10 @@ type OutlineState[K comparable] struct {
 	List ListState
 	// Open holds the items showing their children.
 	Open Selection[K]
-	rows []outlineRow[K]
+	// Indent is the width in DIPs each level adds before a row's arrow,
+	// the theme's Space(4) when zero. It must not be negative.
+	Indent float32
+	rows   []outlineRow[K]
 }
 
 // outlineRow is a row of an outline: its item, how deep it is, the row of
@@ -48,6 +51,9 @@ func (s *OutlineState[K]) Depth(row int) int { return s.rows[row].depth }
 // flatten lists the rows the outline shows: roots, and the children of
 // the items open.
 func (s *OutlineState[K]) flatten(roots []K, children func(K) []K) {
+	if !(s.Indent >= 0) {
+		panic("ui: an OutlineState's Indent must not be negative")
+	}
 	s.rows = s.rows[:0]
 	var walk func(items []K, depth, parent int)
 	walk = func(items []K, depth, parent int) {
@@ -98,17 +104,17 @@ func (s *OutlineState[K]) setOpen(item K, open, all bool, children func(K) []K) 
 //	}, func(path string) {
 //		ui.Text(c, filepath.Base(path))
 //	}).Grow(1)
-func Outline[K comparable](c *Context, s *OutlineState[K], roots []K, children func(K) []K, row func(item K)) *Element {
-	e := Scroll(c)
+func coreOutline[K comparable](c *context, s *OutlineState[K], roots []K, children func(K) []K, row func(item K)) *node {
+	e := coreScroll(c)
 	e.widget, e.role = "Outline", RoleTree
 	s.flatten(roots, children)
 	s.List.Key = func(i int) any { return s.rows[i].item }
 	buildList(c, e, e, &s.List, len(s.rows), func(i int) {
-		r := Row(c).AlignItems(Center).Gap(c.theme.Space(1)).Padding(c.theme.Space(1), c.theme.Space(2))
+		r := coreRow(c).AlignItems(Center).Gap(c.theme.Space(1)).Padding(c.theme.Space(1), c.theme.Space(2))
 		r.Role(RoleNone)
 		r.Children(func() { s.prefix(c, i, children, func() { row(s.rows[i].item) }) })
 	}, treeList)
-	s.keys(e, children)
+	e.afterInput(func() { s.keys(e, children) })
 	return e
 }
 
@@ -125,7 +131,7 @@ func Outline[K comparable](c *Context, s *OutlineState[K], roots []K, children f
 //			ui.Text(c, app.size(path))
 //		}
 //	})
-func OutlineTable[K comparable](c *Context, s *OutlineState[K], columns []TableColumn, roots []K, children func(K) []K, cell func(item K, col int)) *Element {
+func coreOutlineTable[K comparable](c *context, s *OutlineState[K], columns []TableColumn, roots []K, children func(K) []K, cell func(item K, col int)) *node {
 	s.flatten(roots, children)
 	s.List.Key = func(i int) any { return s.rows[i].item }
 	e := table(c, &s.List, columns, len(s.rows), func(i, col int) {
@@ -135,18 +141,18 @@ func OutlineTable[K comparable](c *Context, s *OutlineState[K], columns []TableC
 		}
 		s.prefix(c, i, children, func() { cell(s.rows[i].item, 0) })
 	}, treeTableList)
-	s.keys(e, children)
+	e.afterInput(func() { s.keys(e, children) })
 	return e
 }
 
 // prefix builds the indentation and the arrow of row i, then content, and
 // tells assistive technology how deep the row is and whether it is open.
-func (s *OutlineState[K]) prefix(c *Context, i int, children func(K) []K, content func()) {
+func (s *OutlineState[K]) prefix(c *context, i int, children func(K) []K, content func()) {
 	t := c.theme
 	r := s.rows[i]
 	open := r.branch && s.Open.Has(r.item)
 	// The list's element holding the row is the tree's item.
-	var item *Element
+	var item *node
 	for p := c.parent; p != nil; p = p.parent {
 		if p.listRow {
 			item = p
@@ -155,33 +161,37 @@ func (s *OutlineState[K]) prefix(c *Context, i int, children func(K) []K, conten
 		}
 	}
 	if r.depth > 0 {
-		Box(c).Width(float32(r.depth) * t.Space(4)).Shrink(0)
+		indent := s.Indent
+		if indent == 0 {
+			indent = t.Space(4)
+		}
+		coreBox(c).Width(float32(r.depth) * indent).Shrink(0)
 	}
-	arrow := Box(c).Size(t.Space(4), t.Space(4)).Shrink(0).Role(RoleNone)
+	arrow := coreBox(c).Size(t.Space(4), t.Space(4)).Shrink(0).Role(RoleNone)
 	if r.branch {
 		arrow.flags |= flagClickable | flagKeepFocus
-		toggle := arrow.Clicked()
-		if item != nil && item.st.expand != 0 {
-			// Assistive technology opening or closing it.
-			toggle = (item.st.expand > 0) != open
-			item.st.expand = 0
-			c.rt.consumed = true
-		}
-		if toggle {
-			s.setOpen(r.item, !open, arrow.ClickModifiers()&Alt != 0, children)
-			s.closed(i, open)
-			open = !open
-			if item != nil {
-				item.expanded = open
+		arrow.afterInput(func() {
+			toggle := arrow.Clicked()
+			if item != nil && item.st.expand != 0 {
+				// Assistive technology opening or closing it.
+				toggle = (item.st.expand > 0) != open
+				item.st.expand = 0
+				c.rt.consumed = true
 			}
-		}
+			if toggle {
+				s.setOpen(r.item, !open, arrow.ClickModifiers()&Alt != 0, children)
+				s.closed(i, open)
+				open = !open
+				if item != nil {
+					item.expanded = open
+				}
+			}
+
+		})
 		turn := arrow.Animate("open", 90*b2f(open), 150*time.Millisecond)
+		rtl := arrow.rtl()
 		arrow.Draw(func(p *Painter, rect Rect) {
-			cx, cy, d := rect.X+rect.W/2, rect.Y+rect.H/2, rect.W/8
-			var path Path
-			at := rotate(cx, cy, turn)
-			path.MoveTo(at(-d, -2*d)).LineTo(at(d, 0)).LineTo(at(-d, 2*d))
-			p.StrokePath(&path, 1.5, arrowColor(t, item))
+			p.StrokePath(disclosurePath(rect, turn, rtl), 1.5, arrowColor(t, item))
 		})
 	}
 	content()
@@ -204,13 +214,16 @@ func (s *OutlineState[K]) closed(i int, wasOpen bool) {
 
 // keys opens and closes the item chosen with Right and Left while the
 // outline has the focus, or moves to its first child or its parent.
-func (s *OutlineState[K]) keys(owner *Element, children func(K) []K) {
+func (s *OutlineState[K]) keys(owner *node, children func(K) []K) {
 	sel := s.List.cursor()
 	if sel == nil {
 		return
 	}
-	right, left := owner.Shortcut(0, KeyRight), owner.Shortcut(0, KeyLeft)
-	allRight, allLeft := owner.Shortcut(allMod, KeyRight), owner.Shortcut(allMod, KeyLeft)
+	// Right opens, toward where the rows' content goes; Left right to
+	// left.
+	back, forth := owner.arrows()
+	right, left := owner.Shortcut(0, forth), owner.Shortcut(0, back)
+	allRight, allLeft := owner.Shortcut(allMod, forth), owner.Shortcut(allMod, back)
 	i := *sel
 	if i < 0 || i >= len(s.rows) {
 		return
@@ -242,7 +255,7 @@ var allMod = func() Modifiers {
 
 // arrowColor is the color of the arrow of an item of a tree: muted, or
 // the accent's text on the item chosen.
-func arrowColor(t *Theme, item *Element) Color {
+func arrowColor(t *Theme, item *node) Color {
 	if item != nil && item.checked == 2 {
 		return t.AccentText
 	}

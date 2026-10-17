@@ -6,6 +6,7 @@ $stage = Join-Path $PSScriptRoot '.stage'
 $cache = Join-Path $PSScriptRoot '.cache'
 $originalPath = $env:PATH
 $originalSigningKey = $env:MYGO_UPDATER_PRIVATE_KEY
+$originalBenchOutput = $env:MINICODE_BENCH_OUTPUT
 function Run([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Program failed ($LASTEXITCODE)" }
@@ -51,6 +52,7 @@ try {
     Run 'node' @("$PSScriptRoot/audit.mjs",'--source','--history',$root)
     Run 'node' @("$PSScriptRoot/audit.mjs","$stage/runtime")
     if (-not $SkipTests) {
+        if (-not $env:MINICODE_BENCH_OUTPUT) { $env:MINICODE_BENCH_OUTPUT = "$cache/algorithm-measurements.json" }
         Run 'cargo' @('test','--locked')
         Run 'cargo' @('fmt','--check')
         Run 'cargo' @('clippy','--locked','--all-targets','--','-D','warnings')
@@ -92,7 +94,7 @@ try {
     Run 'pwsh' @('-NoProfile','-File',"$PSScriptRoot/test-updater.ps1",'-Installation',$installation)
     Run 'pwsh' @('-NoProfile','-File',"$PSScriptRoot/test-installer.ps1",'-Installation',$installation)
     $version=(Get-Content "$PSScriptRoot/package.json" -Raw|ConvertFrom-Json).version
-    $built=Get-Item "$installation/MiniCode Setup $version.exe"
+    $built=Get-Item "$installation/MiniCode Setup $version amd64.exe"
     $installer="$PSScriptRoot/dist/MiniCode-Setup-$version-win-x64.exe"
     Copy-Item -LiteralPath $built.FullName -Destination $installer
     Copy-Item -LiteralPath "$installation/update-windows-amd64.json" -Destination "$PSScriptRoot/dist"
@@ -100,4 +102,4 @@ try {
     $hash=(Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $([IO.Path]::GetFileName($installer))" | Set-Content "$PSScriptRoot/dist/SHA256SUMS.txt" -Encoding ascii
     Write-Host "Installer verified: $installer"
-} finally { $env:PATH=$originalPath; $env:MYGO_UPDATER_PRIVATE_KEY=$originalSigningKey; Pop-Location }
+} finally { $env:PATH=$originalPath; $env:MYGO_UPDATER_PRIVATE_KEY=$originalSigningKey; $env:MINICODE_BENCH_OUTPUT=$originalBenchOutput; Pop-Location }

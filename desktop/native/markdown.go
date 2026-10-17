@@ -118,6 +118,8 @@ func highlight(source, language string) []codeLine {
 	return lines
 }
 
+// tokenColor colors code in Claude's quiet scheme: clay keywords, slate
+// functions, sage strings and ochre numbers on the paper code block.
 func tokenColor(kind chroma.TokenType, p palette) ui.Color {
 	pair := func(light, dark string) ui.Color {
 		if p.Dark {
@@ -125,44 +127,23 @@ func tokenColor(kind chroma.TokenType, p palette) ui.Color {
 		}
 		return ui.Hex(light)
 	}
-	if kind.InCategory(chroma.Comment) {
-		return pair("#8c8c93", "#6f6f78")
-	}
-	if kind.InCategory(chroma.Keyword) {
-		if p.Dark {
-			return ui.Hex("#e38ad0")
-		}
-		return ui.Hex("#a2358f")
-	}
-	if kind.InCategory(chroma.LiteralString) {
-		if p.Dark {
-			return ui.Hex("#9fd88d")
-		}
-		return ui.Hex("#2b7a3d")
-	}
-	if kind.InCategory(chroma.LiteralNumber) {
-		if p.Dark {
-			return ui.Hex("#f3b27a")
-		}
-		return ui.Hex("#b45a12")
-	}
-	if kind == chroma.NameFunction {
-		if p.Dark {
-			return ui.Hex("#8db2ff")
-		}
-		return ui.Hex("#3159b8")
-	}
-	if kind == chroma.NameBuiltin {
-		return pair("#6f42c1", "#c0a4ff")
-	}
-	if kind == chroma.NameTag {
-		return pair("#b8392a", "#ff8f7d")
-	}
-	if kind == chroma.NameClass || kind == chroma.KeywordType {
-		return pair("#0f7a8a", "#6fd3de")
-	}
-	if kind == chroma.NameAttribute || kind.InSubCategory(chroma.NameVariable) || kind == chroma.NameProperty {
-		return pair("#8a5a0e", "#e8c079")
+	switch {
+	case kind.InCategory(chroma.Comment):
+		return pair("#9c9a92", "#6e6c66")
+	case kind == chroma.KeywordType || kind == chroma.NameClass:
+		return pair("#7a5c99", "#c3a8de")
+	case kind.InCategory(chroma.Keyword):
+		return pair("#8f4a2e", "#e3a383")
+	case kind.InCategory(chroma.LiteralString):
+		return pair("#5c7a3e", "#a9c08f")
+	case kind.InCategory(chroma.LiteralNumber):
+		return pair("#a8742a", "#d7a85c")
+	case kind == chroma.NameFunction || kind == chroma.NameBuiltin:
+		return pair("#3b5f8a", "#9db7da")
+	case kind == chroma.NameTag:
+		return pair("#8f4a2e", "#e3a383")
+	case kind == chroma.NameAttribute || kind.InSubCategory(chroma.NameVariable) || kind == chroma.NameProperty:
+		return pair("#7d6230", "#d9c08f")
 	}
 	return p.Text
 }
@@ -175,7 +156,7 @@ func codeText(c *ui.Context, p palette, line codeLine) {
 	if len(spans) == 0 {
 		spans = []ui.Span{{Text: " "}}
 	}
-	ui.RichText(c, spans...).Font("Cascadia Code, Cascadia Mono, Consolas").FontSize(p.font(12.32)).NoWrap().Selectable().LineHeight(1.65)
+	ui.RichText(c, spans...).Font(monoFont).FontSize(p.font(12.04)).NoWrap().Selectable().LineHeight(1.65)
 }
 
 var markdownParser = goldmark.New(goldmark.WithExtensions(extension.GFM)).Parser()
@@ -333,18 +314,18 @@ func inlines(parent ast.Node, data []byte, style inline) []inline {
 	return spans
 }
 
-func inlineText(c *ui.Context, p palette, spans []inline, bold bool) *ui.Element {
+func inlineText(c *ui.Context, p palette, spans []inline, bold bool) ui.Element {
 	e := ui.RichText(c).Selectable().LineHeight(1.72)
 	e.Children(func() {
 		for _, span := range spans {
-			var part *ui.Element
+			var part ui.Element
 			if span.URL != "" && allowedExternal(span.URL) {
-				part = ui.Link(c, span.Text, span.URL).TextColor(p.AccentText).Underline()
+				part = ui.Link(c, span.Text, span.URL).TextColor(p.Text).Underline()
 			} else {
 				part = ui.Text(c, span.Text)
 			}
 			if span.Bold || bold {
-				part.FontWeight(650)
+				part.FontWeight(600)
 			}
 			if span.Italic {
 				part.Italic()
@@ -353,7 +334,7 @@ func inlineText(c *ui.Context, p palette, spans []inline, bold bool) *ui.Element
 				part.Strikethrough()
 			}
 			if span.Code {
-				part.Font("Cascadia Code, Cascadia Mono, Consolas").FontSize(p.font(12.6)).TextBackground(p.Subtle).TextColor(p.Text)
+				part.Font(monoFont).FontSize(p.font(12.32)).TextBackground(p.Active).TextColor(p.Text)
 			}
 		}
 	})
@@ -362,47 +343,50 @@ func inlineText(c *ui.Context, p palette, spans []inline, bold bool) *ui.Element
 
 func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 	doc := d.renderCache.markdown(source)
-	ui.Column(c).Gap(10.29).FontSize(p.font(13.72)).Children(func() {
+	// Replies are set as Claude sets them: a book face, a little larger,
+	// with generous leading.
+	ui.Column(c).Gap(12).Font(p.Prose).FontSize(p.font(14.7)).Children(func() {
 		for i, block := range doc.Blocks {
-			ui.Column(c).Key(i).Margin(0, 0, 0, float32(block.Indent)*18).Children(func() {
+			ui.Column(c.Key(i)).Margin(0, 0, 0, float32(block.Indent)*18).Children(func() {
 				switch block.Kind {
 				case "image":
 					d.markdownImage(c, p, block.ImageURL, block.Text)
 				case "heading":
-					size := float32(14.7)
+					size := float32(15.4)
 					if block.Level == 1 {
-						size = 18.9
+						size = 20.3
 					}
 					if block.Level == 2 {
-						size = 16.52
+						size = 17.5
 					}
 					if block.Level >= 4 {
-						size = 14
+						size = 14.7
 					}
 					heading := inlineText(c, p, block.Spans, true).FontSize(p.font(size)).LineHeight(1.35)
 					if i > 0 {
-						heading.Margin(8, 0, 0, 0)
+						heading.Margin(10, 0, 0, 0)
 					}
 				case "paragraph", "list":
 					inlineText(c, p, block.Spans, false)
 				case "quote":
-					ui.Column(c).BorderWidth(0, 0, 0, 3).BorderColor(p.BorderStrong).Padding(0, 0, 0, 12).Children(func() { inlineText(c, p, block.Spans, false).TextColor(p.Text2) })
+					ui.Column(c).BorderWidth(0, 0, 0, 2).BorderColor(p.BorderStrong).Padding(0, 0, 0, 14).Children(func() { inlineText(c, p, block.Spans, false).TextColor(p.Text2) })
 				case "divider":
 					ui.Divider(c).Margin(4, 0)
 				case "code":
-					ui.Column(c).Radius(8).Clip().Border(1, p.CodeBorder).Background(p.Code).Children(func() {
-						ui.Row(c).Height(32).Padding(0, 12).BorderWidth(0, 0, 1, 0).BorderColor(p.CodeBorder).Children(func() {
+					ui.Column(c).Margin(2, 0).Radius(14).Clip().Border(1, p.CodeBorder).Background(p.Code).Font(sansFont).Children(func() {
+						ui.Row(c).Height(34).Padding(0, 6, 0, 14).Children(func() {
 							language := block.Language
 							if language == "" {
 								language = "text"
 							}
-							muted(c, p, language).FontSize(p.font(10.64))
+							ui.Text(c, language).Font(monoFont).FontSize(p.font(10.64)).TextColor(p.Text3)
 							ui.Spacer(c)
-							if button(c, p, tr("复制代码"), "Copy", false).Height(24).Padding(0, 7).FontSize(p.font(10.36)).Border(0, ui.Transparent).Clicked() {
+							copyCode := button(c, p, tr("复制代码"), "Copy", false).Height(24).Padding(0, 8).Radius(8).FontSize(p.font(10.36)).Border(0, ui.Transparent)
+							if copyCode.Clicked() {
 								c.WriteClipboard(block.Text)
 							}
 						})
-						ui.ScrollHorizontal(c).Padding(10, 12).Children(func() {
+						ui.ScrollHorizontal(c).Padding(2, 14, 12, 14).Children(func() {
 							ui.Column(c).Children(func() {
 								for _, line := range block.Code {
 									codeText(c, p, line)
@@ -411,16 +395,21 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 						})
 					})
 				case "table":
-					ui.Column(c).Border(1, p.Border).Radius(6).Clip().Children(func() {
+					ui.Column(c).Border(1, p.Border).Radius(12).Clip().Font(sansFont).Children(func() {
 						for rowIndex, row := range block.Table {
 							ui.Row(c).AlignItems(ui.Stretch).Background(func() ui.Color {
 								if rowIndex == 0 {
 									return p.Subtle
 								}
 								return ui.Transparent
-							}()).BorderWidth(0, 0, 1, 0).BorderColor(p.Border).Children(func() {
+							}()).BorderWidth(0, 0, func() float32 {
+								if rowIndex == len(block.Table)-1 {
+									return 0
+								}
+								return 1
+							}(), 0).BorderColor(p.BorderSubtle).Children(func() {
 								for _, cell := range row {
-									ui.Column(c).Grow(1).Basis(0).Padding(6, 10).Children(func() { inlineText(c, p, cell, rowIndex == 0).FontSize(p.font(12.6)) })
+									ui.Column(c).Grow(1).Basis(0).Padding(8, 12).Children(func() { inlineText(c, p, cell, rowIndex == 0).FontSize(p.font(12.6)) })
 								}
 							})
 						}

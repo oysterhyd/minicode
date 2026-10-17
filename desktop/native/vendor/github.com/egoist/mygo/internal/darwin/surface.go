@@ -17,6 +17,7 @@ import (
 	"github.com/ebitengine/purego/objc"
 
 	"github.com/egoist/mygo/internal/platform"
+	"github.com/egoist/mygo/transfer"
 )
 
 // The surface of a window that shows content MyGo draws itself is a
@@ -50,6 +51,11 @@ var (
 	cgProviderCreate   uintptr
 	cgProviderRelease  uintptr
 	cfDataCreate       uintptr
+	// Read the keyboard type from each event, so an external ISO keyboard
+	// does not inherit the built-in keyboard's ANSI mapping.
+	cgEventGetIntegerValueField func(event uintptr, field uint32) int64
+	kbGetLayoutType             func(keyboardType int16) uint32
+	lmGetKbdType                func() uint8
 
 	// caPass counts the passes of the main run loop, past Core Animation's
 	// commit of each: frames drawn in the same pass go into the same
@@ -79,6 +85,9 @@ func loadSurface() {
 		cgProviderCreate = mustDlsym(libCG, "CGDataProviderCreateWithCFData")
 		cgProviderRelease = mustDlsym(libCG, "CGDataProviderRelease")
 		cfDataCreate = mustDlsym(libCF, "CFDataCreate")
+		purego.RegisterLibFunc(&cgEventGetIntegerValueField, libCG, "CGEventGetIntegerValueField")
+		purego.RegisterLibFunc(&kbGetLayoutType, libCarbon, "KBGetLayoutType")
+		purego.RegisterLibFunc(&lmGetKbdType, libCarbon, "LMGetKbdType")
 		p := mustDlsym(libCG, "kCGColorSpaceSRGB")
 		name := **(**uintptr)(unsafe.Pointer(&p))
 		cgColorSpaceSRGB, _, _ = purego.SyscallN(mustDlsym(libCG, "CGColorSpaceCreateWithName"), name)
@@ -104,10 +113,12 @@ type surface struct {
 	// and due is whether its next tick draws one. Without a display link,
 	// a timer paces frames at the display's rate: timing is true while
 	// one is due. lastFrame is when the last frame began, and framePass
-	// the pass of the run loop that drew it (caPass).
+	// the pass of the run loop that drew it (caPass); resized tells that
+	// the view changed size or scale since.
 	linkRunning bool
 	due         bool
 	timing      bool
+	resized     bool
 	lastFrame   time.Time
 	framePass   uint64
 	cursor      platform.Cursor
@@ -123,11 +134,16 @@ type surface struct {
 
 	// Accessibility: whether the content describes its frames, the last
 	// tree, the elements of its nodes and those at the top (an NSArray).
-	accessOn bool
-	access   platform.AccessTree
-	elements map[uint64]*accessElement
-	topLevel id
-	updating bool
+	accessOn      bool
+	access        platform.AccessTree
+	elements      map[uint64]*accessElement
+	topLevel      id
+	updating      bool
+	dataDrag      *macDataSource
+	dragOperation transfer.Operation
+	// placed are where the content shows the window's web views, under
+	// it (webview.go).
+	placed []platform.WebViewPlacement
 }
 
 func (w *window) createSurface(content NSRect) {
@@ -155,6 +171,7 @@ func (w *window) createSurface(content NSRect) {
 }
 
 func (s *surface) destroy() {
+	s.CancelDataDrag()
 	if s.link != 0 {
 		send(s.link, "invalidate")
 		release(s.link)
@@ -179,6 +196,10 @@ func (w *window) Surface() platform.Surface {
 func (s *surface) Native() platform.SurfaceNative {
 	return platform.SurfaceNative{View: uintptr(s.view), Layer: uintptr(send(s.view, "layer"))}
 }
+
+// ShowsMaterial reports whether the window has a material, whose effect
+// view, behind the surface, shows where its frames are transparent.
+func (s *surface) ShowsMaterial() bool { return s.w.effect != 0 || s.w.popover != 0 }
 
 func (s *surface) scale() float64 {
 	if f := msgFloat(s.w.win, sel("backingScaleFactor")); f > 0 {
@@ -230,6 +251,21 @@ func (s *surface) RequestFrame() {
 		t := msgTimer(class("NSTimer"), sel("timerWithTimeInterval:target:selector:userInfo:repeats:"), delay.Seconds(), s.view, sel("mygoTimer:"), 0, false)
 		send(send(class("NSRunLoop"), "mainRunLoop"), "addTimer:forMode:", uintptr(t), kCFRunLoopCommonModes)
 	})
+}
+
+// presentsWithTransaction reports whether the GPU renderer's CAMetalLayer
+// presents with Core Animation's transaction (internal/gpu/metal), as it
+// does the frames that change it: the frame drawn last then takes a
+// drawable until the transaction commits.
+func (s *surface) presentsWithTransaction() bool {
+	sublayers := send(send(s.view, "layer"), "sublayers")
+	metalLayer := uintptr(class("CAMetalLayer"))
+	for i := range sendInt(sublayers, "count") {
+		if l := send(sublayers, "objectAtIndex:", uintptr(i)); sendBool(l, "isKindOfClass:", metalLayer) {
+			return sendBool(l, "presentsWithTransaction")
+		}
+	}
+	return false
 }
 
 // Occluded reports whether nothing of the window shows on screen: hidden,
@@ -315,7 +351,17 @@ var cursorFallbacks = map[platform.Cursor]string{
 	platform.CursorResizeRow:    "resizeUpDownCursor",
 }
 
+// applyCursor sets the content's cursor, unless the pointer is over a
+// web view, whose page sets its own.
 func (s *surface) applyCursor() {
+	if len(s.placed) > 0 {
+		p := msgPoint(class("NSEvent"), sel("mouseLocation"))
+		inWindow := msgRectToRect(s.w.win, sel("convertRectFromScreen:"), NSRect{Origin: p})
+		local := msgPointFromView(s.view, sel("convertPoint:fromView:"), inWindow.Origin, 0)
+		if s.webViewAt(local.X, local.Y) != nil {
+			return
+		}
+	}
 	send(nsCursor(s.cursor), "set")
 }
 
@@ -385,6 +431,15 @@ func (s *surface) SetCursor(c platform.Cursor) {
 }
 
 func (s *surface) SetTextInput(t platform.TextInputState) {
+	if s.input.Client != t.Client && s.input.Active {
+		s.marked = ""
+		send(send(s.view, "inputContext"), "discardMarkedText")
+	}
+	if s.input.Active && t.Active && t.NoInputMethod && !s.input.NoInputMethod {
+		// Input methods turned off give up what they composed.
+		s.marked = ""
+		send(send(s.view, "inputContext"), "discardMarkedText")
+	}
 	if s.input.Active && !t.Active && s.marked != "" {
 		s.marked = ""
 		send(send(s.view, "inputContext"), "discardMarkedText")
@@ -488,6 +543,72 @@ func eventKey(ev id) platform.Key {
 	return platform.KeyUnknown
 }
 
+// ansiKeys maps virtual key codes (Carbon's kVK_ANSI_*) to the key at that
+// position of an ANSI US keyboard.
+var ansiKeys = map[uint16]platform.Key{
+	0x00: platform.KeyA, 0x01: platform.KeyS, 0x02: platform.KeyD, 0x03: platform.KeyF,
+	0x04: platform.KeyH, 0x05: platform.KeyG, 0x06: platform.KeyZ, 0x07: platform.KeyX,
+	0x08: platform.KeyC, 0x09: platform.KeyV, 0x0B: platform.KeyB, 0x0C: platform.KeyQ,
+	0x0D: platform.KeyW, 0x0E: platform.KeyE, 0x0F: platform.KeyR, 0x10: platform.KeyY,
+	0x11: platform.KeyT, 0x1F: platform.KeyO, 0x20: platform.KeyU, 0x22: platform.KeyI,
+	0x23: platform.KeyP, 0x25: platform.KeyL, 0x26: platform.KeyJ, 0x28: platform.KeyK,
+	0x2D: platform.KeyN, 0x2E: platform.KeyM,
+	0x12: platform.Key1, 0x13: platform.Key2, 0x14: platform.Key3, 0x15: platform.Key4,
+	0x16: platform.Key6, 0x17: platform.Key5, 0x19: platform.Key9, 0x1A: platform.Key7,
+	0x1C: platform.Key8, 0x1D: platform.Key0,
+	0x18: platform.KeyEqual, 0x1B: platform.KeyMinus, 0x1E: platform.KeyBracketRight,
+	0x21: platform.KeyBracketLeft, 0x27: platform.KeyQuote, 0x29: platform.KeySemicolon,
+	0x2A: platform.KeyBackslash, 0x2B: platform.KeyComma, 0x2C: platform.KeySlash,
+	0x2F: platform.KeyPeriod, 0x32: platform.KeyBackquote,
+}
+
+// keyAtCode returns the key a virtual key code stands for by position:
+// the non-text keys of macKeys, then the ANSI US letter, digit and
+// punctuation keys.
+func keyAtCode(code uint16) platform.Key {
+	if k, ok := macKeys[code]; ok {
+		return k
+	}
+	return ansiKeys[code]
+}
+
+const (
+	macISOSectionCode = 0x0A
+	macANSIGraveCode  = 0x32
+	macISOLayoutType  = 0x49534F20 // Carbon's kKeyboardISO ('ISO ')
+)
+
+func keyAtCodeForLayout(code uint16, layoutType uint32) platform.Key {
+	if layoutType == macISOLayoutType {
+		// On ISO keyboards the key left of 1 is kVK_ISO_Section, while
+		// kVK_ANSI_Grave is the extra key beside the left Shift.
+		switch code {
+		case macISOSectionCode:
+			return platform.KeyBackquote
+		case macANSIGraveCode:
+			return platform.KeyUnknown // No key for ISO's extra key in platform.Key.
+		}
+	}
+	return keyAtCode(code)
+}
+
+// physicalKey returns the ANSI US key at the event's physical position,
+// independent of the current input source. Only the grave key differs on ISO.
+func physicalKey(ev id) platform.Key {
+	code := uint16(send(ev, "keyCode"))
+	if code != macISOSectionCode && code != macANSIGraveCode {
+		return keyAtCode(code)
+	}
+	var keyboardType int16
+	if cgEvent := send(ev, "CGEvent"); cgEvent != 0 {
+		keyboardType = int16(cgEventGetIntegerValueField(uintptr(cgEvent), 10)) // kCGKeyboardEventKeyboardType
+	}
+	if keyboardType == 0 { // Synthetic NSEvents can lack a keyboard type.
+		keyboardType = int16(lmGetKbdType())
+	}
+	return keyAtCodeForLayout(code, kbGetLayoutType(keyboardType))
+}
+
 // stringOf returns the text of an NSString or NSAttributedString.
 func stringOf(obj id) string {
 	if obj == 0 {
@@ -518,6 +639,7 @@ func (b *Backend) surfaceOf(view id) *surface {
 }
 
 func registerSurfaceClass() {
+	registerDataDragClasses()
 	b := func() *Backend { return theBackend }
 	mouse := func(kind platform.SurfaceEventKind, button int) func(id, objc.SEL, id) {
 		return func(self id, _ objc.SEL, ev id) {
@@ -567,11 +689,7 @@ func registerSurfaceClass() {
 		if s == nil {
 			return 0
 		}
-		x, y := s.dragPoint(info)
-		if s.send(platform.SurfaceEvent{Kind: platform.FileDragOver, X: x, Y: y}) {
-			return 1 // NSDragOperationCopy
-		}
-		return 0
+		return s.nativeDataOperation(info)
 	}
 	methods := []objc.MethodDef{
 		// Files dragged from other apps.
@@ -579,7 +697,7 @@ func registerSurfaceClass() {
 		method("draggingUpdated:", dragged),
 		method("draggingExited:", func(self id, _ objc.SEL, info id) {
 			if s := b().surfaceOf(self); s != nil {
-				s.send(platform.SurfaceEvent{Kind: platform.FileDragLeave})
+				s.nativeDataEvent(info, platform.DataDragLeave)
 			}
 		}),
 		method("prepareForDragOperation:", func(self id, _ objc.SEL, info id) bool { return true }),
@@ -588,12 +706,22 @@ func registerSurfaceClass() {
 			if s == nil {
 				return false
 			}
-			x, y := s.dragPoint(info)
-			return s.send(platform.SurfaceEvent{Kind: platform.FileDrop, X: x, Y: y, Files: draggedFiles(info)})
+			return s.nativeDataEvent(info, platform.DataDrop)
 		}),
 	}
 	classDef("MyGoSurfaceView", "NSView", []string{"NSTextInputClient"}, append(append(methods, accessViewMethods()...), []objc.MethodDef{
 		method("isFlipped", func(self id, _ objc.SEL) bool { return true }),
+		// The pointer goes through to the web views under the surface
+		// where the content shows them (webview.go).
+		method("hitTest:", func(self id, cmd objc.SEL, p NSPoint) id {
+			if s := b().surfaceOf(self); s != nil && len(s.placed) > 0 {
+				local := msgPointFromView(self, sel("convertPoint:fromView:"), p, send(self, "superview"))
+				if s.webViewAt(local.X, local.Y) != nil {
+					return 0
+				}
+			}
+			return sendSuperPoint(self, "MyGoSurfaceView", cmd, p)
+		}),
 		method("acceptsFirstResponder", func(self id, _ objc.SEL) bool { return true }),
 		method("acceptsFirstMouse:", func(self id, _ objc.SEL, ev id) bool { return true }),
 		method("mouseDownCanMoveWindow", func(self id, _ objc.SEL) bool { return false }),
@@ -603,20 +731,24 @@ func registerSurfaceClass() {
 			if s == nil {
 				return
 			}
-			if s.framePass == caPass && send(self, "inLiveResize") == 0 {
+			if s.framePass == caPass && send(self, "inLiveResize") == 0 && (!s.resized || s.presentsWithTransaction()) {
 				// AppKit displays the view again before Core Animation
 				// commits the frame drawn in this pass, as while the
-				// trackpad scrolls: the frame would wait a second for a
+				// trackpad scrolls. The next refresh draws it: as one just
+				// drew, not at once; and after a frame presented with the
+				// transaction, the frame would wait a second for a
 				// drawable, the layer's two being taken until the commit.
-				// The next refresh draws it: as one just drew, not at once.
-				// A window that resizes, as zooming animates it, displays
-				// the view for each of its sizes within one pass of the
-				// run loop, committing each: those frames draw at once, or
-				// the layer would stretch the last one to the new sizes.
+				// A frame for a new size after one presented at once, as
+				// those of the display link's ticks are, draws at once, or
+				// the layer would stretch the last one meanwhile. A window
+				// that resizes, as zooming animates it, displays the view
+				// for each of its sizes within one pass of the run loop,
+				// committing each: those frames draw at once too.
 				s.lastFrame = time.Now()
 				s.RequestFrame()
 				return
 			}
+			s.resized = false
 			s.framePass = caPass
 			s.lastFrame = time.Now()
 			s.send(platform.SurfaceEvent{Kind: platform.SurfaceFrame})
@@ -632,7 +764,21 @@ func registerSurfaceClass() {
 				return
 			}
 			s.due = false
-			send(self, "setNeedsDisplay:", 1)
+			if sendBool(send(self, "layer"), "needsDisplay") {
+				// AppKit displays the view in this pass, as after a
+				// resize (the view's needsDisplay tells nothing): the
+				// frame shows with the window's changes then.
+				return
+			}
+			// The frame draws now, rather than when AppKit displays the
+			// view, which would cost a pass of its display cycle and a
+			// commit of Core Animation's transaction for each frame: the
+			// renderer presents frames that change nothing else as soon
+			// as drawn.
+			s.resized = false
+			s.framePass = caPass
+			s.lastFrame = time.Now()
+			s.send(platform.SurfaceEvent{Kind: platform.SurfaceFrame})
 		}),
 		method("mygoTimer:", func(self id, _ objc.SEL, timer id) {
 			// A closed window's view lives until its timer fires.
@@ -644,12 +790,14 @@ func registerSurfaceClass() {
 		method("setFrameSize:", func(self id, cmd objc.SEL, size NSSize) {
 			sendSuperSize(self, "MyGoSurfaceView", cmd, size)
 			if s := b().surfaceOf(self); s != nil {
+				s.resized = true
 				s.send(platform.SurfaceEvent{Kind: platform.SurfaceResize})
 				send(self, "setNeedsDisplay:", 1)
 			}
 		}),
 		method("viewDidChangeBackingProperties", func(self id, _ objc.SEL) {
 			if s := b().surfaceOf(self); s != nil {
+				s.resized = true
 				s.send(platform.SurfaceEvent{Kind: platform.SurfaceResize})
 				send(self, "setNeedsDisplay:", 1)
 			}
@@ -713,13 +861,14 @@ func registerSurfaceClass() {
 				return
 			}
 			mods := eventMods(ev)
-			ime := s.input.Active && mods&(platform.ModSuper|platform.ModCtrl) == 0
+			text := s.input.Active && mods&(platform.ModSuper|platform.ModCtrl) == 0
+			ime := text && !s.input.NoInputMethod
 			// A key typed while the input method composes is the input
 			// method's alone, as Enter choosing a candidate or Escape
 			// giving the composition up, as GTK's and IMM32's filtering
 			// keeps them on Linux and Windows.
-			if !ime || s.marked == "" {
-				s.send(platform.SurfaceEvent{Kind: platform.KeyPressed, Key: eventKey(ev), Mods: mods, Repeat: sendBool(ev, "isARepeat")})
+			if !ime || !s.hasMarkedText() {
+				s.send(platform.SurfaceEvent{Kind: platform.KeyPressed, Key: eventKey(ev), PhysicalKey: physicalKey(ev), Mods: mods, Repeat: sendBool(ev, "isARepeat")})
 			}
 			// Input methods see the key while a text input has the focus;
 			// they answer with insertText: or setMarkedText:.
@@ -727,17 +876,28 @@ func registerSurfaceClass() {
 				s.keyDown = true
 				send(self, "interpretKeyEvents:", uintptr(nsArray(ev)))
 				s.keyDown = false
+			} else if text {
+				// Input methods off: the key types the characters of the
+				// layout, as winit's keys do without them.
+				if t := typedChars(stringOf(send(ev, "characters"))); t != "" {
+					s.insertText(t, nsRange{Location: nsNotFound})
+				}
 			}
 		}),
 		method("keyUp:", func(self id, _ objc.SEL, ev id) {
 			if s := b().surfaceOf(self); s != nil {
-				s.send(platform.SurfaceEvent{Kind: platform.KeyReleased, Key: eventKey(ev), Mods: eventMods(ev)})
+				s.send(platform.SurfaceEvent{Kind: platform.KeyReleased, Key: eventKey(ev), PhysicalKey: physicalKey(ev), Mods: eventMods(ev)})
+			}
+		}),
+		method("flagsChanged:", func(self id, _ objc.SEL, ev id) {
+			if s := b().surfaceOf(self); s != nil {
+				s.send(platform.SurfaceEvent{Kind: platform.ModifiersChanged, Mods: eventMods(ev)})
 			}
 		}),
 		command("copy"), command("cut"), command("paste"), command("selectAll"), command("undo"), command("redo"), command("delete"),
 		method("pasteAsPlainText:", func(self id, _ objc.SEL, sender id) {
 			if s := b().surfaceOf(self); s != nil {
-				s.send(platform.SurfaceEvent{Kind: platform.SurfaceCommand, Text: "paste"})
+				s.send(platform.SurfaceEvent{Kind: platform.SurfaceCommand, Text: "pasteAndMatchStyle"})
 			}
 		}),
 		method("validateMenuItem:", func(self id, _ objc.SEL, item id) bool { return true }),
@@ -745,7 +905,7 @@ func registerSurfaceClass() {
 		// NSTextInputClient
 		method("hasMarkedText", func(self id, _ objc.SEL) bool {
 			s := b().surfaceOf(self)
-			return s != nil && s.marked != ""
+			return s != nil && s.hasMarkedText()
 		}),
 		method("markedRange", func(self id, _ objc.SEL) nsRange {
 			if s := b().surfaceOf(self); s != nil {
@@ -765,9 +925,8 @@ func registerSurfaceClass() {
 			}
 		}),
 		method("unmarkText", func(self id, _ objc.SEL) {
-			if s := b().surfaceOf(self); s != nil && s.marked != "" {
-				s.marked = ""
-				s.send(platform.SurfaceEvent{Kind: platform.TextComposition})
+			if s := b().surfaceOf(self); s != nil {
+				s.unmarkText()
 			}
 		}),
 		method("validAttributesForMarkedText", func(self id, _ objc.SEL) id { return nsArray() }),
@@ -782,13 +941,37 @@ func registerSurfaceClass() {
 				s.insertText(stringOf(text), replacement)
 			}
 		}),
-		method("characterIndexForPoint:", func(self id, _ objc.SEL, p NSPoint) uint { return nsNotFound }),
+		method("characterIndexForPoint:", func(self id, _ objc.SEL, p NSPoint) uint {
+			s := b().surfaceOf(self)
+			if s != nil && s.input.Client != nil {
+				window := msgRectToRect(s.w.win, sel("convertRectFromScreen:"), NSRect{Origin: p})
+				local := msgConvertRectView(self, sel("convertRect:fromView:"), window, 0)
+				if index, ok := s.input.Client.IndexForPoint(local.Origin.X, local.Origin.Y); ok {
+					return uint(index)
+				}
+			}
+			return nsNotFound
+		}),
 		method("firstRectForCharacterRange:actualRange:", func(self id, _ objc.SEL, r nsRange, actual *nsRange) cgRect {
 			s := b().surfaceOf(self)
 			if s == nil {
 				return cgRect{}
 			}
 			c := s.input.Caret
+			if client := s.input.Client; client != nil {
+				rangeWanted := clientRange(r)
+				if rangeWanted == nil {
+					return cgRect{}
+				}
+				bounds, used, ok := client.BoundsForRange(*rangeWanted)
+				if !ok {
+					return cgRect{}
+				}
+				c = bounds
+				if actual != nil {
+					*actual = nsRange{Location: uint(used.Start), Length: uint(max(0, used.End-used.Start))}
+				}
+			}
 			inWindow := msgConvertRectView(self, sel("convertRect:toView:"), NSRect{Origin: NSPoint{c.X, c.Y}, Size: NSSize{max(c.W, 1), c.H}}, 0)
 			screen := msgRectToRect(s.w.win, sel("convertRectToScreen:"), inWindow)
 			return cgRect{X: screen.Origin.X, Y: screen.Origin.Y, W: screen.Size.Width, H: screen.Size.Height}

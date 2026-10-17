@@ -118,6 +118,13 @@ type desktop struct {
 	historyDraft                           string
 	history                                []string
 	focusPrompt                            bool
+	pendingCaret                           int
+	caretPending                           bool
+	dockHeight                             float32
+	sessionListBounds                      ui.Rect
+	activeRowY                             float32
+	activeRowSeen                          bool
+	completionUndo                         *completionUndo
 	focusSearch                            bool
 	toasts                                 []toast
 	lastDark                               bool

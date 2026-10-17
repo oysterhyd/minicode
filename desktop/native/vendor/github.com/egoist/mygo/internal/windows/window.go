@@ -17,6 +17,10 @@ type window struct {
 	opts   *platform.WindowOptions
 	hwnd   uintptr
 	parent *window
+	// flyout is how a flyout (WindowOptions.Flyout) was placed last, at
+	// flyoutSize.
+	flyout     platform.Flyout
+	flyoutSize platform.Size
 
 	// The WebView2 controller is created asynchronously; calls that need
 	// it wait in pending until it exists, or fail with webViewErr, why it
@@ -28,8 +32,13 @@ type window struct {
 	pending      []pendingCall
 	webViewErr   error
 	webViewFails int // creations that failed
-	closed       bool
-	destroying   bool
+	// scriptIDs are the ids of the scripts added to every document, which
+	// SetUserScripts removes; scriptGen counts the replacements, so an id
+	// that arrives after one is removed at once.
+	scriptIDs  []string
+	scriptGen  int
+	closed     bool
+	destroying bool
 
 	minW, minH, maxW, maxH int // DIPs
 	movable, closable      bool
@@ -49,7 +58,21 @@ type window struct {
 	icons [2]uintptr // small and big, from SetIcon
 	// surface shows the content MyGo draws, in place of the webview.
 	surface *surface
-	saved   struct {
+	// webViews are the web views under the surface (webview_embed.go), and
+	// host the window whose surface a web view is under, which shows it
+	// through its composition controller comp (comp3 its drag and drop,
+	// on runtimes having it; uia the provider of its page for UI
+	// Automation), in the visual webVis inside clipVis, at frame clipped
+	// to clip while shown. focused tells that it has the keyboard, and
+	// cursor is the cursor its page wants.
+	webViews         []*window
+	host             *window
+	comp, comp3, uia uintptr
+	clipVis, webVis  uintptr
+	frame, clip      platform.RectF
+	shown, focused   bool
+	cursor           uintptr
+	saved            struct {
 		style, exStyle uintptr
 		placement      windowPlacement
 	}
@@ -77,6 +100,7 @@ type window struct {
 	zoom         float64
 	devTools     bool
 	htmlFor      map[string]string // LoadHTML documents by the URL they load at
+	htmlNext     bool              // LoadHTML started the next navigation
 	calls        map[int]func(string, error)
 	nextCall     int
 }
@@ -95,25 +119,54 @@ func (b *Backend) NewWindow(o *platform.WindowOptions, h platform.WindowHandler)
 		htmlFor: map[string]string{}, calls: map[int]func(string, error){},
 	}
 	w.hiddenTitleBar = !o.Frameless && (o.TitleBarStyle == "hidden" || o.TitleBarStyle == "hiddenInset")
-	// A page with a material behind it needs a window without a redirection
-	// bitmap, whose opaque surface would cover the system backdrop. GDI
-	// draws nothing there: the controls of a hidden title bar show through
-	// DirectComposition (compositor.go), and the menus open in a popup
-	// (barless). Where DirectComposition is unavailable, the window keeps
-	// its bitmap: its controls show, and the material does not. The style
-	// is the window's for life: Windows neither adds it nor removes it later.
-	w.noRedirect = o.Vibrancy != "" && !o.Surface && systemBackdrops() && (!w.hiddenTitleBar || b.composition() != nil)
+	// A page or native UI with a material behind it needs a window without
+	// a redirection bitmap, whose opaque surface would cover the system
+	// backdrop. GDI draws nothing there: the controls of a hidden title bar
+	// and the frames of native UI show through DirectComposition
+	// (compositor.go, and the renderer's swap chain), and the menus open in
+	// a popup (barless). Where DirectComposition is unavailable, the window
+	// keeps its bitmap: what it shows shows, and the material does not. The
+	// style is the window's for life: Windows neither adds it nor removes it
+	// later.
+	w.noRedirect = o.Vibrancy != "" && systemBackdrops() && (!w.hiddenTitleBar && !o.Surface || b.composition() != nil)
+	if o.Flyout != nil {
+		// What the content leaves transparent shows what is behind.
+		w.noRedirect = b.composition() != nil
+	}
 	var owner uintptr
 	if p, ok := o.Parent.(*window); ok && p != nil && !p.closed {
 		w.parent, owner = p, p.hwnd
+	} else if o.Panel {
+		// A tool window alone may still get a taskbar button, on the
+		// taskbars of other displays: an owned one never does. The
+		// application window is hidden for good.
+		owner = b.appHwnd
 	}
 	style, ex := w.styles()
-	w.hwnd = createWindow(ex, windowClass, o.Title, style, 0, 0, 0, 0, owner)
+	class := windowClass
+	if o.Flyout != nil {
+		style, ex = w.flyoutStyles()
+		if o.HasShadow {
+			class = flyoutShadowClass
+		}
+	}
+	w.hwnd = createWindow(ex, class, o.Title, style, 0, 0, 0, 0, owner)
 	if w.hwnd == 0 {
 		return nil, errors.New("mygo: cannot create a window")
 	}
 	b.windows[w.hwnd] = w
-	w.placeInitially()
+	if o.Panel {
+		// Windows 11 gives tool windows the small corners of menus.
+		w.roundFlyout()
+	}
+	if o.Flyout != nil {
+		if o.HasShadow {
+			w.roundFlyout()
+		}
+		w.PlaceFlyout(*o.Flyout, platform.Size{Width: o.Width, Height: o.Height})
+	} else {
+		w.placeInitially()
+	}
 
 	if !o.Closable {
 		w.SetClosable(false)
@@ -127,7 +180,7 @@ func (b *Backend) NewWindow(o *platform.WindowOptions, h platform.WindowHandler)
 	if o.BackgroundColor != nil {
 		w.SetBackgroundColor(*o.BackgroundColor)
 	}
-	if w.captionless() && w.shadow {
+	if w.captionless() && w.shadow && o.Flyout == nil {
 		w.SetHasShadow(true)
 	}
 	if w.hiddenTitleBar {
@@ -146,7 +199,7 @@ func (b *Backend) NewWindow(o *platform.WindowOptions, h platform.WindowHandler)
 	if b.icon != 0 {
 		w.setIcon(b.icon)
 	}
-	if b.appMenu != nil {
+	if b.appMenu != nil && w.hasAppMenu() {
 		w.installMenu(b.appMenu)
 	}
 	if o.Modal && w.parent != nil {
@@ -182,6 +235,14 @@ func (w *window) styles() (style, ex uint32) {
 	if !o.Focusable {
 		ex |= wsExNoActivate
 	}
+	if o.Panel {
+		// Out of the taskbar and Alt+Tab, on whichever virtual desktop
+		// is current as it shows, and above other apps' windows. Without
+		// a window menu: DWM draws the close button of a tool window's
+		// menu where a material extends the frame, over the content.
+		ex |= wsExToolWindow | wsExTopmost
+		style &^= wsSysMenu
+	}
 	if w.noRedirect {
 		ex |= wsExNoRedirect
 	}
@@ -216,7 +277,7 @@ func (w *window) placeInitially() {
 func (w *window) outerSize(width, height int32, dpi int) (int32, int32) {
 	r := rect{0, 0, width, height}
 	menu := uintptr(0)
-	if !w.autoHideMenu && !w.noRedirect && (w.hmenu != 0 || w.b.appMenu != nil) {
+	if !w.autoHideMenu && !w.noRedirect && (w.hmenu != 0 || w.b.appMenu != nil && w.hasAppMenu()) {
 		menu = 1
 	}
 	style, ex := windowLong(w.hwnd, gwlStyle), windowLong(w.hwnd, gwlExStyle)
@@ -262,6 +323,17 @@ func (w *window) message(m uint32, wp, lp uintptr) (uintptr, bool) {
 		w.applyTaskbar()
 		return 0, true
 	}
+	if w.opts.Flyout != nil {
+		if r, ok := w.flyoutMessage(m, wp, lp); ok {
+			return r, true
+		}
+	}
+	if m == wmMouseActivate && w.ownsFocusableFlyout() {
+		return maActivateAndEat, true
+	}
+	if r, ok := w.darkMenuMessage(m, wp, lp); ok {
+		return r, true
+	}
 	switch m {
 	case wmClose:
 		if w.h.ShouldClose() {
@@ -287,6 +359,11 @@ func (w *window) message(m uint32, wp, lp uintptr) (uintptr, bool) {
 	case wmMove:
 		if w.controller != 0 {
 			comCall(w.controller, ctlNotifyParentWindowPositionChanged)
+		}
+		for _, v := range w.webViews {
+			if v.controller != 0 {
+				comCall(v.controller, ctlNotifyParentWindowPositionChanged)
+			}
 		}
 		w.h.Moved()
 		return 0, true
@@ -426,7 +503,16 @@ func (w *window) captionless() bool { return w.frameless || w.hiddenTitleBar }
 func (w *window) frameCalcSize(wp, lp uintptr) uintptr {
 	params := (*ncCalcSizeParams)(native(lp))
 	if w.IsMaximized() {
-		params.Rgrc[0] = monitorWorkArea(w.monitor())
+		// The monitor of the proposed rectangle, not of the window: while a
+		// window is restored from minimized it is still the minimized one,
+		// parked off screen, whose nearest monitor is not the one it comes
+		// back to. Fitting the work area of the wrong monitor leaves the
+		// client area outside the window, and the content shows nothing.
+		// A rectangle on no monitor keeps the whole window as its client
+		// area, as winit and tao do.
+		if mon, _, _ := procMonitorFromRect.Call(uintptr(unsafe.Pointer(&params.Rgrc[0])), monitorDefaultToNull); mon != 0 {
+			params.Rgrc[0] = monitorWorkArea(mon)
+		}
 		return 0
 	}
 	if windowLong(w.hwnd, gwlStyle)&wsThickFrame != 0 {
@@ -456,6 +542,7 @@ func (w *window) cleanup() {
 	if w.closed {
 		return
 	}
+	w.closeWebViews()
 	w.closed = true
 	if w.opts.Modal && w.parent != nil && !w.parent.closed {
 		procEnableWindow.Call(w.parent.hwnd, 1)
@@ -502,6 +589,10 @@ func (w *window) Title() string {
 	procGetWindowTextW.Call(w.hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	return string(utf16Decode(buf))
 }
+
+// The core marks the title of an edited document; Windows shows no file.
+func (w *window) SetRepresentedFile(string) {}
+func (w *window) SetDocumentEdited(bool)    {}
 
 func utf16Decode(b []uint16) []rune {
 	for i, c := range b {
@@ -637,6 +728,10 @@ func (w *window) SetAlwaysOnTop(v bool) {
 func (w *window) IsAlwaysOnTop() bool { return windowLong(w.hwnd, gwlExStyle)&wsExTopmost != 0 }
 
 func (w *window) Show() {
+	if f := w.opts.Flyout; f != nil && !f.Focusable {
+		procShowWindow.Call(w.hwnd, swShowNoActivate)
+		return
+	}
 	if w.showMaximized {
 		w.showMaximized = false
 		procShowWindow.Call(w.hwnd, swShowMaximized)
@@ -663,6 +758,14 @@ func (w *window) IsVisible() bool {
 }
 
 func (w *window) Focus() {
+	if w.host != nil {
+		w.focusWebView()
+		return
+	}
+	if f := w.opts.Flyout; f != nil && !f.Focusable {
+		w.Show() // never activated
+		return
+	}
 	if w.IsMinimized() {
 		procShowWindow.Call(w.hwnd, swRestore)
 	}
@@ -679,6 +782,9 @@ func (w *window) Blur() {
 }
 
 func (w *window) IsFocused() bool {
+	if w.host != nil {
+		return w.focused
+	}
 	fg, _, _ := procGetForegroundWindow.Call()
 	return fg == w.hwnd
 }
@@ -777,12 +883,18 @@ func (w *window) Center() {
 
 func (w *window) SetBackgroundColor(c platform.Color) {
 	w.bg = &c
-	if w.bgBrush != 0 {
-		procDeleteObject.Call(w.bgBrush)
+	// A web view in native UI has no window of its own to paint: only
+	// WebView2 fills it, and a brush would outlive it.
+	if w.host == nil {
+		if w.bgBrush != 0 {
+			procDeleteObject.Call(w.bgBrush)
+		}
+		w.bgBrush, _, _ = procCreateSolidBrush.Call(uintptr(c.R) | uintptr(c.G)<<8 | uintptr(c.B)<<16)
 	}
-	w.bgBrush, _, _ = procCreateSolidBrush.Call(uintptr(c.R) | uintptr(c.G)<<8 | uintptr(c.B)<<16)
 	w.withWebView(w.applyWebViewBackground)
-	procInvalidateRect(w.hwnd)
+	if w.hwnd != 0 {
+		procInvalidateRect(w.hwnd)
+	}
 }
 
 // applyWebViewBackground paints the webview before its page does:
@@ -899,9 +1011,13 @@ func (w *window) SetVibrancy(material string) {
 	procInvalidateRect(w.hwnd)
 }
 
+// hasAppMenu tells whether the window shows the application menu in its
+// menu bar: flyouts and panels show none.
+func (w *window) hasAppMenu() bool { return w.opts.Flyout == nil && !w.opts.Panel }
+
 func (w *window) SetMenu(m *platform.Menu) {
 	w.ownMenu = m != nil
-	if m == nil && w.b.appMenu != nil {
+	if m == nil && w.hasAppMenu() {
 		m = w.b.appMenu
 	}
 	w.installMenu(m)
@@ -928,6 +1044,10 @@ func (w *window) TitleBarDoubleClicked() {
 }
 
 func (w *window) Close() {
+	if w.host != nil {
+		w.closeWebView()
+		return
+	}
 	if !w.closed {
 		w.destroy()
 	}

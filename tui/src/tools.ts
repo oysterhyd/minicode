@@ -42,3 +42,124 @@ export function toolMark(item: FeedItem): string {
   if (item.success === false) return '✗'
   return '✓'
 }
+
+export type DiffLine = { kind: 'context' | 'add' | 'del'; text: string; line?: number }
+export type ParsedDiff = { path: string; adds: number; dels: number; lines: DiffLine[] }
+
+// edit/write report "Applied change to <path> (+N -M)" followed by a unified
+// diff. Parse it so the transcript can show Claude Code style numbered hunks.
+export function parseToolDiff(output = ''): ParsedDiff | null {
+  const text = output.replace(/\r\n/g, '\n')
+  const head = /^Applied (?:change|write) to (.+?) \(\+(\d+) -(\d+)\)/.exec(text)
+  if (!head) return null
+  const lines: DiffLine[] = []
+  let oldLine = 0
+  let newLine = 0
+  let inHunk = false
+  for (const row of text.split('\n').slice(1)) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
+    if (hunk) {
+      if (lines.length) lines.push({ kind: 'context', text: '…' })
+      oldLine = Number(hunk[1])
+      newLine = Number(hunk[2])
+      inHunk = true
+      continue
+    }
+    if (!inHunk || row.startsWith('\\')) continue
+    if (row.startsWith('+')) lines.push({ kind: 'add', text: row.slice(1), line: newLine++ })
+    else if (row.startsWith('-')) lines.push({ kind: 'del', text: row.slice(1), line: oldLine++ })
+    else if (row.startsWith(' ')) {
+      lines.push({ kind: 'context', text: row.slice(1), line: newLine })
+      oldLine++
+      newLine++
+    }
+  }
+  while (lines.at(-1)?.kind === 'context' && !lines.at(-1)?.text) lines.pop()
+  return { path: head[1], adds: Number(head[2]), dels: Number(head[3]), lines }
+}
+
+// A compact before/after preview for approvals, where no unified diff exists
+// yet. Shared leading and trailing lines become context.
+export function previewDiff(before = '', after = ''): DiffLine[] {
+  const split = (text: string) => text ? text.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n') : []
+  const a = split(before)
+  const b = split(after)
+  let start = 0
+  while (start < a.length && start < b.length && a[start] === b[start]) start++
+  let end = 0
+  while (end < a.length - start && end < b.length - start && a[a.length - 1 - end] === b[b.length - 1 - end]) end++
+  return [
+    ...a.slice(Math.max(0, start - 1), start).map(text => ({ kind: 'context' as const, text })),
+    ...a.slice(start, a.length - end).map(text => ({ kind: 'del' as const, text })),
+    ...b.slice(start, b.length - end).map(text => ({ kind: 'add' as const, text })),
+    ...a.slice(a.length - end, a.length - end + 1).map(text => ({ kind: 'context' as const, text })),
+  ]
+}
+
+export type WordSegment = { text: string; changed: boolean }
+
+function tokens(text: string): string[] {
+  return text.match(/[\p{L}\p{N}_]+|\s+|[^\p{L}\p{N}_\s]/gu) || []
+}
+
+function merge(parts: WordSegment[]): WordSegment[] {
+  const out: WordSegment[] = []
+  for (const part of parts) {
+    const last = out.at(-1)
+    if (last && last.changed === part.changed) last.text += part.text
+    else out.push({ ...part })
+  }
+  return out
+}
+
+// Word-level diff of a removed line against its replacement (LCS over word,
+// space and punctuation tokens). Lines that changed almost entirely return
+// null so they keep the plain band, as Claude Code does.
+export function wordDiff(before: string, after: string): { before: WordSegment[]; after: WordSegment[] } | null {
+  const a = tokens(before)
+  const b = tokens(after)
+  if (!a.length || !b.length || a.length * b.length > 40_000) return null
+  const table = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1))
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1])
+    }
+  }
+  const left: WordSegment[] = []
+  const right: WordSegment[] = []
+  let i = 0
+  let j = 0
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      left.push({ text: a[i++], changed: false })
+      right.push({ text: b[j++], changed: false })
+    } else if (j < b.length && (i >= a.length || table[i][j + 1] >= table[i + 1][j])) {
+      right.push({ text: b[j++], changed: true })
+    } else {
+      left.push({ text: a[i++], changed: true })
+    }
+  }
+  const changed = (parts: WordSegment[]) => parts.filter(part => part.changed && part.text.trim()).reduce((sum, part) => sum + part.text.length, 0)
+  const ratio = Math.max(changed(left) / Math.max(1, before.trim().length), changed(right) / Math.max(1, after.trim().length))
+  if (ratio > 0.6) return null
+  return { before: merge(left), after: merge(right) }
+}
+
+export function diffPairs(lines: DiffLine[]): Map<number, number> {
+  const pairs = new Map<number, number>()
+  for (let index = 0; index < lines.length;) {
+    if (lines[index].kind !== 'del') { index++; continue }
+    let dels = index
+    while (dels < lines.length && lines[dels].kind === 'del') dels++
+    let adds = dels
+    while (adds < lines.length && lines[adds].kind === 'add') adds++
+    if (adds > dels) {
+      for (let offset = 0; offset < Math.min(dels - index, adds - dels); offset++) {
+        pairs.set(index + offset, dels + offset)
+        pairs.set(dels + offset, index + offset)
+      }
+    }
+    index = adds
+  }
+  return pairs
+}

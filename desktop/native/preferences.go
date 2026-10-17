@@ -22,6 +22,14 @@ type preferences struct {
 	SidebarWidth   float32 `json:"sidebarWidth"`
 	WorkWidth      float32 `json:"workWidth"`
 	ExpandTools    bool    `json:"expandTools"`
+	// ChatFont is the font of replies: "serif" (the default, also when
+	// empty), "sans" or "system".
+	ChatFont string `json:"chatFont,omitempty"`
+	// SolidSidebar turns off the translucent window material (Mica) behind
+	// the sidebar.
+	SolidSidebar bool `json:"solidSidebar,omitempty"`
+	// ReduceMotion keeps the interface still, whatever the system says.
+	ReduceMotion bool `json:"reduceMotion,omitempty"`
 }
 
 func defaultPreferences() preferences {
