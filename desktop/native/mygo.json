@@ -1,7 +1,7 @@
 {
   "name": "MiniCode",
   "identifier": "com.minicode.desktop",
-  "version": "2.0.3",
+  "version": "3.0.0",
   "copyright": "Copyright 2026 MiniCode contributors",
   "icon": "resources/icon.png",
   "out": "../../release/dist/native",

@@ -1,8 +1,8 @@
-# MiniCode 2.0.3 Windows 发行版
+# MiniCode 3.0.0 Windows 发行版
 
 Windows 10/11 x64：Go / MyGo Desktop、Rust Agent / CLI、TypeScript + Ink TUI。内置 Git 2.56.0、Node.js 22.22.0；后端及内置评测不依赖 Python。项目自己的 SDK 和测试依赖由项目提供。
 
-下载 [v2.0.3](https://github.com/oysterhyd/minicode/releases/tag/v2.0.3) 的 MiniCode-Setup-2.0.3-win-x64.exe；摘要见 SHA256SUMS.txt。首次启动在“设置 → 模型与预算”添加自己的服务。升级保留配置、schema 7 会话、附件和记忆。
+下载 [v3.0.0](https://github.com/oysterhyd/minicode/releases/tag/v3.0.0) 的 MiniCode-Setup-3.0.0-win-x64.exe；摘要见 SHA256SUMS.txt。首次启动在“设置 → 模型与预算”添加自己的服务。升级保留配置、schema 7 会话、附件和记忆。
 
 ## 从源码打包
 
@@ -24,10 +24,10 @@ test-installer.ps1 将实际 NSIS 包安装到中文和空格路径，验证 Uni
 ## 产物
 
 ```text
-dist/MiniCode-Setup-2.0.3-win-x64.exe
+dist/MiniCode-Setup-3.0.0-win-x64.exe
 dist/SHA256SUMS.txt
 dist/update-windows-amd64.json
-dist/minicode-2.0.3-windows-amd64.tar.gz
+dist/minicode-3.0.0-windows-amd64.tar.gz
 dist/native/windows-amd64/
   MiniCode.exe, minicode.cmd, LICENSE, THIRD-PARTY-NOTICES.md, licenses/
   runtime/minicode.exe, git/, node/, tui/, evals/, licenses/
@@ -35,4 +35,4 @@ dist/native/windows-amd64/
 
 发布需上传安装器、摘要、更新清单及其引用的归档和差分包。MyGo 官方 updater/native 在下次启动应用更新，自动下载默认关闭。Windows 代码签名与更新归档签名分别处理；本发行包沿用 Ed25519 更新签名。
 
-源码、个人目录、会话数据库和旧实现不进入安装包。2.0.3 的逐功能修复见 [修复说明](../docs/fixes-2.0.3.md)。验收及指标见 [核验记录](VERIFICATION.md) 和 [2.0.2 性能报告](../docs/performance-2.0.2.md)。
+源码、个人目录、会话数据库和旧实现不进入安装包。3.0.0 界面与兼容说明见 [界面重设计](../docs/ui-redesign-3.0.md)，验收见 [核验记录](VERIFICATION.md)。历史修复和性能数据见 [旧版修复说明](../docs/fixes-2.0.3.md) 和 [性能报告](../docs/performance-2.0.2.md)。
