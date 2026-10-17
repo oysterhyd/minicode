@@ -2,7 +2,9 @@ package main
 
 import (
 	"strings"
+	"time"
 
+	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -16,27 +18,34 @@ func (d *desktop) overlays(c *ui.Context, p palette) {
 	open := true
 	ui.DialogBase(c, &open, func(back, panel ui.Element) {
 		back.Material(modalBackdrop{p.Overlay})
-		panel.Width(640).MaxWidthPercent(90).MaxHeightPercent(90).Padding(0).Radius(16).Clip().Background(p.Elevated).Border(1, p.Border).Shadow(0, 24, 64, 0, ui.RGBA(0, 0, 0, 0.3))
+		panel.Width(640).MaxWidthPercent(90).MaxHeightPercent(90).Padding(0).Radius(22).Clip().Background(p.Elevated).Border(1, p.Border).Shadow(0, 30, 80, -12, ui.RGBA(0, 0, 0, 0.32)).
+			Transition(ui.ElementTransition{Duration: 240 * time.Millisecond, Ease: ui.CubicBezier(0.2, 0.9, 0.25, 1), Enter: &ui.Motion{Scale: 0.96, Opacity: 0}, Exit: &ui.Motion{Scale: 0.98, Opacity: 0}})
 		switch d.modal {
 		case "palette":
+			// Spotlight: Liquid Glass high on the window rather than a sheet.
+			back.Material(modalBackdrop{p.Overlay.Alpha(0.12)})
+			panel.Width(680).Radius(26).Material(glass.Glass{Tint: p.Elevated.Alpha(0.72)}).Margin(110, ui.Auto, ui.Auto, ui.Auto)
 			d.commandPalette(c, p, panel)
 		case "shortcuts":
-			ui.Row(c).Height(56).Padding(0, 18).Children(func() {
-				ui.Text(c, tr("键盘快捷键")).FontSize(p.font(16)).FontWeight(650).Grow(1)
+			ui.Row(c).Height(60).Padding(0, 16, 0, 24).Children(func() {
+				ui.Text(c, tr("键盘快捷键")).Font(serifFont).FontSize(p.font(18.2)).FontWeight(500).Grow(1)
 				if iconButton(c, p, "X", tr("关闭快捷键")).Clicked() {
 					open = false
 				}
 			})
-			ui.Scroll(c).MaxHeight(500).Padding(0, 20, 20, 20).Children(func() { shortcutList(c, p) })
+			ui.Scroll(c).MaxHeight(520).Padding(0, 24, 24, 24).Children(func() { shortcutList(c, p) })
 		case "delete":
-			panel.Width(440).Padding(24).Gap(16).Label(tr("删除任务"))
-			ui.Text(c, tr("删除任务？")).FontSize(p.font(18)).FontWeight(650)
-			ui.Text(c, tr("对话记录、运行事件和归档输出将被永久删除，工作区中的文件不受影响。")).FontSize(p.font(12.6)).TextColor(p.Text2)
-			ui.Row(c).Justify(ui.End).Gap(8).Children(func() {
-				if button(c, p, tr("取消"), "", false).Clicked() {
+			// An alert, as macOS centers one: icon, title, text, and two
+			// buttons sharing the width.
+			panel.Width(380).Padding(26, 24, 20, 24).Gap(10).AlignItems(ui.Center).Label(tr("删除任务"))
+			ui.Box(c).Size(48, 48).Radius(14).Background(p.DangerSoft).Center().Margin(0, 0, 4, 0).Children(func() { icon(c, "Trash2", 22, p.Danger) })
+			ui.Text(c, tr("删除任务？")).Font(serifFont).FontSize(p.font(18.2)).FontWeight(500)
+			ui.Text(c, tr("对话记录、运行事件和归档输出将被永久删除，工作区中的文件不受影响。")).TextAlign(ui.Center).FontSize(p.font(12.04)).LineHeight(1.55).TextColor(p.Text3)
+			ui.Row(c).FillWidth().Margin(10, 0, 0, 0).Gap(8).Children(func() {
+				if button(c, p, tr("取消"), "", false).Grow(1).Basis(0).Height(34).Justify(ui.Center).Clicked() {
 					open = false
 				}
-				if button(c, p, tr("删除"), "Trash2", true).Background(p.Danger).Clicked() {
+				if button(c, p, tr("删除"), "Trash2", true).Grow(1).Basis(0).Height(34).Justify(ui.Center).Background(p.Danger).TextColor(ui.Hex("#ffffff")).Clicked() {
 					d.sessionAction("deleteSession", d.deleteID, nil)
 					d.deleteID = ""
 					open = false
@@ -91,9 +100,9 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 		}
 	}
 	panel.Label(tr("快捷操作"))
-	ui.Row(c).Height(60).Padding(0, 18).Gap(10).BorderWidth(0, 0, 1, 0).BorderColor(p.Border).Children(func() {
-		icon(c, "Search", 17, p.Text3)
-		input := ui.TextInputBase(c, &d.paletteQuery).Grow(1).Label(tr("搜索操作和任务")).Placeholder(tr("搜索操作、任务或文件…")).AutoFocus().FontSize(p.font(14))
+	ui.Row(c).Height(64).Padding(0, 20).Gap(12).BorderWidth(0, 0, 1, 0).BorderColor(p.BorderSubtle).Children(func() {
+		icon(c, "Search", 20, p.Text2)
+		input := ui.TextInputBase(c, &d.paletteQuery).Grow(1).Label(tr("搜索操作和任务")).Placeholder(tr("搜索操作、任务或文件…")).AutoFocus().FontSize(p.font(16.8))
 		count := len(filtered)
 		input.OnTextKey(func(k ui.TextKey) bool {
 			if k.Mods != 0 || count == 0 || (k.Key != ui.KeyUp && k.Key != ui.KeyDown) {
@@ -115,21 +124,30 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 		if input.Submitted() {
 			run(d.paletteIndex)
 		}
-		badge(c, p, "Esc", p.Text3, p.Subtle)
+		keycap(c, p, "Esc")
 	})
-	ui.Scroll(c).MaxHeight(420).Padding(6).Children(func() {
+	ui.Scroll(c).MaxHeight(420).Padding(8).Children(func() {
 		for i, action := range filtered {
 			if i == 0 || filtered[i-1].Group != action.Group {
-				muted(c, p, action.Group).Padding(8, 10).FontSize(p.font(10.36))
+				ui.Text(c, action.Group).Padding(10, 12, 6, 12).FontSize(p.font(10.36)).FontWeight(600).TextColor(p.Text3)
 			}
-			row := ui.ButtonBase(c).Label(action.Label).FillWidth().Height(38).Padding(0, 10).Gap(10).Radius(8)
-			if i == d.paletteIndex || row.Hovered() {
+			selected := i == d.paletteIndex
+			row := ui.ButtonBase(c).Label(action.Label).FillWidth().Height(42).Padding(0, 10).Gap(12).Radius(12).Cursor(ui.CursorDefault)
+			if selected {
+				row.Background(p.Active)
+			} else if row.Hovered() {
 				row.Background(p.Hover)
 			}
 			row.Children(func() {
-				icon(c, action.Icon, 15, p.Text3)
-				ui.Text(c, action.Label).Grow(1).SingleLine().FontSize(p.font(12.04))
-				muted(c, p, action.Hint).SingleLine().FontSize(p.font(10.36))
+				ui.Box(c).Size(28, 28).Shrink(0).Radius(8).Background(p.Elevated).Border(1, p.BorderSubtle).Center().Children(func() {
+					icon(c, action.Icon, 15, p.Text2)
+				})
+				ui.Text(c, action.Label).Grow(1).SingleLine().FontSize(p.font(12.6))
+				if isShortcut(action.Hint) {
+					keys(c, p, action.Hint)
+				} else {
+					muted(c, p, action.Hint).SingleLine().FontSize(p.font(10.64))
+				}
 			})
 			if row.Clicked() {
 				run(i)
@@ -139,11 +157,33 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 			empty(c, p, tr("没有匹配“")+d.paletteQuery+tr("”的结果"))
 		}
 	})
-	ui.Row(c).Height(36).Padding(0, 16).Gap(14).BorderWidth(1, 0, 0, 0).BorderColor(p.Border).Children(func() {
-		muted(c, p, tr("↑ ↓ 选择"))
-		muted(c, p, tr("Enter 打开"))
-		muted(c, p, tr("Esc 关闭"))
+	ui.Row(c).Height(40).Padding(0, 18).Gap(16).BorderWidth(1, 0, 0, 0).BorderColor(p.BorderSubtle).Children(func() {
+		for _, hint := range [][2]string{{"↑↓", "选择"}, {"↵", "打开"}, {"Esc", "关闭"}} {
+			ui.Row(c).Gap(6).Children(func() {
+				keycap(c, p, hint[0])
+				muted(c, p, hint[1]).FontSize(p.font(10.64))
+			})
+		}
 	})
+}
+
+// keycap is one key, drawn as a raised chip.
+func keycap(c *ui.Context, p palette, key string) ui.Element {
+	return ui.Text(c, key).Font(sansFont).FontSize(p.font(10.08)).FontWeight(550).TextColor(p.Text2).MinWidth(20).TextAlign(ui.Center).
+		Padding(1, 6).Radius(6).Background(p.Elevated).Border(1, p.Border).Shadow(0, 1, 0, 0, p.Border).SingleLine().Shrink(0)
+}
+
+// keys is a shortcut such as "Ctrl Shift B", a keycap per key.
+func keys(c *ui.Context, p palette, shortcut string) {
+	ui.Row(c).Gap(3).Shrink(0).Children(func() {
+		for _, key := range strings.Fields(shortcut) {
+			keycap(c, p, key)
+		}
+	})
+}
+
+func isShortcut(hint string) bool {
+	return strings.HasPrefix(hint, "Ctrl ") || strings.HasPrefix(hint, "Cmd ")
 }
 
 var shortcutGroups = []struct {
@@ -158,12 +198,14 @@ var shortcutGroups = []struct {
 
 func shortcutList(c *ui.Context, p palette) {
 	for _, group := range shortcutGroups {
-		ui.Column(c).Margin(12, 0).Gap(6).Children(func() {
-			ui.Text(c, tr(group.Title)).FontSize(p.font(12.88)).FontWeight(650).Margin(0, 0, 4, 0)
+		section(c, p, group.Title, "", func() {
 			for _, entry := range group.Items {
-				ui.Row(c).Height(30).Gap(12).Children(func() {
-					ui.Text(c, tr(entry[1])).Grow(1).FontSize(p.font(11.76)).TextColor(p.Text2)
-					badge(c, p, entry[0], p.Text3, p.Subtle)
+				settingsRow(c, p, entry[1], "", func() {
+					if strings.Contains(entry[0], " / ") || strings.Contains(entry[0], " · ") {
+						keycap(c, p, entry[0])
+					} else {
+						keys(c, p, entry[0])
+					}
 				})
 			}
 		})

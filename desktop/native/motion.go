@@ -33,17 +33,29 @@ func legacyEase(value float32) float32 {
 }
 
 func toggle(c *ui.Context, p palette, on *bool, label string) ui.Element {
-	e := ui.SwitchBase(c, on).Label(tr(label)).Size(32.2, 18.9).Radius(99).Background(p.BorderStrong).Transition(fastMotion)
+	// An iOS switch: a capsule that fills with ink when on, and a white
+	// knob that springs across and stretches while it is pressed.
+	e := ui.SwitchBase(c, on).Label(tr(label)).Size(36, 21).Radius(99).Background(p.Active.Mix(p.Text, 0.1)).Transition(fastMotion)
 	if *on {
-		e.Background(p.Accent)
+		e.Background(p.Ink)
 	}
+	pressed := e.Pressed()
 	e.Children(func() {
-		thumb := ui.Box(c).Size(14.9, 14.9).Radius(99).Background(ui.Hex("#ffffff")).Shadow(0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.3)).Absolute().Top(2)
+		width := float32(17)
+		if pressed {
+			width = 21
+		}
+		knob := ui.Hex("#ffffff")
+		if *on && p.Dark {
+			knob = p.InkText
+		}
+		thumb := ui.Box(c).Height(17).Radius(99).Background(knob).Shadow(0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.25)).Absolute().Top(2)
+		thumb.Width(thumb.AnimateWith("width", width, 160*time.Millisecond, legacyEase))
 		target := float32(2)
 		if *on {
-			target = 15.3
+			target = 36 - 2 - width
 		}
-		thumb.Left(thumb.AnimateWith("position", target, 180*time.Millisecond, legacyEase))
+		thumb.Left(thumb.Animate("position", target, 220*time.Millisecond))
 	})
 	return e
 }
@@ -84,7 +96,11 @@ func contextRing(c *ui.Context, p palette, percent int) {
 var pressMotion = ui.Animation{Spring: ui.SpringOptions{Duration: 260 * time.Millisecond, Bounce: 0.25}}
 
 // reduceMotion reports whether the desktop asks for less motion.
-func reduceMotion(c *ui.Context) bool { return c.Preferences().ReduceMotion }
+func reduceMotion(c *ui.Context) bool { return c.Preferences().ReduceMotion || appReduceMotion }
+
+// appReduceMotion is the app's own "reduce motion" setting, set as the view
+// builds.
+var appReduceMotion bool
 
 // spark draws Claude's ten-ray asterisk. A live one turns slowly, as the
 // mark of work going on, in frames that only paint.

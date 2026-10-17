@@ -124,17 +124,28 @@ func (d *desktop) openAttachment(file model.Attachment) {
 }
 
 func (d *desktop) attachmentChips(c *ui.Context, p palette, files []model.Attachment, editable bool) {
-	row := ui.Row(c).FillWidth().Wrap().Gap(6)
+	row := ui.Row(c).FillWidth().Wrap().Gap(8)
 	if !editable {
 		row.MaxWidthPercent(85).Justify(ui.End)
 	}
 	row.Children(func() {
 		for _, file := range files {
-			ui.Row(c.Key(file.AssetID)).Height(28).Gap(2).Radius(7).Border(1, p.Border).Background(p.Panel).Children(func() {
-				b := ui.ButtonBase(c).Label(tr("打开附件 ")+file.Name).Description(tr(mediaLabels[file.Kind])).Height(26).Padding(0, 8).Gap(6)
+			card := ui.Row(c.Key(file.AssetID)).Height(48).Gap(2).Padding(0, 4, 0, 0).Radius(14).Border(1, p.Border).Background(p.Elevated).Transition(enterMotion)
+			card.Children(func() {
+				b := ui.ButtonBase(c).Label(tr("打开附件 ")+file.Name).Description(tr(mediaLabels[file.Kind])).Height(46).Padding(0, 10, 0, 7).Gap(9)
 				b.Children(func() {
-					icon(c, "FileText", 13, p.Text3)
-					ui.Text(c, file.Name).SingleLine().MaxWidth(170).FontSize(p.font(11.2)).TextColor(p.Text2)
+					name := "FileText"
+					switch file.Kind {
+					case "image":
+						name = "Image"
+					case "audio", "video":
+						name = "Files"
+					}
+					ui.Box(c).Size(32, 32).Radius(9).Background(p.Subtle).Center().Children(func() { icon(c, name, 15, p.Text3) })
+					ui.Column(c).Gap(0).Children(func() {
+						ui.Text(c, file.Name).SingleLine().MaxWidth(170).FontSize(p.font(12.04)).FontWeight(550).TextColor(p.Text)
+						ui.Text(c, tr(mediaLabels[file.Kind])).SingleLine().FontSize(p.font(10.64)).TextColor(p.Text3)
+					})
 				})
 				b.Tooltip(file.Name + " · " + mediaLabels[file.Kind])
 				if b.Clicked() {

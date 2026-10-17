@@ -85,7 +85,65 @@ var englishUI = func() map[string]string {
 	return result
 }()
 
-const englishUIText = `通用|General
+const englishUIText = `排队中|Queued
+回复 MiniCode…|Reply to MiniCode…
+查看改动|Review changes
+%d 处改动|%d changes
+模型|Model
+上下文 %d%%|Context %d%%
+思考了 %s|Thought for %s
+思考已中断|Thinking interrupted
+正在思考…|Thinking…
+%d 行|%d lines
+%d 处匹配|%d matches
+读取 %d|Read %d
+搜索 %d|Searched %d
+编辑 %d|Edited %d
+写入 %d|Wrote %d
+命令 %d|Ran %d
+委派 %d|Delegated %d
+%.1f 秒|%.1fs
+ 于 |\x20in\x20
+允许 MiniCode 编辑这个文件吗？|Allow MiniCode to edit this file?
+允许 MiniCode 运行这条命令吗？|Allow MiniCode to run this command?
+允许 MiniCode 写入这个文件吗？|Allow MiniCode to write this file?
+允许 MiniCode 使用 %s 吗？|Allow MiniCode to use %s?
+选择|Select
+打开|Open
+搜索设置|Search settings
+没有匹配的设置|No matching settings
+对话字体|Conversation font
+MiniCode 回复所用的字体|The typeface of MiniCode's replies
+默认衬线|Serif (default)
+无衬线|Sans serif
+系统|System
+窗口|Window
+半透明侧栏|Translucent sidebar
+让侧栏和标题栏透出桌面的 Mica 材质（Windows 11）|Let the desktop's Mica material show through the sidebar and title bar (Windows 11)
+减少动态效果|Reduce motion
+关闭弹簧、淡入与闪烁等动画|Turn off springs, fades and shimmering animations
+语言与输入|Language & input
+等待你的确认|Waiting for you
+本地 · %d 个 AI 服务|Local · %d AI services
+早上好|Good morning
+中午好|Good afternoon
+下午好|Good afternoon
+晚上好|Good evening
+，|,\x20
+审查改动|Review changes
+审查当前工作区未提交的改动，指出问题与风险。|Review the uncommitted changes in this workspace and point out problems and risks.
+定位问题|Find a bug
+帮我定位并修复这个问题：|Help me find and fix this problem:\x20
+补充测试|Add tests
+为最近改动的代码补充测试，并运行它们。|Add tests for the recently changed code and run them.
+了解项目|Explore the project
+梳理这个项目的结构、入口和关键模块。|Outline this project's structure, entry points and key modules.
+实现功能|Build a feature
+实现以下功能：|Implement the following feature:\x20
+最近任务|Recent tasks
+打开任务 |Open task\x20
+工作区|Workspace
+通用|General
 运行结束但没有产生结果|The run finished without a result
 当前任务仍在运行，不能替换会话或工作区|The current task is running. The conversation or workspace cannot be replaced.
 当前回合结束后才能执行命令|Wait for the current turn to finish before running a command

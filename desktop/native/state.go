@@ -120,6 +120,10 @@ type desktop struct {
 	focusPrompt                            bool
 	pendingCaret                           int
 	caretPending                           bool
+	dockHeight                             float32
+	sessionListBounds                      ui.Rect
+	activeRowY                             float32
+	activeRowSeen                          bool
 	completionUndo                         *completionUndo
 	focusSearch                            bool
 	toasts                                 []toast

@@ -166,7 +166,7 @@ func (d *desktop) extensionSettings(c *ui.Context, p palette, s *settingsState, 
 		})
 	case "mcp":
 		section(c, p, "连接状态", "启用的 MCP 服务在运行回合中连接，也可以手动测试连接。", func() {
-			if button(c, p, "测试已启用服务", "RefreshCw", false).Disabled(s.Working || e.Pending != "").Clicked() {
+			if button(c, p, "测试已启用服务", "RefreshCw", false).AlignSelf(ui.Start).Disabled(s.Working || e.Pending != "").Clicked() {
 				s.Working = true
 				var result model.Discovery
 				d.request(d.current(), "refreshMcp", nil, &result, func(err error) {
