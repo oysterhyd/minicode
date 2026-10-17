@@ -18,6 +18,16 @@ pub struct Store {
     connection: Arc<Mutex<Connection>>,
     pages: Arc<crate::paging::TextPages>,
 }
+
+pub struct SessionLock(File);
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        // A forked child may still hold the same open file description until
+        // exec. Unlock explicitly so closing our handle releases ownership now.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
 const COLUMNS: &str = "session_id,created_at,workspace,provider,model,status,exit_reason,rounds,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,usage_available";
 fn summary(row: &Row<'_>) -> rusqlite::Result<Value> {
     Ok(
@@ -305,7 +315,7 @@ impl Store {
             .unwrap_or(Path::new("."))
             .to_path_buf()
     }
-    pub fn activation(&self, id: &str) -> Result<File> {
+    pub fn activation(&self, id: &str) -> Result<SessionLock> {
         if !util::valid_id(id) {
             bail!("invalid session id")
         }
@@ -322,10 +332,11 @@ impl Store {
             .open(dir.join(format!("{id}.lock")))?;
         fs2::FileExt::try_lock_exclusive(&f)
             .with_context(|| format!("session already running: {id}"))?;
-        if f.metadata()?.len() == 0 {
-            (&f).write_all(&[0])?;
+        let lock = SessionLock(f);
+        if lock.0.metadata()?.len() == 0 {
+            (&lock.0).write_all(&[0])?;
         }
-        Ok(f)
+        Ok(lock)
     }
     pub fn spill(&self, id: &str, kind: &str, text: &str) -> Result<String> {
         if !util::valid_id(id) || !util::valid_id(kind) {

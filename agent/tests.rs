@@ -413,6 +413,36 @@ fn per_session_lock() {
     drop(guard);
     assert!(ctx.store.activation(&ctx.session).is_ok());
 }
+
+#[cfg(unix)]
+#[test]
+fn session_lock_release_does_not_wait_for_a_forked_child() {
+    let (_dir, ctx) = fixture();
+    let guard = ctx.store.activation(&ctx.session).unwrap();
+    let mut pipe = [0; 2];
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        // Only async-signal-safe syscalls are allowed in the forked child.
+        unsafe {
+            libc::close(pipe[1]);
+            let mut signal = 0_u8;
+            libc::read(pipe[0], (&mut signal as *mut u8).cast(), 1);
+            libc::_exit(0);
+        }
+    }
+    assert!(pid > 0, "fork failed");
+    unsafe { libc::close(pipe[0]) };
+    drop(guard);
+    let reacquired = ctx.store.activation(&ctx.session);
+    // Reap the child before asserting, even if the old implementation failed.
+    unsafe {
+        libc::write(pipe[1], b"x".as_ptr().cast(), 1);
+        libc::close(pipe[1]);
+        libc::waitpid(pid, std::ptr::null_mut(), 0);
+    }
+    assert!(reacquired.is_ok(), "session lock outlived its owner");
+}
 #[test]
 fn attachments_digest_and_tamper() {
     let (_dir, ctx) = fixture();
