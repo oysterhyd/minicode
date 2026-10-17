@@ -6,7 +6,7 @@
 
 实际 3.0.0 → 3.0.1 覆盖升级通过，升级前已正常关闭 MiniCode 并在仓库外备份数据；36 个原有会话、数据库各表、配置和偏好哈希不变。另以旧版写入非空记忆和会话，新版读取后内容一致。已安装包的首页／对话／关于页截图已捕获。
 
-本地安装器 58,278,385 B，SHA256：`01f267e9ca152a82f737bfc2f8da2ad6e7ac5d24f35979761cd7f994a3b882d5`。公开资产和 CI 核验待发布后补记。
+本地安装器 58,278,385 B，SHA256：`01f267e9ca152a82f737bfc2f8da2ad6e7ac5d24f35979761cd7f994a3b882d5`。公开 [v3.0.1](https://github.com/oysterhyd/minicode/releases/tag/v3.0.1) 的七个资产已匿名下载，大小和 SHA256 与 GitHub 摘要相符，SHA256SUMS 一致；完整归档及三个差分包通过原 Ed25519 公钥签名核验，匿名 latest 清单字节一致并指向 3.0.1。[Windows installer 标签](https://github.com/oysterhyd/minicode/actions/runs/39029147933)、[tests 标签](https://github.com/oysterhyd/minicode/actions/runs/39029147998)、[tests main](https://github.com/oysterhyd/minicode/actions/runs/39029147692)全部通过。公开安装器再次实际安装、数据保留及原生／CLI／Git／TUI 烟测通过；安装器 58,279,019 B，SHA256：`a4e00253504cdb712b1b5f9a7a5537b98b28049c326cb568e4eb4f9b666222ac`。
 
 # v3.0.0 界面重设计与发行核验
 
