@@ -6,7 +6,7 @@
 
 实际 3.0.1 → 3.0.2 覆盖升级通过，升级前已正常关闭 MiniCode 并在仓库外备份数据；36 个原有会话、数据库各表、配置和偏好哈希不变。另以旧版写入非空记忆和会话，新版读取后内容一致。已安装包的首页／对话／关于页截图已捕获。
 
-本地安装器 58,290,152 B，SHA256：`5a08057556f0d364e19fbb2b1d7176c476e5be925e668bcf0cefcb0fd1c6c213`。公开资产和 CI 核验待发布后补记。
+本地安装器 58,290,152 B，SHA256：`5a08057556f0d364e19fbb2b1d7176c476e5be925e668bcf0cefcb0fd1c6c213`。公开 [v3.0.2](https://github.com/oysterhyd/minicode/releases/tag/v3.0.2) 的七个资产已匿名下载，大小和 SHA256 与 GitHub 摘要相符，SHA256SUMS 一致；完整归档及三个差分包通过原 Ed25519 公钥签名核验，匿名 latest 清单字节一致并指向 3.0.2。[tests main](https://github.com/oysterhyd/minicode/actions/runs/39039138640)、[tests 标签](https://github.com/oysterhyd/minicode/actions/runs/39039138688)、[Windows installer 标签](https://github.com/oysterhyd/minicode/actions/runs/39039138557)全部通过。公开安装器再次实际安装、数据保留及原生／CLI／Git／TUI 烟测通过；安装器 58,275,264 B，SHA256：`b68cd9b066332d324cc4ef73de0ba666054a60b087671721666d57c2be910e8e`。
 
 # v3.0.1 工作台按钮布局修复与发行核验
 
