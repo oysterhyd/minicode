@@ -1,11 +1,17 @@
+//go:build !js
+
 package mygo
 
 import (
 	"fmt"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
+	"net/url"
+	"os"
 	"path"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -102,6 +108,10 @@ func validScheme(s string) bool {
 	return true
 }
 
+func (h *windowHandler) SchemeRequest(req *platform.SchemeRequest) {
+	Protocol.serve(h.w, req)
+}
+
 // serve runs on the main thread when the webview requests a custom scheme.
 func (p *ProtocolModule) serve(w *Window, req *platform.SchemeRequest) {
 	scheme, _, _ := strings.Cut(req.URL, ":")
@@ -149,7 +159,61 @@ func serveScheme(win *Window, h http.Handler, req *platform.SchemeRequest) {
 	if cl := r.Header.Get("Content-Length"); cl != "" {
 		r.ContentLength, _ = strconv.ParseInt(cl, 10, 64)
 	}
+	if allowCORS(win, rw.header, r) {
+		rw.WriteHeader(http.StatusNoContent) // a preflight, answered here
+		return
+	}
 	h.ServeHTTP(rw, r)
+}
+
+// allowCORS lets the app's own pages read responses of custom schemes,
+// which are other origins than theirs: the frontend, another scheme, or
+// the dev server fetching thumbs://localhost/ for example. It sets the
+// CORS headers for those origins, which handlers may still override, and
+// reports whether the request is a preflight it answered. Pages of other
+// sites get no CORS headers, unless the window trusts them
+// (PageOptions.TrustedOrigins).
+func allowCORS(win *Window, header http.Header, r *http.Request) (preflight bool) {
+	origin := r.Header.Get("Origin")
+	if origin == "" || origin == "null" || !win.isTrusted(appOrigin(origin)) {
+		return false
+	}
+	header.Set("Access-Control-Allow-Origin", origin)
+	header.Set("Access-Control-Expose-Headers", "*")
+	header.Add("Vary", "Origin")
+	method := r.Header.Get("Access-Control-Request-Method")
+	if r.Method != http.MethodOptions || method == "" {
+		return false
+	}
+	header.Set("Access-Control-Allow-Methods", method)
+	if h := r.Header.Get("Access-Control-Request-Headers"); h != "" {
+		header.Set("Access-Control-Allow-Headers", h)
+	}
+	header.Set("Access-Control-Max-Age", "600")
+	return true
+}
+
+// schemeHosts is set where the webview serves custom schemes at
+// http://<scheme>.localhost (WebView2). Elsewhere, such an origin is a
+// server on the loopback interface, not the app's.
+var schemeHosts = runtime.GOOS == "windows"
+
+// appOrigin maps the origin WebView2 gives pages of a custom scheme,
+// http://<scheme>.localhost, back to <scheme>://localhost, as the rest of
+// MyGo names it.
+func appOrigin(origin string) string {
+	if !schemeHosts {
+		return origin
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme != "http" || u.Port() != "" {
+		return origin
+	}
+	scheme, ok := strings.CutSuffix(strings.ToLower(u.Hostname()), ".localhost")
+	if !ok || !(scheme == frontendScheme || Protocol.IsHandled(scheme)) {
+		return origin
+	}
+	return scheme + "://localhost"
 }
 
 // schemeWriter is the http.ResponseWriter for custom scheme requests. Body
@@ -295,4 +359,125 @@ func FileServer(fsys fs.FS) http.Handler {
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// frontendHandler serves mygo:// when the app has no handler of its own.
+func frontendHandler() http.Handler {
+	frontend.Lock()
+	fsys := frontend.fsys
+	frontend.Unlock()
+	if fsys == nil && IsDev() {
+		// `mygo dev` without a dev server: the files on disk.
+		if dir := os.Getenv("MYGO_FRONTEND_DIST"); dir != "" {
+			fsys = os.DirFS(dir)
+		}
+	}
+	if fsys == nil {
+		return http.HandlerFunc(noFrontend)
+	}
+	return FileServer(fsys)
+}
+
+func noFrontend(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`<!doctype html>
+<meta charset="utf-8">
+<title>No frontend</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;margin:3em;color:#444}code{font-size:90%}</style>
+<h1>No frontend</h1>
+<p>Run the app with <code>mygo dev</code>, which loads <code>devUrl</code> from mygo.config.ts,
+or build it with <code>mygo build</code>, which embeds <code>frontendDist</code>.</p>
+`))
+}
+
+func (h *windowHandler) SchemeDownload(rawURL string) { go downloadScheme(h, rawURL) }
+
+// downloadScheme serves a URL of a custom scheme into a download.
+func downloadScheme(h *windowHandler, rawURL string) {
+	scheme, _, _ := strings.Cut(rawURL, ":")
+	scheme = strings.ToLower(scheme)
+	Protocol.mu.RLock()
+	handler := Protocol.handlers[scheme]
+	Protocol.mu.RUnlock()
+	if handler == nil && scheme == frontendScheme {
+		handler = frontendHandler()
+	}
+	finish := func(path string, err error) {
+		postMain(func() { h.DownloadFinished(rawURL, path, err) })
+	}
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil || handler == nil {
+		finish("", fmt.Errorf("mygo: cannot download %s", rawURL))
+		return
+	}
+	rw := &downloadWriter{h: h, url: rawURL, header: http.Header{}}
+	handler.ServeHTTP(rw, req)
+	rw.WriteHeader(http.StatusOK) // nothing written
+	if rw.file == nil {
+		if rw.err != nil {
+			finish("", rw.err)
+		}
+		return // canceled
+	}
+	if err := rw.file.Close(); rw.err == nil {
+		rw.err = err
+	}
+	if rw.err != nil {
+		os.Remove(rw.path)
+	}
+	finish(rw.path, rw.err)
+}
+
+// downloadWriter writes a response into the file OnWillDownload chose.
+type downloadWriter struct {
+	h      *windowHandler
+	url    string
+	header http.Header
+	wrote  bool
+	path   string
+	file   *os.File
+	err    error
+}
+
+func (d *downloadWriter) Header() http.Header { return d.header }
+
+func (d *downloadWriter) WriteHeader(status int) {
+	if d.wrote {
+		return
+	}
+	d.wrote = true
+	if status >= 400 {
+		d.err = fmt.Errorf("mygo: downloading %s: %d %s", d.url, status, http.StatusText(status))
+		return
+	}
+	name := ""
+	if _, params, err := mime.ParseMediaType(d.header.Get("Content-Disposition")); err == nil {
+		name = params["filename"]
+	}
+	if name == "" {
+		if u, err := url.Parse(d.url); err == nil {
+			name = path.Base(u.Path)
+		}
+	}
+	d.path = onMainValue(func() string { return d.h.DownloadStarted(d.url, name) })
+	if d.path == "" {
+		return
+	}
+	d.file, d.err = os.Create(d.path)
+	if d.err != nil {
+		d.file = nil
+	}
+}
+
+func (d *downloadWriter) Write(b []byte) (int, error) {
+	d.WriteHeader(http.StatusOK)
+	if d.file == nil || d.err != nil {
+		return len(b), nil // canceled: drain
+	}
+	n, err := d.file.Write(b)
+	if err != nil {
+		d.err = err
+	}
+	return n, err
 }
