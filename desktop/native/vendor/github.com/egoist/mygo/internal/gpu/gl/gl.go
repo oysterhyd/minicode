@@ -1,13 +1,15 @@
-//go:build linux && (amd64 || arm64)
+//go:build (linux && (amd64 || arm64)) || js
 
-// Package gl draws scenes with OpenGL 3.3 or OpenGL ES 3.0 into the
-// framebuffer bound when Render is called: the one GTK's GtkGLArea binds
-// while it emits its render signal. Every op of a scene is an instanced
+// Package gl draws scenes with OpenGL 3.3, OpenGL ES 3.0 or WebGL 2 into
+// the framebuffer bound when Render is called: the one GTK's GtkGLArea
+// binds while it emits its render signal, or a canvas's (package web). Every op of a scene is an instanced
 // quad drawn by one shader (shader.glsl, compiled when the renderer
 // starts), from the instances package gpu builds; clips are scissor
 // rectangles, with the innermost rounded clip computed in the shader, as
-// in packages d3d11 and metal. GL functions come from libepoxy, which GTK
-// resolves its own through, called with purego (no cgo).
+// in packages d3d11 and metal. GL functions come from libepoxy on Linux,
+// which GTK resolves its own through, called with purego (no cgo), and
+// from the current WebGL 2 context in browsers (load_js.go), through
+// syscall/js.
 package gl
 
 import (
@@ -16,10 +18,8 @@ import (
 	"image"
 	"os"
 	"strings"
-	"sync"
 	"unsafe"
-
-	"github.com/ebitengine/purego"
+	"weak"
 
 	"github.com/egoist/mygo/internal/gpu"
 	"github.com/egoist/mygo/internal/scene"
@@ -48,14 +48,18 @@ const (
 	glTriangleStrip      = 0x0005
 	glBlend              = 0x0BE2
 	glScissorTest        = 0x0C11
+	glZero               = 0
 	glOne                = 1
 	glOneMinusSrcAlpha   = 0x0303
 	glOneMinusSrc1Color  = 0x88FA
 	glOneMinusSrc1Alpha  = 0x88FB
 	glColorBufferBit     = 0x4000
 	glArrayBuffer        = 0x8892
+	glUniformBuffer      = 0x8A11
+	glInvalidIndex       = 0xFFFFFFFF
 	glStreamDraw         = 0x88E0
 	glFloat              = 0x1406
+	glRGBA32F            = 0x8814
 	glUnsignedByte       = 0x1401
 	glTexture2D          = 0x0DE1
 	glTexture0           = 0x84C0
@@ -90,198 +94,21 @@ const (
 	glNoError            = 0
 )
 
-// The functions of libepoxy and GL this package calls.
-var (
-	loadOnce sync.Once
-	errLoad  error
-
-	epoxyGLVersion    func() int32
-	epoxyIsDesktopGL  func() bool
-	epoxyHasExtension func(name string) bool
-	currentGDKContext func() uintptr // gdk_gl_context_get_current, when GDK is loaded
-
-	glGetString             func(name uint32) uintptr
-	glGetError              func() uint32
-	glGetIntegerv           func(name uint32, data *int32)
-	glCreateShader          func(typ uint32) uint32
-	glShaderSource          func(shader uint32, count int32, sources **byte, lengths *int32)
-	glCompileShader         func(shader uint32)
-	glGetShaderiv           func(shader, name uint32, out *int32)
-	glGetShaderInfoLog      func(shader uint32, size int32, length *int32, log *byte)
-	glDeleteShader          func(shader uint32)
-	glCreateProgram         func() uint32
-	glAttachShader          func(program, shader uint32)
-	glLinkProgram           func(program uint32)
-	glGetProgramiv          func(program, name uint32, out *int32)
-	glGetProgramInfoLog     func(program uint32, size int32, length *int32, log *byte)
-	glUseProgram            func(program uint32)
-	glDeleteProgram         func(program uint32)
-	glGetUniformLocation    func(program uint32, name string) int32
-	glUniform1i             func(location, v int32)
-	glUniform2f             func(location int32, x, y float32)
-	glUniform1f             func(location int32, v float32)
-	glUniform2i             func(location, x, y int32)
-	glCopyTexSubImage2D     func(target uint32, level, xoff, yoff, x, y, w, h int32)
-	glGenVertexArrays       func(n int32, out *uint32)
-	glBindVertexArray       func(array uint32)
-	glDeleteVertexArrays    func(n int32, arrays *uint32)
-	glGenBuffers            func(n int32, out *uint32)
-	glBindBuffer            func(target, buffer uint32)
-	glBufferData            func(target uint32, size int, data unsafe.Pointer, usage uint32)
-	glDeleteBuffers         func(n int32, buffers *uint32)
-	glEnableVertexAttrib    func(index uint32)
-	glVertexAttribPointer   func(index uint32, size int32, typ uint32, normalized bool, stride int32, offset uintptr)
-	glVertexAttribDivisor   func(index, divisor uint32)
-	glGenTextures           func(n int32, out *uint32)
-	glBindTexture           func(target, texture uint32)
-	glActiveTexture         func(unit uint32)
-	glTexImage2D            func(target uint32, level, internalFormat, w, h, border int32, format, typ uint32, pix unsafe.Pointer)
-	glTexSubImage2D         func(target uint32, level, x, y, w, h int32, format, typ uint32, pix unsafe.Pointer)
-	glTexParameteri         func(target, name uint32, v int32)
-	glDeleteTextures        func(n int32, textures *uint32)
-	glPixelStorei           func(name uint32, v int32)
-	glViewport              func(x, y, w, h int32)
-	glScissor               func(x, y, w, h int32)
-	glEnable                func(cap uint32)
-	glDisable               func(cap uint32)
-	glBlendFunc             func(src, dst uint32)
-	glBlendFuncSeparate     func(srcRGB, dstRGB, srcAlpha, dstAlpha uint32)
-	glClearColor            func(r, g, b, a float32)
-	glClear                 func(mask uint32)
-	glDrawArraysInstanced   func(mode uint32, first, count, instances int32)
-	glReadPixels            func(x, y, w, h int32, format, typ uint32, pix unsafe.Pointer)
-	glGenFramebuffers       func(n int32, out *uint32)
-	glBindFramebuffer       func(target, fb uint32)
-	glFramebufferTexture2D  func(target, attachment, texTarget, texture uint32, level int32)
-	glCheckFramebufferState func(target uint32) uint32
-	glDeleteFramebuffers    func(n int32, fbs *uint32)
-	glBlitFramebuffer       func(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1 int32, mask, filter uint32)
-)
-
-func load() error {
-	loadOnce.Do(func() {
-		lib, err := purego.Dlopen("libepoxy.so.0", purego.RTLD_NOW|purego.RTLD_GLOBAL)
-		if err != nil {
-			errLoad = fmt.Errorf("gl: cannot load libepoxy: %w", err)
-			return
-		}
-		var missing []string
-		fn := func(f any, name string) {
-			sym, err := purego.Dlsym(lib, name)
-			if err != nil || sym == 0 {
-				missing = append(missing, name)
-				return
-			}
-			purego.RegisterFunc(f, sym)
-		}
-		// libepoxy exports a pointer for each GL function, to a stub that
-		// finds the function of the current context when first called.
-		gl := func(f any, name string) {
-			sym, err := purego.Dlsym(lib, "epoxy_"+name)
-			if err != nil || sym == 0 {
-				missing = append(missing, name)
-				return
-			}
-			purego.RegisterFunc(f, **(**uintptr)(unsafe.Pointer(&sym)))
-		}
-		fn(&epoxyGLVersion, "epoxy_gl_version")
-		fn(&epoxyIsDesktopGL, "epoxy_is_desktop_gl")
-		fn(&epoxyHasExtension, "epoxy_has_gl_extension")
-		gl(&glGetString, "glGetString")
-		gl(&glGetError, "glGetError")
-		gl(&glGetIntegerv, "glGetIntegerv")
-		gl(&glCreateShader, "glCreateShader")
-		gl(&glShaderSource, "glShaderSource")
-		gl(&glCompileShader, "glCompileShader")
-		gl(&glGetShaderiv, "glGetShaderiv")
-		gl(&glGetShaderInfoLog, "glGetShaderInfoLog")
-		gl(&glDeleteShader, "glDeleteShader")
-		gl(&glCreateProgram, "glCreateProgram")
-		gl(&glAttachShader, "glAttachShader")
-		gl(&glLinkProgram, "glLinkProgram")
-		gl(&glGetProgramiv, "glGetProgramiv")
-		gl(&glGetProgramInfoLog, "glGetProgramInfoLog")
-		gl(&glUseProgram, "glUseProgram")
-		gl(&glDeleteProgram, "glDeleteProgram")
-		gl(&glGetUniformLocation, "glGetUniformLocation")
-		gl(&glUniform1i, "glUniform1i")
-		gl(&glUniform2f, "glUniform2f")
-		gl(&glUniform1f, "glUniform1f")
-		gl(&glUniform2i, "glUniform2i")
-		gl(&glCopyTexSubImage2D, "glCopyTexSubImage2D")
-		gl(&glGenVertexArrays, "glGenVertexArrays")
-		gl(&glBindVertexArray, "glBindVertexArray")
-		gl(&glDeleteVertexArrays, "glDeleteVertexArrays")
-		gl(&glGenBuffers, "glGenBuffers")
-		gl(&glBindBuffer, "glBindBuffer")
-		gl(&glBufferData, "glBufferData")
-		gl(&glDeleteBuffers, "glDeleteBuffers")
-		gl(&glEnableVertexAttrib, "glEnableVertexAttribArray")
-		gl(&glVertexAttribPointer, "glVertexAttribPointer")
-		gl(&glVertexAttribDivisor, "glVertexAttribDivisor")
-		gl(&glGenTextures, "glGenTextures")
-		gl(&glBindTexture, "glBindTexture")
-		gl(&glActiveTexture, "glActiveTexture")
-		gl(&glTexImage2D, "glTexImage2D")
-		gl(&glTexSubImage2D, "glTexSubImage2D")
-		gl(&glTexParameteri, "glTexParameteri")
-		gl(&glDeleteTextures, "glDeleteTextures")
-		gl(&glPixelStorei, "glPixelStorei")
-		gl(&glViewport, "glViewport")
-		gl(&glScissor, "glScissor")
-		gl(&glEnable, "glEnable")
-		gl(&glDisable, "glDisable")
-		gl(&glBlendFunc, "glBlendFunc")
-		gl(&glBlendFuncSeparate, "glBlendFuncSeparate")
-		gl(&glClearColor, "glClearColor")
-		gl(&glClear, "glClear")
-		gl(&glDrawArraysInstanced, "glDrawArraysInstanced")
-		gl(&glReadPixels, "glReadPixels")
-		gl(&glGenFramebuffers, "glGenFramebuffers")
-		gl(&glBindFramebuffer, "glBindFramebuffer")
-		gl(&glFramebufferTexture2D, "glFramebufferTexture2D")
-		gl(&glCheckFramebufferState, "glCheckFramebufferStatus")
-		gl(&glDeleteFramebuffers, "glDeleteFramebuffers")
-		gl(&glBlitFramebuffer, "glBlitFramebuffer")
-		if len(missing) > 0 {
-			errLoad = fmt.Errorf("gl: libepoxy lacks %s", strings.Join(missing, ", "))
-			return
-		}
-		// GDK is loaded in apps, where its context tells when GTK
-		// realized the area again; tests make contexts of their own.
-		if sym, err := purego.Dlsym(purego.RTLD_DEFAULT, "gdk_gl_context_get_current"); err == nil && sym != 0 {
-			purego.RegisterFunc(&currentGDKContext, sym)
-		}
-	})
-	return errLoad
-}
-
-func currentContext() uintptr {
-	if currentGDKContext == nil {
-		return 0
-	}
-	return currentGDKContext()
-}
-
-func goString(p uintptr) string {
-	if p == 0 {
-		return ""
-	}
-	var b []byte
-	for i := uintptr(0); ; i++ {
-		c := *(*byte)(unsafe.Add(*(*unsafe.Pointer)(unsafe.Pointer(&p)), i))
-		if c == 0 {
-			return string(b)
-		}
-		b = append(b, c)
-	}
-}
-
 type texture struct {
 	tex       uint32
 	w, h      int
 	gen, ver  uint64
 	lastFrame uint64
+}
+
+// canvasTexture is the texture a canvas (scene.NewCanvas) is drawn into,
+// through its framebuffer, and what drawing it keeps, for as long as the
+// canvas lives. Its rows go up, as GL's: images showing it flip it.
+type canvasTexture struct {
+	texture
+	fb     uint32
+	b      gpu.Builder
+	canvas weak.Pointer[scene.Image]
 }
 
 // Renderer draws scenes into the framebuffer bound when Render is called,
@@ -292,7 +119,9 @@ type Renderer struct {
 	es      bool
 	// dual tells that the context blends with a second color from the
 	// shader (OpenGL 3.3, or GLES with EXT_blend_func_extended).
-	dual     bool
+	dual bool
+	// software tells that the context draws on the CPU (Software).
+	software bool
 	maxSize  int
 	program  uint32
 	vao, buf uint32
@@ -302,6 +131,10 @@ type Renderer struct {
 	empty    uint32 // a texture to bind where there is none
 	images   map[uint64]*texture
 	frame    uint64
+	// canvases are the textures canvases are drawn into, and canvasTex
+	// the names of those textures.
+	canvases  map[uint64]*canvasTexture
+	canvasTex map[uint32]bool
 
 	// The passes computing the backdrops of effects: down and blur are
 	// their programs, with their uniforms' locations, drawn with passVAO;
@@ -316,6 +149,19 @@ type Renderer struct {
 	// the effects drawn, made as first drawn.
 	header  string
 	effects map[*scene.Effect]*effectProgram
+	// ubo holds the uniforms of the shader being drawn (package ui/shader),
+	// laid out in shaderBytes, which binding point 0 reads.
+	ubo         uint32
+	shaderBytes []byte
+	// stops is the texture of the stops of gradients (uStops), stopsTex
+	// the scene drawn's, 0 for none; blurred are the textures of the images
+	// the frame draws blurred, the first used of them, and blurTmp the
+	// textures their passes go through.
+	stops    texture
+	stopsTex uint32
+	blurred  []target
+	used     int
+	blurTmp  [2]target
 
 	b gpu.Builder
 }
@@ -325,14 +171,17 @@ type Renderer struct {
 type effectProgram struct {
 	program uint32
 	uSize   int32
-	err     error
+	// flipRows is the location of a shader's uShaderFlipRows, which tells
+	// it the canvases among its images, whose rows go up.
+	flipRows int32
+	err      error
 }
 
 // passProgram is the program of a pass computing backdrops and its
 // uniforms' locations.
 type passProgram struct {
-	program                                     uint32
-	origin, limit, shift, dir, down, rad, sigma int32
+	program                                           uint32
+	origin, limit, shift, dir, down, rad, sigma, mode int32
 }
 
 // New returns a renderer for the current GL context.
@@ -350,15 +199,16 @@ func New() (*Renderer, error) {
 
 // init creates the program, buffers and textures in the current context.
 func (r *Renderer) init() error {
-	version := epoxyGLVersion()
-	r.es = !epoxyIsDesktopGL()
+	version, es := contextVersion()
+	r.es = es
 	if r.es && version < 30 || !r.es && version < 33 {
-		return fmt.Errorf("gl: OpenGL %d.%d is too old (%s)", version/10, version%10, goString(glGetString(glVersion)))
+		return fmt.Errorf("gl: OpenGL %d.%d is too old (%s)", version/10, version%10, versionString())
 	}
 	var size int32
 	glGetIntegerv(glMaxTextureSize, &size)
 	r.maxSize = int(size)
-	r.dual = !r.es || epoxyHasExtension("GL_EXT_blend_func_extended")
+	r.dual = !r.es || hasExtension("GL_EXT_blend_func_extended")
+	r.software = softwareRenderer(rendererString())
 	header := "#version 330 core\n#define DUAL\n"
 	if r.es {
 		header = "#version 300 es\n"
@@ -384,13 +234,15 @@ func (r *Renderer) init() error {
 	glLinkProgram(r.program)
 	var ok int32
 	if glGetProgramiv(r.program, glLinkStatus, &ok); ok == 0 {
-		return fmt.Errorf("gl: cannot link the shader: %s", infoLog(r.program, glGetProgramiv, glGetProgramInfoLog))
+		return fmt.Errorf("gl: cannot link the shader: %s", programLog(r.program))
 	}
 	glUseProgram(r.program)
 	r.uSize = glGetUniformLocation(r.program, "uSize")
 	glUniform1i(glGetUniformLocation(r.program, "uMask"), 0)
 	glUniform1i(glGetUniformLocation(r.program, "uColor"), 1)
 	glUniform1i(glGetUniformLocation(r.program, "uImage"), 2)
+	glUniform1i(glGetUniformLocation(r.program, "uClipMask"), 4)
+	glUniform1i(glGetUniformLocation(r.program, "uStops"), stopsUnit)
 	glUseProgram(0)
 	if r.down, err = passLink(header, "DOWN"); err != nil {
 		return err
@@ -400,7 +252,7 @@ func (r *Renderer) init() error {
 	}
 	glGenVertexArrays(1, &r.passVAO)
 
-	// The instance buffer feeds eleven float4 attributes per instance;
+	// The instance buffer feeds fourteen float4 attributes per instance;
 	// draws point them at their batch's instances.
 	glGenVertexArrays(1, &r.vao)
 	glGenBuffers(1, &r.buf)
@@ -440,8 +292,58 @@ func (r *Renderer) effectProgram(e *scene.Effect) *effectProgram {
 	}
 	glUseProgram(p.program)
 	p.uSize = glGetUniformLocation(p.program, "uSize")
+	glUniform1i(glGetUniformLocation(p.program, "uMask"), 0)
 	glUniform1i(glGetUniformLocation(p.program, "uBackdrop"), 3)
+	glUniform1i(glGetUniformLocation(p.program, "uClipMask"), 4)
+	if e.Shader != nil {
+		// A shader's uniforms come from binding point 0, its images from
+		// units 5 to 8.
+		if i := glGetUniformBlockIndex(p.program, "ShaderUniforms"); i != glInvalidIndex {
+			glUniformBlockBinding(p.program, i, 0)
+		}
+		for i := range 4 {
+			if l := glGetUniformLocation(p.program, fmt.Sprintf("T%d", i)); l >= 0 {
+				glUniform1i(l, int32(5+i))
+			}
+		}
+		p.flipRows = glGetUniformLocation(p.program, "uShaderFlipRows")
+	}
 	return p
+}
+
+// bindShader binds what the shader of batch b reads: its uniforms, laid
+// out as its effect says, at binding point 0, and its images to units 5
+// to 8. Unit 2 is active after.
+func (r *Renderer) bindShader(b gpu.Batch) {
+	r.shaderBytes = b.Effect.Shader.Pack(r.shaderBytes, b.Uniforms)
+	if n := len(r.shaderBytes); n > 0 {
+		if r.ubo == 0 {
+			glGenBuffers(1, &r.ubo)
+		}
+		glBindBuffer(glUniformBuffer, r.ubo)
+		glBufferData(glUniformBuffer, n, unsafe.Pointer(&r.shaderBytes[0]), glStreamDraw)
+		glBindBufferBase(glUniformBuffer, 0, r.ubo)
+	}
+	// A canvas's rows go up, as GL's framebuffers draw them: the shader
+	// flips the rows of those it reads.
+	var flip [4]int32
+	for i, t := range b.Textures {
+		glActiveTexture(glTexture0 + 5 + uint32(i))
+		if i == gpu.BackdropImage && b.Backdrop != 0 {
+			// A shader reading its backdrop reads it as this image, its
+			// rows going down.
+			glBindTexture(glTexture2D, r.backdrop[0].tex)
+			continue
+		}
+		glBindTexture(glTexture2D, or(uint32(t), r.empty))
+		if img := b.Shader.Images[i]; t != 0 && img != nil && r.canvasTex[uint32(t)] {
+			flip[i] = int32(img.H)
+		}
+	}
+	glActiveTexture(glTexture0 + 2)
+	if p := r.effects[b.Effect]; p != nil && p.flipRows >= 0 {
+		glUniform4i(p.flipRows, flip[0], flip[1], flip[2], flip[3])
+	}
 }
 
 // link compiles a vertex and a fragment shader and links them.
@@ -462,7 +364,7 @@ func link(vertex, fragment string) (uint32, error) {
 	glLinkProgram(program)
 	var ok int32
 	if glGetProgramiv(program, glLinkStatus, &ok); ok == 0 {
-		err := fmt.Errorf("gl: cannot link the shader: %s", infoLog(program, glGetProgramiv, glGetProgramInfoLog))
+		err := fmt.Errorf("gl: cannot link the shader: %s", programLog(program))
 		glDeleteProgram(program)
 		return 0, err
 	}
@@ -488,7 +390,7 @@ func passLink(header, name string) (passProgram, error) {
 	glLinkProgram(p.program)
 	var ok int32
 	if glGetProgramiv(p.program, glLinkStatus, &ok); ok == 0 {
-		err := fmt.Errorf("gl: cannot link the %s pass: %s", name, infoLog(p.program, glGetProgramiv, glGetProgramInfoLog))
+		err := fmt.Errorf("gl: cannot link the %s pass: %s", name, programLog(p.program))
 		glDeleteProgram(p.program)
 		return passProgram{}, err
 	}
@@ -501,6 +403,7 @@ func passLink(header, name string) (passProgram, error) {
 	p.down = glGetUniformLocation(p.program, "uDown")
 	p.rad = glGetUniformLocation(p.program, "uRadius")
 	p.sigma = glGetUniformLocation(p.program, "uSigma")
+	p.mode = glGetUniformLocation(p.program, "uMode")
 	glUseProgram(0)
 	return p, nil
 }
@@ -510,28 +413,15 @@ const attributes = gpu.InstanceSize / 16
 
 func compile(kind uint32, src string) (uint32, error) {
 	s := glCreateShader(kind)
-	b := append([]byte(src), 0)
-	p := &b[0]
-	glShaderSource(s, 1, &p, nil)
+	setShaderSource(s, src)
 	glCompileShader(s)
 	var ok int32
 	if glGetShaderiv(s, glCompileStatus, &ok); ok == 0 {
-		log := infoLog(s, glGetShaderiv, glGetShaderInfoLog)
+		log := shaderLog(s)
 		glDeleteShader(s)
 		return 0, fmt.Errorf("gl: cannot compile the shader: %s", log)
 	}
 	return s, nil
-}
-
-func infoLog(obj uint32, get func(uint32, uint32, *int32), read func(uint32, int32, *int32, *byte)) string {
-	var n int32
-	get(obj, glInfoLogLength, &n)
-	if n <= 1 {
-		return "no log"
-	}
-	buf := make([]byte, n)
-	read(obj, n, nil, &buf[0])
-	return strings.TrimSpace(string(buf[:n-1]))
 }
 
 func newTexture(internal int32, format uint32, w, h int, pix []byte, stride int) uint32 {
@@ -603,10 +493,21 @@ func (r *Renderer) imageTexture(img *scene.Image) uintptr {
 	if img.W > r.maxSize || img.H > r.maxSize {
 		return 0
 	}
+	if img.Scene != nil {
+		// A canvas, drawn before the scene showing it.
+		if c := r.canvases[img.ID()]; c != nil {
+			return uintptr(c.tex)
+		}
+		return 0
+	}
 	t := r.images[img.ID()]
 	if t == nil {
 		t = &texture{tex: newTexture(glRGBA8, glRGBA, img.W, img.H, img.Pix, img.W*4), w: img.W, h: img.H, ver: img.Version()}
 		r.images[img.ID()] = t
+	} else if t.w != img.W || t.h != img.H {
+		glDeleteTextures(1, &t.tex)
+		t.tex = newTexture(glRGBA8, glRGBA, img.W, img.H, img.Pix, img.W*4)
+		t.w, t.h, t.ver = img.W, img.H, img.Version()
 	} else if t.ver != img.Version() {
 		glBindTexture(glTexture2D, t.tex)
 		unpack(img.W*4, glRGBA8)
@@ -644,6 +545,7 @@ func (r *Renderer) Render(s *scene.Scene) error {
 
 func (r *Renderer) draw(s *scene.Scene) error {
 	r.frame++
+	r.used = 0
 	glActiveTexture(glTexture0)
 	if err := r.syncAtlas(&r.mask, s.MaskAtlas, glR8, glRed); err != nil {
 		return err
@@ -651,8 +553,117 @@ func (r *Renderer) draw(s *scene.Scene) error {
 	if err := r.syncAtlas(&r.color, s.ColorAtlas, glRGBA8, glRGBA); err != nil {
 		return err
 	}
-	r.b.Build(s, r.imageTexture)
-	if err := r.fitBackdrop(); err != nil {
+	if err := r.drawCanvases(s); err != nil {
+		return err
+	}
+	if err := r.drawScene(s, &r.b); err != nil {
+		return err
+	}
+	if r.frame%120 == 0 {
+		for key, t := range r.images {
+			if r.frame-t.lastFrame > 240 {
+				glDeleteTextures(1, &t.tex)
+				delete(r.images, key)
+			}
+		}
+		for key, t := range r.canvases {
+			if t.canvas.Value() == nil {
+				r.deleteCanvas(t)
+				delete(r.canvases, key)
+			}
+		}
+	}
+	return nil
+}
+
+// drawCanvases draws the canvases s draws anew or shows into their
+// textures, unless they hold their versions already, leaving the
+// framebuffer bound as it was.
+func (r *Renderer) drawCanvases(s *scene.Scene) (err error) {
+	var outer int32
+	glGetIntegerv(glFramebufferBinding, &outer)
+	defer glBindFramebuffer(glFramebuffer, uint32(outer))
+	s.EachCanvas(func(c *scene.Image) {
+		if err == nil {
+			err = r.drawCanvas(c)
+		}
+	})
+	return err
+}
+
+func (r *Renderer) drawCanvas(c *scene.Image) error {
+	if c.W > r.maxSize || c.H > r.maxSize {
+		return nil
+	}
+	if r.canvases == nil {
+		r.canvases, r.canvasTex = map[uint64]*canvasTexture{}, map[uint32]bool{}
+	}
+	t := r.canvases[c.ID()]
+	if t == nil {
+		t = &canvasTexture{canvas: weak.Make(c)}
+		r.canvases[c.ID()] = t
+	}
+	if t.tex != 0 && t.w == c.W && t.h == c.H && t.ver == c.Version() {
+		return nil
+	}
+	if t.tex == 0 || t.w != c.W || t.h != c.H {
+		if t.tex != 0 {
+			delete(r.canvasTex, t.tex)
+			glDeleteTextures(1, &t.tex)
+		}
+		t.tex, t.w, t.h = newTexture(glRGBA8, glRGBA, c.W, c.H, nil, 0), c.W, c.H
+		r.canvasTex[t.tex] = true
+		if t.fb == 0 {
+			glGenFramebuffers(1, &t.fb)
+		}
+		glBindFramebuffer(glFramebuffer, t.fb)
+		glFramebufferTexture2D(glFramebuffer, glColorAttachment0, glTexture2D, t.tex, 0)
+		if glCheckFramebufferState(glFramebuffer) != glFramebufferDone {
+			return fmt.Errorf("gl: cannot draw into a %d×%d canvas", c.W, c.H)
+		}
+	}
+	glBindFramebuffer(glFramebuffer, t.fb)
+	cs := c.Scene
+	cs.Width, cs.Height = c.W, c.H
+	if err := r.drawScene(cs, &t.b); err != nil {
+		return err
+	}
+	t.ver = c.Version()
+	return nil
+}
+
+func (r *Renderer) deleteCanvas(t *canvasTexture) {
+	delete(r.canvasTex, t.tex)
+	if t.tex != 0 {
+		glDeleteTextures(1, &t.tex)
+	}
+	if t.fb != 0 {
+		glDeleteFramebuffers(1, &t.fb)
+	}
+	t.b.Release()
+}
+
+// drawScene draws s into the framebuffer bound, with b.
+func (r *Renderer) drawScene(s *scene.Scene, b *gpu.Builder) error {
+	b.BlurredImage = r.blurImage
+	s = b.Build(s, r.imageTexture)
+	b.BlurredImage = nil
+	r.syncStops(b)
+	// Canvases' rows go up, as GL's: images showing them sample them
+	// flipped, which their source rectangles may be (scene.OpImage).
+	if len(r.canvasTex) > 0 {
+		for _, bt := range b.Batches {
+			if bt.Image == 0 || !r.canvasTex[uint32(bt.Image)] {
+				continue
+			}
+			for i := bt.Start; i < bt.Start+bt.Count; i++ {
+				if in := &b.Instances[i]; in.Params[0] == 4 {
+					in.UV[1], in.UV[3] = 1-in.UV[1], 1-in.UV[3]
+				}
+			}
+		}
+	}
+	if err := r.fitBackdrop(b); err != nil {
 		return err
 	}
 	// The framebuffer drawn into, GTK's, which the passes computing
@@ -665,81 +676,227 @@ func (r *Renderer) draw(s *scene.Scene) error {
 	c := s.Clear.Premul(1)
 	glClearColor(c[0], c[1], c[2], c[3])
 	glClear(glColorBufferBit)
-	if len(r.b.Instances) == 0 {
+	if len(b.Instances) == 0 {
 		return nil
 	}
 	glBindBuffer(glArrayBuffer, r.buf)
-	glBufferData(glArrayBuffer, len(r.b.Instances)*gpu.InstanceSize, unsafe.Pointer(&r.b.Instances[0]), glStreamDraw)
+	glBufferData(glArrayBuffer, len(b.Instances)*gpu.InstanceSize, unsafe.Pointer(&b.Instances[0]), glStreamDraw)
 	r.bindState(s)
-	bound, program := uintptr(r.empty), r.program
-	for _, b := range r.b.Batches {
-		sc := b.Scissor
+	bound, program, hole := uintptr(r.empty), r.program, false
+	for _, bt := range b.Batches {
+		sc := bt.Scissor
 		sc.Left, sc.Top = max(sc.Left, 0), max(sc.Top, 0)
 		sc.Right, sc.Bottom = min(sc.Right, int32(s.Width)), min(sc.Bottom, int32(s.Height))
-		if b.Count == 0 || sc.Empty() {
+		if bt.Count == 0 || sc.Empty() {
 			continue
 		}
 		want := r.program
-		if b.Effect != nil {
-			p := r.effectProgram(b.Effect)
+		if bt.Effect != nil {
+			p := r.effectProgram(bt.Effect)
 			if p.program == 0 {
 				continue
 			}
 			want = p.program
 		}
-		if b.Backdrop != 0 {
+		if bt.Backdrop != 0 {
 			// The effect shows what is drawn so far.
-			r.readBackdrop(uint32(fb), s.Height, r.b.Backdrops[b.Backdrop-1])
+			r.readBackdrop(uint32(fb), s.Height, b.Backdrops[bt.Backdrop-1])
 			glBindFramebuffer(glFramebuffer, uint32(fb))
 			glViewport(0, 0, int32(s.Width), int32(s.Height))
 			r.bindState(s)
 			glActiveTexture(glTexture0 + 3)
 			glBindTexture(glTexture2D, r.backdrop[0].tex)
 			glActiveTexture(glTexture0 + 2)
-			bound, program = uintptr(r.empty), r.program
+			bound, program, hole = uintptr(r.empty), r.program, false
+		}
+		if bt.Hole != hole {
+			hole = bt.Hole
+			r.blendFunc(hole)
 		}
 		if want != program {
 			program = want
 			glUseProgram(program)
-			if b.Effect != nil {
-				glUniform2f(r.effects[b.Effect].uSize, float32(s.Width), float32(s.Height))
+			if bt.Effect != nil {
+				glUniform2f(r.effects[bt.Effect].uSize, float32(s.Width), float32(s.Height))
 			}
 		}
-		if b.Image != 0 && b.Image != bound {
-			bound = b.Image
+		if bt.Image != 0 && bt.Image != bound {
+			bound = bt.Image
 			glBindTexture(glTexture2D, uint32(bound)) // unit 2 is active
+		}
+		glActiveTexture(glTexture0 + 4)
+		glBindTexture(glTexture2D, or(uint32(bt.ClipMask), r.empty))
+		glActiveTexture(glTexture0 + 2)
+		if bt.Shader != nil {
+			r.bindShader(bt)
 		}
 		// Instances draw from the batch's first: without base instances in
 		// OpenGL ES 3.0, the attributes start there.
-		offset := uintptr(b.Start * gpu.InstanceSize)
+		offset := uintptr(bt.Start * gpu.InstanceSize)
 		for i := range uint32(attributes) {
 			glVertexAttribPointer(i, 4, glFloat, false, int32(gpu.InstanceSize), offset+uintptr(i)*16)
 		}
 		// GL's scissor rectangles start at the bottom.
 		glScissor(sc.Left, int32(s.Height)-sc.Bottom, sc.Right-sc.Left, sc.Bottom-sc.Top)
-		glDrawArraysInstanced(glTriangleStrip, 0, 4, int32(b.Count))
+		glDrawArraysInstanced(glTriangleStrip, 0, 4, int32(bt.Count))
 	}
 	// Leave the state as GTK, which draws the area with the same context,
 	// expects it.
 	glDisable(glScissorTest)
 	glDisable(glBlend)
-	for unit := range 4 {
+	for unit := range stopsUnit + 1 {
 		glActiveTexture(glTexture0 + uint32(unit))
 		glBindTexture(glTexture2D, 0)
 	}
 	glActiveTexture(glTexture0)
 	glBindBuffer(glArrayBuffer, 0)
+	glBindBuffer(glUniformBuffer, 0)
 	glBindVertexArray(0)
 	glUseProgram(0)
-	if r.frame%120 == 0 {
-		for key, t := range r.images {
-			if r.frame-t.lastFrame > 240 {
-				glDeleteTextures(1, &t.tex)
-				delete(r.images, key)
+	return nil
+}
+
+// stopsUnit is the texture unit of the stops of gradients (uStops).
+const stopsUnit = 9
+
+// syncStops uploads the stops of the gradients b built into r.stops,
+// which r.stopsTex then is, or 0 for none.
+func (r *Renderer) syncStops(b *gpu.Builder) {
+	r.stopsTex = 0
+	w, h := b.StopsSize()
+	if w == 0 {
+		return
+	}
+	data := b.Stops
+	for len(data) < 4*w*h {
+		data = append(data, 0)
+	}
+	b.Stops = data[:len(b.Stops)]
+	glActiveTexture(glTexture0)
+	if r.stops.tex == 0 || r.stops.w != w || r.stops.h < h {
+		if r.stops.tex != 0 {
+			glDeleteTextures(1, &r.stops.tex)
+		}
+		glGenTextures(1, &r.stops.tex)
+		glBindTexture(glTexture2D, r.stops.tex)
+		// Floats of 32 bits are not filterable: nearest, or the texture is
+		// incomplete and reads as zero.
+		glTexParameteri(glTexture2D, glTextureMinFilter, glNearest)
+		glTexParameteri(glTexture2D, glTextureMagFilter, glNearest)
+		glTexParameteri(glTexture2D, glTextureWrapS, glClampToEdge)
+		glTexParameteri(glTexture2D, glTextureWrapT, glClampToEdge)
+		glTexImage2D(glTexture2D, 0, glRGBA32F, int32(w), int32(h), 0, glRGBA, glFloat, unsafe.Pointer(&data[0]))
+		r.stops.w, r.stops.h = w, h
+	} else {
+		glBindTexture(glTexture2D, r.stops.tex)
+		glTexSubImage2D(glTexture2D, 0, 0, 0, int32(w), int32(h), glRGBA, glFloat, unsafe.Pointer(&data[0]))
+	}
+	glBindTexture(glTexture2D, 0)
+	r.stopsTex = r.stops.tex
+}
+
+// target is a texture drawn into, with its framebuffer.
+type target struct {
+	tex, fb uint32
+	w, h    int
+}
+
+// fit makes t a w×h texture of RGBA8 to draw into, unless it is.
+func (t *target) fit(w, h int) error {
+	if t.tex != 0 && t.w == w && t.h == h {
+		return nil
+	}
+	if t.tex != 0 {
+		glDeleteTextures(1, &t.tex)
+	}
+	t.tex = newTexture(glRGBA8, glRGBA, w, h, nil, 0)
+	if t.fb == 0 {
+		glGenFramebuffers(1, &t.fb)
+	}
+	glBindFramebuffer(glFramebuffer, t.fb)
+	glFramebufferTexture2D(glFramebuffer, glColorAttachment0, glTexture2D, t.tex, 0)
+	if glCheckFramebufferState(glFramebuffer) != glFramebufferDone {
+		return fmt.Errorf("gl: cannot draw into a %d×%d texture", w, h)
+	}
+	t.w, t.h = w, h
+	return nil
+}
+
+func (t *target) release() {
+	if t.tex != 0 {
+		glDeleteTextures(1, &t.tex)
+	}
+	if t.fb != 0 {
+		glDeleteFramebuffers(1, &t.fb)
+	}
+	*t = target{}
+}
+
+// blurImage computes the area of img that bk says blurred
+// (gpu.Builder.BlurredImage) into a texture of the frame's own, whose
+// rows go down as an image's, as internal/raster computes it, and returns
+// it, or 0. It leaves the framebuffer bound as it was.
+func (r *Renderer) blurImage(img *scene.Image, bk scene.Backdrop) uintptr {
+	src := uint32(r.imageTexture(img))
+	w, h := bk.Size()
+	if src == 0 || w <= 0 || h <= 0 || w > r.maxSize || h > r.maxSize {
+		return 0
+	}
+	var fb int32
+	glGetIntegerv(glFramebufferBinding, &fb)
+	defer glBindFramebuffer(glFramebuffer, uint32(fb))
+	for i := range r.blurTmp {
+		if t := &r.blurTmp[i]; t.w < w || t.h < h {
+			if t.fit(max(w, t.w), max(h, t.h)) != nil {
+				return 0
 			}
 		}
 	}
-	return nil
+	if r.used == len(r.blurred) {
+		r.blurred = append(r.blurred, target{})
+	}
+	out := &r.blurred[r.used]
+	r.used++
+	if out.fit(w, h) != nil {
+		return 0
+	}
+	glDisable(glBlend)
+	glEnable(glScissorTest)
+	glBindVertexArray(r.passVAO)
+	glActiveTexture(glTexture0)
+	glBindTexture(glTexture2D, src)
+	p := gpu.ImageDownPass(bk)
+	if img.Scene != nil {
+		// A canvas, whose rows go up: its row y is h-1-y.
+		p.Shift = [2]int32{0, int32(img.H - 1)}
+	} else {
+		p.Mode |= gpu.PassUnflipped
+	}
+	r.down.set(p)
+	if bk.Radius == 0 {
+		r.passInto(out, w, h)
+		glDisable(glScissorTest)
+		return uintptr(out.tex)
+	}
+	r.passInto(&r.blurTmp[0], w, h)
+	r.blur.set(gpu.ImageBlurPass(bk, [2]int32{1, 0}))
+	glBindTexture(glTexture2D, r.blurTmp[0].tex)
+	r.passInto(&r.blurTmp[1], w, h)
+	r.blur.set(gpu.ImageBlurPass(bk, [2]int32{0, 1}))
+	glBindTexture(glTexture2D, r.blurTmp[1].tex)
+	r.passInto(out, w, h)
+	glBindTexture(glTexture2D, 0)
+	glDisable(glScissorTest)
+	return uintptr(out.tex)
+}
+
+// passInto draws the program in use into the w×h texels at the start of
+// t, reading the texture bound to unit 0.
+func (r *Renderer) passInto(t *target, w, h int) {
+	glBindFramebuffer(glFramebuffer, t.fb)
+	glViewport(0, 0, int32(t.w), int32(t.h))
+	glScissor(0, 0, int32(w), int32(h))
+	glDrawArraysInstanced(glTriangleStrip, 0, 4, 1)
 }
 
 // bindState sets the state the instances of s draw with, leaving texture
@@ -749,18 +906,30 @@ func (r *Renderer) bindState(s *scene.Scene) {
 	glUniform2f(r.uSize, float32(s.Width), float32(s.Height))
 	glBindVertexArray(r.vao)
 	glBindBuffer(glArrayBuffer, r.buf)
-	for unit, tex := range [4]uint32{or(r.mask.tex, r.empty), or(r.color.tex, r.empty), r.empty, r.empty} {
+	for unit, tex := range [5]uint32{or(r.mask.tex, r.empty), or(r.color.tex, r.empty), r.empty, r.empty, r.empty} {
 		glActiveTexture(glTexture0 + uint32(unit))
 		glBindTexture(glTexture2D, tex)
 	}
+	glActiveTexture(glTexture0 + stopsUnit)
+	glBindTexture(glTexture2D, or(r.stopsTex, r.empty))
 	glActiveTexture(glTexture0 + 2)
 	glEnable(glBlend)
-	if r.dual {
-		glBlendFuncSeparate(glOne, glOneMinusSrc1Color, glOne, glOneMinusSrc1Alpha)
-	} else {
-		glBlendFunc(glOne, glOneMinusSrcAlpha)
-	}
+	r.blendFunc(false)
 	glEnable(glScissorTest)
+}
+
+// blendFunc blends premultiplied colors over what is drawn, or for hole,
+// takes their coverage away (scene.OpHole).
+func (r *Renderer) blendFunc(hole bool) {
+	src := uint32(glOne)
+	if hole {
+		src = glZero
+	}
+	if r.dual {
+		glBlendFuncSeparate(src, glOneMinusSrc1Color, src, glOneMinusSrc1Alpha)
+	} else {
+		glBlendFunc(src, glOneMinusSrcAlpha)
+	}
 }
 
 // readBackdrop computes the backdrop bk of what the framebuffer fb holds,
@@ -797,6 +966,7 @@ func (pp *passProgram) set(p gpu.Pass) {
 	glUniform1i(pp.down, p.Down)
 	glUniform1i(pp.rad, p.Radius)
 	glUniform1f(pp.sigma, p.Sigma)
+	glUniform1i(pp.mode, p.Mode)
 }
 
 // pass draws the program in use into the w×h texels at the start of
@@ -810,10 +980,10 @@ func (r *Renderer) pass(i, w, h int) {
 
 // fitBackdrop makes the textures of backdrops as large as the scene built
 // needs, and the texture the area read is copied to.
-func (r *Renderer) fitBackdrop() error {
-	w, h := r.b.BackdropSize()
+func (r *Renderer) fitBackdrop(b *gpu.Builder) error {
+	w, h := b.BackdropSize()
 	aw, ah := 0, 0
-	for _, bk := range r.b.Backdrops {
+	for _, bk := range b.Backdrops {
 		aw, ah = max(aw, bk.Area.Dx()), max(ah, bk.Area.Dy())
 	}
 	if aw > r.grab.w || ah > r.grab.h {
@@ -860,17 +1030,42 @@ func or(a, b uint32) uint32 {
 
 // forget drops the objects of a context that is gone.
 func (r *Renderer) forget() {
-	r.program, r.vao, r.buf, r.empty = 0, 0, 0, 0
+	r.program, r.vao, r.buf, r.empty, r.ubo = 0, 0, 0, 0, 0
 	r.down, r.blur, r.passVAO = passProgram{}, passProgram{}, 0
 	clear(r.effects)
 	r.grab, r.backdrop, r.backdropFB = texture{}, [2]texture{}, [2]uint32{}
 	r.mask, r.color = texture{}, texture{}
 	clear(r.images)
+	for _, t := range r.canvases {
+		t.b.Release()
+	}
+	clear(r.canvases)
+	clear(r.canvasTex)
+	r.stops, r.stopsTex, r.blurred, r.used, r.blurTmp = texture{}, 0, nil, 0, [2]target{}
+}
+
+// Software reports whether the context draws on the CPU, as Mesa's
+// llvmpipe (where MYGO_GPU=1 has Linux draw with OpenGL anyway) and the
+// SwiftShader of browsers without a GPU, for ui's Painter.Accelerated.
+func (r *Renderer) Software() bool { return r.software }
+
+// softwareRenderer reports whether a context's renderer string names a
+// renderer drawing on the CPU (internal/linux's softwareGL, which picks
+// whether surfaces draw with OpenGL, knows Mesa's).
+func softwareRenderer(name string) bool {
+	n := strings.ToLower(name)
+	for _, s := range []string{"llvmpipe", "softpipe", "swrast", "software rasterizer", "swiftshader", "basic render driver"} {
+		if strings.Contains(n, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // Release deletes the renderer's objects when its context is current, and
 // otherwise leaves them to the context, which deletes them with itself.
 func (r *Renderer) Release() {
+	r.b.Release()
 	if errLoad != nil || currentContext() != r.context {
 		r.forget()
 		return
@@ -878,7 +1073,17 @@ func (r *Renderer) Release() {
 	for _, t := range r.images {
 		glDeleteTextures(1, &t.tex)
 	}
-	for _, tex := range []*uint32{&r.mask.tex, &r.color.tex, &r.empty, &r.grab.tex, &r.backdrop[0].tex, &r.backdrop[1].tex} {
+	for _, t := range r.canvases {
+		r.deleteCanvas(t)
+	}
+	for i := range r.blurred {
+		r.blurred[i].release()
+	}
+	for i := range r.blurTmp {
+		r.blurTmp[i].release()
+	}
+	r.blurred, r.used = nil, 0
+	for _, tex := range []*uint32{&r.mask.tex, &r.color.tex, &r.empty, &r.grab.tex, &r.backdrop[0].tex, &r.backdrop[1].tex, &r.stops.tex} {
 		if *tex != 0 {
 			glDeleteTextures(1, tex)
 		}
@@ -901,6 +1106,9 @@ func (r *Renderer) Release() {
 	if r.passVAO != 0 {
 		glDeleteVertexArrays(1, &r.passVAO)
 	}
+	if r.ubo != 0 {
+		glDeleteBuffers(1, &r.ubo)
+	}
 	if r.buf != 0 {
 		glDeleteBuffers(1, &r.buf)
 	}
@@ -912,3 +1120,6 @@ func (r *Renderer) Release() {
 	}
 	r.forget()
 }
+
+// FrameInfo describes the last frame for MYGO_FRAME_STATS.
+func (r *Renderer) FrameInfo() string { return r.b.Summary() }
