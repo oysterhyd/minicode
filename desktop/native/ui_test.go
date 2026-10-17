@@ -128,6 +128,33 @@ func TestPanelControlsAndCompactRail(t *testing.T) {
 	}
 }
 
+func TestWorkPanelCollapseControlStaysInsideToolbar(t *testing.T) {
+	for _, page := range []string{"home", "conversation"} {
+		for _, width := range []float32{280, 400, 680} {
+			t.Run(fmt.Sprintf("%s/%g", page, width), func(t *testing.T) {
+				r := newTestRig(t, page)
+				r.d.preferences.WorkWidth = width
+				r.d.preferences.FontScale = 1.4
+				r.ui.Frame()
+				r.ui.Advance(time.Second)
+				collapse, ok := r.ui.Find("收拢右侧面板")
+				refresh, refreshOK := r.ui.Find("刷新工作区")
+				if !ok || !refreshOK || collapse.X < 1500-width || collapse.X+collapse.W > 1492 || collapse.W < 28 || refresh.X+refresh.W > 1492 || refresh.W < 28 {
+					t.Fatalf("toolbar controls clipped or duplicated in the conversation: collapse=%+v refresh=%+v", collapse, refresh)
+				}
+				click(t, r.ui, "收拢右侧面板")
+				if !r.d.preferences.RightCollapsed {
+					t.Fatal("work panel collapse control is not clickable")
+				}
+				click(t, r.ui, "展开工作区")
+				if r.d.preferences.RightCollapsed {
+					t.Fatal("work panel cannot be reopened")
+				}
+			})
+		}
+	}
+}
+
 func TestSidebarNewConversationPreservesRunningConversation(t *testing.T) {
 	for _, collapsed := range []bool{false, true} {
 		r := newTestRig(t, "conversation")

@@ -28,14 +28,15 @@ func statusLetter(status string) string {
 func (d *desktop) workPanel(c *ui.Context, p palette) {
 	v := d.current()
 	ui.Row(c).Height(48).Padding(8, 8, 6, 10).Gap(6).Shrink(0).Children(func() {
-		d.workTabs(c, p)
-		ui.Spacer(c)
-		if iconButton(c, p, "RefreshCw", tr("刷新工作区")).Clicked() {
-			d.refresh(v, true)
-		}
-		if iconButton(c, p, "PanelRightClose", tr("收拢右侧面板")).Clicked() {
+		if iconButton(c, p, "PanelRightClose", tr("收拢右侧面板")).Shrink(0).Clicked() {
 			d.preferences.RightCollapsed = true
 			d.persist()
+		}
+		ui.ScrollHorizontal(c).Grow(1).Basis(0).MinWidth(0).Height(34).AlignItems(ui.Center).Children(func() {
+			d.workTabs(c, p)
+		})
+		if iconButton(c, p, "RefreshCw", tr("刷新工作区")).Shrink(0).Clicked() {
+			d.refresh(v, true)
 		}
 	})
 	if d.preview != nil {
@@ -145,7 +146,7 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 // raised thumb that springs to the chosen one and counts beside them.
 func (d *desktop) workTabs(c *ui.Context, p palette) {
 	v := d.current()
-	track := ui.Row(c).Gap(1).Padding(2).Radius(11).Background(p.Active).Role(ui.RoleTabList).Label(tr("工作区"))
+	track := ui.Row(c).Gap(1).Padding(2).Shrink(0).Radius(11).Background(p.Active).Role(ui.RoleTabList).Label(tr("工作区"))
 	state := ui.Local(track, "tabs", func() segmentedState {
 		return segmentedState{X: make([]float32, len(workTabs)), W: make([]float32, len(workTabs))}
 	})

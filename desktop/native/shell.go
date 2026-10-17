@@ -106,12 +106,8 @@ func (d *desktop) header(c *ui.Context, p palette) {
 		}
 		d.runState(c, p, v)
 		ui.Spacer(c)
-		name, label := "PanelRightOpen", tr("展开工作区")
-		if !d.preferences.RightCollapsed {
-			name, label = "PanelRightClose", tr("收拢右侧面板")
-		}
-		if iconButton(c, p, name, label).Size(30, 30).Clicked() {
-			d.preferences.RightCollapsed = !d.preferences.RightCollapsed
+		if d.preferences.RightCollapsed && iconButton(c, p, "PanelRightOpen", tr("展开工作区")).Size(30, 30).Clicked() {
+			d.preferences.RightCollapsed = false
 			d.persist()
 		}
 	})
@@ -534,16 +530,14 @@ func (d *desktop) welcome(c *ui.Context, p palette) {
 	v := d.current()
 	_, height := c.Size()
 	ui.Box(c).Fill().Children(func() {
-		ui.Row(c).Absolute().Top(10).Right(10).Children(func() {
-			name, label := "PanelRightOpen", tr("展开工作区")
-			if !d.preferences.RightCollapsed {
-				name, label = "PanelRightClose", tr("收拢右侧面板")
-			}
-			if iconButton(c, p, name, label).Size(30, 30).Clicked() {
-				d.preferences.RightCollapsed = !d.preferences.RightCollapsed
-				d.persist()
-			}
-		})
+		if d.preferences.RightCollapsed {
+			ui.Row(c).Absolute().Top(10).Right(10).Children(func() {
+				if iconButton(c, p, "PanelRightOpen", tr("展开工作区")).Size(30, 30).Clicked() {
+					d.preferences.RightCollapsed = false
+					d.persist()
+				}
+			})
+		}
 		ui.Scroll(c).Fill().Children(func() {
 			ui.Column(c).FillWidth().MinHeight(height - 64).Center().Children(func() {
 				ui.Column(c).FillWidth().MaxWidth(720).Padding(32, 32, 48, 32).Margin(0, ui.Auto).Children(func() {
