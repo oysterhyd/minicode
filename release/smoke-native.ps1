@@ -8,8 +8,13 @@ $node = Join-Path $runtime 'node/node.exe'
 $version = (Get-Content (Join-Path $PSScriptRoot 'package.json') -Raw | ConvertFrom-Json).version
 $scratch = Join-Path $PSScriptRoot ('.cache/native-smoke-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force $scratch | Out-Null
+$lockDirectory = Join-Path ([IO.Path]::GetTempPath()) ('mc-qa-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+# MyGo's instance lock uses app identity, independently of the user-data path.
+# Keep this socket path below its 100-byte limit so a running user app is untouched.
+if ([Text.Encoding]::UTF8.GetByteCount((Join-Path $lockDirectory 'mygo--1-000000000000.sock')) -ge 100) { throw 'Temporary path is too long for an isolated native smoke socket' }
+New-Item -ItemType Directory -Force $lockDirectory | Out-Null
 $original = @{}
-foreach ($key in @('USERPROFILE','HOME','APPDATA','LOCALAPPDATA','PATH','MINICODE_RESOURCES','MINICODE_AGENT')) {
+foreach ($key in @('USERPROFILE','HOME','APPDATA','LOCALAPPDATA','PATH','MINICODE_RESOURCES','MINICODE_AGENT','XDG_RUNTIME_DIR')) {
     $original[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
 }
 function Run([string]$Program,[string[]]$Arguments) {
@@ -17,6 +22,7 @@ function Run([string]$Program,[string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$Program failed ($LASTEXITCODE)" }
 }
 try {
+    $env:XDG_RUNTIME_DIR = $lockDirectory
     $env:USERPROFILE = $scratch
     $env:HOME = $scratch
     $env:APPDATA = Join-Path $scratch 'AppData/Roaming'
@@ -55,4 +61,5 @@ try {
     } finally { Pop-Location }
 } finally {
     foreach ($key in $original.Keys) { [Environment]::SetEnvironmentVariable($key, $original[$key], 'Process') }
+    if (-not @(Get-ChildItem -LiteralPath $lockDirectory -Force).Count) { Remove-Item -LiteralPath $lockDirectory }
 }
