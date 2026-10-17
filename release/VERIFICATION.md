@@ -10,7 +10,7 @@
 
 在实际用户安装目录先安装 2.0.3，再以 3.0.0 覆盖升级；原有 33 个会话、数据库各表、配置、指令及界面偏好内容哈希不变。原库记忆为空，另用 2.0.3 写入非空记忆和会话，3.0.0 打开后记忆及消息／事件内容完全一致。已备份原用户数据；安装后的运行版本及关于页 3.0.0 / MyGo 0.5.5 已核对。
 
-本地安装器 58,278,621 B，SHA256：`6661b69485c609124bf431c9330f9498925b5f9eadb2f46509ddc3c3e823edd8`。公开资产和标签 CI 结果将在发布后补记。
+本地安装器 58,278,621 B，SHA256：`6661b69485c609124bf431c9330f9498925b5f9eadb2f46509ddc3c3e823edd8`。公开 [v3.0.0](https://github.com/oysterhyd/minicode/releases/tag/v3.0.0) 的七个资产已匿名实际下载，逐项大小和 SHA256 与 GitHub 摘要相符，SHA256SUMS 匹配；完整归档及三个差分包通过原 Ed25519 公钥验签，匿名 latest 清单字节一致并指向 3.0.0。[发布 main CI](https://github.com/oysterhyd/minicode/actions/runs/39024031525)、[标签 CI](https://github.com/oysterhyd/minicode/actions/runs/39024031497) 各五项及[完整 Windows 发行构建](https://github.com/oysterhyd/minicode/actions/runs/39024031484)全部通过。公开安装器再次实际安装，运行、会话／记忆保留及关于页通过；安装器 58,277,114 B，SHA256：`22c6689a893ee8ab020c74cc58c8ebce05531022d4cf9e7c535efb74b4a6c49e`。
 
 # v2.0.3 代码审查核验
 
