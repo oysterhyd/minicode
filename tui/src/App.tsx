@@ -547,9 +547,11 @@ export function App({ client, options, version = '1.1.0' }: AppProps) {
         setApprovalChoice(next)
       }
       const letter = input.toLowerCase()
-      if (letter === 'y' || input === '1') { void decide(true); return }
-      if (letter === 'a' || input === '2') { void decide(true, true); return }
-      if (letter === 'n' || input === '3') { void decide(false); return }
+      if (!key.ctrl && !key.meta) {
+        if (letter === 'y' || input === '1') { void decide(true); return }
+        if (letter === 'a' || input === '2') { void decide(true, true); return }
+        if (letter === 'n' || input === '3') { void decide(false); return }
+      }
       if (key.upArrow) { choose((choice + 2) % 3); return }
       if (key.downArrow || (key.tab && !key.shift)) { choose((choice + 1) % 3); return }
       if (key.return) { void decide(choice !== 2, choice === 1); return }

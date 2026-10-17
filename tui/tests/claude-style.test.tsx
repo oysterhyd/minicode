@@ -5,6 +5,7 @@ import { render } from 'ink-testing-library'
 import stripAnsi from 'strip-ansi'
 import { App } from '../src/App.js'
 import { diffPairs, parseToolDiff, previewDiff, wordDiff } from '../src/tools.js'
+import { displayWidth } from '../src/format.js'
 import { delay, FakeBridge } from './fake-bridge.js'
 
 const DIFF = `Applied change to src/App.tsx (+2 -1)
@@ -90,6 +91,32 @@ test('shift+tab cycles permission modes and the footer shows the mode', async ()
   }
 })
 
+test('approval letter shortcuts ignore control and alt chords', async () => {
+  const { client, ui } = await mount()
+  try {
+    ui.stdin.write('run tests')
+    ui.stdin.write('\r')
+    await delay(40)
+    client.emit({
+      event: 'approval', sessionId: 'sess-1', approvalId: 'a1',
+      request: { tool_name: 'bash', arguments: { command: 'npm test' }, summary: '运行测试' },
+    })
+    await delay(40)
+    for (const chord of ['\x01', '\x19', '\x0e', '\x1ba', '\x1by', '\x1bn']) {
+      ui.stdin.write(chord)
+      await delay(20)
+    }
+    assert.equal(client.requests.filter(item => item.method === 'resolveApproval').length, 0)
+    assert.match(stripAnsi(ui.lastFrame() || ''), /是否继续？/)
+    ui.stdin.write('a')
+    await delay(30)
+    const resolved = client.requests.find(item => item.method === 'resolveApproval')
+    assert.deepEqual(resolved?.params, { approvalId: 'a1', granted: true, sessionId: 'sess-1', remember: 'session' })
+  } finally {
+    ui.unmount()
+  }
+})
+
 test('? on an empty prompt toggles the shortcut panel without typing', async () => {
   const { ui } = await mount()
   try {
@@ -105,3 +132,48 @@ test('? on an empty prompt toggles the shortcut panel without typing', async () 
     ui.unmount()
   }
 })
+
+for (const columns of [40, 120]) {
+  test(`welcome, shortcuts and edit approval fit a ${columns}-column terminal`, async () => {
+    const { client, ui } = await mount()
+    try {
+      Object.defineProperty(ui.stdout, 'columns', { value: columns, writable: true, configurable: true })
+      Object.defineProperty(ui.stdout, 'rows', { value: 24, writable: true, configurable: true })
+      ui.stdout.emit('resize')
+      await delay(40)
+      const checkFrame = (expected: RegExp) => {
+        const frame = stripAnsi(ui.lastFrame() || '')
+        const rows = frame.split('\n')
+        assert.equal(rows.length, 24)
+        assert.ok(rows.every(row => displayWidth(row) <= columns), frame)
+        assert.match(frame, expected)
+      }
+      checkFrame(/欢迎/)
+      ui.stdin.write('?')
+      await delay(30)
+      checkFrame(/pgup\/pgdn 翻阅历史/)
+      ui.stdin.write('?')
+      ui.stdin.write('edit file')
+      ui.stdin.write('\r')
+      await delay(40)
+      client.emit({
+        event: 'approval', sessionId: 'sess-1', approvalId: 'edit-1',
+        request: {
+          tool_name: 'edit', summary: 'edit: src/App.tsx',
+          arguments: { path: 'src/App.tsx', old_text: 'a\nb\nc\nd\ne\nf\ng', new_text: 'a\nB\nC\nD\nE\nF\ng' },
+        },
+      })
+      await delay(40)
+      checkFrame(/3\. 否/)
+      ui.stdin.write('\x1b[A')
+      await delay(20)
+      checkFrame(/❯ 3\. 否/)
+      ui.stdin.write('\r')
+      await delay(30)
+      assert.deepEqual(client.requests.find(item => item.method === 'resolveApproval')?.params,
+        { approvalId: 'edit-1', granted: false, sessionId: 'sess-1' })
+    } finally {
+      ui.unmount()
+    }
+  })
+}

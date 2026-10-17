@@ -159,14 +159,18 @@ func pulse(c *ui.Context, w, h, radius float32, color ui.Color, period time.Dura
 // ring draws a thin arc turning around a faint track, the spinner of a
 // running step, in frames that only paint.
 func ring(c *ui.Context, size float32, color ui.Color) ui.Element {
+	still := reduceMotion(c)
 	return ui.Box(c).Size(size, size).Shrink(0).Draw(func(painter *ui.Painter, r ui.Rect) {
-		painter.AnimationFrame()
+		start := 0.0
+		if !still {
+			painter.AnimationFrame()
+			start = float64(painter.Now().UnixMilli()%900) / 900 * 2 * math.Pi
+		}
 		cx, cy := r.X+r.W/2, r.Y+r.H/2
 		radius := min(r.W, r.H)/2 - 1.2
 		var track ui.Path
 		track.Circle(cx, cy, radius)
 		painter.StrokePath(&track, 1.6, color.Alpha(0.22))
-		start := float64(painter.Now().UnixMilli()%900) / 900 * 2 * math.Pi
 		var arc ui.Path
 		for i := 0; i <= 24; i++ {
 			a := start + math.Pi*0.6*float64(i)/24
