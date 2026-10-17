@@ -21,7 +21,11 @@ import (
 // GtkDrawingArea whose accessible, a subclass of GtkWidgetAccessible, has
 // the nodes of the content's tree below it: ATK objects of types
 // registered here, which answer from the last tree and turn what assistive
-// technology does into AccessAction events.
+// technology does into AccessAction events. The page of a web view is
+// inside the node standing for it: the node's child is the web view's
+// accessible, an AtkSocket the web process's tree is embedded in, which
+// the overlay holding the web views and the surface (a subclass) does not
+// list beside the content.
 //
 // Registering types writes functions into ATK's class and interface
 // structures at offsets of its headers. The class's size is checked
@@ -35,6 +39,7 @@ var (
 	// The types: the drawing area, its accessible, and the nodes', by
 	// the interfaces they implement.
 	areaType, glAreaType, rootType, nodeType, rangeType, textType, editableType, selectionType uintptr
+	overlayType, overlayAccessType                                                             uintptr
 
 	gTypeRegisterStaticSimple func(parent uintptr, name *byte, classSize uint32, classInit ptr, instanceSize uint32, instanceInit ptr, flags uint32) uintptr
 	gTypeAddInterfaceStatic   func(instanceType, ifaceType uintptr, info *gInterfaceInfo)
@@ -63,6 +68,9 @@ var (
 	gtkWidgetClassSetAccessibleRole func(class ptr, role int32)
 	gtkAccessibleGetWidget          func(accessible ptr) ptr
 	gtkWidgetGetAccessible          func(widget ptr) ptr
+	gtkOverlayGetType               func() uintptr
+	gtkContainerAccessibleGetType   func() uintptr
+	atkSocketGetType                func() uintptr
 
 	atkGetMajorVersion, atkGetMinorVersion                  func() uint32
 	atkObjectGetType, atkComponentGetType, atkActionGetType func() uintptr
@@ -80,7 +88,10 @@ var (
 
 	cbAreaClassInit, cbRootClassInit, cbNodeClassInit, cbRootComponent     ptr
 	cbComponentInit, cbActionInit, cbValueInit, cbTextInit, cbEditableInit ptr
-	cbSelectionInit                                                        ptr
+	cbSelectionInit, cbOverlayClassInit, cbOverlayAccessClassInit          ptr
+
+	// rootParentIndex is GtkWidgetAccessible's get_index_in_parent.
+	rootParentIndex ptr
 
 	atkRoles  = map[platform.AccessRole]int32{}
 	atkRole   struct{ panel, text, password, listBox int32 }
@@ -231,6 +242,45 @@ func registerAccess() {
 	if bind(t, &gtkGLAreaGetType, "gtk_gl_area_get_type") {
 		glAreaType = register(gtkGLAreaGetType(), "MyGoSurfaceGLArea", cbAreaClassInit)
 	}
+	// The overlay holding web views lists the surface alone, whose nodes
+	// hold the pages.
+	if bind(t, &gtkOverlayGetType, "gtk_overlay_get_type") && bind(t, &gtkContainerAccessibleGetType, "gtk_container_accessible_get_type") &&
+		bind(a, &atkSocketGetType, "atk_socket_get_type") {
+		if overlayAccessType = register(gtkContainerAccessibleGetType(), "MyGoSurfaceOverlayAccessible", cbOverlayAccessClassInit); overlayAccessType != 0 {
+			overlayType = register(gtkOverlayGetType(), "MyGoSurfaceOverlay", cbOverlayClassInit)
+		}
+	}
+}
+
+// newOverlay creates the overlay putting a surface's area over its web
+// views.
+func newOverlay() ptr {
+	if overlayType != 0 {
+		return gObjectNew(overlayType, 0)
+	}
+	return gtkOverlayNew()
+}
+
+// layersOf returns the surface whose web views the overlay holds.
+func layersOf(overlay ptr) *surface {
+	for _, s := range surfaceAreas {
+		if s.layers == overlay && overlay != 0 {
+			return s
+		}
+	}
+	return nil
+}
+
+// pageAccessible returns the accessible of a web view, the AtkSocket its
+// page's tree is embedded in, or 0.
+func (w *window) pageAccessible() ptr {
+	if atkSocketGetType == nil || w.web == 0 {
+		return 0
+	}
+	if acc := gtkWidgetGetAccessible(w.web); acc != 0 && gTypeCheckInstanceIsA(acc, atkSocketGetType()) {
+		return acc
+	}
+	return 0
 }
 
 // loadAccessNames finds ATK's roles and states by name, which, unlike
@@ -303,6 +353,9 @@ type accessNode struct {
 	// chosen are the rows a list choosing its rows chose, among those
 	// built.
 	chosen []uint64
+	// page is the accessible of the web view's page the node stands for,
+	// its only child.
+	page ptr
 }
 
 // chooses reports whether a node is the row of a list, a table or an
@@ -357,6 +410,7 @@ func (s *surface) destroyAccess() {
 	}
 	delete(surfaceTrees, s)
 	delete(accessTrees, t.root)
+	t.graft(nil)
 	for _, an := range t.nodes {
 		an.release()
 	}
@@ -494,6 +548,7 @@ func (t *accessTree) update(tree *platform.AccessTree) {
 			}
 		}
 	}
+	t.graft(list)
 	for _, an := range old {
 		an.release()
 	}
@@ -774,9 +829,38 @@ func initAccessCallbacks() {
 		}
 		return 0
 	})
+	// In the overlay holding web views, the surface is its only child.
+	rootIndex := purego.NewCallback(func(root ptr) int32 {
+		if s := surfaceAreas[gtkAccessibleGetWidget(root)]; s != nil && s.layers != 0 && overlayType != 0 {
+			return 0
+		}
+		r, _, _ := purego.SyscallN(rootParentIndex, root)
+		return int32(r)
+	})
 	cbRootClassInit = purego.NewCallback(func(class, data ptr) {
 		*slot(class, atkGetNChildren) = rootChildren
 		*slot(class, atkRefChild) = rootChild
+		rootParentIndex = *slot(class, atkGetIndexInParent)
+		*slot(class, atkGetIndexInParent) = rootIndex
+	})
+	overlayChildren := purego.NewCallback(func(obj ptr) int32 {
+		if layersOf(gtkAccessibleGetWidget(obj)) != nil {
+			return 1
+		}
+		return 0
+	})
+	overlayChild := purego.NewCallback(func(obj ptr, i int32) ptr {
+		if s := layersOf(gtkAccessibleGetWidget(obj)); s != nil && i == 0 {
+			return gObjectRef(gtkWidgetGetAccessible(s.area))
+		}
+		return 0
+	})
+	cbOverlayAccessClassInit = purego.NewCallback(func(class, data ptr) {
+		*slot(class, atkGetNChildren) = overlayChildren
+		*slot(class, atkRefChild) = overlayChild
+	})
+	cbOverlayClassInit = purego.NewCallback(func(class, data ptr) {
+		gtkWidgetClassSetAccessibleType(class, overlayAccessType)
 	})
 	rootAt := purego.NewCallback(func(root ptr, x, y, coords int32) ptr {
 		if t := rootTree(root); t != nil {
@@ -789,12 +873,17 @@ func initAccessCallbacks() {
 	})
 
 	children := purego.NewCallback(func(obj ptr) int32 {
-		if an := node(obj); an != nil {
+		if an := node(obj); an != nil && an.page != 0 {
+			return 1
+		} else if an != nil {
 			return int32(len(an.children))
 		}
 		return 0
 	})
 	child := purego.NewCallback(func(obj ptr, i int32) ptr {
+		if an := node(obj); an != nil && an.page != 0 && i == 0 {
+			return gObjectRef(an.page)
+		}
 		if an := node(obj); an != nil && i >= 0 && int(i) < len(an.children) {
 			return gObjectRef(an.children[i].obj)
 		}
@@ -870,6 +959,9 @@ func initAccessCallbacks() {
 		return an != nil && an.contains(x, y, coords)
 	})
 	nodeAt := purego.NewCallback(func(obj ptr, x, y, coords int32) ptr {
+		if an := node(obj); an != nil && an.page != 0 {
+			return gObjectRef(an.page)
+		}
 		if an := node(obj); an != nil {
 			return at(an.children, x, y, coords)
 		}
@@ -1084,12 +1176,30 @@ func initAccessCallbacks() {
 	textAtOffset := purego.NewCallback(func(obj ptr, offset, boundary int32, start, end ptr) ptr {
 		return stringAt(obj, offset, int([]int32{0, 1, 1, 3, 3, 3, 3}[max(0, min(boundary, 6))]), start, end)
 	})
+	// The formats of a rich text's runs, in ATK's text attributes, which
+	// Orca reads as bold, italic, underlined.
+	runAttributes := purego.NewCallback(func(obj ptr, offset int32, start, end ptr) ptr {
+		an := node(obj)
+		if an == nil {
+			setInt(start, 0)
+			setInt(end, 0)
+			return 0
+		}
+		run, a, z := textRunAt(an.n.TextRuns, int(offset), len(an.text()))
+		setInt(start, a)
+		setInt(end, z)
+		return textAttributeSet(run)
+	})
+	defaultAttributes := purego.NewCallback(func(obj ptr) ptr {
+		return textAttributeSet(platform.AccessTextRun{})
+	})
 	cbTextInit = purego.NewCallback(func(iface, data ptr) {
 		// get_text, get_text_at_offset, get_character_at_offset,
-		// get_caret_offset, get_character_count, get_n_selections,
-		// get_selection and get_string_at_offset.
-		setIface(iface, map[int]ptr{0: getText, 2: textAtOffset, 3: charAt, 5: caret, 9: count, 11: selections,
-			12: selection, 23: stringAtOffset})
+		// get_caret_offset, get_run_attributes, get_default_attributes,
+		// get_character_count, get_n_selections, get_selection and
+		// get_string_at_offset.
+		setIface(iface, map[int]ptr{0: getText, 2: textAtOffset, 3: charAt, 5: caret, 6: runAttributes, 7: defaultAttributes,
+			9: count, 11: selections, 12: selection, 23: stringAtOffset})
 	})
 
 	// The rows a list chooses, which choosing a row as a click does
@@ -1168,4 +1278,92 @@ func initAccessCallbacks() {
 		// set_text_contents, insert_text and delete_text.
 		setIface(iface, map[int]ptr{1: setContents, 2: insert, 5: remove})
 	})
+}
+
+// graft puts the pages of the surface's web views in the nodes of list
+// standing for them, and takes those of the others out.
+func (t *accessTree) graft(list []*accessNode) {
+	grafted := map[*window]bool{}
+	for _, an := range list {
+		an.page = 0
+		v, ok := an.n.WebView.(*window)
+		if !ok || grafted[v] || v.closed || v.host == nil || v.host.surface != t.s {
+			continue
+		}
+		if acc := v.pageAccessible(); acc != 0 {
+			grafted[v], an.page = true, acc
+			if v.accessParent != an.obj {
+				v.accessParent = an.obj
+				atkObjectSetParent(acc, an.obj)
+			}
+		}
+	}
+	for _, v := range t.s.w.webViews {
+		if !grafted[v] && v.accessParent != 0 {
+			v.accessParent = 0
+			if acc := v.pageAccessible(); acc != 0 {
+				atkObjectSetParent(acc, 0)
+			}
+		}
+	}
+}
+
+// textRunAt returns the run of runs holding rune i of a text of n runes,
+// and where it starts and ends: between runs, a run without formats
+// over the runes between them.
+func textRunAt(runs []platform.AccessTextRun, i, n int) (platform.AccessTextRun, int, int) {
+	start := 0
+	for _, r := range runs {
+		switch {
+		case i < r.Start:
+			return platform.AccessTextRun{}, start, r.Start
+		case i < r.End:
+			return r, r.Start, r.End
+		}
+		start = r.End
+	}
+	return platform.AccessTextRun{}, min(start, n), n
+}
+
+// textAttributeSet returns the formats of a run as an AtkAttributeSet,
+// which ATK frees.
+func textAttributeSet(r platform.AccessTextRun) ptr {
+	var list ptr
+	add := func(name, value string) {
+		attr := gMalloc0(16) // AtkAttribute: name, value
+		*slot(attr, 0), *slot(attr, 8) = cString(name), cString(value)
+		list = gSlistAppend(list, attr)
+	}
+	if r.Family != "" {
+		add("family-name", r.Family)
+	}
+	if r.Size > 0 {
+		add("size", strconv.FormatFloat(float64(r.Size)*0.75, 'g', 4, 32)) // points
+	}
+	weight := r.Weight
+	if weight <= 0 {
+		weight = 400
+	}
+	add("weight", strconv.Itoa(weight))
+	if r.Italic {
+		add("style", "italic")
+	} else {
+		add("style", "normal")
+	}
+	if r.Underline {
+		add("underline", "single")
+	} else {
+		add("underline", "none")
+	}
+	add("strikethrough", strconv.FormatBool(r.Strikethrough))
+	color := func(c [4]uint8) string {
+		return strconv.Itoa(int(c[0])*257) + "," + strconv.Itoa(int(c[1])*257) + "," + strconv.Itoa(int(c[2])*257)
+	}
+	if r.Color[3] > 0 {
+		add("fg-color", color(r.Color))
+	}
+	if r.Background[3] > 0 {
+		add("bg-color", color(r.Background))
+	}
+	return list
 }

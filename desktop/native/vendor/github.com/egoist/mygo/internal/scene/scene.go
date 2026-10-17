@@ -72,14 +72,19 @@ const (
 	// Radii are the shadow's box, already offset and spread, Blur its blur
 	// radius and Color its color. Unless Cast is empty, the shadow shows
 	// only outside it, the box casting the shadow, as CSS's box-shadow
-	// does.
+	// does. An Inset shadow shows only inside Cast instead, where Rect,
+	// the hole it leaves, blurred, does not cover it, as CSS's box-shadow:
+	// inset does; Rect may then be empty, which leaves no hole.
 	OpShadow
 	// OpGlyphs paints Scene.Glyphs[Start:End]. With a gradient Paint, its
 	// mask glyphs take the gradient from Color to Color2, times Opacity,
 	// instead of their own colors.
 	OpGlyphs
 	// OpImage paints Src of Image into Rect, clipped to Radii, with
-	// Opacity, in shades of gray if Grayscale.
+	// Opacity, in shades of gray if Grayscale, tinted by Color unless it
+	// is zero (its pixels times its straight color and alpha). A negative
+	// Src.W or Src.H flips the image along that axis, Src.X or Src.Y then
+	// being its right or bottom edge; nothing outside Src shows.
 	OpImage
 	// OpPushClip clips the following ops to Rect with Radii, intersected
 	// with the clip in effect, until the matching OpPopClip.
@@ -88,14 +93,25 @@ const (
 	OpPopClip
 	// OpEffect paints the rounded rectangle Rect with Radii with an effect,
 	// Scene.Effects[Start]: shaders of a package outside the renderers (see
-	// Effect), with Opacity.
+	// Effect), with Opacity; or, for a shader's effect, mask glyphs, which
+	// Rect then holds (EffectOp.Glyphs).
 	OpEffect
+	// OpHole makes the rounded rectangle Rect with Radii transparent,
+	// within the clip: what the ops before it painted there is gone, and
+	// what the window shows under the frame, as a web view, shows through.
+	// The ops after it paint over it as over any transparent pixels. Below
+	// full Opacity, what the ops before it painted fades by Opacity
+	// instead, so what shows through blends over it.
+	OpHole
 )
 
 // Op is one drawing operation. Which fields matter depends on Kind.
 type Op struct {
 	Kind Kind
 	Rect Rect
+	// Transform maps this operation's geometry to frame pixels. Clips
+	// retain the transform with which they were pushed.
+	Transform Affine
 	// Radii are the corner radii: top-left, top-right, bottom-right and
 	// bottom-left.
 	Radii [4]float32
@@ -125,17 +141,34 @@ type Op struct {
 	Border      [4]float32
 	BorderColor Color
 	Dashed      bool
+	// BorderPaint paints an OpFill's border with Paint, its gradient of
+	// stops (Paint.HasStops), times BorderColor (opaque white for the
+	// gradient as it is), and its inside with plain Color.
+	BorderPaint bool
 
+	// Inset makes an OpShadow an inner shadow.
+	Inset bool
+	// Blur is an OpShadow's blur, and an OpImage's: the standard deviation
+	// of a Gaussian blur of the image's Src, in its pixels, before it is
+	// drawn, transparent beyond Src, as CSS's filter: blur() is. Large
+	// blurs are computed at a fraction of the size, as backdrops' are
+	// (BackdropOf).
 	Blur float32
 	// Cast is the box casting an OpShadow, with CastRadii.
 	Cast      Rect
 	CastRadii [4]float32
 
 	Start, End int32
+	// Stops are a gradient's colors with stops (PaintLinearStops and the
+	// others), Scene.Stops[Stops[0]:Stops[1]].
+	Stops [2]int32
 
 	Image     *Image
 	Src       Rect
 	Grayscale bool
+	// Pixelated samples an OpImage's nearest pixel, as pixel art draws,
+	// where it would interpolate between pixels.
+	Pixelated bool
 	// Opacity multiplies the op's colors; 0 means 1.
 	Opacity float32
 }
@@ -156,7 +189,34 @@ const (
 	// unit vector across the stripes, their width and their period, from
 	// the top-left corner of Rect.
 	PaintStripes
+	// PaintLinearStops is a linear gradient of the op's Stops, from
+	// (Gradient[0], Gradient[1]) at 0 to (Gradient[2], Gradient[3]) at 1,
+	// mixed in sRGB; PaintLinearStopsOklab mixes them in Oklab.
+	PaintLinearStops
+	PaintLinearStopsOklab
+	// PaintConic is a conic gradient of the op's Stops around
+	// (Gradient[0], Gradient[1]), from 0 at the angle Gradient[2], in
+	// radians clockwise from upwards, to 1 a turn later, mixed in sRGB, as
+	// CSS's conic-gradient() is; PaintConicOklab mixes them in Oklab.
+	PaintConic
+	PaintConicOklab
 )
+
+// Stop is a color of a gradient with stops (Op.Stops), at a place along
+// it from 0 to 1. A gradient shows its first color before its first stop
+// and its last after its last, and mixes premultiplied colors between, as
+// CSS does; stops in order, at most MaxStops of them.
+type Stop struct {
+	Color Color
+	At    float32
+}
+
+// MaxStops is how many stops a gradient has at most, which the shaders
+// loop through.
+const MaxStops = 32
+
+// HasStops reports whether paint takes its colors from the op's Stops.
+func (p Paint) HasStops() bool { return p >= PaintLinearStops && p <= PaintConicOklab }
 
 // Uniform returns the widths of a border as wide on every side.
 func Uniform(w float32) [4]float32 { return [4]float32{w, w, w, w} }
@@ -181,6 +241,8 @@ func InnerRadii(r Rect, radii, w [4]float32) (Rect, [4]float32) {
 
 // Glyph is a glyph mask or color glyph copied from an atlas into a frame.
 type Glyph struct {
+	// Transform is applied before its Op's transform, for inline text.
+	Transform Affine
 	// X, Y, W and H place the glyph's bitmap, in device pixels.
 	X, Y, W, H float32
 	// U, V, UW and VH are the bitmap's rectangle in its atlas.
@@ -276,8 +338,14 @@ type Scene struct {
 	Clear  Color
 	Ops    []Op
 	Glyphs []Glyph
+	// Stops holds the stops of gradients (Op.Stops).
+	Stops []Stop
 	// Effects holds the effects of OpEffect operations.
 	Effects []EffectOp
+	// Words holds the words of the effects' uniforms (EffectOp.Uniforms
+	// and WideUniforms), which the frame's painter allocates from
+	// (Painter.EffectWords), kept from frame to frame.
+	Words []uint32
 	// Wide holds the colors outside the sRGB gamut of ops and glyphs (see
 	// Op.Wide), and those of the parameters of effects, which no op points
 	// at. Without any, the scene draws the same on every renderer.
@@ -288,15 +356,63 @@ type Scene struct {
 	// premultiplied RGBA bitmaps such as emoji, and the coverage of
 	// subpixel glyphs.
 	MaskAtlas, ColorAtlas *Atlas
+	// Canvases are the canvases (NewCanvas) drawn anew for this frame,
+	// which renderers draw before it, whether it shows them or not, while
+	// the atlases their glyphs point at hold them.
+	Canvases []*Image
+}
+
+// EachCanvas calls fn with the canvases the scene draws anew or shows,
+// each once, those a canvas shows before it.
+func (s *Scene) EachCanvas(fn func(*Image)) {
+	seen := map[*Image]bool{}
+	var visit func(c *Image)
+	visit = func(c *Image) {
+		if c == nil || c.Scene == nil || seen[c] {
+			return
+		}
+		seen[c] = true
+		c.Scene.eachShown(visit)
+		fn(c)
+	}
+	for _, c := range s.Canvases {
+		visit(c)
+	}
+	s.eachShown(visit)
+}
+
+// eachShown calls fn with the canvases the scene's images show, and its
+// shaders read.
+func (s *Scene) eachShown(fn func(*Image)) {
+	for i := range s.Ops {
+		if op := &s.Ops[i]; op.Kind == OpImage && op.Image != nil && op.Image.Scene != nil {
+			fn(op.Image)
+		}
+	}
+	for i := range s.Effects {
+		for _, img := range s.Effects[i].Images {
+			if img != nil && img.Scene != nil {
+				fn(img)
+			}
+		}
+	}
 }
 
 // Reset empties the scene for another frame, keeping its storage.
-func (s *Scene) Reset(width, height int, clear Color) {
-	s.Width, s.Height, s.Clear = width, height, clear
+func (s *Scene) Reset(width, height int, color Color) {
+	s.Width, s.Height, s.Clear = width, height, color
+	// Ops and effects can keep images and effect resources alive beyond
+	// the end of the shorter list the next frame paints.
+	clear(s.Ops)
 	s.Ops = s.Ops[:0]
 	s.Glyphs = s.Glyphs[:0]
+	s.Stops = s.Stops[:0]
+	clear(s.Effects)
 	s.Effects = s.Effects[:0]
 	s.Wide = s.Wide[:0]
+	s.Words = s.Words[:0]
+	clear(s.Canvases)
+	s.Canvases = s.Canvases[:0]
 }
 
 var lastImageID atomic.Uint64
@@ -310,6 +426,18 @@ type Image struct {
 	// 4*W bytes.
 	W, H int
 	Pix  []byte
+	// Scene, in a canvas (NewCanvas), is what the image shows: renderers
+	// draw it into the image's texture whenever the version changes,
+	// rather than upload Pix, which the CPU renderer draws it into, and
+	// PixVersion is the version Pix holds.
+	Scene      *Scene
+	PixVersion uint64
+}
+
+// NewCanvas returns a w×h image that renderers draw from a scene of its
+// own, cleared to transparent: render to texture.
+func NewCanvas(w, h int) *Image {
+	return &Image{id: lastImageID.Add(1), version: 1, W: w, H: h, Scene: &Scene{Width: w, Height: h, Scale: 1}}
 }
 
 // NewImage converts img to a premultiplied RGBA bitmap.
@@ -336,6 +464,19 @@ func (m *Image) Version() uint64 { return m.version }
 
 // Changed records that Pix was modified.
 func (m *Image) Changed() { m.version++ }
+
+// Resize keeps the image's texture-cache identity while changing its size.
+// Renderers replace the backing texture on a size change, so an animated
+// clip does not leave a new texture in the cache on every frame.
+func (m *Image) Resize(w, h int) {
+	m.W, m.H = w, h
+	if cap(m.Pix) >= 4*w*h {
+		m.Pix = m.Pix[:4*w*h]
+	} else {
+		m.Pix = make([]byte, 4*w*h)
+	}
+	m.Changed()
+}
 
 // FitRadii scales corner radii down so that adjacent ones fit along each
 // side of r, as CSS does; renderers apply it before drawing.
