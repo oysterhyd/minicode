@@ -23,14 +23,20 @@ const (
 	styleResizable           = 1 << 3
 	styleFullScreen          = 1 << 14
 	styleFullSizeContentView = 1 << 15
+	styleNonactivatingPanel  = 1 << 7
 
 	nsBackingStoreBuffered   = 2
 	nsFloatingWindowLevel    = 3
+	nsPopUpMenuWindowLevel   = 101
 	nsNormalWindowLevel      = 0
 	nsViewWidthHeightSizable = 2 | 16
 
-	collectionFullScreenPrimary = 1 << 7
-	collectionFullScreenNone    = 1 << 9
+	collectionCanJoinAllSpaces    = 1 << 0
+	collectionTransient           = 1 << 3
+	collectionIgnoresCycle        = 1 << 6
+	collectionFullScreenPrimary   = 1 << 7
+	collectionFullScreenAuxiliary = 1 << 8
+	collectionFullScreenNone      = 1 << 9
 
 	// NSApplicationPresentationOptions
 	presentationAutoHideMenuBar = 1 << 2
@@ -54,18 +60,41 @@ type window struct {
 	ucc      id
 	effect   id
 	parent   *window
+	// flyout is how a flyout (WindowOptions.Flyout) was placed last, at
+	// flyoutSize.
+	flyout     platform.Flyout
+	flyoutSize platform.Size
+	// popover shows a flyout with the look of AppKit's popovers
+	// (Flyout.Popover), in its window, win while it shows; popoverClosing
+	// tells that the backend closes it, not the user.
+	popover, popoverController id
+	popoverClosing             bool
 
 	lastMouseDown id
 	dropped       []string         // DroppedFiles
 	downloads     map[id][2]string // WKDownload: URL and path
 	attention     int              // the request of FlashFrame
 	maximized     bool
+	// auxiliary tells that SetVisibleOnAllWorkspaces made a window that
+	// cannot go full screen an auxiliary of full-screen Spaces, to undo.
+	auxiliary     bool
 	programmatic  bool
 	closed        bool
 	sheet         bool
 	trafficLights *platform.Point
 	// surface shows the content MyGo draws, in place of the web view.
 	surface *surface
+	// webViews are the web views under the surface (webview.go), and host
+	// the window whose surface a web view is under, in the clip view clip.
+	webViews []*window
+	host     *window
+	clip     id
+	// pointerIn tells that the page of a web view has the pointer, where
+	// nothing the content painted covers it.
+	pointerIn bool
+	// accessParent is the element of the content showing a web view,
+	// which assistive technology finds its page in.
+	accessParent id
 }
 
 func (b *Backend) NewWindow(o *platform.WindowOptions, h platform.WindowHandler) (platform.Window, error) {
@@ -79,8 +108,11 @@ func (b *Backend) NewWindow(o *platform.WindowOptions, h platform.WindowHandler)
 
 func (w *window) create() {
 	o := w.opts
-	b := w.b
 
+	if o.Flyout != nil {
+		w.createFlyout()
+		return
+	}
 	style := uint(styleTitled)
 	if o.Closable {
 		style |= styleClosable
@@ -102,7 +134,15 @@ func (w *window) create() {
 		content = msgRectForRect(class("NSWindow"), sel("contentRectForFrameRect:styleMask:"), size, style)
 		content.Origin = NSPoint{}
 	}
-	w.win = msgInitWindow(send(class("MyGoWindow"), "alloc"), sel("initWithContentRect:styleMask:backing:defer:"),
+	cls := "MyGoWindow"
+	if o.Panel {
+		// The nonactivating style must be there from the start: the window
+		// server only learns that the window never activates its app from
+		// the style it is created with.
+		cls = "MyGoPanel"
+		style |= styleNonactivatingPanel
+	}
+	w.win = msgInitWindow(send(class(cls), "alloc"), sel("initWithContentRect:styleMask:backing:defer:"),
 		content, style, nsBackingStoreBuffered, false)
 	send(w.win, "setReleasedWhenClosed:", 0)
 	w.delegate = alloc("MyGoWindowDelegate")
@@ -132,44 +172,25 @@ func (w *window) create() {
 		w.SetMaximumSize(o.MaxSize)
 	}
 	send(w.win, "setMovable:", boolArg(o.Movable))
+	if !o.Maximizable {
+		w.SetMaximizable(false)
+	}
 	behavior := uint(collectionFullScreenPrimary)
 	if !o.Fullscreenable {
 		behavior = collectionFullScreenNone
+	}
+	if o.Panel {
+		// On the Space the user is on, full-screen ones included, as they
+		// switch, and out of Mission Control and the window cycle.
+		behavior = collectionCanJoinAllSpaces | collectionFullScreenAuxiliary | collectionIgnoresCycle | collectionTransient
+		// A panel stays as the app is deactivated: the app hides it.
+		send(w.win, "setHidesOnDeactivate:", 0)
 	}
 	send(w.win, "setCollectionBehavior:", uintptr(behavior))
 	if o.AlwaysOnTop {
 		send(w.win, "setLevel:", nsFloatingWindowLevel)
 	}
-	send(w.win, "setHasShadow:", boolArg(o.HasShadow))
-	if o.Opacity < 1 {
-		msgSetFloat(w.win, sel("setAlphaValue:"), o.Opacity)
-	}
-	if o.Transparent {
-		send(w.win, "setOpaque:", 0)
-		send(w.win, "setBackgroundColor:", uintptr(send(class("NSColor"), "clearColor")))
-	} else if o.BackgroundColor != nil {
-		send(w.win, "setBackgroundColor:", uintptr(nsColor(*o.BackgroundColor)))
-	}
-
-	if o.Surface {
-		w.createSurface(content)
-	} else {
-		w.createWebView(content)
-	}
-	// WebKit docks the inspector next to the web view, in its superview.
-	// That must not be the window's frame view: AppKit would draw a broken
-	// legacy title bar from then on.
-	w.view = msgInitRect(send(class("NSView"), "alloc"), sel("initWithFrame:"), NSRect{Size: content.Size})
-	if w.surface != nil {
-		send(w.view, "addSubview:", uintptr(w.surface.view))
-		send(w.win, "makeFirstResponder:", uintptr(w.surface.view))
-	} else {
-		send(w.view, "addSubview:", uintptr(w.web))
-	}
-	send(w.win, "setContentView:", uintptr(w.view))
-	if o.Vibrancy != "" {
-		w.SetVibrancy(o.Vibrancy)
-	}
+	w.fillWindow(content)
 
 	if o.Center {
 		send(w.win, "center")
@@ -181,17 +202,129 @@ func (w *window) create() {
 	}
 	if w.trafficLights != nil {
 		w.layoutTrafficLights()
+		// The window's appearance changes with the application's, or when
+		// it is given its own; either lays the title bar out again.
+		send(w.win, "addObserver:forKeyPath:options:context:", uintptr(w.delegate), uintptr(nsString("effectiveAppearance")), 0, 0)
 	}
-
-	b.byDelegate[w.delegate] = w
-	b.byWebView[w.web] = w
-	b.byNSWindow[w.win] = w
+	w.register()
 
 	if o.FullScreen {
 		send(w.win, "toggleFullScreen:", 0)
 	} else if o.Maximized {
 		send(w.win, "zoom:", 0)
 	}
+}
+
+// createFlyout creates the panel of a flyout (WindowOptions.Flyout):
+// borderless and nonactivating, so that it never activates the app,
+// and the key window only when it is focusable, while its parent stays
+// the main window. It is a child window of its parent while it shows.
+func (w *window) createFlyout() {
+	o := w.opts
+	content := NSRect{Size: NSSize{float64(o.Width), float64(o.Height)}}
+	w.flyout = *o.Flyout
+	w.flyoutSize = platform.Size{Width: o.Width, Height: o.Height}
+	if w.flyout.Popover {
+		w.createPopover(content)
+		return
+	}
+	w.win = msgInitWindow(send(class("MyGoFlyout"), "alloc"), sel("initWithContentRect:styleMask:backing:defer:"),
+		content, styleNonactivatingPanel, nsBackingStoreBuffered, false)
+	send(w.win, "setReleasedWhenClosed:", 0)
+	w.delegate = alloc("MyGoWindowDelegate")
+	send(w.win, "setDelegate:", uintptr(w.delegate))
+	send(w.win, "setTitle:", uintptr(nsString(o.Title)))
+	// NSPanel hides when the app is deactivated: a flyout stays with its
+	// parent instead, and one that takes the keyboard closes.
+	send(w.win, "setHidesOnDeactivate:", 0)
+	send(w.win, "setCollectionBehavior:", collectionTransient|collectionIgnoresCycle|collectionFullScreenAuxiliary)
+	if w.flyout.Tray != nil {
+		// Over the windows of other apps, as the menus of the menu bar.
+		send(w.win, "setLevel:", nsPopUpMenuWindowLevel)
+	}
+	w.fillWindow(content)
+	w.register()
+	w.PlaceFlyout(w.flyout, w.flyoutSize)
+}
+
+// fillWindow gives a new window its look and its web view or surface.
+func (w *window) fillWindow(content NSRect) {
+	o := w.opts
+	send(w.win, "setHasShadow:", boolArg(o.HasShadow))
+	if o.Opacity < 1 {
+		msgSetFloat(w.win, sel("setAlphaValue:"), o.Opacity)
+	}
+	if o.Transparent {
+		send(w.win, "setOpaque:", 0)
+		send(w.win, "setBackgroundColor:", uintptr(send(class("NSColor"), "clearColor")))
+	} else if o.BackgroundColor != nil {
+		send(w.win, "setBackgroundColor:", uintptr(nsColor(*o.BackgroundColor)))
+	}
+
+	w.createContent(content)
+	if w.surface != nil {
+		send(w.win, "makeFirstResponder:", uintptr(w.surface.view))
+	}
+	send(w.win, "setContentView:", uintptr(w.view))
+	if o.Vibrancy != "" {
+		w.SetVibrancy(o.Vibrancy)
+	}
+}
+
+// createContent creates the web view or the surface, in w.view.
+func (w *window) createContent(content NSRect) {
+	if w.opts.Surface {
+		w.createSurface(content)
+	} else {
+		w.createWebView(content)
+	}
+	// WebKit docks the inspector next to the web view, in its superview.
+	// That must not be the window's frame view: AppKit would draw a broken
+	// legacy title bar from then on.
+	w.view = msgInitRect(send(class("NSView"), "alloc"), sel("initWithFrame:"), NSRect{Size: content.Size})
+	if w.surface != nil {
+		send(w.view, "addSubview:", uintptr(w.surface.view))
+	} else {
+		send(w.view, "addSubview:", uintptr(w.web))
+	}
+}
+
+// register lets the delegate, the web view and the window find w.
+func (w *window) register() {
+	b := w.b
+	b.byDelegate[w.delegate] = w
+	b.byWebView[w.web] = w
+	if w.win != 0 {
+		b.byNSWindow[w.win] = w
+	}
+}
+
+// PlaceFlyout places a flyout next to its anchor, in the parent's content
+// area, as Flyout.Place resolves it in the visible frame of a screen.
+func (w *window) PlaceFlyout(f platform.Flyout, size platform.Size) {
+	if w.opts.Flyout == nil || w.closed {
+		return
+	}
+	w.flyout, w.flyoutSize = f, size
+	if w.popover != 0 {
+		w.placePopover()
+		return
+	}
+	displays := screen{}.Displays()
+	anchor := f.Anchor
+	if t, ok := f.Tray.(*tray); ok {
+		if anchor = t.Bounds(); anchor.Width == 0 || anchor.Height == 0 {
+			r := platform.Centered(size, platform.PrimaryWorkArea(displays))
+			msgSetRectBool(w.win, sel("setFrame:display:"), rectToMac(r), true)
+			return
+		}
+	} else if p := w.parent; p != nil && !p.closed {
+		c := p.ContentBounds()
+		anchor.X += c.X
+		anchor.Y += c.Y
+	}
+	r, _, _ := f.Place(anchor, size, platform.WorkAreaFor(anchor, displays))
+	msgSetRectBool(w.win, sel("setFrame:display:"), rectToMac(r), true)
 }
 
 func (w *window) createWebView(content NSRect) {
@@ -217,23 +350,7 @@ func (w *window) createWebView(content NSRect) {
 	// the bridge configuration never leak between windows.
 	w.ucc = alloc("WKUserContentController")
 	send(w.ucc, "addScriptMessageHandler:name:", uintptr(w.delegate), uintptr(nsString("mygo")))
-	for _, s := range o.UserScripts {
-		injection := uintptr(0) // WKUserScriptInjectionTimeAtDocumentStart
-		if s.AtDocumentEnd {
-			injection = 1
-		}
-		script := send(send(class("WKUserScript"), "alloc"), "initWithSource:injectionTime:forMainFrameOnly:",
-			uintptr(nsString(s.Source)), injection, boolArg(!s.AllFrames))
-		send(w.ucc, "addUserScript:", uintptr(script))
-		release(script)
-	}
-	if w.hiddenTitleBar() {
-		// After the bridge, which it tells: the room of the traffic lights.
-		script := send(send(class("WKUserScript"), "alloc"), "initWithSource:injectionTime:forMainFrameOnly:",
-			uintptr(nsString(bridge.TitleBarScript(w.TitleBar(), o.Zoom))), 0, 1)
-		send(w.ucc, "addUserScript:", uintptr(script))
-		release(script)
-	}
+	w.addUserScripts(o.Zoom)
 	send(cfg, "setUserContentController:", uintptr(w.ucc))
 
 	w.web = msgInitRectID(send(class("MyGoWebView"), "alloc"), sel("initWithFrame:configuration:"), NSRect{Size: content.Size}, cfg)
@@ -270,17 +387,25 @@ func (w *window) cleanup() {
 	if w.closed {
 		return
 	}
+	w.closeWebViews()
 	w.closed = true
 	b := w.b
 	send(w.web, "removeObserver:forKeyPath:", uintptr(w.delegate), uintptr(nsString("title")))
+	if w.trafficLights != nil {
+		send(w.win, "removeObserver:forKeyPath:", uintptr(w.delegate), uintptr(nsString("effectiveAppearance")))
+	}
 	send(w.ucc, "removeScriptMessageHandlerForName:", uintptr(nsString("mygo")))
 	send(w.ucc, "removeAllUserScripts")
 	send(w.web, "stopLoading")
 	send(w.web, "setNavigationDelegate:", 0)
 	send(w.web, "setUIDelegate:", 0)
-	send(w.win, "setDelegate:", 0)
-	if w.parent != nil && !w.parent.closed {
-		send(w.parent.win, "removeChildWindow:", uintptr(w.win))
+	if w.popover != 0 {
+		w.cleanupPopover()
+	} else {
+		send(w.win, "setDelegate:", 0)
+		if w.parent != nil && !w.parent.closed {
+			send(w.parent.win, "removeChildWindow:", uintptr(w.win))
+		}
 	}
 	delete(b.byDelegate, w.delegate)
 	delete(b.byWebView, w.web)
@@ -303,7 +428,9 @@ func (w *window) cleanup() {
 	release(w.view)
 	// AppKit is still closing the window; let the pool release it.
 	autorelease(w.delegate)
-	autorelease(w.win)
+	if w.popover == 0 {
+		autorelease(w.win)
+	}
 }
 
 func (w *window) Handle() uintptr        { return uintptr(w.win) }
@@ -311,6 +438,27 @@ func (w *window) WebViewHandle() uintptr { return uintptr(w.web) }
 
 func (w *window) SetTitle(title string) {
 	withPool(func() { send(w.win, "setTitle:", uintptr(nsString(title))) })
+	w.layoutTrafficLights()
+}
+
+// SetRepresentedFile shows the file's proxy icon in the title bar, which
+// the user drags, and whose ⌘-click menu lists its folders.
+func (w *window) SetRepresentedFile(path string) {
+	withPool(func() {
+		var url id
+		if path != "" {
+			url = fileURL(path)
+		}
+		send(w.win, "setRepresentedURL:", uintptr(url))
+	})
+	// AppKit lays the title bar's buttons out again.
+	w.layoutTrafficLights()
+}
+
+// SetDocumentEdited shows the dot in the close button, and dims the proxy
+// icon.
+func (w *window) SetDocumentEdited(edited bool) {
+	send(w.win, "setDocumentEdited:", boolArg(edited))
 	w.layoutTrafficLights()
 }
 
@@ -391,6 +539,14 @@ func (w *window) SetAlwaysOnTop(v bool) {
 func (w *window) IsAlwaysOnTop() bool { return sendInt(w.win, "level") != nsNormalWindowLevel }
 
 func (w *window) Show() {
+	if w.popover != 0 {
+		w.showPopover()
+		return
+	}
+	if w.opts.Flyout != nil {
+		w.showFlyout(w.flyout.Focusable)
+		return
+	}
 	if w.parent != nil && w.opts.Modal && !w.sheet {
 		w.sheet = true
 		send(w.parent.win, "beginSheet:completionHandler:", uintptr(w.win), 0)
@@ -400,10 +556,160 @@ func (w *window) Show() {
 	if w.parent != nil && !w.parent.closed {
 		send(w.parent.win, "addChildWindow:ordered:", uintptr(w.win), 1)
 	}
-	send(w.b.app, "activateIgnoringOtherApps:", 1)
+	if !w.opts.Panel {
+		send(w.b.app, "activateIgnoringOtherApps:", 1)
+	}
+}
+
+// showFlyout shows a flyout above its parent, as its child window, and
+// gives it the keyboard when it takes it. Showing it does not activate
+// the app: it shows over a parent the user is using.
+func (w *window) showFlyout(key bool) {
+	if key {
+		w.b.watchOutsideClicks()
+		send(w.win, "makeKeyAndOrderFront:", 0)
+	} else {
+		send(w.win, "orderFront:", 0)
+	}
+	if p := w.parent; p != nil && !p.closed && send(w.win, "parentWindow") == 0 {
+		send(p.win, "addChildWindow:ordered:", uintptr(w.win), 1) // NSWindowAbove
+	}
+}
+
+// hideFlyout hides a flyout. It stops being a child window, which AppKit
+// would order in again with its parent, and gives the keyboard it had
+// back to the parent.
+func (w *window) hideFlyout() {
+	key := sendBool(w.win, "isKeyWindow")
+	if p := w.parent; p != nil && !p.closed {
+		send(p.win, "removeChildWindow:", uintptr(w.win))
+		if key && sendBool(p.win, "isVisible") {
+			send(p.win, "makeKeyWindow")
+		}
+	}
+	send(w.win, "orderOut:", 0)
+}
+
+// outsideClicks is the monitor of clicks outside the app, in other apps or
+// the menu bar, which close focusable flyouts as AppKit's transient
+// popovers close: their panels may take the keyboard without the app
+// being activated, and a click in the menu bar activates no other app, so
+// they would not resign the key window. It is made once, as the first
+// focusable flyout shows.
+var outsideClicks id
+
+func (b *Backend) watchOutsideClicks() {
+	if outsideClicks != 0 {
+		return
+	}
+	const mask = 1<<1 | 1<<3 | 1<<25 // left, right and other mouse down
+	blk := newBlock(func(_ objc.Block, ev id) {
+		var open []*window
+		for _, w := range b.byNSWindow {
+			if w.opts.Flyout != nil && w.popover == 0 && w.flyout.Focusable && !w.closed && sendBool(w.win, "isVisible") {
+				open = append(open, w)
+			}
+		}
+		for _, w := range open {
+			if !w.closed && w.h.ShouldClose() {
+				w.Close()
+			}
+		}
+	})
+	outsideClicks = retain(send(class("NSEvent"), "addGlobalMonitorForEventsMatchingMask:handler:", mask, uintptr(blk)))
+	b.watchAnchorPresses()
+}
+
+// anchorPresses is the monitor of presses in the app that eats a press on
+// the anchor of a focusable flyout, which only closes the flyout, as
+// AppKit's transient popovers eat a press on their positioning rect: the
+// press would make the parent key, which closes the flyout before the
+// release clicks what opened it, which would open it again. The press's
+// drags and release are eaten too. Presses elsewhere go on to what is
+// under the pointer. It is made once, with outsideClicks.
+var anchorPresses id
+
+// eatingPress is the type of the release that ends a press anchorPresses
+// ate, or 0. Main thread only.
+var eatingPress int
+
+func (b *Backend) watchAnchorPresses() {
+	// left, right and other mouse down, up and dragged
+	const mask = 1<<1 | 1<<3 | 1<<25 | 1<<2 | 1<<4 | 1<<26 | 1<<6 | 1<<7 | 1<<27
+	blk := newBlock(func(_ objc.Block, ev id) id {
+		switch typ := sendInt(ev, "type"); typ {
+		case 2, 4, 26: // NSEventTypeLeftMouseUp, RightMouseUp, OtherMouseUp
+			if typ == eatingPress {
+				eatingPress = 0
+				return 0
+			}
+		case 6, 7, 27: // NSEventTypeLeftMouseDragged, RightMouseDragged, OtherMouseDragged
+			if eatingPress != 0 {
+				return 0
+			}
+		default: // a press, which ends any other
+			eatingPress = 0
+			if w := b.flyoutAnchoredAt(ev); w != nil {
+				eatingPress = typ + 1
+				if w.h.ShouldClose() {
+					w.Close()
+				}
+				return 0
+			}
+		}
+		return ev
+	})
+	anchorPresses = retain(send(class("NSEvent"), "addLocalMonitorForEventsMatchingMask:handler:", mask, uintptr(blk)))
+}
+
+// flyoutAnchoredAt returns the focusable flyout that shows in a panel
+// whose anchor is under the press ev in its parent, or nil.
+func (b *Backend) flyoutAnchoredAt(ev id) *window {
+	p := b.byNSWindow[send(ev, "window")]
+	if p == nil || p.closed {
+		return nil
+	}
+	frame := msgRect(p.win, sel("frame"))
+	c := msgRectToRect(p.win, sel("contentRectForFrameRect:"), frame)
+	loc := msgPoint(ev, sel("locationInWindow"))
+	x := loc.X - (c.Origin.X - frame.Origin.X)
+	y := c.Origin.Y - frame.Origin.Y + c.Size.Height - loc.Y
+	for _, w := range b.byNSWindow {
+		if w.parent != p || w.opts.Flyout == nil || w.popover != 0 || !w.flyout.Focusable || w.closed || !sendBool(w.win, "isVisible") {
+			continue
+		}
+		if a := w.flyout.Anchor; x >= float64(a.X) && y >= float64(a.Y) && x < float64(a.X+a.Width) && y < float64(a.Y+a.Height) {
+			return w
+		}
+	}
+	return nil
+}
+
+// dismissFlyout closes a focusable flyout that lost the keyboard, as the
+// user closing it, unless it went to a flyout of its own.
+func (w *window) dismissFlyout() {
+	if w.closed || !w.flyout.Focusable || !sendBool(w.win, "isVisible") {
+		return
+	}
+	for k := w.b.byNSWindow[send(w.b.app, "keyWindow")]; k != nil; k = k.parent {
+		if k == w {
+			return
+		}
+	}
+	if w.h.ShouldClose() {
+		w.Close()
+	}
 }
 
 func (w *window) ShowInactive() {
+	if w.popover != 0 {
+		w.showPopover()
+		return
+	}
+	if w.opts.Flyout != nil {
+		w.showFlyout(false)
+		return
+	}
 	send(w.win, "orderFrontRegardless")
 	if w.parent != nil && !w.parent.closed {
 		send(w.parent.win, "addChildWindow:ordered:", uintptr(w.win), 1)
@@ -411,6 +717,14 @@ func (w *window) ShowInactive() {
 }
 
 func (w *window) Hide() {
+	if w.popover != 0 {
+		w.hidePopover()
+		return
+	}
+	if w.opts.Flyout != nil {
+		w.hideFlyout()
+		return
+	}
 	if w.sheet {
 		w.sheet = false
 		send(w.parent.win, "endSheet:", uintptr(w.win))
@@ -419,15 +733,34 @@ func (w *window) Hide() {
 	send(w.win, "orderOut:", 0)
 }
 
-func (w *window) IsVisible() bool { return sendBool(w.win, "isVisible") }
-
-func (w *window) Focus() {
-	send(w.win, "makeKeyAndOrderFront:", 0)
-	send(w.b.app, "activateIgnoringOtherApps:", 1)
+func (w *window) IsVisible() bool {
+	if w.popover != 0 {
+		return sendBool(w.popover, "isShown")
+	}
+	return sendBool(w.win, "isVisible")
 }
 
-func (w *window) Blur()             { send(w.win, "orderBack:", 0) }
-func (w *window) IsFocused() bool   { return sendBool(w.win, "isKeyWindow") }
+func (w *window) Focus() {
+	if w.host != nil {
+		if !w.closed {
+			send(w.win, "makeFirstResponder:", uintptr(w.web))
+		}
+		return
+	}
+	if w.opts.Flyout != nil {
+		w.Show() // the key window only when it takes the keyboard
+		return
+	}
+	send(w.win, "makeKeyAndOrderFront:", 0)
+	if !w.opts.Panel {
+		send(w.b.app, "activateIgnoringOtherApps:", 1)
+	}
+}
+
+func (w *window) Blur() { send(w.win, "orderBack:", 0) }
+func (w *window) IsFocused() bool {
+	return sendBool(w.win, "isKeyWindow")
+}
 func (w *window) Minimize()         { send(w.win, "miniaturize:", 0) }
 func (w *window) IsMinimized() bool { return sendBool(w.win, "isMiniaturized") }
 
@@ -462,7 +795,12 @@ func (w *window) Center()            { send(w.win, "center") }
 
 func (w *window) SetBackgroundColor(c platform.Color) {
 	withPool(func() {
-		send(w.win, "setBackgroundColor:", uintptr(nsColor(c)))
+		if w.host != nil {
+			// A web view's window is its host's.
+			w.clipBackground(c)
+		} else {
+			send(w.win, "setBackgroundColor:", uintptr(nsColor(c)))
+		}
 		send(w.web, "setValue:forKey:", uintptr(nsBool(false)), uintptr(nsString("drawsBackground")))
 		if respondsTo(w.web, "setUnderPageBackgroundColor:") {
 			send(w.web, "setUnderPageBackgroundColor:", uintptr(nsColor(c)))
@@ -492,8 +830,20 @@ func (w *window) SetVisibleOnAllWorkspaces(v bool) {
 	behavior := uint(sendInt(w.win, "collectionBehavior"))
 	if v {
 		behavior |= canJoinAllSpaces
+		// FullScreenNone (DisableFullScreen) also keeps a window out of
+		// other apps' full-screen Spaces. As an auxiliary, the window shows
+		// there too (an accessory app's: macOS shows no regular app's
+		// windows there), and still cannot go full screen itself.
+		if behavior&collectionFullScreenNone != 0 {
+			behavior = behavior&^collectionFullScreenNone | collectionFullScreenAuxiliary
+			w.auxiliary = true
+		}
 	} else {
 		behavior &^= canJoinAllSpaces
+		if w.auxiliary {
+			behavior = behavior&^collectionFullScreenAuxiliary | collectionFullScreenNone
+			w.auxiliary = false
+		}
 	}
 	send(w.win, "setCollectionBehavior:", uintptr(behavior))
 }
@@ -608,12 +958,23 @@ func (w *window) TitleBarDoubleClicked() {
 }
 
 func (w *window) Close() {
+	if w.host != nil {
+		w.closeWebView()
+		return
+	}
 	if w.closed {
+		return
+	}
+	if w.popover != 0 {
+		w.closePopover()
 		return
 	}
 	if w.sheet {
 		w.sheet = false
 		send(w.parent.win, "endSheet:", uintptr(w.win))
+	}
+	if w.opts.Flyout != nil {
+		w.hideFlyout()
 	}
 	send(w.win, "close")
 }
@@ -649,13 +1010,6 @@ func (w *window) layoutTrafficLights() {
 	for i := uintptr(0); i < 3; i++ {
 		btn := send(w.win, "standardWindowButton:", i)
 		msgSetPoint(btn, sel("setFrameOrigin:"), NSPoint{float64(p.X) + float64(i)*gap, float64(p.Y)})
-	}
-}
-
-// layoutTrafficLights lays out the window buttons of every window.
-func (b *Backend) layoutTrafficLights() {
-	for _, w := range b.byNSWindow {
-		w.layoutTrafficLights()
 	}
 }
 
@@ -706,6 +1060,41 @@ func (w *window) URL() string {
 	var s string
 	withPool(func() { s = goString(send(send(w.web, "URL"), "absoluteString")) })
 	return s
+}
+
+// addUserScripts adds the user scripts of the options to the content
+// controller, and the title bar's after them. Pool required.
+func (w *window) addUserScripts(zoom float64) {
+	add := func(src string, injection uintptr, mainFrameOnly bool) {
+		script := send(send(class("WKUserScript"), "alloc"), "initWithSource:injectionTime:forMainFrameOnly:",
+			uintptr(nsString(src)), injection, boolArg(mainFrameOnly))
+		send(w.ucc, "addUserScript:", uintptr(script))
+		release(script)
+	}
+	for _, s := range w.opts.UserScripts {
+		injection := uintptr(0) // WKUserScriptInjectionTimeAtDocumentStart
+		if s.AtDocumentEnd {
+			injection = 1
+		}
+		add(s.Source, injection, !s.AllFrames)
+	}
+	if w.hiddenTitleBar() {
+		// After the bridge, which it tells: the room of the traffic lights.
+		add(bridge.TitleBarScript(w.TitleBar(), zoom), 0, true)
+	}
+}
+
+// SetUserScripts replaces the user scripts: a content controller can only
+// remove all of its scripts, so they are all added again.
+func (w *window) SetUserScripts(scripts []platform.UserScript) {
+	if w.ucc == 0 || w.closed {
+		return
+	}
+	w.opts.UserScripts = scripts
+	withPool(func() {
+		send(w.ucc, "removeAllUserScripts")
+		w.addUserScripts(w.Zoom())
+	})
 }
 
 func (w *window) Eval(js string) {
@@ -978,14 +1367,59 @@ func (b *Backend) windowFor(delegate id) *window {
 }
 
 func registerWindowClasses() {
+	// WebKit moves the keyboard out of a page past its ends through the
+	// window's key view loop: a web view in native UI gives it back to
+	// the content.
+	selectKeyView := func(class string, back bool) func(id, objc.SEL, id) {
+		return func(self id, cmd objc.SEL, view id) {
+			if w := webViewOf(view); w != nil && w.host != nil {
+				w.tabOut(back)
+				return
+			}
+			sendSuper(self, class, cmd, uintptr(view))
+		}
+	}
 	classDef("MyGoWindow", "NSWindow", nil, []objc.MethodDef{
 		method("canBecomeKeyWindow", func(self id, _ objc.SEL) bool { return true }),
 		method("canBecomeMainWindow", func(self id, _ objc.SEL) bool { return true }),
+		method("selectKeyViewFollowingView:", selectKeyView("MyGoWindow", false)),
+		method("selectKeyViewPrecedingView:", selectKeyView("MyGoWindow", true)),
 	})
 
-	classDef("MyGoWebView", "WKWebView", nil, []objc.MethodDef{
+	// A panel (WindowOptions.Panel) takes the keyboard, without
+	// activating the app, and is never the main window.
+	classDef("MyGoPanel", "NSPanel", nil, []objc.MethodDef{
+		method("canBecomeKeyWindow", func(self id, _ objc.SEL) bool { return true }),
+		method("canBecomeMainWindow", func(self id, _ objc.SEL) bool { return false }),
+		// NSPanel closes on an Escape its content leaves (cancelOperation:),
+		// past windowShouldClose: MyGo closes it then, as the user closing
+		// it, which OnClose listeners may prevent.
+		method("cancelOperation:", func(self id, _ objc.SEL, sender id) {}),
+		method("selectKeyViewFollowingView:", selectKeyView("MyGoPanel", false)),
+		method("selectKeyViewPrecedingView:", selectKeyView("MyGoPanel", true)),
+	})
+
+	// A flyout's panel becomes the key window only when it takes the
+	// keyboard, and never the main window: its parent stays it.
+	classDef("MyGoFlyout", "NSPanel", nil, []objc.MethodDef{
+		method("canBecomeKeyWindow", func(self id, _ objc.SEL) bool {
+			w := theBackend.byNSWindow[self]
+			return w != nil && w.flyout.Focusable
+		}),
+		method("canBecomeMainWindow", func(self id, _ objc.SEL) bool { return false }),
+		method("selectKeyViewFollowingView:", selectKeyView("MyGoFlyout", false)),
+		method("selectKeyViewPrecedingView:", selectKeyView("MyGoFlyout", true)),
+	})
+
+	registerClipViewClass()
+	classDef("MyGoWebView", "WKWebView", nil, append(webViewMethods(), []objc.MethodDef{
 		method("mouseDown:", func(self id, cmd objc.SEL, ev id) {
 			if w := theBackend.byWebView[self]; w != nil {
+				if w.host != nil {
+					w.pressed(ev, 0)
+				}
+				// A web view's page drags the window it is in (StartDrag).
+				w = w.top()
 				release(w.lastMouseDown)
 				w.lastMouseDown = retain(ev)
 			}
@@ -999,12 +1433,12 @@ func registerWindowClasses() {
 			}
 			return byte(sendSuper(self, "MyGoWebView", cmd, uintptr(info))) != 0
 		}),
-	})
+	}...))
 
 	b := func() *Backend { return theBackend }
 	classDef("MyGoWindowDelegate", "NSObject",
-		[]string{"NSWindowDelegate", "WKNavigationDelegate", "WKUIDelegate", "WKScriptMessageHandler", "WKDownloadDelegate"},
-		[]objc.MethodDef{
+		[]string{"NSWindowDelegate", "WKNavigationDelegate", "WKUIDelegate", "WKScriptMessageHandler", "WKDownloadDelegate", "NSPopoverDelegate"},
+		append(popoverDelegateMethods(), []objc.MethodDef{
 			// NSWindowDelegate
 			method("windowShouldClose:", func(self id, _ objc.SEL, sender id) bool {
 				if w := b().windowFor(self); w != nil {
@@ -1040,6 +1474,13 @@ func registerWindowClasses() {
 				if w := b().windowFor(self); w != nil {
 					w.h.Blurred()
 					w.surfaceKeyChanged(false)
+					if w.opts.Flyout != nil && w.popover == 0 {
+						// Once AppKit made another window key, or none,
+						// unless the press on its tray icon toggles it.
+						if t, ok := w.flyout.Tray.(*tray); !ok || !t.pressed() {
+							b().post(w.dismissFlyout)
+						}
+					}
 				}
 			}),
 			method("windowDidResize:", func(self id, _ objc.SEL, n id) {
@@ -1124,10 +1565,19 @@ func registerWindowClasses() {
 				w.h.Message(goString(body))
 			}),
 
-			// Key-value observing of the page title.
+			// Key-value observing of the page title and the window's
+			// appearance.
 			method("observeValueForKeyPath:ofObject:change:context:", func(self id, _ objc.SEL, keyPath, object, change id, ctx uintptr) {
-				if w := b().windowFor(self); w != nil && goString(keyPath) == "title" {
+				w := b().windowFor(self)
+				if w == nil {
+					return
+				}
+				switch goString(keyPath) {
+				case "title":
 					w.h.TitleChanged(goString(send(w.web, "title")))
+				case "effectiveAppearance":
+					// AppKit lays the title bar out again after telling us.
+					b().post(w.layoutTrafficLights)
 				}
 			}),
 
@@ -1142,15 +1592,17 @@ func registerWindowClasses() {
 				if w := b().windowFor(self); w != nil {
 					frame := send(action, "targetFrame")
 					navType := sendInt(action, "navigationType")
+					// WKNavigationType: link, form, back/forward, reload, …
 					nav := platform.Navigation{
 						URL:           goString(send(send(send(action, "request"), "URL"), "absoluteString")),
 						IsMainFrame:   frame != 0 && sendBool(frame, "isMainFrame"),
 						UserInitiated: navType == 0 || navType == 1,
-						IsReload:      navType == 2 || navType == 3,
+						Unasked:       navType == 2 || navType == 3,
+						Reload:        navType == 3,
 					}
 					if nav.IsMainFrame && w.programmatic {
 						w.programmatic = false
-						nav.IsReload = true
+						nav.Unasked = true
 					}
 					allow = w.h.WillNavigate(nav)
 				}
@@ -1300,7 +1752,7 @@ func registerWindowClasses() {
 				w := b().windowFor(self)
 				jsFileInput(w, params, handler)
 			}),
-		})
+		}...))
 }
 
 func (w *window) loadFailed(err id) {
