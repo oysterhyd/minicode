@@ -26,4 +26,6 @@ export function connect(fixture,extraEnv={}){
   async function close(){if(closed)return;closed=true;const exited=new Promise(resolve=>{if(child.exitCode!==null)resolve();else child.once('exit',resolve)});child.stdin.end();await Promise.race([exited,delay(5000)]);if(child.exitCode===null){if(process.platform==='win32')await new Promise(resolve=>spawn('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore',windowsHide:true}).once('exit',resolve));else child.kill('SIGKILL');await exited}}
   const api={child,events,request,run,wait,close,get stderr(){return errors}};fixture.connections?.add(api);return api
 }
-export async function fixture(t,turns=[]){const f=profile(turns),c=connect(f);t.after(async()=>{for(const connection of f.connections)await connection.close();await c.close();if(path.dirname(f.root)!==path.resolve(os.tmpdir()))throw Error('unsafe test cleanup');fs.rmSync(f.root,{recursive:true,force:true})});return {...f,...c}}
+// Windows can briefly retain directory handles after a cancelled job exits.
+// Bound retries to transient cleanup errors; persistent process leaks still fail.
+export async function fixture(t,turns=[]){const f=profile(turns),c=connect(f);t.after(async()=>{for(const connection of f.connections)await connection.close();await c.close();if(path.dirname(f.root)!==path.resolve(os.tmpdir()))throw Error('unsafe test cleanup');fs.rmSync(f.root,{recursive:true,force:true,maxRetries:10,retryDelay:100})});return {...f,...c}}
