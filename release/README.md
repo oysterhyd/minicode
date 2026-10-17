@@ -9,7 +9,7 @@ Windows 10/11 x64：Go / MyGo Desktop、Rust Agent / CLI、TypeScript + Ink TUI�
 需要 Windows x64、PowerShell 7、Rust stable（MSVC 目标与 C++ Build Tools）、Go 1.27.1、Git、Node.js 22+。
 
 ```powershell
-go install github.com/egoist/mygo/cmd/mygo@v0.2.15
+go install github.com/egoist/mygo/cmd/mygo@v0.5.5
 pwsh -NoProfile -File release/build.ps1
 ```
 

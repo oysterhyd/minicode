@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $version = (Get-Content (Join-Path $PSScriptRoot 'package.json') -Raw | ConvertFrom-Json).version
 $source = [IO.Path]::GetFullPath($Installation)
-$installer = Join-Path $source "MiniCode Setup $version.exe"
+$installer = Join-Path $source "MiniCode Setup $version amd64.exe"
 $qaCache = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '.cache'))
 $scratch = [IO.Path]::GetFullPath((Join-Path $qaCache ('installer-qa-' + [guid]::NewGuid().ToString('N'))))
 $target = Join-Path $scratch '本地 安装'

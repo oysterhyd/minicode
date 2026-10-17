@@ -92,7 +92,7 @@ try {
     Run 'pwsh' @('-NoProfile','-File',"$PSScriptRoot/test-updater.ps1",'-Installation',$installation)
     Run 'pwsh' @('-NoProfile','-File',"$PSScriptRoot/test-installer.ps1",'-Installation',$installation)
     $version=(Get-Content "$PSScriptRoot/package.json" -Raw|ConvertFrom-Json).version
-    $built=Get-Item "$installation/MiniCode Setup $version.exe"
+    $built=Get-Item "$installation/MiniCode Setup $version amd64.exe"
     $installer="$PSScriptRoot/dist/MiniCode-Setup-$version-win-x64.exe"
     Copy-Item -LiteralPath $built.FullName -Destination $installer
     Copy-Item -LiteralPath "$installation/update-windows-amd64.json" -Destination "$PSScriptRoot/dist"

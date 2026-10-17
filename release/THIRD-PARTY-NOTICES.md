@@ -5,7 +5,7 @@ MiniCode is distributed under MIT (runtime/LICENSE).
 - Rust dependencies are locked in Cargo.lock. Package versions, license
   expressions and repositories: runtime/licenses/rust/dependencies.json.
   LICENSE, COPYING and NOTICE files are retained beside each entry.
-- Native Desktop uses Go / MyGo 0.2.15. MyGo, Goldmark, Chroma, purego,
+- Native Desktop uses Go / MyGo 0.5.5. MyGo, Goldmark, Chroma, purego,
   Go text/image, LevelDB and Snappy notices are under licenses/ beside MiniCode.exe.
   Versions: desktop/native/go.mod and vendor/modules.txt.
 - Lucide / Feather icons: ISC and MIT notices under licenses/lucide/.
@@ -19,5 +19,5 @@ MiniCode is distributed under MIT (runtime/LICENSE).
 - SQLite is compiled into Rust through rusqlite / libsqlite3-sys.
   SQLite is public domain; wrapper notices are in the Rust notice directory.
 
-MyGo source: https://github.com/egoist/mygo/tree/v0.2.15.
+MyGo source: https://github.com/egoist/mygo/tree/v0.5.5.
 No personal model credentials or user configuration are bundled.
