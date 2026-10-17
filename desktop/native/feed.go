@@ -91,8 +91,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 		turn.Children(func() {
 			d.markdown(c, p, item.Text)
 			if item.Pending {
-				e := ui.Box(c).Size(7, 14).Radius(2).Background(p.Accent)
-				e.OpacityLoop("caret", time.Second, ui.Linear, 0, 1)
+				pulse(c, 7, 14, 2, p.Accent, time.Second, 0, 1)
 			} else {
 				actions := ui.Row(c).Height(26).Gap(2)
 				if !last && !turn.Hovered() && !turn.FocusWithin() {
@@ -110,8 +109,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 		})
 	case "thinking":
 		ui.Row(c).Height(26).Gap(10).Children(func() {
-			orb := ui.Box(c).Size(10, 10).Radius(99).Background(p.Accent).Shadow(0, 0, 0, 4, p.AccentSoft)
-			orb.OpacityLoop("breathe", 1600*time.Millisecond, ui.Bounce(ui.EaseInOut), 0.4, 1)
+			spark(c, 14, p.Accent, true)
 			ui.Text(c, tr(item.Text)).SingleLine().Grow(1).Basis(0).MinWidth(0).FontSize(p.font(12.6)).TextColor(p.Text3)
 			if elapsed := time.Since(item.StartedAt); elapsed >= 2*time.Second {
 				muted(c, p, fmt.Sprintf("%ds", int(elapsed.Seconds()))).NoWrap().Shrink(0).FontSize(p.font(10.92))
@@ -164,7 +162,7 @@ func (d *desktop) reasoningView(c *ui.Context, p palette, item *model.FeedItem) 
 	if !stored {
 		open = item.Pending
 	}
-	root := ui.Column(c).Key(key).FillWidth().Border(1, p.BorderSubtle).Radius(10).Background(p.Panel)
+	root := ui.Column(c.Key(key)).FillWidth().Border(1, p.BorderSubtle).Radius(10).Background(p.Panel)
 	scroll := ui.Local(root, "scroll", func() ui.ScrollState { return ui.ScrollState{} })
 	root.Children(func() {
 		head := ui.ButtonBase(c).Label(tr("思考过程")).Description(tr("模型接口返回的推理内容")).Expanded(open).FillWidth().Height(34).Padding(0, 12).Gap(8).Justify(ui.Start)

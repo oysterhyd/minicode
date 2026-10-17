@@ -130,7 +130,7 @@ func (d *desktop) attachmentChips(c *ui.Context, p palette, files []model.Attach
 	}
 	row.Children(func() {
 		for _, file := range files {
-			ui.Row(c).Key(file.AssetID).Height(28).Gap(2).Radius(7).Border(1, p.Border).Background(p.Panel).Children(func() {
+			ui.Row(c.Key(file.AssetID)).Height(28).Gap(2).Radius(7).Border(1, p.Border).Background(p.Panel).Children(func() {
 				b := ui.ButtonBase(c).Label(tr("打开附件 ")+file.Name).Description(tr(mediaLabels[file.Kind])).Height(26).Padding(0, 8).Gap(6)
 				b.Children(func() {
 					icon(c, "FileText", 13, p.Text3)

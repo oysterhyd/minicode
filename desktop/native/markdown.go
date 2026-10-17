@@ -333,11 +333,11 @@ func inlines(parent ast.Node, data []byte, style inline) []inline {
 	return spans
 }
 
-func inlineText(c *ui.Context, p palette, spans []inline, bold bool) *ui.Element {
+func inlineText(c *ui.Context, p palette, spans []inline, bold bool) ui.Element {
 	e := ui.RichText(c).Selectable().LineHeight(1.72)
 	e.Children(func() {
 		for _, span := range spans {
-			var part *ui.Element
+			var part ui.Element
 			if span.URL != "" && allowedExternal(span.URL) {
 				part = ui.Link(c, span.Text, span.URL).TextColor(p.AccentText).Underline()
 			} else {
@@ -364,7 +364,7 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 	doc := d.renderCache.markdown(source)
 	ui.Column(c).Gap(10.29).FontSize(p.font(13.72)).Children(func() {
 		for i, block := range doc.Blocks {
-			ui.Column(c).Key(i).Margin(0, 0, 0, float32(block.Indent)*18).Children(func() {
+			ui.Column(c.Key(i)).Margin(0, 0, 0, float32(block.Indent)*18).Children(func() {
 				switch block.Kind {
 				case "image":
 					d.markdownImage(c, p, block.ImageURL, block.Text)

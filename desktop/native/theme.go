@@ -123,7 +123,7 @@ var fastMotion = ui.ElementTransition{Colors: true, Duration: 120 * time.Millise
 var panelMotion = ui.ElementTransition{Size: true, Position: true, Duration: 220 * time.Millisecond, Ease: ui.EaseOut}
 var enterMotion = ui.ElementTransition{Duration: 180 * time.Millisecond, Enter: &ui.Motion{Y: 6}, Exit: &ui.Motion{Y: 6}}
 
-func styleButton(e *ui.Element, p palette, primary bool) *ui.Element {
+func styleButton(e ui.Element, p palette, primary bool) ui.Element {
 	e.Height(30).Padding(0, 12).Gap(6).Radius(8).FontSize(p.font(12.32)).FontWeight(550).Cursor(ui.CursorDefault)
 	fill, color, border := ui.Transparent, p.Text2, p.Border
 	if primary {
@@ -143,11 +143,11 @@ func styleButton(e *ui.Element, p palette, primary bool) *ui.Element {
 	if e.Pressed() {
 		target = 0.97
 	}
-	e.TransformScale(e.AnimateWith("press", target, 120*time.Millisecond, legacyEase))
+	e.AnimatePose(ui.Pose{Scale: target}, pressMotion)
 	return e
 }
 
-func button(c *ui.Context, p palette, label, iconName string, primary bool) *ui.Element {
+func button(c *ui.Context, p palette, label, iconName string, primary bool) ui.Element {
 	label = tr(label)
 	e := styleButton(ui.ButtonBase(c).Label(label), p, primary)
 	e.Children(func() {
@@ -165,7 +165,7 @@ func eText(p palette, primary bool) ui.Color {
 	return p.Text2
 }
 
-func iconButton(c *ui.Context, p palette, name, label string) *ui.Element {
+func iconButton(c *ui.Context, p palette, name, label string) ui.Element {
 	label = tr(label)
 	e := ui.ButtonBase(c).Label(label).Size(28, 28).Center().Radius(8).TextColor(p.Text3).Transition(fastMotion)
 	if e.Hovered() {
@@ -175,7 +175,7 @@ func iconButton(c *ui.Context, p palette, name, label string) *ui.Element {
 	if e.Pressed() {
 		target = 0.92
 	}
-	e.TransformScale(e.AnimateWith("press", target, 120*time.Millisecond, legacyEase))
+	e.AnimatePose(ui.Pose{Scale: target}, pressMotion)
 	e.Children(func() {
 		color := p.Text3
 		if e.Hovered() {
@@ -187,19 +187,16 @@ func iconButton(c *ui.Context, p palette, name, label string) *ui.Element {
 	return e
 }
 
-func badge(c *ui.Context, p palette, text string, color, bg ui.Color) *ui.Element {
+func badge(c *ui.Context, p palette, text string, color, bg ui.Color) ui.Element {
 	return ui.Text(c, tr(text)).FontSize(p.font(9.8)).FontWeight(550).Padding(2, 6).Radius(99).TextColor(color).Background(bg).SingleLine().Shrink(0)
 }
 
-func muted(c *ui.Context, p palette, text string) *ui.Element {
+func muted(c *ui.Context, p palette, text string) ui.Element {
 	return ui.Text(c, tr(text)).FontSize(p.font(11.48)).TextColor(p.Text3)
 }
 
 func spinner(c *ui.Context, p palette) {
-	if svg := icons["LoaderCircle"]; svg != nil {
-		e := ui.Icon(c, svg).FontSize(14).TextColor(p.Accent)
-		e.RotateLoop("spin", 900*time.Millisecond, ui.Linear)
-	}
+	ring(c, 14, p.Text3)
 }
 
 func formatDuration(d time.Duration) string {

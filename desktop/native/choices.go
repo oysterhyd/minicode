@@ -8,7 +8,7 @@ import (
 )
 
 // Both permission surfaces use the same left-aligned radio row.
-func permissionChoice(c *ui.Context, p palette, value string, index int, compact bool) *ui.Element {
+func permissionChoice(c *ui.Context, p palette, value string, index int, compact bool) ui.Element {
 	option := permissionOptions[index]
 	selected := value
 	row := ui.RadioBase(c, &selected, option.Value).Label(tr(option.Label)).Description(tr(option.Detail)).

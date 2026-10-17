@@ -95,7 +95,7 @@ func (d *desktop) extensionSettings(c *ui.Context, p palette, s *settingsState, 
 			empty(c, p, "未发现匹配的本地资源。")
 		}
 		for _, item := range entries {
-			ui.Row(c).Key(item.ID).FillWidth().Padding(14).Gap(14).Radius(10).Border(1, p.BorderSubtle).Background(p.Panel).Children(func() {
+			ui.Row(c.Key(item.ID)).FillWidth().Padding(14).Gap(14).Radius(10).Border(1, p.BorderSubtle).Background(p.Panel).Children(func() {
 				ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(5).Children(func() {
 					ui.Row(c).Wrap().Gap(6).Children(func() {
 						ui.Text(c, item.Name).FontSize(p.font(12.32)).FontWeight(600)

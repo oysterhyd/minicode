@@ -437,7 +437,7 @@ func TestComposerCompletionAndUndo(t *testing.T) {
 	if got := r.d.current().Draft; got != "请看 @desktop/src/components/Sidebar.tsx " {
 		t.Fatalf("completed %q", got)
 	}
-	r.ui.Command("undo")
+	r.ui.Key(ui.Cmd, ui.KeyZ)
 	if got := r.d.current().Draft; got != "请看 @Side" {
 		t.Fatalf("undo completion: %q", got)
 	}

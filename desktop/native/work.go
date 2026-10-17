@@ -336,9 +336,9 @@ func (d *desktop) previewView(c *ui.Context, p palette) {
 				ui.Text(c, fmtInt(i+1)).Width(42).Padding(0, 10, 0, 0).TextAlign(ui.End).Font("Cascadia Mono, Consolas").FontSize(p.font(10.92)).TextColor(p.Text4)
 				codeText(c, p, preview.Lines[i])
 			})
-		}).Grow(1).Padding(6, 0).Background(p.Main).HorizontalScroll()
+		}).Grow(1).Padding(6, 0).Background(p.Main)
 	} else {
-		ui.List(c, &preview.List, len(preview.Diff), func(i int) { d.diffView(c, p, preview.Diff[i:i+1], "preview-row", 0) }).Grow(1).Background(p.Main).HorizontalScroll()
+		ui.List(c, &preview.List, len(preview.Diff), func(i int) { d.diffView(c, p, preview.Diff[i:i+1], "preview-row", 0) }).Grow(1).Background(p.Main)
 		if len(preview.Diff) == 0 {
 			muted(c, p, preview.Text).Grow(1).Padding(12)
 		}

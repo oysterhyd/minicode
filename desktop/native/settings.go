@@ -66,8 +66,8 @@ func settingsRow(c *ui.Context, p palette, label, description string, fn func())
 	})
 }
 
-func field(c *ui.Context, p palette, label string, value *string, password bool) *ui.Element {
-	var e *ui.Element
+func field(c *ui.Context, p palette, label string, value *string, password bool) ui.Element {
+	var e ui.Element
 	ui.Column(c).Gap(5).Children(func() {
 		ui.Text(c, tr(label)).FontSize(p.font(11.48)).TextColor(p.Text2)
 		e = ui.TextInput(c, value).Label(tr(label)).FillWidth().Height(32).FontSize(p.font(11.76))
@@ -120,7 +120,7 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 	if !open {
 		return
 	}
-	ui.DialogBase(c, &open, func(back, panel *ui.Element) {
+	ui.DialogBase(c, &open, func(back, panel ui.Element) {
 		back.Material(modalBackdrop{p.Overlay})
 		_, height := c.Size()
 		panel.Width(920).MaxWidthPercent(95).Height(min(680, height-64)).Padding(0).Radius(16).Clip().Background(p.Main).Border(1, p.Border).Shadow(0, 24, 64, 0, ui.RGBA(0, 0, 0, 0.3)).Label(tr("设置")).Row()
@@ -152,7 +152,7 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 					open = false
 				}
 			})
-			ui.Scroll(c).Key(fmt.Sprintf("%s-%t", s.Tab, s.Service != nil)).Grow(1).Basis(0).MinHeight(0).Padding(0, 28, 28, 28).Children(func() {
+			ui.Scroll(c.Key(fmt.Sprintf("%s-%t", s.Tab, s.Service != nil))).Grow(1).Basis(0).MinHeight(0).Padding(0, 28, 28, 28).Children(func() {
 				if s.Error != "" {
 					ui.Text(c, localizeNotice(s.Error)).Margin(0, 0, 10, 0).Padding(8, 12).Radius(8).Background(p.DangerSoft).FontSize(p.font(11.48))
 				}
@@ -555,7 +555,7 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 			remove := -1
 			for i := range service.Models {
 				m := &service.Models[i]
-				ui.Column(c).Key(i).FillWidth().Border(1, p.Border).Radius(10).Padding(14).Gap(12).Children(func() {
+				ui.Column(c.Key(i)).FillWidth().Border(1, p.Border).Radius(10).Padding(14).Gap(12).Children(func() {
 					label := m.Name
 					if label == "" {
 						label = m.ModelID

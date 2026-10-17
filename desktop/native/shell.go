@@ -27,13 +27,13 @@ func (d *desktop) view(c *ui.Context) {
 			if d.preferences.LeftCollapsed {
 				leftWidth = 44
 			}
-			ui.Column(c).Key("sidebar").Width(leftWidth).FillHeight().ClipX().Transition(panelMotion).Children(func() { d.sidebar(c, p) })
+			ui.Column(c.Key("sidebar")).Width(leftWidth).FillHeight().ClipX().Transition(panelMotion).Children(func() { d.sidebar(c, p) })
 			if !d.preferences.LeftCollapsed {
 				d.splitter(c, p, &d.preferences.SidebarWidth, 200, 400, false)
 			} else {
 				ui.Box(c).Width(0)
 			}
-			ui.Column(c).Key("main").Grow(1).Basis(0).MinWidth(360).FillHeight().Clip().Border(1, p.Border).Radius(12).Background(p.Main).
+			ui.Column(c.Key("main")).Grow(1).Basis(0).MinWidth(360).FillHeight().Clip().Border(1, p.Border).Radius(12).Background(p.Main).
 				Shadow(0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.06)).Transition(panelMotion).Children(func() {
 				v := d.current()
 				if len(v.Items) == 0 && !v.Busy && !v.Loading {
@@ -45,10 +45,10 @@ func (d *desktop) view(c *ui.Context) {
 			})
 			if !d.preferences.RightCollapsed {
 				d.splitter(c, p, &d.preferences.WorkWidth, 280, 680, true)
-				ui.Column(c).Key("work").Width(d.preferences.WorkWidth).FillHeight().Clip().Border(1, p.Border).Radius(12).Background(p.Panel).Transition(panelMotion).Children(func() { d.workPanel(c, p) })
+				ui.Column(c.Key("work")).Width(d.preferences.WorkWidth).FillHeight().Clip().Border(1, p.Border).Radius(12).Background(p.Panel).Transition(panelMotion).Children(func() { d.workPanel(c, p) })
 			} else {
 				ui.Box(c).Width(4)
-				ui.Column(c).Key("work-rail").Width(32).AlignItems(ui.Center).Gap(4).Children(func() {
+				ui.Column(c.Key("work-rail")).Width(32).AlignItems(ui.Center).Gap(4).Children(func() {
 					if iconButton(c, p, "PanelRightOpen", tr("展开工作区")).Clicked() {
 						d.preferences.RightCollapsed = false
 						d.persist()
@@ -137,9 +137,10 @@ func (d *desktop) titlebar(c *ui.Context, p palette) {
 				}
 			}
 			ui.Row(c).Gap(5).Padding(2, 8).Radius(99).Background(bg).Children(func() {
-				dot := ui.Box(c).Size(6, 6).Radius(99).Background(p.Success)
 				if v.Busy {
-					dot.Background(p.Accent).OpacityLoop("pulse", 1400*time.Millisecond, ui.Bounce(ui.EaseInOut), 0.4, 1)
+					pulse(c, 6, 6, 3, p.Accent, 1400*time.Millisecond, 0.4, 1)
+				} else {
+					ui.Box(c).Size(6, 6).Radius(99).Background(p.Success)
 				}
 				ui.Text(c, status).FontSize(p.font(9.8)).FontWeight(550).TextColor(color).NoWrap().Shrink(0)
 			})
@@ -221,7 +222,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 				}
 			})
 			for _, root := range groups.Roots {
-				ui.Column(c).Key("project-" + root).Children(func() {
+				ui.Column(c.Key("project-" + root)).Children(func() {
 					row := ui.ButtonBase(c).Label(tr("工作区 ")+root).Height(30).Radius(8).Gap(7).Padding(0, 1).Justify(ui.Start)
 					if row.Hovered() {
 						row.Background(p.Hover)
@@ -285,7 +286,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 }
 
 func (d *desktop) sessionRow(c *ui.Context, p palette, session model.Session, pinned bool) {
-	ui.Column(c).Key("session-"+session.ID).Margin(1, 0).Children(func() {
+	ui.Column(c.Key("session-"+session.ID)).Margin(1, 0).Children(func() {
 		if d.renameID == session.ID {
 			input := ui.TextInput(c, &d.renameText).Label(tr("重命名任务")).Height(28).AutoFocus()
 			if input.Submitted() {
@@ -491,7 +492,7 @@ func (d *desktop) toastView(c *ui.Context, p palette) {
 	ui.Overlay(c, func() {
 		ui.Column(c).Absolute().Right(18).Bottom(18).Width(320).Gap(8).Children(func() {
 			for _, entry := range d.toasts {
-				ui.Column(c).Key(entry.ID).Padding(12, 14).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 28, 0, ui.RGBA(0, 0, 0, 0.25)).Transition(enterMotion).Children(func() {
+				ui.Column(c.Key(entry.ID)).Padding(12, 14).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 28, 0, ui.RGBA(0, 0, 0, 0.25)).Transition(enterMotion).Children(func() {
 					ui.Row(c).Gap(8).Children(func() {
 						icon(c, "CircleCheck", 15, p.Success)
 						ui.Text(c, tr(entry.Title)).FontSize(p.font(12.32)).FontWeight(600).Grow(1)

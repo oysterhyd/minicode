@@ -169,37 +169,141 @@ func isSubmenu(verb string) bool {
 	return false
 }
 
-func (d *desktop) pickSuggestion(input *ui.Element, index int) {
+// completionUndo is what Cmd+Z puts back after a completion was accepted:
+// an app edit joins the typing before it in the input's own history.
+type completionUndo struct {
+	before, after string
+	caret         int
+}
+
+// setCaret puts the caret of the composer at n runes in the next frame.
+func (d *desktop) setCaret(n int) {
+	d.pendingCaret, d.caretPending = n, true
+}
+
+// replaceRunes swaps the runes of text from..to for insert and reports the
+// caret after it, as a text input replaces its selection.
+func replaceRunes(text string, from, to int, insert string) (string, int) {
+	runes := []rune(text)
+	from, to = min(max(from, 0), len(runes)), min(max(to, 0), len(runes))
+	if from > to {
+		from, to = to, from
+	}
+	out := string(runes[:from]) + insert + string(runes[to:])
+	return out, from + len([]rune(insert))
+}
+
+// pickSuggestion applies a completion to text and returns the new text, the
+// caret after it and whether the result is sent right away.
+func (d *desktop) pickSuggestion(text string, index int) (string, int, bool) {
 	state := d.completion
 	if state == nil || index < 0 || index >= len(state.Items) {
-		return
+		return text, len([]rune(text)), false
 	}
-	v := d.current()
 	item := state.Items[index]
-	if item.Kind == "file" {
-		insert := "@" + item.Value + " "
-		v.Draft = input.ReplaceSelection(state.From, state.To, insert)
-	} else if item.Kind == "value" {
-		verb, _, _ := strings.Cut(v.Draft, " ")
-		v.Draft = verb + " " + item.Value
-		d.completion = nil
-		d.submit()
-		return
-	} else if isSubmenu(item.Value) {
-		v.Draft = input.ReplaceSelection(0, len([]rune(v.Draft)), item.Value+" ")
-	} else {
-		v.Draft = item.Value
-		d.completion = nil
-		d.submit()
-		return
-	}
 	d.completion = nil
-	d.focusPrompt = true
+	switch {
+	case item.Kind == "file":
+		out, caret := replaceRunes(text, state.From, state.To, "@"+item.Value+" ")
+		return out, caret, false
+	case item.Kind == "value":
+		verb, _, _ := strings.Cut(text, " ")
+		out := verb + " " + item.Value
+		return out, len([]rune(out)), true
+	case isSubmenu(item.Value):
+		out := item.Value + " "
+		return out, len([]rune(out)), false
+	default:
+		return item.Value, len([]rune(item.Value)), true
+	}
+}
+
+// promptKey handles the keys of the composer that type no text: Enter
+// sends, the arrows walk the completions or the history, Tab accepts and
+// Escape dismisses a completion. It runs between frames and goes through k.
+func (d *desktop) promptKey(v *conversation, k ui.TextKey) bool {
+	defer func() {
+		if d.window != nil {
+			d.window.Invalidate()
+		}
+	}()
+	plain := k.Mods == 0
+	if undo := d.completionUndo; undo != nil && k.Mods == ui.Cmd && k.Key == ui.KeyZ {
+		d.completionUndo = nil
+		if k.Text() == undo.after {
+			v.Draft = undo.before
+			k.SetText(undo.before)
+			d.setCaret(undo.caret)
+			return true
+		}
+	}
+	if state := d.completion; state != nil && !state.Dismissed && len(state.Items) > 0 && plain {
+		switch k.Key {
+		case ui.KeyDown:
+			state.Index = (state.Index + 1) % len(state.Items)
+			return true
+		case ui.KeyUp:
+			state.Index = (state.Index + len(state.Items) - 1) % len(state.Items)
+			return true
+		case ui.KeyEscape:
+			state.Dismissed = true
+			return true
+		case ui.KeyTab, ui.KeyEnter:
+			before := k.Text()
+			out, caret, send := d.pickSuggestion(before, state.Index)
+			v.Draft = out
+			d.completionUndo = &completionUndo{before: before, after: out, caret: state.To}
+			if send {
+				d.submit()
+				k.SetText(v.Draft)
+				return true
+			}
+			k.SetText(out)
+			d.setCaret(caret)
+			d.focusPrompt = true
+			return true
+		}
+	}
+	if k.Key == ui.KeyEnter {
+		send := (d.preferences.SendKey == "enter" && plain) || (d.preferences.SendKey != "enter" && k.Mods == ui.Cmd)
+		if !send {
+			return false
+		}
+		v.Draft = k.Text()
+		d.submit()
+		k.SetText(v.Draft)
+		return true
+	}
+	text := k.Text()
+	if plain && (text == "" || d.historyIndex >= 0) && (k.Key == ui.KeyUp || k.Key == ui.KeyDown) {
+		next := d.historyIndex
+		if k.Key == ui.KeyUp {
+			next = min(len(d.history)-1, next+1)
+		} else {
+			next = max(-1, next-1)
+		}
+		if next == d.historyIndex {
+			return len(d.history) > 0
+		}
+		if d.historyIndex == -1 {
+			d.historyDraft = text
+		}
+		d.historyIndex = next
+		if next < 0 {
+			v.Draft = d.historyDraft
+		} else {
+			v.Draft = d.history[next]
+		}
+		k.SetText(v.Draft)
+		d.setCaret(len([]rune(v.Draft)))
+		return true
+	}
+	return false
 }
 
 func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 	v := d.current()
-	ui.Column(c).Key("composer-area").FillWidth().MaxWidth(820).Margin(0, ui.Auto).
+	ui.Column(c.Key("composer-area")).FillWidth().MaxWidth(820).Margin(0, ui.Auto).
 		Padding(func() []float32 {
 			if home {
 				return []float32{0}
@@ -233,7 +337,7 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				muted(c, p, fmt.Sprintf(tr("等待执行 · %d"), len(v.Queue))).FontSize(p.font(10.36))
 				remove := -1
 				for i, prompt := range v.Queue {
-					ui.Row(c).Key(fmt.Sprintf("queue-%d-%s", i, prompt.Text)).Height(32).Padding(0, 4, 0, 10).Gap(8).Border(1, p.BorderStrong).BorderStyle(ui.BorderDashed).Radius(8).Background(p.Panel).Transition(enterMotion).Children(func() {
+					ui.Row(c.Key(fmt.Sprintf("queue-%d-%s", i, prompt.Text))).Height(32).Padding(0, 4, 0, 10).Gap(8).Border(1, p.BorderStrong).BorderStyle(ui.BorderDashed).Radius(8).Background(p.Panel).Transition(enterMotion).Children(func() {
 						icon(c, "ListPlus", 13, p.Text3)
 						text := prompt.Text
 						if len(prompt.Attachments) > 0 {
@@ -280,65 +384,16 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				d.focusPrompt = false
 			}
 			_, caret := input.TextSelection()
-			input.ReserveTextKeys(func(mods ui.Modifiers, key ui.Key) bool {
-				if key == ui.KeyEnter {
-					return (d.preferences.SendKey == "enter" && mods == 0) || (d.preferences.SendKey != "enter" && mods == ui.Cmd)
-				}
-				if d.completion != nil && !d.completion.Dismissed && (key == ui.KeyUp || key == ui.KeyDown || key == ui.KeyTab || key == ui.KeyEscape) {
-					return mods == 0
-				}
-				return mods == 0 && (v.Draft == "" || d.historyIndex >= 0) && (key == ui.KeyUp || key == ui.KeyDown)
-			})
+			if d.caretPending {
+				input.SetTextSelection(d.pendingCaret, d.pendingCaret)
+				d.caretPending = false
+			}
+			input.OnTextKey(func(k ui.TextKey) bool { return d.promptKey(v, k) })
 			if input.Changed() {
 				d.historyIndex = -1
 			}
 			if input.Focused() && !input.Composing() {
 				d.completion = d.suggestions(v, caret)
-				state := d.completion
-				if state != nil && !state.Dismissed {
-					if input.Shortcut(0, ui.KeyDown) {
-						state.Index = (state.Index + 1) % len(state.Items)
-					}
-					if input.Shortcut(0, ui.KeyUp) {
-						state.Index = (state.Index + len(state.Items) - 1) % len(state.Items)
-					}
-					if input.Shortcut(0, ui.KeyTab) || input.Shortcut(0, ui.KeyEnter) {
-						d.pickSuggestion(input, state.Index)
-					}
-					if input.Shortcut(0, ui.KeyEscape) {
-						state.Dismissed = true
-					}
-				} else {
-					send := false
-					if d.preferences.SendKey == "enter" {
-						send = input.Shortcut(0, ui.KeyEnter)
-					} else {
-						send = input.Shortcut(ui.Cmd, ui.KeyEnter)
-					}
-					if send {
-						d.submit()
-					}
-					if v.Draft == "" || d.historyIndex >= 0 {
-						next := d.historyIndex
-						if input.Shortcut(0, ui.KeyUp) {
-							next = min(len(d.history)-1, next+1)
-						}
-						if input.Shortcut(0, ui.KeyDown) {
-							next = max(-1, next-1)
-						}
-						if next != d.historyIndex {
-							if d.historyIndex == -1 {
-								d.historyDraft = v.Draft
-							}
-							d.historyIndex = next
-							if next < 0 {
-								v.Draft = d.historyDraft
-							} else {
-								v.Draft = d.history[next]
-							}
-						}
-					}
-				}
 			}
 			ui.Row(c).Wrap().Padding(6, 8, 8, 8).Gap(4).Children(func() {
 				if iconButton(c, p, "FileUp", tr("添加附件")).Size(30, 30).Radius(99).Disabled(v.Workspace == "" || v.Uploading).Clicked() {
@@ -346,7 +401,9 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				}
 				if iconButton(c, p, "AtSign", tr("引用文件")).Size(30, 30).Radius(99).Disabled(v.Workspace == "").Clicked() {
 					anchor, caret := input.TextSelection()
-					v.Draft = input.ReplaceSelection(anchor, caret, "@")
+					var at int
+					v.Draft, at = replaceRunes(v.Draft, anchor, caret, "@")
+					d.setCaret(at)
 					d.focusPrompt = true
 				}
 				d.modelMenu(c, p, home)
@@ -409,7 +466,7 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 	})
 }
 
-func (d *desktop) suggestionOverlay(c *ui.Context, p palette, anchor, input *ui.Element, home bool) {
+func (d *desktop) suggestionOverlay(c *ui.Context, p palette, anchor, input ui.Element, home bool) {
 	state := d.completion
 	if state == nil {
 		return
@@ -448,7 +505,15 @@ func (d *desktop) suggestionOverlay(c *ui.Context, p palette, anchor, input *ui.
 					}
 				})
 				if row.Clicked() {
-					d.pickSuggestion(input, i)
+					v := d.current()
+					out, caret, send := d.pickSuggestion(v.Draft, i)
+					v.Draft = out
+					if send {
+						d.submit()
+					} else {
+						d.setCaret(caret)
+						d.focusPrompt = true
+					}
 				}
 			}
 		})
@@ -494,7 +559,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 	if chip.Clicked() {
 		d.modelOpen = !d.modelOpen
 	}
-	ui.PopoverBase(c, chip, &d.modelOpen, func(panel *ui.Element) {
+	ui.PopoverBase(c, chip, &d.modelOpen, func(panel ui.Element) {
 		available := composerPopover(c, panel, chip, 340, home)
 		panel.Key("model-popup").Padding(8).Radius(12).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2))
 		panel.FocusGroup(ui.Vertical)
@@ -547,7 +612,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 }
 
 // Attached popovers only flip sides; their content must fit the chosen side.
-func composerPopover(c *ui.Context, panel, anchor *ui.Element, width float32, home bool) float32 {
+func composerPopover(c *ui.Context, panel, anchor ui.Element, width float32, home bool) float32 {
 	w, h := c.Size()
 	r := anchor.Bounds()
 	above, below := max(0, r.Y-12), max(0, h-r.Y-r.H-12)
@@ -583,7 +648,7 @@ func (d *desktop) permissionMenu(c *ui.Context, p palette, home bool) {
 	if chip.Clicked() {
 		d.permissionOpen = !d.permissionOpen
 	}
-	ui.PopoverBase(c, chip, &d.permissionOpen, func(panel *ui.Element) {
+	ui.PopoverBase(c, chip, &d.permissionOpen, func(panel ui.Element) {
 		if !home {
 			panel.AttachTo(chip, ui.AnchorTopLeft, ui.AnchorBottomLeft)
 		}
@@ -622,7 +687,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 			d.refreshState(v)
 		}
 	}
-	ui.PopoverBase(c, chip, &d.contextOpen, func(panel *ui.Element) {
+	ui.PopoverBase(c, chip, &d.contextOpen, func(panel ui.Element) {
 		available := composerPopover(c, panel, chip, 300, home)
 		panel.Padding(14).Radius(12).Border(1, p.Border).Background(p.Elevated)
 		ui.Scroll(c).FillWidth().MaxHeight(available - 28).Children(func() {

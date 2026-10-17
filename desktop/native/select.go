@@ -7,7 +7,7 @@ type selectOption struct {
 	Disabled     bool
 }
 
-func selectField(c *ui.Context, p palette, value *string, options []selectOption) *ui.Element {
+func selectField(c *ui.Context, p palette, value *string, options []selectOption) ui.Element {
 	sel := ui.SelectBase(c, value)
 	label := *value
 	for _, option := range options {
@@ -20,7 +20,7 @@ func selectField(c *ui.Context, p palette, value *string, options []selectOption
 		ui.Text(c, tr(label)).Grow(1).SingleLine().FontSize(p.font(11.76))
 		icon(c, "ChevronDown", 13, p.Text3)
 	})
-	sel.Popup(func(panel *ui.Element) {
+	sel.Popup(func(panel ui.Element) {
 		panel.Padding(4).MinWidth(sel.Trigger.Bounds().W).MaxHeight(360).Radius(8).Border(1, p.Border).Background(p.Elevated).Shadow(0, 8, 24, 0, ui.RGBA(0, 0, 0, 0.2))
 		for _, option := range options {
 			item := sel.Item(option.Value).Label(tr(option.Label)).Padding(8, 10).Radius(6).Disabled(option.Disabled)

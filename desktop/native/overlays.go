@@ -14,7 +14,7 @@ func (d *desktop) overlays(c *ui.Context, p palette) {
 		return
 	}
 	open := true
-	ui.DialogBase(c, &open, func(back, panel *ui.Element) {
+	ui.DialogBase(c, &open, func(back, panel ui.Element) {
 		back.Material(modalBackdrop{p.Overlay})
 		panel.Width(640).MaxWidthPercent(90).MaxHeightPercent(90).Padding(0).Radius(16).Clip().Background(p.Elevated).Border(1, p.Border).Shadow(0, 24, 64, 0, ui.RGBA(0, 0, 0, 0.3))
 		switch d.modal {
@@ -54,7 +54,7 @@ type paletteAction struct {
 	Run                      func()
 }
 
-func (d *desktop) commandPalette(c *ui.Context, p palette, panel *ui.Element) {
+func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 	v := d.current()
 	actions := []paletteAction{
 		{tr("操作"), tr("新建任务"), "Ctrl N", "SquarePen", func() { d.newSession(v.Workspace) }},
@@ -94,15 +94,23 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel *ui.Element) {
 	ui.Row(c).Height(60).Padding(0, 18).Gap(10).BorderWidth(0, 0, 1, 0).BorderColor(p.Border).Children(func() {
 		icon(c, "Search", 17, p.Text3)
 		input := ui.TextInputBase(c, &d.paletteQuery).Grow(1).Label(tr("搜索操作和任务")).Placeholder(tr("搜索操作、任务或文件…")).AutoFocus().FontSize(p.font(14))
-		input.ReserveTextKeys(func(mods ui.Modifiers, key ui.Key) bool { return mods == 0 && (key == ui.KeyUp || key == ui.KeyDown) })
+		count := len(filtered)
+		input.OnTextKey(func(k ui.TextKey) bool {
+			if k.Mods != 0 || count == 0 || (k.Key != ui.KeyUp && k.Key != ui.KeyDown) {
+				return false
+			}
+			if k.Key == ui.KeyDown {
+				d.paletteIndex = (d.paletteIndex + 1) % count
+			} else {
+				d.paletteIndex = (d.paletteIndex + count - 1) % count
+			}
+			if d.window != nil {
+				d.window.Invalidate()
+			}
+			return true
+		})
 		if input.Changed() {
 			d.paletteIndex = 0
-		}
-		if input.Shortcut(0, ui.KeyDown) && len(filtered) > 0 {
-			d.paletteIndex = (d.paletteIndex + 1) % len(filtered)
-		}
-		if input.Shortcut(0, ui.KeyUp) && len(filtered) > 0 {
-			d.paletteIndex = (d.paletteIndex + len(filtered) - 1) % len(filtered)
 		}
 		if input.Submitted() {
 			run(d.paletteIndex)
