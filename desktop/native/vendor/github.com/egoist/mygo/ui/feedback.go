@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"runtime"
 )
 
@@ -21,26 +20,26 @@ type checkGroup struct {
 //		ui.Checkbox(c, &app.mail, "Mail")
 //		ui.Checkbox(c, &app.calendar, "Calendar")
 //	})
-func CheckboxGroup(c *Context, label string, fn func()) *Element {
+func coreCheckboxGroup(c *context, label string, fn func()) *node {
 	t := c.theme
-	g := Column(c).Gap(t.Space(2)).Shrink(0)
+	g := coreColumn(c).Gap(t.Space(2)).Shrink(0)
 	g.widget = "CheckboxGroup"
-	var head *Element
+	var head *node
 	var group *checkGroup
 	g.Children(func() {
-		head = Row(c).Focusable().Shrink(0).Gap(t.Space(2)).FocusRing(false).Role(RoleCheckBox)
+		head = coreRow(c).Focusable().Shrink(0).Gap(t.Space(2)).FocusRing(false).Role(RoleCheckBox)
 		head.flags |= flagClickable | flagHover | flagToggle
 		head.widget = "CheckboxGroup"
-		clicked := head.Clicked()
-		var box *Element
+		head.flags |= flagClickable
+		var box *node
 		head.Children(func() {
-			box = Box(c).Size(t.Space(4), t.Space(4)).Radius(t.Space(1)).Shrink(0)
-			Text(c, label)
+			box = coreBox(c).Size(t.Space(4), t.Space(4)).Radius(t.Space(1)).Shrink(0)
+			coreText(c, label)
 		})
 		saved := c.checks
 		group = &checkGroup{}
 		c.checks = group
-		boxes := Column(c).Gap(t.Space(2)).Padding(0, 0, 0, t.Space(6)).Role(RoleGroup).Label(label)
+		boxes := coreColumn(c).Gap(t.Space(2)).PaddingStart(t.Space(6)).Role(RoleGroup).Label(label)
 		boxes.Children(fn)
 		c.checks = saved
 		on := 0
@@ -50,13 +49,15 @@ func CheckboxGroup(c *Context, label string, fn func()) *Element {
 			}
 		}
 		all := on == len(group.boxes) && on > 0
-		if clicked {
-			for _, b := range group.boxes {
-				*b = !all
+		head.afterInput(func() {
+			if head.Clicked() {
+				for _, b := range group.boxes {
+					*b = !all
+				}
+				g.st.markChanged()
+				c.rt.consumed = true
 			}
-			g.st.changed = true
-			c.rt.consumed = true
-		}
+		})
 		state := int8(1)
 		switch {
 		case all:
@@ -72,7 +73,7 @@ func CheckboxGroup(c *Context, label string, fn func()) *Element {
 
 // paintCheckbox styles the box of a check box, off (1), on (2) or mixed
 // (3), as Checkbox does.
-func paintCheckbox(c *Context, row, box *Element, state int8) {
+func paintCheckbox(c *context, row, box *node, state int8) {
 	t := c.theme
 	if state > 1 {
 		box.Background(t.Accent)
@@ -90,7 +91,7 @@ func paintCheckbox(c *Context, row, box *Element, state int8) {
 			p.FocusRing(r, box.radius)
 		}
 	})
-	box.styleFn = func(box *Element) {
+	box.styleFn = func(box *node) {
 		if state == 1 && row.Hovered() {
 			box.borderC = t.Accent
 		}
@@ -107,23 +108,29 @@ func paintCheckbox(c *Context, row, box *Element, state int8) {
 //	if ui.Breadcrumbs(c, path, &app.chosen).Label("Path").Changed() {
 //		app.open(path[:app.chosen+1])
 //	}
-func Breadcrumbs(c *Context, items []string, chosen *int) *Element {
+func coreBreadcrumbs(c *context, items []string, chosen *int) *node {
 	t := c.theme
-	e := Row(c).AlignItems(Center).Gap(t.Space(0.5)).MinWidth(0).Role(RoleGroup)
+	e := coreRow(c).AlignItems(Center).Gap(t.Space(0.5)).MinWidth(0).Role(RoleGroup)
 	e.widget = "Breadcrumbs"
 	e.Children(func() {
 		for i, item := range items {
 			if i > 0 {
-				Box(c).Size(t.Space(3), t.Space(3)).Shrink(0).Role(RoleNone).Draw(func(p *Painter, r Rect) {
+				sep := coreBox(c).Size(t.Space(3), t.Space(3)).Shrink(0).Role(RoleNone)
+				rtl := sep.rtl()
+				sep.Draw(func(p *Painter, r Rect) {
 					cx, cy, d := r.X+r.W/2, r.Y+r.H/2, r.W/6
+					if rtl {
+						// Pointing left, along the path.
+						d = -d
+					}
 					var path Path
-					path.MoveTo(cx-d, cy-2*d).LineTo(cx+d, cy).LineTo(cx-d, cy+2*d)
+					path.MoveTo(cx-d, cy-2*abs32(d)).LineTo(cx+d, cy).LineTo(cx-d, cy+2*abs32(d))
 					p.StrokePath(&path, 1.2, t.TextMuted)
 				})
 			}
 			last := i == len(items)-1
-			b := Row(c).Key(i).Padding(t.Space(0.5), t.Space(1.5)).Radius(t.Radius).MinWidth(t.Space(6)).Shrink(1)
-			b.Children(func() { Text(c, item).SingleLine() })
+			b := coreRow(c).Key(i).Padding(t.Space(0.5), t.Space(1.5)).Radius(t.Radius).MinWidth(t.Space(6)).Shrink(1)
+			b.Children(func() { coreText(c, item).SingleLine() })
 			if last {
 				// Where the path is: no link.
 				b.Shrink(0.5).FontWeight(500)
@@ -131,11 +138,13 @@ func Breadcrumbs(c *Context, items []string, chosen *int) *Element {
 			}
 			b.Focusable().Role(RoleLink).TextColor(t.TextMuted)
 			b.flags |= flagClickable | flagHover
-			if b.Clicked() {
-				*chosen = i
-				e.st.changed = true
-			}
-			b.styleFn = func(b *Element) {
+			b.afterInput(func() {
+				if b.Clicked() {
+					*chosen = i
+					e.st.markChanged()
+				}
+			})
+			b.styleFn = func(b *node) {
 				if b.Hovered() {
 					b.bg = t.SurfaceHover
 				}
@@ -145,52 +154,51 @@ func Breadcrumbs(c *Context, items []string, chosen *int) *Element {
 	return e
 }
 
+// AlertDismissed is what AlertDialog returns in the frame Escape closes the
+// alert, choosing no button.
+const AlertDismissed = -2
+
 // AlertDialog shows an alert over the window while *open is true, as
 // AppKit's: title, message, and buttons, the last of which is the default,
-// in the accent color, with the focus, which Enter clicks. Escape clicks a
-// button labeled Cancel, if any; a click outside the alert does nothing.
-// It returns the index of the button clicked, in the frame it is, which
-// closes the alert, and -1 otherwise. Assistive technology sees an alert
-// named by title and described by message.
+// in the accent color, with the focus, which Enter clicks. Escape closes the
+// alert choosing no button, as canceling does, whatever the buttons say; a
+// click outside the alert does nothing. It returns the index of the button
+// clicked, in the frame it is, which closes the alert, AlertDismissed in
+// the frame Escape closes it, and -1 otherwise. An alert that must be
+// answered stays open by setting *open back to true on AlertDismissed.
+// Assistive technology sees an alert named by title and described by
+// message.
 //
 //	switch ui.AlertDialog(c, &app.asking, "Delete “Notes”?", "You can't undo this.", "Cancel", "Delete") {
 //	case 1:
 //		app.delete()
 //	}
-func AlertDialog(c *Context, open *bool, title, message string, buttons ...string) int {
+func coreAlertDialog(c *context, open *bool, title, message string, buttons ...string) int {
 	if !*open {
 		return -1
 	}
 	t := c.theme
-	chosen := -1
-	Overlay(c, func() {
-		back := Box(c).Absolute().Left(0).Top(0).Right(0).Bottom(0).Center().Background(RGBA(0, 0, 0, 0.4)).Modal()
-		cancel := -1
-		for i, b := range buttons {
-			if b == "Cancel" {
-				cancel = i
-			}
-		}
-		if back.OverlayShortcut(0, KeyEscape) && cancel >= 0 {
-			chosen = cancel
-		}
+	chosen, dismissed := -1, false
+	coreOverlay(c, func() {
+		back := coreBox(c).Absolute().Left(0).Top(0).Right(0).Bottom(0).Center().Background(RGBA(0, 0, 0, 0.4)).Modal()
+		dismissed = back.OverlayShortcut(0, KeyEscape)
 		back.Children(func() {
-			panel := Column(c).Width(t.Space(75)).MaxWidth(c.w - t.Space(10)).Padding(t.Space(5)).Gap(t.Space(3)).Radius(t.Space(2.5)).Background(t.Background).Role(RoleAlertDialog)
+			panel := coreColumn(c).Width(t.Space(75)).MaxWidth(c.w - t.Space(10)).Padding(t.Space(5)).Gap(t.Space(3)).Radius(t.Space(2.5)).Background(t.Background).Role(RoleAlertDialog)
 			panel.Label(title)
 			panel.description = message
 			panel.Shadow(0, 10, 30, 0, RGBA(0, 0, 0, 0.3))
 			panel.Children(func() {
-				Text(c, title).Bold().FontSize(t.FontSize + 1)
+				coreText(c, title).Bold().FontSize(t.FontSize + 1)
 				if message != "" {
-					Text(c, message).TextColor(t.TextMuted)
+					coreText(c, message).TextColor(t.TextMuted)
 				}
-				Row(c).Gap(t.Space(2)).Justify(End).Margin(t.Space(2), 0, 0, 0).Children(func() {
+				coreRow(c).Gap(t.Space(2)).Justify(End).Margin(t.Space(2), 0, 0, 0).Children(func() {
 					for i, label := range buttons {
-						var b *Element
+						var b *node
 						if i == len(buttons)-1 {
-							b = PrimaryButton(c, label).AutoFocus()
+							b = corePrimaryButton(c, label).AutoFocus()
 						} else {
-							b = Button(c, label)
+							b = coreButton(c, label)
 						}
 						if b.Clicked() {
 							chosen = i
@@ -200,7 +208,10 @@ func AlertDialog(c *Context, open *bool, title, message string, buttons ...strin
 			})
 		})
 	})
-	if chosen >= 0 {
+	if dismissed && chosen < 0 {
+		chosen = AlertDismissed
+	}
+	if chosen != -1 {
 		*open = false
 		c.rt.consumed = true
 	}
@@ -217,43 +228,46 @@ func AlertDialog(c *Context, open *bool, title, message string, buttons ...strin
 // *current, which Changed reports moving. Assistive technology hears the
 // count as it changes. While closed, it returns an element showing
 // nothing.
-func FindBar(c *Context, open *bool, query *string, matches int, current *int) *Element {
+func coreFindBar(c *context, open *bool, query *string, matches int, current *int) *node {
 	t := c.theme
 	if !*open {
 		// Nothing, which Changed and the rest can ask.
-		e := Box(c).Absolute()
+		e := coreBox(c).Absolute()
 		e.flags |= flagInvisible
 		return e
 	}
 	// Keyed, for its state to go as it closes, to open anew.
-	bar := Row(c).Key("find bar").Gap(t.Space(2)).Padding(t.Space(1.5), t.Space(3)).AlignItems(Center).Background(t.Surface).
-		BorderWidth(0, 0, 1, 0).BorderColor(t.Border).Shrink(0).Role(RoleToolbar).Label("Find")
+	bar := coreRow(c).Key("find bar").Gap(t.Space(2)).Padding(t.Space(1.5), t.Space(3)).AlignItems(Center).Background(t.Surface).
+		BorderWidth(0, 0, 1, 0).BorderColor(t.Border).Shrink(0).Role(RoleToolbar).Label(c.texts().Find())
 	bar.widget = "FindBar"
 	// Its state goes as it closes: true in the frame it opens.
-	opening := Local(bar, "opening", func() bool { return true })
+	opening := coreLocal(bar, "opening", func() bool { return true })
 	*current = max(0, min(*current, matches-1))
 	step := func(d int) {
 		if matches > 0 {
 			*current = (*current + d + matches) % matches
-			bar.st.changed = true
+			bar.st.markChanged()
 			c.rt.consumed = true
 		}
 	}
-	mac := runtime.GOOS == "darwin"
-	switch {
-	case mac && c.Shortcut(Cmd, KeyG), !mac && c.Shortcut(0, KeyF3):
-		step(1)
-	case mac && c.Shortcut(Shift|Cmd, KeyG), !mac && c.Shortcut(Shift, KeyF3):
-		step(-1)
-	}
+	bar.afterInput(func() {
+		mac := runtime.GOOS == "darwin"
+		switch {
+		case mac && c.Shortcut(Cmd, KeyG), !mac && c.Shortcut(0, KeyF3):
+			step(1)
+		case mac && c.Shortcut(Shift|Cmd, KeyG), !mac && c.Shortcut(Shift, KeyF3):
+			step(-1)
+		}
+
+	})
 	bar.Children(func() {
-		f, in := field(c, func() *Element {
+		f, in := field(c, func() *node {
 			magnifier(c)
-			in := TextInputBase(c, query).Grow(1).MinWidth(t.Space(25)).Placeholder("Find")
+			in := coreTextInputBase(c, query).Grow(1).MinWidth(t.Space(25)).Placeholder(c.texts().Find())
 			in.search = true
 			return in
 		})
-		f.Label("Find").Grow(1).MaxWidth(t.Space(90))
+		f.Label(c.texts().Find()).Grow(1).MaxWidth(t.Space(90))
 		if *opening {
 			// Opening the bar focuses its field, with what was found before
 			// chosen, ready to type over.
@@ -263,31 +277,34 @@ func FindBar(c *Context, open *bool, query *string, matches int, current *int) *
 				ed.selectAll()
 			}
 		}
-		switch {
-		case in.Submitted() && in.st.submitMods&Shift != 0:
-			step(-1)
-		case in.Submitted():
-			step(1)
-		case in.Shortcut(0, KeyEscape):
-			*open = false
-			c.rt.consumed = true
-		}
-		status := "No matches"
+		in.afterInput(func() {
+			switch {
+			case in.Submitted() && in.st.submitMods&Shift != 0:
+				step(-1)
+			case in.Submitted():
+				step(1)
+			case in.Shortcut(0, KeyEscape):
+				*open = false
+				c.rt.consumed = true
+			}
+
+		})
+		status := c.texts().NoMatches()
 		switch {
 		case *query == "":
 			status = ""
 		case matches > 0:
-			status = fmt.Sprintf("%d of %d", *current+1, matches)
+			status = c.texts().Matches(*current+1, matches)
 		}
-		Text(c, status).TextColor(t.TextMuted).FontFeatures("tnum").MinWidth(t.Space(18)).Role(RoleStatus)
+		coreText(c, status).TextColor(t.TextMuted).FontFeatures("tnum").MinWidth(t.Space(18)).Role(RoleStatus)
 		for _, b := range []struct {
 			label string
 			d     int
-		}{{"Previous", -1}, {"Next", 1}} {
-			btn := Button(c, "").Padding(t.Space(1.5), t.Space(2)).Label(b.label).Disabled(matches == 0)
+		}{{c.texts().Previous(), -1}, {c.texts().Next(), 1}} {
+			btn := coreButton(c, "").Padding(t.Space(1.5), t.Space(2)).Label(b.label).Disabled(matches == 0)
 			up := b.d < 0
 			btn.Children(func() {
-				Box(c).Size(t.Space(3), t.Space(3)).Shrink(0).Draw(func(p *Painter, r Rect) {
+				coreBox(c).Size(t.Space(3), t.Space(3)).Shrink(0).Draw(func(p *Painter, r Rect) {
 					cx, cy, d := r.X+r.W/2, r.Y+r.H/2, r.W/4
 					var path Path
 					if up {
@@ -298,14 +315,19 @@ func FindBar(c *Context, open *bool, query *string, matches int, current *int) *
 					p.StrokePath(&path, 1.5, t.Text)
 				})
 			})
-			if btn.Clicked() {
-				step(b.d)
+			btn.afterInput(func() {
+				if btn.Clicked() {
+					step(b.d)
+				}
+			})
+		}
+		done := coreButton(c, c.texts().Done())
+		done.afterInput(func() {
+			if done.Clicked() {
+				*open = false
+				c.rt.consumed = true
 			}
-		}
-		if Button(c, "Done").Clicked() {
-			*open = false
-			c.rt.consumed = true
-		}
+		})
 	})
 	return bar
 }

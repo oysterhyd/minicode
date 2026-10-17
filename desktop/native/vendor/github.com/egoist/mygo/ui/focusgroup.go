@@ -1,7 +1,5 @@
 package ui
 
-import "time"
-
 // Orientation says which arrows move the focus in a FocusGroup: Left and
 // Right (Horizontal), Up and Down (Vertical), or all four
 // (Horizontal|Vertical).
@@ -21,7 +19,7 @@ const (
 // first, and Home and End to the first and the last. An element inside
 // that takes those keys itself, as a slider or a text input does, keeps
 // them. Groups inside a group are part of it.
-func (e *Element) FocusGroup(o Orientation) *Element {
+func (e *node) FocusGroup(o Orientation) *node {
 	e.focusGroup = o
 	return e
 }
@@ -29,6 +27,9 @@ func (e *Element) FocusGroup(o Orientation) *Element {
 // groupInfo is what the frame committed of a focus group.
 type groupInfo struct {
 	orient Orientation
+	// rtl tells that the group is laid out right to left, where Left
+	// moves to the next element.
+	rtl bool
 	// selects makes moving the focus with the arrows click the element
 	// it moves to, as in a radio group.
 	selects bool
@@ -116,10 +117,14 @@ func (rt *engine) groupKey(mods Modifiers, key Key) bool {
 		return false
 	}
 	to := -1
+	back, forth := KeyLeft, KeyRight
+	if info.rtl {
+		back, forth = forth, back
+	}
 	switch {
-	case key == KeyRight && info.orient&Horizontal != 0, key == KeyDown && info.orient&Vertical != 0:
+	case key == forth && info.orient&Horizontal != 0, key == KeyDown && info.orient&Vertical != 0:
 		to = (at + 1) % n
-	case key == KeyLeft && info.orient&Horizontal != 0, key == KeyUp && info.orient&Vertical != 0:
+	case key == back && info.orient&Horizontal != 0, key == KeyUp && info.orient&Vertical != 0:
 		to = (at - 1 + n) % n
 	case key == KeyHome:
 		to = 0
@@ -129,7 +134,7 @@ func (rt *engine) groupKey(mods Modifiers, key Key) bool {
 		return false
 	}
 	id := members[to]
-	rt.focused, rt.focusVisible, rt.blinkStart = id, true, time.Now()
+	rt.focused, rt.focusVisible, rt.blinkStart = id, true, rt.now()
 	if rt.groupLast == nil {
 		rt.groupLast = map[uint64]uint64{}
 	}

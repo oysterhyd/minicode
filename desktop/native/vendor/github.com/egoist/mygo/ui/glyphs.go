@@ -17,15 +17,23 @@ type Font struct {
 	Weight   int
 	Italic   bool
 	Features string
+	// Lang is the language of the text, as for Element.Lang; "" is the
+	// language the app shows.
+	Lang string
 	// Thicken draws the glyphs with a thicker stroke, as Ghostty's
 	// font-thicken: on macOS, with Core Text's font smoothing at its
 	// strongest, whatever the color and the user's setting. It changes
 	// nothing elsewhere.
 	Thicken bool
+	// Antialiased draws the glyphs without font smoothing, thinner, as
+	// browsers draw text styled -webkit-font-smoothing: antialiased on
+	// macOS, for drawings that match a web page's. It changes nothing
+	// elsewhere.
+	Antialiased bool
 }
 
 func (f Font) style() text.Style {
-	return text.Style{Family: f.Family, Size: f.Size, Weight: f.Weight, Italic: f.Italic, Features: f.Features}
+	return text.Style{Family: f.Family, Size: f.Size, Weight: f.Weight, Italic: f.Italic, Features: f.Features, Lang: f.Lang}
 }
 
 // FontMetrics are the vertical metrics of a font, in DIPs: how far its
@@ -56,6 +64,7 @@ type Glyph struct {
 	font  *text.Font
 	id    uint32
 	thick bool
+	flat  bool
 }
 
 // Shape shapes s in font f, on one line, for Painter.Glyphs: the
@@ -68,7 +77,7 @@ func Shape(s string, f Font) []Glyph {
 	var out []Glyph
 	for _, line := range l.Lines {
 		for _, g := range line.Glyphs {
-			out = append(out, Glyph{Cluster: g.Cluster, Runes: g.Runes, X: line.X + g.X, Advance: g.Advance, font: g.Font, id: g.ID, thick: f.Thicken})
+			out = append(out, Glyph{Cluster: g.Cluster, Runes: g.Runes, X: line.X + g.X, Advance: g.Advance, font: g.Font, id: g.ID, thick: f.Thicken, flat: f.Antialiased})
 		}
 	}
 	return out
@@ -94,13 +103,15 @@ func (p *Painter) Glyphs(glyphs []Glyph, x, y float32, c Color) {
 			continue
 		}
 		pen := (x + g.X) * s
-		if pen > right || pen+(g.Advance+g.font.Size)*s < left {
+		if !p.transform.Set && (pen > right || pen+(g.Advance+g.font.Size)*s < left) {
 			continue
 		}
 		ix := float32(math.Floor(float64(pen)))
 		shade := shade
 		if g.thick {
 			shade = text.Thick
+		} else if g.flat {
+			shade = text.Flat
 		}
 		gi := sys.Glyph(g.font, g.id, s, pen, shade, p.opaque)
 		if !gi.OK {
@@ -121,9 +132,65 @@ func (p *Painter) Glyphs(glyphs []Glyph, x, y float32, c Color) {
 		run.flush(p, baseline)
 	}
 	if end := int32(len(p.s.Glyphs)); end > start {
-		p.s.Ops = append(p.s.Ops, scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
+		p.add(scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
 	}
 }
+
+// TextLine paints the glyphs of the first line of l, a layout of this
+// module's text system that only its packages make, as package ui/editor
+// does, from x, on the baseline at y, each in the color color returns for
+// the rune its cluster starts at. Glyphs outside the painter's clip are
+// left out.
+func (p *Painter) TextLine(l *text.Layout, x, y float32, color func(cluster int) Color) {
+	if l == nil || len(l.Lines) == 0 {
+		return
+	}
+	sys := p.rt.text
+	s := p.scale
+	baseline := sys.Baseline(y * s)
+	left, right := p.clip.X*s, (p.clip.X+p.clip.W)*s
+	start := int32(len(p.s.Glyphs))
+	var run *glyphRun
+	if sys.JoinsGlyphs() {
+		run = &p.rt.glyphRun
+		run.ids, run.pens, run.glyphs = run.ids[:0], run.pens[:0], run.glyphs[:0]
+	}
+	for _, g := range l.Lines[0].Glyphs {
+		pen := (x + g.X) * s
+		if !p.transform.Set && (pen > right || pen+(g.Advance+g.Size)*s < left) {
+			continue
+		}
+		c := color(g.Cluster)
+		shade := text.ShadeOf(c.R, c.G, c.B)
+		gi := sys.Glyph(g.Font, g.ID, s, pen, shade, p.opaque)
+		if !gi.OK {
+			continue
+		}
+		c = c.Alpha(p.opacity)
+		sg := scene.Glyph{
+			X: float32(math.Floor(float64(pen))) + gi.Left, Y: baseline + gi.Top, W: float32(gi.W), H: float32(gi.H),
+			U: gi.X, V: gi.Y, UW: gi.W, VH: gi.H,
+			Color: c.scene(), Wide: p.glyphWide(c), Colored: gi.Colored, Subpixel: gi.Subpixel, Thin: gi.Thin,
+		}
+		if run != nil {
+			run.add(p, text.Glyph{Font: g.Font, ID: g.ID}, gi, pen, sg, shade, baseline)
+			continue
+		}
+		p.s.Glyphs = append(p.s.Glyphs, sg)
+	}
+	if run != nil {
+		run.flush(p, baseline)
+	}
+	if end := int32(len(p.s.Glyphs)); end > start {
+		p.add(scene.Op{Kind: scene.OpGlyphs, Start: start, End: end})
+	}
+}
+
+// Visible returns what the painter's clip leaves of the window, in DIPs:
+// the part of an element's box that shows inside the scroll containers
+// and clips around it, as an element taller than the window, showing a
+// long document, paints only what falls in it.
+func (p *Painter) Visible() Rect { return p.clip }
 
 // Scale returns how many device pixels a DIP is, for drawing that lines
 // up with the pixels of the display.
