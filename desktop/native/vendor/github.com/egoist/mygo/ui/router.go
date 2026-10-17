@@ -50,16 +50,30 @@ import (
 // sidebar choosing the pages, where it stays: screen readers then hear
 // the title of the page. Pages slide or fade in (Transition).
 //
+// In a browser, the first router a window shows follows the history of
+// the browser's tab, in the URL's fragment, as "#/notes/42": going to a
+// page adds an entry to it, the browser's back and forward buttons go
+// through the router's pages, and a URL with a fragment opens the app at
+// its page.
+//
 // The zero Router shows "/". As the rest of the app's state, it is read
 // and changed on the main thread: from another goroutine, change it in
 // Window.Update.
 type Router struct {
-	// Transition is how pages replace each other.
+	Handle
+
+	// Transition is how pages replace each other, and Animation, if set,
+	// how they move then: as a spring (Snappy, …) or a curve, rather than
+	// easing out over 250 ms as they slide, 150 ms as they fade.
 	Transition Transition
+	Animation  *Animation
 
 	entries []*routeEntry
 	at      int
-	pages   uint64
+	// base numbers entries[0] among all the entries the history had, as
+	// the oldest go: a browser's history refers to them by number.
+	base  int
+	pages uint64
 	// rt is the window showing the router, which a change asks for a
 	// frame.
 	rt *engine
@@ -94,6 +108,8 @@ type routeView struct {
 	dir                  int
 	start                time.Time
 	focusing, announcing bool
+	// progress goes from 0 to 1 as the page comes in.
+	progress channel
 }
 
 // Transition is how a Router's pages replace each other.
@@ -196,11 +212,15 @@ func (r *Router) Push(target string) {
 	e := &routeEntry{loc: loc}
 	e.pages, e.layouts = shared(cur, p)
 	r.entries = append(r.entries[:r.at+1], e)
-	if len(r.entries) > maxHistory {
-		r.entries = r.entries[len(r.entries)-maxHistory:]
+	if n := len(r.entries) - maxHistory; n > 0 {
+		r.entries = r.entries[n:]
+		r.base += n
 	}
 	r.at = len(r.entries) - 1
 	r.changed()
+	if browserHistory != nil {
+		browserHistory.pushed(r)
+	}
 }
 
 // Replace shows the page at target in place of the page shown, in its
@@ -224,6 +244,9 @@ func (r *Router) Replace(target string) {
 		r.entries[r.at] = e
 	}
 	r.changed()
+	if browserHistory != nil {
+		browserHistory.replaced(r)
+	}
 }
 
 // Back shows the page before, if any.
@@ -238,9 +261,25 @@ func (r *Router) Go(n int) {
 	r.current()
 	at := max(0, min(r.at+n, len(r.entries)-1))
 	if at != r.at {
+		moved := at - r.at
 		r.at = at
 		r.changed()
+		if browserHistory != nil {
+			browserHistory.went(r, moved)
+		}
 	}
+}
+
+// browserHistory is the history of the browser's tab the app runs in,
+// which the first router a window shows follows (router_js.go): it hears
+// of the router's changes. It is nil elsewhere.
+var browserHistory interface {
+	// claim makes r the router following the history, unless another
+	// one does.
+	claim(r *Router)
+	pushed(r *Router)
+	replaced(r *Router)
+	went(r *Router, n int)
 }
 
 // CanGoBack reports whether there is a page to go back to, and
@@ -279,6 +318,10 @@ func (r *Router) changed() {
 
 // isPath reports whether a link's target is a path within the app, as
 // "/notes/42", "edit" or "?tab=info", rather than a URL with a scheme.
+// Router returns the router whose page is being built, which a Link to a
+// path without a scheme goes through, or nil outside one.
+func (c *context) Router() *Router { return c.router }
+
 func isPath(target string) bool {
 	u, err := url.Parse(target)
 	return err == nil && u.Scheme == "" && u.Host == "" && u.Opaque == ""
@@ -328,10 +371,11 @@ func pathParts(p string) []string {
 // Route is a page a Router's View builds: Match tells its path apart and
 // Param reads the parts of the path the pattern matched.
 type Route struct {
-	router *Router
-	entry  *routeEntry
-	page   *Element
-	level  int
+	router    *Router
+	entry     *routeEntry
+	page      *node
+	pageEpoch uint64
+	level     int
 	// segments are the parts of the path, unescaped, from part offset of
 	// the whole path for the pages of a Route.View. params are what the
 	// last pattern matched took, base what the patterns of the layouts
@@ -409,7 +453,12 @@ func (r *Route) Title(title string) { r.entry.title = title }
 
 // Page returns the element holding the page, a column filling the router,
 // for its style.
-func (r *Route) Page() *Element { return r.page }
+func (r *Route) corePage() *node {
+	if r == nil || r.router == nil || r.router.rt == nil || r.router.rt.closed || r.pageEpoch != r.router.rt.epoch {
+		return nil
+	}
+	return r.page
+}
 
 // View builds the pages of the rest of the path, which the {name...}
 // wildcard of the pattern Match matched last took, with fn, in a column
@@ -433,18 +482,18 @@ func (r *Route) Page() *Element { return r.page }
 //		})
 //
 // View panics when the pattern Match matched last has no {name...}.
-func (r *Route) View(c *Context, fn func(r *Route)) *Element {
+func (r *Route) coreView(c *context, fn func(r *Route)) *node {
 	if r.rest < 0 {
 		panic("ui: Route.View with no {name...} in the pattern matched")
 	}
-	box := Column(c).Grow(1).AlignSelf(Stretch).MinWidth(0).MinHeight(0)
+	box := coreColumn(c).Grow(1).AlignSelf(Stretch).MinWidth(0).MinHeight(0)
 	box.widget = "Router"
 	e := r.entry
 	for len(e.layouts) <= r.level {
 		e.layouts = append(e.layouts, -1)
 	}
 	e.layouts[r.level] = r.offset + r.rest
-	v := Local(box, "view", func() routeView { return routeView{} })
+	v := coreLocal(box, "view", func() routeView { return routeView{} })
 	r.router.build(c, box, v, r, fn)
 	return box
 }
@@ -452,10 +501,14 @@ func (r *Route) View(c *Context, fn func(r *Route)) *Element {
 // View builds the page shown with fn, in a column taking the room it is
 // given, and returns the column. As a page slides in, it builds the one
 // going away too, which takes neither the pointer nor the keyboard.
-func (r *Router) View(c *Context, fn func(r *Route)) *Element {
+func (r *Router) coreView(c *context, fn func(r *Route)) *node {
 	r.rt = c.rt
-	box := Column(c).Grow(1).AlignSelf(Stretch).MinWidth(0).MinHeight(0)
+	if browserHistory != nil {
+		browserHistory.claim(r)
+	}
+	box := coreColumn(c).Grow(1).AlignSelf(Stretch).MinWidth(0).MinHeight(0)
 	box.widget = "Router"
+	wrapElement(box).Bind(&r.Handle)
 	r.keys(c, box)
 	r.build(c, box, &r.view, nil, fn)
 	return box
@@ -463,7 +516,7 @@ func (r *Router) View(c *Context, fn func(r *Route)) *Element {
 
 // build builds the pages of view v in box: the router's, or those inside
 // the page of route parent, a layout.
-func (r *Router) build(c *Context, box *Element, v *routeView, parent *Route, fn func(*Route)) {
+func (r *Router) build(c *context, box *node, v *routeView, parent *Route, fn func(*Route)) {
 	// The entry to show: the router's, or the layout's, which is going
 	// away while it slides out.
 	cur, level := r.current(), 0
@@ -480,19 +533,16 @@ func (r *Router) build(c *Context, box *Element, v *routeView, parent *Route, fn
 	}
 	progress := float32(1)
 	if v.leaving != nil {
-		d := slideTime
-		if v.dir == 0 {
-			d = fadeTime
-		}
-		if t := c.now.Sub(v.start); t < d {
-			progress = EaseOut(float32(t) / float32(d))
+		v.progress.advance(c.now)
+		if v.progress.moving || v.progress.pending {
+			progress = max(0, min(float32(v.progress.value), 1))
 			c.AnimationFrame()
 		} else {
 			v.leaving = nil
 		}
 	}
 	box.Children(func() {
-		var page *Element
+		var page *node
 		switch {
 		case v.leaving == nil:
 			page = r.page(c, parent, cur, fn, false)
@@ -511,8 +561,9 @@ func (r *Router) build(c *Context, box *Element, v *routeView, parent *Route, fn
 			if v.dir > 0 {
 				upper, lower, shown = page, old, progress
 			}
-			upper.Absolute().Top(0).Fill().Background(bg).LeftPercent(100*(1-shown)).Shadow(0, 0, 16, 0, RGBA(0, 0, 0, 0.15))
-			lower.LeftPercent(-30 * shown).Background(bg).DrawOver(func(p *Painter, rc Rect) {
+			// From the end: the left right to left.
+			upper.Absolute().Top(0).Fill().Background(bg).StartPercent(100*(1-shown)).Shadow(0, 0, 16, 0, RGBA(0, 0, 0, 0.15))
+			lower.StartPercent(-30 * shown).Background(bg).DrawOver(func(p *Painter, rc Rect) {
 				p.Fill(rc, RGBA(0, 0, 0, 0.06*shown), 0)
 			})
 		}
@@ -530,10 +581,13 @@ func (r *Router) build(c *Context, box *Element, v *routeView, parent *Route, fn
 
 // keys goes back and forward for the keys that do, with the keyboard
 // focus in the router, or anywhere for the first router of the window.
-func (r *Router) keys(c *Context, box *Element) {
+func (r *Router) keys(c *context, box *node) {
 	first := c.routers == 0
 	c.routers++
-	back, forward := [2]shortcut{{0, KeyBack}, {Alt, KeyLeft}}, [2]shortcut{{0, KeyForward}, {Alt, KeyRight}}
+	// Alt and the arrow pointing back, as the Back button's arrow does:
+	// Right right to left, as in browsers.
+	left, right := box.arrows()
+	back, forward := [2]shortcut{{0, KeyBack}, {Alt, left}}, [2]shortcut{{0, KeyForward}, {Alt, right}}
 	if runtime.GOOS == "darwin" {
 		back[1], forward[1] = shortcut{Super, KeyBracketLeft}, shortcut{Super, KeyBracketRight}
 	}
@@ -556,7 +610,7 @@ func (r *Router) keys(c *Context, box *Element) {
 
 // show starts view v showing entry cur in place of the entry it shows: the
 // transition, and where the keyboard focus goes.
-func (r *Router) show(c *Context, box *Element, v *routeView, parent *Route, cur *routeEntry) {
+func (r *Router) show(c *context, box *node, v *routeView, parent *Route, cur *routeEntry) {
 	rt := c.rt
 	old, level, offset := v.shown, 0, 0
 	if parent != nil {
@@ -576,10 +630,14 @@ func (r *Router) show(c *Context, box *Element, v *routeView, parent *Route, cur
 		v.focusing, v.announcing = false, true
 	}
 	v.leaving, v.dir, v.start = nil, 0, c.now
-	if r.Transition == TransitionNone {
+	if r.Transition == TransitionNone || rt.instant() {
 		return
 	}
 	v.leaving = old
+	defer func() {
+		v.progress = channel{at: c.now}
+		headFor(&v.progress, 1, r.animation(v.dir), c.now)
+	}()
 	if r.Transition == TransitionAuto && !rt.preferences().ReduceMotion {
 		from, to := segmentsOf(old.loc), segmentsOf(cur.loc)
 		from, to = from[min(offset, len(from)):], to[min(offset, len(to)):]
@@ -592,9 +650,20 @@ func (r *Router) show(c *Context, box *Element, v *routeView, parent *Route, cur
 	}
 }
 
+// animation returns how pages go in direction dir (0 fading).
+func (r *Router) animation(dir int) Animation {
+	if r.Animation != nil {
+		return *r.Animation
+	}
+	if dir == 0 {
+		return Animation{Duration: fadeTime, Ease: EaseOut}
+	}
+	return Animation{Duration: slideTime, Ease: EaseOut}
+}
+
 // page builds the page of entry e with fn, in a view of the router or
 // inside the page of route parent: inert while it goes away.
-func (r *Router) page(c *Context, parent *Route, e *routeEntry, fn func(*Route), leaving bool) *Element {
+func (r *Router) page(c *context, parent *Route, e *routeEntry, fn func(*Route), leaving bool) *node {
 	route := &Route{router: r, entry: e, rest: -1}
 	if parent != nil {
 		route.level, route.offset = parent.level+1, parent.offset+parent.rest
@@ -602,8 +671,9 @@ func (r *Router) page(c *Context, parent *Route, e *routeEntry, fn func(*Route),
 	}
 	segments := segmentsOf(e.loc)
 	route.segments = segments[min(route.offset, len(segments)):]
-	pg := Column(c).Key(r.pageAt(e, route.level)).Grow(1).MinWidth(0).MinHeight(0)
+	pg := coreColumn(c).Key(r.pageAt(e, route.level)).Grow(1).MinWidth(0).MinHeight(0)
 	route.page = pg
+	route.pageEpoch = c.rt.epoch
 	pg.flags |= flagPage
 	if leaving {
 		pg.flags |= flagInert
@@ -627,7 +697,7 @@ func (r *Router) page(c *Context, parent *Route, e *routeEntry, fn func(*Route),
 // keep keeps the state of the pages at a level of the entries nearest the
 // one shown, but those built: of a layout's view, those inside the same
 // layout, which keeps them when it goes out of sight.
-func (r *Router) keep(c *Context, box *Element, v *routeView, level int, cur *routeEntry) {
+func (r *Router) keep(c *context, box *node, v *routeView, level int, cur *routeEntry) {
 	rt := c.rt
 	if rt.kept == nil {
 		rt.kept = map[uint64]bool{}
@@ -656,14 +726,14 @@ func (r *Router) keep(c *Context, box *Element, v *routeView, level int, cur *ro
 // focusPage gives the keyboard focus to the element of the page that had
 // it as the page went out of sight, else to the page, unless an element
 // of the page took it as it was built (AutoFocus).
-func (r *Router) focusPage(c *Context, page *Element, cur *routeEntry) {
+func (r *Router) focusPage(c *context, page *node, cur *routeEntry) {
 	rt := c.rt
 	if rt.focused != 0 {
 		return
 	}
 	if s := rt.states[cur.focus]; cur.focus != 0 && s != nil && s.seen == rt.frame && s.pass == rt.pass {
 		rt.focused = cur.focus
-		rt.blinkStart = time.Now()
+		rt.blinkStart = rt.now()
 		return
 	}
 	page.Focus()
@@ -671,7 +741,7 @@ func (r *Router) focusPage(c *Context, page *Element, cur *routeEntry) {
 
 // backdrop returns the color behind an element: the background of the
 // nearest element around it that has one.
-func backdrop(e *Element) Color {
+func backdrop(e *node) Color {
 	for p := e.parent; p != nil; p = p.parent {
 		if p.bg.A > 0 {
 			return p.bg
@@ -697,13 +767,13 @@ func (rt *engine) within(id, ancestor uint64) bool {
 // BackButton creates a button going back in r's history, disabled at its
 // start, as in the toolbar of Finder or a browser; a right click lists
 // the pages before, to go back several. ForwardButton goes forward again.
-func BackButton(c *Context, r *Router) *Element { return historyButton(c, r, -1) }
+func coreBackButton(c *context, r *Router) *node { return historyButton(c, r, -1) }
 
 // ForwardButton creates a button going forward in r's history, as
 // BackButton goes back.
-func ForwardButton(c *Context, r *Router) *Element { return historyButton(c, r, 1) }
+func coreForwardButton(c *context, r *Router) *node { return historyButton(c, r, 1) }
 
-func historyButton(c *Context, r *Router, d int) *Element {
+func historyButton(c *context, r *Router, d int) *node {
 	t := c.theme
 	r.current()
 	label, can := "Back", r.CanGoBack()
@@ -717,9 +787,15 @@ func historyButton(c *Context, r *Router, d int) *Element {
 		if !can {
 			color = t.TextMuted
 		}
-		Box(c).Size(t.Space(4), t.Space(4)).Shrink(0).Role(RoleNone).Draw(func(p *Painter, rc Rect) {
+		arrow := coreBox(c).Size(t.Space(4), t.Space(4)).Shrink(0).Role(RoleNone)
+		// Back points the way pages came from: right right to left.
+		dir := float32(d)
+		if arrow.rtl() {
+			dir = -dir
+		}
+		arrow.Draw(func(p *Painter, rc Rect) {
 			cx, cy, s := rc.X+rc.W/2, rc.Y+rc.H/2, rc.W*0.22
-			dx := s * float32(d)
+			dx := s * dir
 			var path Path
 			path.MoveTo(cx-dx/2, cy-s*1.6).LineTo(cx+dx, cy).LineTo(cx-dx/2, cy+s*1.6)
 			p.StrokePath(&path, 1.6, color)

@@ -27,9 +27,20 @@ type Span struct {
 	DecorationColor     Color
 	DecorationThickness float32
 	// Background highlights the span, as search results are.
-	Background    Color
+	Background Color
+	// Radius rounds the corners of the Background, which then hugs the
+	// span's glyphs, a little wider than them, rather than filling the
+	// line, as code within text shows.
+	Radius        float32
 	LetterSpacing float32
 	Features      string // as for Element.FontFeatures, comma separated
+	Lang          string // the language, as for Element.Lang
+	// ObjectWidth and ObjectHeight, when ObjectWidth is set, make each
+	// rune of the span, an object replacement character (U+FFFC), an
+	// inline object: a box of that size in DIPs standing on the baseline,
+	// which lines break around and which draws nothing, where a rich text
+	// editor draws an image (TextLayout.Objects).
+	ObjectWidth, ObjectHeight float32
 }
 
 // RichText creates a text whose spans differ in style, over the style of
@@ -58,7 +69,7 @@ type Span struct {
 //
 // Only text elements go inside a text, and their sizes, padding, borders
 // and corners do not apply; a background highlights their text.
-func RichText(c *Context, spans ...Span) *Element {
+func coreRichText(c *context, spans ...Span) *node {
 	e := c.newElement(kindText)
 	e.text = e.st.spanCache().join(spans)
 	e.spans = spans
@@ -67,7 +78,7 @@ func RichText(c *Context, spans ...Span) *Element {
 
 // textSpans encodes the styles of an element's spans for its layout, once
 // a frame, with those of the elements inside it, once it is built.
-func (e *Element) textSpans() string {
+func (e *node) textSpans() string {
 	if e.first != nil && !e.merged {
 		e.spans, e.merged = e.inlineSpans(), true
 	}
@@ -95,6 +106,9 @@ type spanCache struct {
 	styles []text.Span
 	key    string
 	paints bool
+	// inline holds the spans of a paragraph with elements inside it, its
+	// own and theirs, made again each frame (inlineSpans).
+	inline []Span
 }
 
 // spanCache returns the element's spanCache, making it the first time.
@@ -154,7 +168,8 @@ func (sc *spanCache) update(spans []Span) {
 // spanStyle returns the style of a span ending at rune end, for its
 // layout.
 func spanStyle(s Span, end int) text.Span {
-	return text.Span{End: end, Family: s.Font, Size: s.Size, Weight: s.Weight, Italic: s.Italic, LetterSpacing: s.LetterSpacing, Features: s.Features}
+	return text.Span{End: end, Family: s.Font, Size: s.Size, Weight: s.Weight, Italic: s.Italic, LetterSpacing: s.LetterSpacing, Features: s.Features, Lang: s.Lang,
+		ObjectWidth: s.ObjectWidth, ObjectHeight: s.ObjectHeight}
 }
 
 // encodeSpans encodes the styles of spans for a layout.
@@ -172,7 +187,7 @@ func encodeSpans(spans []Span) string {
 // wrapping lines at width (none for 0).
 func (rt *engine) richParams(width float32, spans []Span) text.Params {
 	t := rt.c.theme
-	style := text.Style{Family: t.Font, Size: t.FontSize}
+	style := text.Style{Family: t.Font, Size: t.FontSize, Lang: rt.lang}
 	// Views measure the same spans frame after frame.
 	for i := range rt.measured {
 		m := &rt.measured[i]
@@ -226,7 +241,7 @@ func (p *Painter) MeasureText(width float32, spans ...Span) (w, h float32) {
 // MeasureText returns the size spans of text take as Painter.RichText draws
 // them, wrapping lines at width DIPs (none for 0), to lay out what depends
 // on it while building.
-func (c *Context) MeasureText(width float32, spans ...Span) (w, h float32) {
+func (c *context) MeasureText(width float32, spans ...Span) (w, h float32) {
 	l := c.rt.text.Layout(c.rt.richParams(width, spans))
 	return l.Width, l.Height
 }
@@ -250,7 +265,7 @@ func newSpanPaint(spans []Span) *spanPaint {
 // paintSpans returns how to paint the spans of the element's text, which
 // textSpans cached as it laid it out, or nil when they paint nothing but
 // its color.
-func (e *Element) paintSpans(sp *spanPaint) *spanPaint {
+func (e *node) paintSpans(sp *spanPaint) *spanPaint {
 	if e.spans == nil {
 		return nil
 	}
@@ -311,10 +326,20 @@ func (sp *spanPaint) runs(line *text.Line, fn func(k, i, j int, x0, x1 float32))
 // backgrounds fills behind the spans of a line that have a background,
 // from the top-left of the text at (x, y), in DIPs.
 func (sp *spanPaint) backgrounds(p *Painter, line *text.Line, x, y float32) {
-	sp.runs(line, func(k, _, _ int, x0, x1 float32) {
-		if k >= 0 && sp.spans[k].Background.A > 0 {
-			p.Fill(Rect{x + x0, y + line.Y, x1 - x0, line.Height}, sp.spans[k].Background, 0)
+	sp.runs(line, func(k, i, _ int, x0, x1 float32) {
+		saved := p.transform
+		p.transform = saved.Mul(p.inlineTransform(line.Glyphs[i].Cluster))
+		defer func() { p.transform = saved }()
+		if k < 0 || sp.spans[k].Background.A == 0 {
+			return
 		}
+		if r := sp.spans[k].Radius; r > 0 {
+			size := line.Glyphs[i].Size
+			px := min(size*0.22, r)
+			p.Fill(Rect{x + x0 - px, y + line.Baseline - size*0.98, x1 - x0 + 2*px, size * 1.32}, sp.spans[k].Background, r)
+			return
+		}
+		p.Fill(Rect{x + x0, y + line.Y, x1 - x0, line.Height}, sp.spans[k].Background, 0)
 	})
 }
 
@@ -337,6 +362,9 @@ func (sp *spanPaint) lines(p *Painter, l *text.Layout, li int, x, y float32, col
 		if span.DecorationThickness > 0 {
 			d.thick = span.DecorationThickness
 		}
-		p.decorations(l, li, i, j, x, y, d, sp.color(k, color))
+		saved := p.transform
+		p.transform = saved.Mul(p.inlineTransform(l.Lines[li].Glyphs[i].Cluster))
+		p.decorationRun(l, li, i, j, x, y, d, sp.color(k, color))
+		p.transform = saved
 	})
 }

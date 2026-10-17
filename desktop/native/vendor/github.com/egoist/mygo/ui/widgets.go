@@ -9,36 +9,36 @@ import (
 )
 
 // Box creates a container that lays its children out in a column.
-func Box(c *Context) *Element { return c.newElement(kindBox) }
+func coreBox(c *context) *node { return c.newElement(kindBox) }
 
 // Column creates a container that lays its children out from top to
 // bottom, stretched to its width.
-func Column(c *Context) *Element { return c.newElement(kindBox) }
+func coreColumn(c *context) *node { return c.newElement(kindBox) }
 
 // Row creates a container that lays its children out from left to right,
 // centered vertically.
-func Row(c *Context) *Element { return c.newElement(kindBox).Row() }
+func coreRow(c *context) *node { return c.newElement(kindBox).Row() }
 
 // Text creates a text, which wraps at the width it gets.
-func Text(c *Context, s string) *Element {
+func coreText(c *context, s string) *node {
 	e := c.newElement(kindText)
 	e.text = s
 	return e
 }
 
 // Textf creates a text formatted with fmt.Sprintf.
-func Textf(c *Context, format string, args ...any) *Element {
-	return Text(c, fmt.Sprintf(format, args...))
+func coreTextf(c *context, format string, args ...any) *node {
+	return coreText(c, fmt.Sprintf(format, args...))
 }
 
 // Spacer creates an empty element that takes the free space of its row or
 // column, pushing its siblings apart.
-func Spacer(c *Context) *Element { return Box(c).Grow(1) }
+func coreSpacer(c *context) *node { return coreBox(c).Grow(1) }
 
 // Divider creates a thin line across its row or column.
-func Divider(c *Context) *Element {
+func coreDivider(c *context) *node {
 	row := c.parent.row
-	e := Box(c).Background(c.theme.Border).Shrink(0).AlignSelf(Stretch)
+	e := coreBox(c).Background(c.theme.Border).Shrink(0).AlignSelf(Stretch)
 	if row {
 		return e.Width(1)
 	}
@@ -49,40 +49,15 @@ func Divider(c *Context) *Element {
 // keeps frames coming while it moves; key tells apart the animations of
 // the element. The value starts at the first target. When the desktop asks
 // for less motion (Preferences.ReduceMotion), it goes to target at once.
-func (e *Element) Animate(key any, target float32, d time.Duration) float32 {
+// AnimateTo takes springs and delays too.
+func (e *node) Animate(key any, target float32, d time.Duration) float32 {
 	return e.AnimateWith(key, target, d, EaseOut)
 }
 
 // AnimateWith returns a value that moves to target over d as Animate does,
 // along ease.
-func (e *Element) AnimateWith(key any, target float32, d time.Duration, ease Easing) float32 {
-	st := e.st
-	if st.anims == nil {
-		st.anims = map[any]*anim{}
-	}
-	a := st.anims[key]
-	now := e.c.now
-	if a == nil {
-		st.anims[key] = &anim{from: target, to: target, value: target}
-		return target
-	}
-	if a.to != target && e.c.rt.preferences().ReduceMotion {
-		// Without the motion.
-		a.from, a.to, a.value = target, target, target
-	}
-	if a.to != target {
-		a.from, a.to, a.start, a.dur = a.value, target, now, d
-	}
-	if a.value != a.to {
-		t := float32(now.Sub(a.start)) / float32(max(a.dur, time.Millisecond))
-		if t >= 1 {
-			a.value = a.to
-		} else {
-			a.value = a.from + (a.to-a.from)*ease(max(t, 0))
-			e.c.AnimationFrame()
-		}
-	}
-	return a.value
+func (e *node) AnimateWith(key any, target float32, d time.Duration, ease Easing) float32 {
+	return e.AnimateTo(key, target, Animation{Duration: max(d, time.Millisecond), Ease: ease})
 }
 
 // Loop returns the progress of an animation that starts over every
@@ -91,7 +66,7 @@ func (e *Element) AnimateWith(key any, target float32, d time.Duration, ease Eas
 // spinner turns with Loop("spin", time.Second, ui.Linear) * 360, and a
 // placeholder pulses with an opacity of 0.5 + 0.5*Loop("pulse", d,
 // ui.Bounce(ui.EaseInOut)).
-func (e *Element) Loop(key any, period time.Duration, ease Easing) float32 {
+func (e *node) Loop(key any, period time.Duration, ease Easing) float32 {
 	st := e.st
 	if st.anims == nil {
 		st.anims = map[any]*anim{}
@@ -145,11 +120,8 @@ func Bounce(ease Easing) Easing {
 	}
 }
 
-type anim struct {
-	from, to, value float32
-	start           time.Time
-	dur             time.Duration
-}
+// anim is a Loop's: when it started.
+type anim struct{ start time.Time }
 
 func b2f(b bool) float32 {
 	if b {
@@ -160,16 +132,16 @@ func b2f(b bool) float32 {
 
 // Button creates a button showing label. Ask Clicked whether it was
 // clicked; give it other content with Children and an empty label.
-func Button(c *Context, label string) *Element { return button(c, label, false) }
+func coreButton(c *context, label string) *node { return button(c, label, false) }
 
 // PrimaryButton creates a button in the accent color, for the main action.
-func PrimaryButton(c *Context, label string) *Element { return button(c, label, true) }
+func corePrimaryButton(c *context, label string) *node { return button(c, label, true) }
 
-func button(c *Context, label string, primary bool) *Element {
-	b := ButtonBase(c)
+func button(c *context, label string, primary bool) *node {
+	b := coreButtonBase(c)
 	styleButton(c, b, primary)
 	if label != "" {
-		b.Children(func() { Text(c, label).SingleLine() })
+		b.Children(func() { coreText(c, label).SingleLine() })
 	}
 	return b
 }
@@ -177,7 +149,7 @@ func button(c *Context, label string, primary bool) *Element {
 // styleButton gives a button the theme's look, in the accent color when
 // primary: without a face of its own until hovered in a toolbar, and as a
 // segment in a ToggleGroup or Segmented.
-func styleButton(c *Context, b *Element, primary bool) {
+func styleButton(c *context, b *node, primary bool) {
 	t := c.theme
 	b.Padding(t.Space(1.5), t.Space(3.5)).Gap(t.Space(1.5)).Radius(t.Radius)
 	base, hover, pressed, fg, border := t.Surface, t.SurfaceHover, t.SurfacePressed, t.Text, t.Border
@@ -196,7 +168,7 @@ func styleButton(c *Context, b *Element, primary bool) {
 	if border.A > 0 {
 		b.Border(1, border)
 	}
-	b.styleFn = func(b *Element) {
+	b.styleFn = func(b *node) {
 		if b.bg != base || b.IsDisabled() {
 			return
 		}
@@ -213,20 +185,23 @@ func styleButton(c *Context, b *Element, primary bool) {
 // scheme, as "/notes/42" or "edit", goes there in the router (Push).
 // Inside a RichText it is a link within the paragraph; give it an empty
 // label and Children to style parts of its text.
-func Link(c *Context, label, url string) *Element {
+func coreLink(c *context, label, url string) *node {
 	t := c.theme
-	e := Text(c, label).TextColor(t.Accent).Cursor(CursorPointer).Focusable()
+	e := coreText(c, label).TextColor(t.Accent).Cursor(CursorPointer).Focusable()
 	e.widget, e.role = "Link", RoleLink
-	if e.Clicked() && url != "" {
-		if r := c.router; r != nil && isPath(url) {
-			r.Push(url)
-		} else {
-			c.rt.host.openURL(url, nil)
+	router := c.router
+	e.afterInput(func() {
+		if e.Clicked() && url != "" {
+			if r := router; r != nil && isPath(url) {
+				r.Push(url)
+			} else {
+				c.rt.host.openURL(url, nil)
+			}
 		}
-	}
-	if e.Hovered() {
-		e.Underline()
-	}
+		if e.Hovered() {
+			e.Underline()
+		}
+	})
 	return e
 }
 
@@ -236,12 +211,12 @@ func checkPath(r Rect) *Path {
 }
 
 // Checkbox creates a check box toggling *checked, with a label.
-func Checkbox(c *Context, checked *bool, label string) *Element {
+func coreCheckbox(c *context, checked *bool, label string) *node {
 	t := c.theme
-	row := CheckboxBase(c, checked).Gap(t.Space(2)).FocusRing(false)
+	row := coreCheckboxBase(c, checked).Gap(t.Space(2)).FocusRing(false)
 	on := *checked
 	row.Children(func() {
-		box := Box(c).Size(t.Space(4), t.Space(4)).Radius(t.Space(1)).Shrink(0)
+		box := coreBox(c).Size(t.Space(4), t.Space(4)).Radius(t.Space(1)).Shrink(0)
 		if on {
 			box.Background(t.Accent)
 		} else {
@@ -255,13 +230,13 @@ func Checkbox(c *Context, checked *bool, label string) *Element {
 				p.FocusRing(r, box.radius)
 			}
 		})
-		box.styleFn = func(box *Element) {
+		box.styleFn = func(box *node) {
 			if !on && row.Hovered() {
 				box.borderC = t.Accent
 			}
 		}
 		if label != "" {
-			Text(c, label)
+			coreText(c, label)
 		}
 	})
 	return row
@@ -269,12 +244,12 @@ func Checkbox(c *Context, checked *bool, label string) *Element {
 
 // Radio creates a radio button that selects value into *selected, with a
 // label.
-func Radio[T comparable](c *Context, selected *T, value T, label string) *Element {
+func coreRadio[T comparable](c *context, selected *T, value T, label string) *node {
 	t := c.theme
-	row := RadioBase(c, selected, value).Gap(t.Space(2)).FocusRing(false)
+	row := coreRadioBase(c, selected, value).Gap(t.Space(2)).FocusRing(false)
 	on := *selected == value
 	row.Children(func() {
-		dot := Box(c).Size(t.Space(4), t.Space(4)).Radius(t.Space(2)).Shrink(0)
+		dot := coreBox(c).Size(t.Space(4), t.Space(4)).Radius(t.Space(2)).Shrink(0)
 		if on {
 			dot.Background(t.Accent)
 		} else {
@@ -289,29 +264,35 @@ func Radio[T comparable](c *Context, selected *T, value T, label string) *Elemen
 				p.FocusRing(r, dot.radius)
 			}
 		})
-		dot.styleFn = func(dot *Element) {
+		dot.styleFn = func(dot *node) {
 			if !on && row.Hovered() {
 				dot.borderC = t.Accent
 			}
 		}
 		if label != "" {
-			Text(c, label)
+			coreText(c, label)
 		}
 	})
 	return row
 }
 
 // Switch creates a switch toggling *on.
-func Switch(c *Context, on *bool) *Element {
+func coreSwitch(c *context, on *bool) *node {
 	t := c.theme
-	sw := SwitchBase(c, on).Size(t.Space(9), t.Space(5)).Radius(t.Space(2.5))
+	sw := coreSwitchBase(c, on).Size(t.Space(9), t.Space(5)).Radius(t.Space(2.5))
 	pos := sw.Animate("knob", b2f(*on), 140*time.Millisecond)
 	off := t.Border.Mix(t.Text, 0.15)
 	sw.Background(off.Mix(t.Accent, pos))
+	rtl := sw.rtl()
 	sw.Draw(func(p *Painter, r Rect) {
 		in := t.Space(0.5)
 		d := r.H - 2*in
-		knob := Rect{r.X + in + pos*(r.W-r.H), r.Y + in, d, d}
+		// On at the end: the left right to left, as UISwitch mirrors.
+		at := pos
+		if rtl {
+			at = 1 - pos
+		}
+		knob := Rect{r.X + in + at*(r.W-r.H), r.Y + in, d, d}
 		p.Shadow(knob, d/2, 0, 1, 3, 0, RGBA(0, 0, 0, 0.25))
 		p.Fill(knob, RGB(255, 255, 255), d/2)
 	})
@@ -319,19 +300,19 @@ func Switch(c *Context, on *bool) *Element {
 }
 
 // Slider creates a slider setting *value between lo and hi.
-func Slider(c *Context, value *float64, lo, hi float64) *Element {
+func coreSlider(c *context, value *float64, lo, hi float64) *node {
 	return slider(c, value, lo, hi, 0)
 }
 
 // StepSlider creates a slider setting *value to lo or a multiple of step
 // from it, up to hi, with a tick mark at each, as AppKit's sliders with
 // tick marks: dragging snaps to them, and the arrows step by step.
-func StepSlider(c *Context, value *float64, lo, hi, step float64) *Element {
+func coreStepSlider(c *context, value *float64, lo, hi, step float64) *node {
 	return slider(c, value, lo, hi, step)
 }
 
 // slider creates a Slider, or with step a StepSlider.
-func slider(c *Context, value *float64, lo, hi, step float64) *Element {
+func slider(c *context, value *float64, lo, hi, step float64) *node {
 	t := c.theme
 	// The knob, a capsule like AppKit's, moves across the content box,
 	// half of it inside the padding on each side, so it stays on the
@@ -344,6 +325,12 @@ func slider(c *Context, value *float64, lo, hi, step float64) *Element {
 		s.Height(t.Space(7))
 	}
 	frac := fraction(*value, lo, hi)
+	// Right to left, lo is at the right (sliderInput), and the track
+	// fills from there.
+	rtl := s.rtl()
+	if rtl {
+		frac = 1 - frac
+	}
 	held := s.Animate("held", b2f(s.st.pressed), 150*time.Millisecond)
 	s.Draw(func(p *Painter, r Rect) {
 		// As thick as Progress; above the ticks.
@@ -358,7 +345,11 @@ func slider(c *Context, value *float64, lo, hi, step float64) *Element {
 			p.Fill(k, RGBA(255, 255, 255, 0.1*held), k.H/2)
 		}
 		p.Fill(track, t.Border, h/2)
-		p.Fill(Rect{track.X, track.Y, x - track.X, h}, t.Accent, h/2)
+		if rtl {
+			p.Fill(Rect{x, track.Y, track.X + track.W - x, h}, t.Accent, h/2)
+		} else {
+			p.Fill(Rect{track.X, track.Y, x - track.X, h}, t.Accent, h/2)
+		}
 		paintKnob(p, t, k, held, s.FocusVisible())
 	})
 	return s
@@ -467,18 +458,20 @@ func paintKnob(p *Painter, t *Theme, k Rect, held float32, focus bool) {
 }
 
 // Progress creates a progress bar filled to value between 0 and 1; a
-// negative value shows activity of unknown length. Reverse fills it from
-// the right, for interfaces laid out from right to left.
-func Progress(c *Context, value float64) *Element {
+// negative value shows activity of unknown length. It fills from its
+// start: the right right to left (Direction). Reverse fills it from the
+// other side.
+func coreProgress(c *context, value float64) *node {
 	t := c.theme
 	rad := t.Space(0.75)
-	e := Box(c).Height(t.Space(1.5)).Radius(rad).Background(t.Border).Clip()
+	e := coreBox(c).Height(t.Space(1.5)).Radius(rad).Background(t.Border).Clip()
 	e.role, e.hasRange, e.accRange = RoleProgress, true, [3]float64{0, 1, value}
 	e.Draw(func(p *Painter, r Rect) {
+		fromRight := e.reverse != e.rtl()
 		if value >= 0 {
 			w := r.W * float32(math.Min(value, 1))
 			x := r.X
-			if e.reverse {
+			if fromRight {
 				x = r.X + r.W - w
 			}
 			p.Fill(Rect{x, r.Y, w, r.H}, t.Accent, rad)
@@ -490,7 +483,7 @@ func Progress(c *Context, value float64) *Element {
 		phase := float32(p.Now().UnixMilli()%1400) / 1400
 		w := r.W * 0.3
 		x := r.X - w + (r.W+w)*phase
-		if e.reverse {
+		if fromRight {
 			x = r.X + r.W - (r.W+w)*phase
 		}
 		p.Clip(r, rad, func() { p.Fill(Rect{x, r.Y, w, r.H}, t.Accent, rad) })
@@ -500,15 +493,15 @@ func Progress(c *Context, value float64) *Element {
 
 // Scroll creates a container that scrolls its children vertically. Give
 // it a size, or Grow it within its parent.
-func Scroll(c *Context) *Element {
-	e := Box(c)
+func coreScroll(c *context) *node {
+	e := coreBox(c)
 	e.flags |= flagScrollY | flagHover
 	return e
 }
 
 // ScrollHorizontal creates a row that scrolls its children horizontally.
-func ScrollHorizontal(c *Context) *Element {
-	e := Row(c)
+func coreScrollHorizontal(c *context) *node {
+	e := coreRow(c)
 	e.flags |= flagScrollX | flagHover
 	return e
 }
@@ -516,8 +509,8 @@ func ScrollHorizontal(c *Context) *Element {
 // ScrollBoth creates a container that scrolls its children both ways, as
 // a canvas, a wide table or code does. Give it a size, or Grow it within
 // its parent.
-func ScrollBoth(c *Context) *Element {
-	e := Box(c)
+func coreScrollBoth(c *context) *node {
+	e := coreBox(c)
 	e.flags |= flagScrollX | flagScrollY | flagHover
 	return e
 }
@@ -531,7 +524,7 @@ type ImageSource interface {
 // Image creates an element showing a bitmap, or an SVG in its own colors
 // (with the text color for its currentColor), by default at its size as
 // DIPs, scaled to fit when given another size.
-func Image(c *Context, src ImageSource) *Element {
+func coreImage(c *context, src ImageSource) *node {
 	e := c.newElement(kindImage)
 	switch s := src.(type) {
 	case *Bitmap:
@@ -549,7 +542,7 @@ func Image(c *Context, src ImageSource) *Element {
 
 // intrinsicSize returns the size of an image's picture, or of an icon: as
 // high as the font size.
-func (e *Element) intrinsicSize() (w, h float32) {
+func (e *node) intrinsicSize() (w, h float32) {
 	switch e.kind {
 	case kindImage:
 		if e.image != nil {
@@ -567,18 +560,22 @@ func (e *Element) intrinsicSize() (w, h float32) {
 }
 
 // Fit sets how an Image fills its box.
-func (e *Element) Fit(f Fit) *Element { e.fit = f; return e }
+func (e *node) Fit(f Fit) *node { e.fit = f; return e }
 
 // Overlay builds fn's elements above the rest of the window. Place them
 // with Absolute, Left and Top, in DIPs relative to the window, or beside
 // another element with AttachTo. Each, as it goes with the focus in it,
 // gives the focus back to the element that had it as it came.
-func Overlay(c *Context, fn func()) {
+func coreOverlay(c *context, fn func()) {
 	saved := c.parent
 	o := c.overlayRoot()
 	c.parent = o
 	last := o.last
+	// What fn builds reads in the direction of where it was asked for.
+	dir := o.dir
+	o.dir = saved.dir &^ dirSet
 	fn()
+	o.dir = dir
 	c.parent = saved
 	first := o.first
 	if last != nil {
@@ -593,13 +590,14 @@ func Overlay(c *Context, fn func()) {
 }
 
 // Modal shows a dialog built by fn over a dimmed window while *open is
-// true; clicking outside it or pressing Escape sets *open to false.
-func Modal(c *Context, open *bool, fn func()) *Element {
+// true; clicking outside it or pressing Escape sets *open to false, which
+// Dismissed reports.
+func coreModal(c *context, open *bool, fn func()) *node {
 	if !*open {
 		return nil
 	}
 	t := c.theme
-	return DialogBase(c, open, func(back, panel *Element) {
+	return coreDialogBase(c, open, func(back, panel *node) {
 		back.Background(RGBA(0, 0, 0, 0.4))
 		panel.Padding(t.Space(5)).Gap(t.Space(3)).Radius(t.Space(2.5)).Background(t.Background).MaxWidth(c.w - t.Space(10)).MaxHeight(c.h - t.Space(10))
 		panel.Shadow(0, 10, 30, 0, RGBA(0, 0, 0, 0.3))
@@ -608,12 +606,13 @@ func Modal(c *Context, open *bool, fn func()) *Element {
 }
 
 // Popover shows fn's elements in a panel below anchor while *open is
-// true; clicking outside it or pressing Escape sets *open to false.
-func Popover(c *Context, anchor *Element, open *bool, fn func()) *Element {
+// true; clicking outside it or pressing Escape sets *open to false, which
+// Dismissed reports.
+func corePopover(c *context, anchor *node, open *bool, fn func()) *node {
 	if !*open {
 		return nil
 	}
-	return PopoverBase(c, anchor, open, func(panel *Element) {
+	return corePopoverBase(c, anchor, open, func(panel *node) {
 		panel.MinWidth(anchor.Bounds().W)
 		stylePanel(c, panel)
 		fn()
@@ -621,24 +620,24 @@ func Popover(c *Context, anchor *Element, open *bool, fn func()) *Element {
 }
 
 // stylePanel gives the panel of a popup the theme's look.
-func stylePanel(c *Context, panel *Element) {
+func stylePanel(c *context, panel *node) {
 	t := c.theme
 	panel.Margin(t.Space(1), 0, 0, 0).Padding(t.Space(1)).Radius(t.Radius+2).Background(t.Background).Border(1, t.Border)
 	panel.Shadow(0, 6, 20, 0, RGBA(0, 0, 0, 0.18))
 }
 
 // Select creates a drop-down choosing one of options into *selected.
-func Select(c *Context, selected *string, options []string) *Element {
+func coreSelect(c *context, selected *string, options []string) *node {
 	t := c.theme
-	sel := SelectBase(c, selected)
+	sel := coreSelectBase(c, selected)
 	b := sel.Trigger
 	styleButton(c, b, false)
 	b.Justify(SpaceBetween).MinWidth(t.Space(35))
 	b.Children(func() {
-		Text(c, *selected).SingleLine()
+		coreText(c, *selected).SingleLine()
 		chevron(c)
 	})
-	sel.Popup(func(panel *Element) {
+	sel.Popup(func(panel *node) {
 		stylePanel(c, panel)
 		for _, opt := range options {
 			item := sel.Item(opt).Padding(t.Space(1.5), t.Space(2.5)).Radius(t.Radius)
@@ -648,16 +647,16 @@ func Select(c *Context, selected *string, options []string) *Element {
 			case opt == *selected:
 				item.Background(t.Surface)
 			}
-			item.Children(func() { Text(c, opt).SingleLine() })
+			item.Children(func() { coreText(c, opt).SingleLine() })
 		}
 	})
 	return b
 }
 
 // chevron draws the arrow of a button opening something below it.
-func chevron(c *Context) {
+func chevron(c *context) {
 	t := c.theme
-	Box(c).Size(t.Space(2.5), t.Space(2.5)).Shrink(0).Draw(func(p *Painter, r Rect) {
+	coreBox(c).Size(t.Space(2.5), t.Space(2.5)).Shrink(0).Draw(func(p *Painter, r Rect) {
 		var path Path
 		path.MoveTo(r.X+r.W*0.1, r.Y+r.H*0.3).LineTo(r.X+r.W*0.5, r.Y+r.H*0.7).LineTo(r.X+r.W*0.9, r.Y+r.H*0.3)
 		p.StrokePath(&path, 1.5, t.TextMuted)
@@ -675,43 +674,13 @@ func chevron(c *Context) {
 //			}
 //		}
 //	})
-func MenuButton(c *Context, label string, build func(m *Menu)) *Element {
+func coreMenuButton(c *context, label string, build func(m *Menu)) *node {
 	b := button(c, "", false)
 	b.Children(func() {
 		if label != "" {
-			Text(c, label).SingleLine()
+			coreText(c, label).SingleLine()
 		}
 		chevron(c)
 	})
 	return b.Menu(build)
-}
-
-// keepInWindow places an overlay element at (x, y), where the layout,
-// which knows its size, moves it to fit in the window: left when it would
-// overflow the right edge, above, ending at aboveY, when it would
-// overflow the bottom. A top margin keeps it apart from what it is above
-// or below.
-func keepInWindow(e *Element, x, y, aboveY float32) {
-	e.Left(x).Top(y)
-	e.place = placement{on: true, above: aboveY}
-}
-
-// placement is where an overlay element goes when it does not fit below
-// what it belongs to: above, its bottom at above.
-type placement struct {
-	on    bool
-	above float32
-}
-
-// fit moves an absolute element w×h at (left, top) in a containing block
-// pw×ph, its placement says, to fit in the block.
-func (p placement) fit(e *Element, left, top, w, h, pw, ph float32) (float32, float32) {
-	if left+e.margin[3]+w > pw-4 {
-		left = max(4-e.margin[3], pw-4-w-e.margin[3])
-	}
-	m := e.margin[0]
-	if top+m+h > ph-4 && p.above-m-h > 4 {
-		top = p.above - h - 2*m
-	}
-	return left, top
 }
