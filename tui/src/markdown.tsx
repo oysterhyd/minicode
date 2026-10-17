@@ -2,7 +2,7 @@ import { Box, Text } from 'ink'
 import { marked, type Token, type Tokens } from 'marked'
 import { useMemo, type ReactNode } from 'react'
 import { displayWidth, terminalText } from './format.js'
-import { useTerminalSize } from './terminal.js'
+import { theme, useTerminalSize } from './terminal.js'
 
 const MATH_PREFIX = '§math§'
 
@@ -88,12 +88,12 @@ function inline(tokens: Token[] | undefined): ReactNode {
     if (token.type === 'del') return <Text key={key} strikethrough dimColor>{inline(token.tokens)}</Text>
     if (token.type === 'codespan') {
       const value = token.text.startsWith(MATH_PREFIX) ? token.text.slice(MATH_PREFIX.length) : token.text
-      return <Text key={key} color="cyan" italic={token.text.startsWith(MATH_PREFIX)}>{value}</Text>
+      return <Text key={key} color={theme.code} italic={token.text.startsWith(MATH_PREFIX)}>{value}</Text>
     }
     if (token.type === 'link') {
       const label = tokensToPlain(token.tokens) || token.text || token.href
       return (
-        <Text key={key} color="cyan" underline>
+        <Text key={key} color={theme.code} underline>
           {label}
           {token.href && token.href !== label ? ` (${token.href})` : ''}
         </Text>
@@ -120,10 +120,10 @@ function codeBlock(token: Tokens.Code) {
   const math = token.lang === 'math'
   const lines = token.text.replace(/\n$/, '').split('\n')
   return (
-    <Box flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderColor={math ? 'cyan' : 'gray'}>
+    <Box flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderColor={math ? theme.code : theme.rule}>
       {token.lang ? <Text dimColor italic={math}>{math ? '公式' : token.lang}</Text> : null}
       {lines.map((line, index) => (
-        <Text key={index} color={math ? 'cyan' : undefined} italic={math}>{line || ' '}</Text>
+        <Text key={index} color={math ? theme.code : undefined} italic={math}>{line || ' '}</Text>
       ))}
     </Box>
   )

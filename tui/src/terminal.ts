@@ -2,7 +2,57 @@ import { useEffect, useRef, useState } from 'react'
 import { useInput, useStdin, useStdout, type Key } from 'ink'
 import { terminalText } from './format.js'
 
-export const ACCENT = '#D99778'
+// Claude Code's terminal palette. Light terminals get the darker variants so
+// the accent, permission blue and diff backgrounds keep enough contrast.
+function lightTerminal(): boolean {
+  const forced = (process.env.MINICODE_THEME || '').toLowerCase()
+  if (forced === 'light') return true
+  if (forced === 'dark') return false
+  const background = Number((process.env.COLORFGBG || '').split(';').at(-1))
+  return Number.isFinite(background) && (background === 7 || background === 15)
+}
+
+const LIGHT = lightTerminal()
+
+export const theme = LIGHT ? {
+  claude: '#D77757',
+  shimmer: '#F0A585',
+  text: '#1F1E1D',
+  subtle: '#8A8A8A',
+  rule: '#999999',
+  success: '#2C7A39',
+  error: '#AB2B3F',
+  warning: '#966C1E',
+  permission: '#5769F7',
+  autoAccept: '#8700FF',
+  bypass: '#AB2B3F',
+  userBg: '#EBEBEB',
+  addBg: '#69DB7C',
+  delBg: '#FFA8B4',
+  addWord: '#2F9D44',
+  delWord: '#D1454B',
+  code: '#5769F7',
+} : {
+  claude: '#D77757',
+  shimmer: '#EB9F7F',
+  text: '#FFFFFF',
+  subtle: '#808080',
+  rule: '#5A5A5A',
+  success: '#4EBA65',
+  error: '#FF6B80',
+  warning: '#FFC107',
+  permission: '#B1B9F9',
+  autoAccept: '#AF87FF',
+  bypass: '#FF6B80',
+  userBg: '#373737',
+  addBg: '#225C2B',
+  delBg: '#7A2936',
+  addWord: '#38A660',
+  delWord: '#B3596B',
+  code: '#B1B9F9',
+}
+
+export const ACCENT = theme.claude
 
 export function enterTerminalScreen(stdout: NodeJS.WriteStream = process.stdout) {
   stdout.write('\x1b[?1049h\x1b[2J\x1b[H\x1b[?2004h\x1b[?1000h\x1b[?1006h')

@@ -102,6 +102,7 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
         kind: 'approval',
         name: event.request.tool_name,
         args: event.request.arguments,
+        text: event.request.summary,
         approvalId: event.approvalId,
         callId: state.approvalCallId,
       }],
