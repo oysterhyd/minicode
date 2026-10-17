@@ -27,16 +27,17 @@ func statusLetter(status string) string {
 
 func (d *desktop) workPanel(c *ui.Context, p palette) {
 	v := d.current()
-	ui.Row(c).Height(48).Padding(8, 8, 6, 10).Gap(6).Shrink(0).Children(func() {
-		if iconButton(c, p, "PanelRightClose", tr("收拢右侧面板")).Shrink(0).Clicked() {
+	ui.Row(c).MinHeight(48).Padding(8, 8, 6, 8).Gap(4).Shrink(0).Children(func() {
+		d.workTabs(c, p)
+		ui.Spacer(c)
+		refresh := iconButton(c, p, "RefreshCw", tr("刷新工作区")).Shrink(0)
+		if refresh.Clicked() {
+			d.refresh(v, true)
+		}
+		collapse := iconButton(c, p, "PanelRightClose", tr("收拢右侧面板")).Shrink(0)
+		if collapse.Clicked() {
 			d.preferences.RightCollapsed = true
 			d.persist()
-		}
-		ui.ScrollHorizontal(c).Grow(1).Basis(0).MinWidth(0).Height(34).AlignItems(ui.Center).Children(func() {
-			d.workTabs(c, p)
-		})
-		if iconButton(c, p, "RefreshCw", tr("刷新工作区")).Shrink(0).Clicked() {
-			d.refresh(v, true)
 		}
 	})
 	if d.preview != nil {
@@ -146,15 +147,20 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 // raised thumb that springs to the chosen one and counts beside them.
 func (d *desktop) workTabs(c *ui.Context, p palette) {
 	v := d.current()
-	track := ui.Row(c).Gap(1).Padding(2).Shrink(0).Radius(11).Background(p.Active).Role(ui.RoleTabList).Label(tr("工作区"))
-	state := ui.Local(track, "tabs", func() segmentedState {
-		return segmentedState{X: make([]float32, len(workTabs)), W: make([]float32, len(workTabs))}
+	track := ui.Row(c).Shrink(1).MinWidth(0).Wrap().Gap(1).Padding(2).Radius(11).Background(p.Active).Role(ui.RoleTabList).Label(tr("工作区"))
+	state := ui.Local(track, "tabs", func() []ui.Rect {
+		return make([]ui.Rect, len(workTabs))
 	})
-	if d.tab >= 0 && d.tab < len(state.W) && state.W[d.tab] > 0 {
+	if d.tab >= 0 && d.tab < len(*state) && (*state)[d.tab].W == 0 {
+		c.After(16 * time.Millisecond)
+	}
+	if d.tab >= 0 && d.tab < len(*state) && (*state)[d.tab].W > 0 {
+		selected := (*state)[d.tab]
 		spring := ui.Animation{Spring: ui.SpringOptions{Duration: 340 * time.Millisecond, Bounce: 0.14}}
-		x, w := track.AnimateTo("x", state.X[d.tab], spring), track.AnimateTo("w", state.W[d.tab], spring)
+		x, y := track.AnimateTo("x", selected.X, spring), track.AnimateTo("y", selected.Y, spring)
+		w, h := track.AnimateTo("w", selected.W, spring), track.AnimateTo("h", selected.H, spring)
 		track.Draw(func(painter *ui.Painter, r ui.Rect) {
-			thumb := ui.Rect{X: r.X + x, Y: r.Y + 2, W: w, H: r.H - 4}
+			thumb := ui.Rect{X: r.X + x, Y: r.Y + y, W: w, H: h}
 			painter.Shadow(thumb, 9, 0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.12))
 			painter.Fill(thumb, p.Thumb, 9)
 		})
@@ -175,11 +181,11 @@ func (d *desktop) workTabs(c *ui.Context, p palette) {
 				count = fmt.Sprintf("%d/%d", done, len(v.Tasks))
 			}
 			current := i == d.tab
-			b := ui.ButtonBase(c).Label(tr(tab.Label)).Role(ui.RoleTab).Height(28).Padding(0, 10).Gap(6).Radius(9).
+			b := ui.ButtonBase(c).Label(tr(tab.Label)).Role(ui.RoleTab).Height(28).Padding(0, 6).Gap(4).Shrink(0).Radius(9).
 				FontSize(p.font(11.48)).TextColor(p.Text3).Cursor(ui.CursorDefault)
 			if current {
 				b.TextColor(p.Text).FontWeight(550)
-				if state.W[i] == 0 {
+				if (*state)[i].W == 0 {
 					b.Background(p.Thumb)
 				}
 			} else if b.Hovered() {
@@ -197,7 +203,7 @@ func (d *desktop) workTabs(c *ui.Context, p palette) {
 				}
 			})
 			if r := b.Bounds(); r.W > 0 {
-				state.X[i], state.W[i] = r.X-origin.X, r.W
+				(*state)[i] = ui.Rect{X: r.X - origin.X, Y: r.Y - origin.Y, W: r.W, H: r.H}
 			}
 			if b.Clicked() {
 				d.tab = i

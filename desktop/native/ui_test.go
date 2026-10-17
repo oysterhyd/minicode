@@ -131,26 +131,59 @@ func TestPanelControlsAndCompactRail(t *testing.T) {
 func TestWorkPanelCollapseControlStaysInsideToolbar(t *testing.T) {
 	for _, page := range []string{"home", "conversation"} {
 		for _, width := range []float32{280, 400, 680} {
-			t.Run(fmt.Sprintf("%s/%g", page, width), func(t *testing.T) {
-				r := newTestRig(t, page)
-				r.d.preferences.WorkWidth = width
-				r.d.preferences.FontScale = 1.4
-				r.ui.Frame()
-				r.ui.Advance(time.Second)
-				collapse, ok := r.ui.Find("收拢右侧面板")
-				refresh, refreshOK := r.ui.Find("刷新工作区")
-				if !ok || !refreshOK || collapse.X < 1500-width || collapse.X+collapse.W > 1492 || collapse.W < 28 || refresh.X+refresh.W > 1492 || refresh.W < 28 {
-					t.Fatalf("toolbar controls clipped or duplicated in the conversation: collapse=%+v refresh=%+v", collapse, refresh)
-				}
-				click(t, r.ui, "收拢右侧面板")
-				if !r.d.preferences.RightCollapsed {
-					t.Fatal("work panel collapse control is not clickable")
-				}
-				click(t, r.ui, "展开工作区")
-				if r.d.preferences.RightCollapsed {
-					t.Fatal("work panel cannot be reopened")
-				}
-			})
+			for _, fontScale := range []float32{1, 1.4} {
+				t.Run(fmt.Sprintf("%s/%g/%g", page, width, fontScale), func(t *testing.T) {
+					r := newTestRig(t, page)
+					if page == "conversation" {
+						// Keep the conversation header without a fixture table also labeled "文件".
+						r.d.current().Items = r.d.current().Items[:1]
+						r.d.current().rebuildRows()
+					}
+					r.d.preferences.WorkWidth = width
+					r.d.preferences.FontScale = fontScale
+					r.ui.Frame()
+					r.ui.Advance(time.Second)
+					collapse, ok := r.ui.Find("收拢右侧面板")
+					refresh, refreshOK := r.ui.Find("刷新工作区")
+					if !ok || !refreshOK || collapse.X < 1500-width || collapse.X+collapse.W > 1492 || collapse.W < 28 || refresh.X+refresh.W > 1492 || refresh.W < 28 {
+						t.Fatalf("toolbar controls clipped or duplicated in the conversation: collapse=%+v refresh=%+v", collapse, refresh)
+					}
+					track, trackOK := r.ui.Find("工作区")
+					if !trackOK || refresh.X < track.X+track.W+2 || collapse.X < refresh.X+refresh.W+2 {
+						t.Fatalf("refresh and collapse must stay outside the tabs on the right: track=%+v refresh=%+v collapse=%+v", track, refresh, collapse)
+					}
+					var firstTabY float32
+					for index, tab := range workTabs {
+						rect, found := r.ui.Find(tab.Label)
+						if !found || rect.W <= 0 || rect.X < track.X || rect.X+rect.W > track.X+track.W+0.5 || rect.Y < track.Y || rect.Y+rect.H > track.Y+track.H+0.5 {
+							t.Fatalf("tab %s is clipped: tab=%+v track=%+v", tab.Label, rect, track)
+						}
+						if index == 0 {
+							firstTabY = rect.Y
+						} else if width >= 400 && fontScale == 1 && rect.Y != firstTabY {
+							t.Fatalf("normal-width toolbar should keep all four tabs on one row: %s", tab.Label)
+						}
+						click(t, r.ui, tab.Label)
+						if r.d.tab != index {
+							t.Fatalf("tab %s cannot be clicked without scrolling", tab.Label)
+						}
+					}
+					before, _ := r.ui.Find("任务")
+					r.ui.Scroll(before.X+before.W/2, before.Y+before.H/2, 120, 0)
+					after, _ := r.ui.Find("任务")
+					if before != after {
+						t.Fatalf("workspace tabs moved after horizontal scrolling: before=%+v after=%+v", before, after)
+					}
+					click(t, r.ui, "收拢右侧面板")
+					if !r.d.preferences.RightCollapsed {
+						t.Fatal("work panel collapse control is not clickable")
+					}
+					click(t, r.ui, "展开工作区")
+					if r.d.preferences.RightCollapsed {
+						t.Fatal("work panel cannot be reopened")
+					}
+				})
+			}
 		}
 	}
 }
