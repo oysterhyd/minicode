@@ -1,3 +1,13 @@
+# v3.0.1 工作台按钮布局修复与发行核验
+
+2026-10-17，Windows x64 / PowerShell 7，MyGo 0.5.5。收拢按钮移至工作台工具栏左端，收拢／刷新按钮固定宽度，标签在窄侧栏内横向滚动；移除首页和对话区重复的收拢按钮，保留右栏收起后的展开入口。280／400／680 宽度、1.4 倍字体、首页／对话两类状态的六个边界及点击回归用例通过。
+
+本地 `pwsh -NoProfile -File release/build.ps1` 未使用 SkipTests，Rust 46、后端集成 66、TUI 源码 97 和压缩运行时 97 项全过且无跳过；Go 全量含测量项通过，vendor UI 包无测试文件。fmt / Clippy、go vet / mygo vet 与原生 Windows 编译通过。60 次任务及 9 次场景符合预设结果，源码／历史／产物审计、包内烟测、签名更新、篡改拒绝、同版本忽略、更新后运行、中文／空格路径安装、快捷方式和卸载均通过。
+
+实际 3.0.0 → 3.0.1 覆盖升级通过，升级前已正常关闭 MiniCode 并在仓库外备份数据；36 个原有会话、数据库各表、配置和偏好哈希不变。另以旧版写入非空记忆和会话，新版读取后内容一致。已安装包的首页／对话／关于页截图已捕获。
+
+本地安装器 58,278,385 B，SHA256：`01f267e9ca152a82f737bfc2f8da2ad6e7ac5d24f35979761cd7f994a3b882d5`。公开资产和 CI 核验待发布后补记。
+
 # v3.0.0 界面重设计与发行核验
 
 2026-10-17，Windows x64 / PowerShell 7，Rust stable MSVC、Go 1.27.1、Node.js 22.22.0、MyGo 0.5.5、NSIS 3.13。PR #1 已 Squash 合并，提交 `f615f3ef8247012ee1bba1d0d8906f205bd485ab`；后续修复并行 fork 持有会话锁时的释放问题，[main CI](https://github.com/oysterhyd/minicode/actions/runs/39022699116) 五项全部通过（Windows Rust 46 项、Linux Rust 47 项）。
