@@ -15,7 +15,7 @@ Desktop · CLI · TUI — 一个运行核心，三种工作方式
 [![CI](https://github.com/oysterhyd/minicode/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/oysterhyd/minicode/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-MIT-63666e)](LICENSE)
 
-[下载安装](https://github.com/oysterhyd/minicode/releases/latest) · [快速开始](#快速开始) · [功能介绍](#功能介绍) · [文档](#文档)
+[官网](https://minicode.oyster.ink) · [下载安装](https://github.com/oysterhyd/minicode/releases/latest) · [快速开始](#快速开始) · [功能介绍](#功能介绍) · [文档](#文档)
 
 <img src="docs/assets/minicode-hero.png" width="100%" alt="MiniCode 原生工作台宣传图：任务对话、测试数据和代码 Diff" />
 
