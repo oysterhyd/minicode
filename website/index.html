@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniCode</title>
+<meta name="description" content="MiniCode — one native Rust agent runtime, three ways to code: Desktop, CLI and TUI.">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="assets/app-mark.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ───────── Nav ───────── -->
+<header class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="#top" aria-label="MiniCode home">
+      <img src="assets/app-mark.svg" alt="" width="22" height="22"><span>MiniCode</span>
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#runtime">Runtime</a>
+      <a href="#cli">CLI</a>
+      <a href="#tui">TUI</a>
+      <a href="#desktop">Desktop</a>
+    </nav>
+    <a class="nav-cta" href="https://github.com/oysterhyd/minicode" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+  <div class="nav-progress" id="navProgress"></div>
+</header>
+
+<main id="top">
+
+<!-- ───────── Hero: three surfaces converge into one runtime ───────── -->
+<section class="hero" id="hero" data-scrub>
+  <div class="sticky">
+    <div class="hero-glow" aria-hidden="true"></div>
+
+    <div class="hero-copy">
+      <svg class="hero-mark" viewBox="0 0 128 128" aria-hidden="true">
+        <rect x="1" y="1" width="126" height="126" rx="28" />
+        <path d="M30 91V40L64 72L98 40V91" />
+      </svg>
+      <h1 class="hero-title">MiniCode</h1>
+      <p class="hero-sub">One Rust runtime. <span class="grad">Three ways to code.</span></p>
+      <div class="ctas">
+        <a class="btn btn-primary" href="https://github.com/oysterhyd/minicode/releases/latest" target="_blank" rel="noopener">Download</a>
+        <a class="btn btn-link" href="https://github.com/oysterhyd/minicode" target="_blank" rel="noopener">View on GitHub <span aria-hidden="true">›</span></a>
+      </div>
+    </div>
+
+    <div class="hero-stage" aria-hidden="true">
+      <!-- Desktop -->
+      <div class="surface s-desktop" data-x="-430" data-y="40" data-r="-8">
+        <div class="win-bar"><i></i><i></i><i></i><b>MiniCode</b></div>
+        <div class="mini-desk">
+          <div class="md-side"><span></span><span></span><span class="on"></span><span></span></div>
+          <div class="md-main">
+            <div class="md-line w70"></div><div class="md-line w45"></div>
+            <div class="md-diff"><span class="del"></span><span class="add"></span><span class="add w60"></span></div>
+            <div class="md-line w55"></div>
+          </div>
+          <div class="md-panel"><div class="md-bar"></div><div class="md-chip"></div><div class="md-chip"></div></div>
+        </div>
+        <span class="surface-label">Desktop</span>
+      </div>
+      <!-- TUI -->
+      <div class="surface s-tui" data-x="430" data-y="40" data-r="8">
+        <div class="win-bar dark"><i></i><i></i><i></i><b>minicode tui</b></div>
+        <pre class="mini-term"><span class="mt-box accent"><em>✻</em> MiniCode</span><span class="dim">› review the diff</span>
+<em>●</em> Read  src/app.tsx
+<em>●</em> Edit  src/app.tsx <span class="ok">+2</span>
+<span class="mt-box">› /model<span class="mt-cur"></span></span></pre>
+        <span class="surface-label">TUI</span>
+      </div>
+      <!-- CLI -->
+      <div class="surface s-cli" data-x="0" data-y="170" data-r="0">
+        <div class="win-bar dark"><i></i><i></i><i></i><b>PowerShell</b></div>
+        <pre class="mini-term"><span class="dim">PS&gt;</span> minicode run "fix tests"
+<em>●</em> grep  fn parse
+<em>●</em> edit  parser.rs <span class="ok">+3</span> <span class="bad">−1</span>
+<em>●</em> bash  cargo test  <span class="ok">✓</span>
+<span class="ok">✔ done</span> <span class="dim">· 6.2s</span></pre>
+        <span class="surface-label">CLI</span>
+      </div>
+
+      <!-- The core they collapse into -->
+      <div class="core">
+        <div class="core-ring r1"></div><div class="core-ring r2"></div><div class="core-ring r3"></div>
+        <div class="core-chip">
+          <svg viewBox="0 0 24 24"><path d="M12 2.5l1.6 1.7 2.3-.5.7 2.2 2.2.7-.5 2.3 1.7 1.6-1.7 1.6.5 2.3-2.2.7-.7 2.2-2.3-.5L12 21.5l-1.6-1.7-2.3.5-.7-2.2-2.2-.7.5-2.3L4 12l1.7-1.6-.5-2.3 2.2-.7.7-2.2 2.3.5z"/><circle cx="12" cy="12" r="3.4"/></svg>
+          <span>Rust Agent Runtime</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ───────── Numbers ───────── -->
+<section class="stats">
+  <div class="wrap">
+    <p class="eyebrow reveal">Rewritten in Rust</p>
+    <h2 class="display reveal">Instant. <span class="muted">Tiny. Native.</span></h2>
+    <div class="stat-grid">
+      <div class="stat reveal"><b><span data-count="28" data-dec="0">0</span><small>ms</small></b><span>cold start</span></div>
+      <div class="stat reveal"><b><span data-count="7.4" data-dec="1">0</span><small>MiB</small></b><span>idle memory</span></div>
+      <div class="stat reveal"><b><span data-count="12" data-dec="0">0</span><small>MiB</small></b><span>agent binary</span></div>
+      <div class="stat reveal"><b><span data-count="97" data-dec="0" data-prefix="−">0</span><small>%</small></b><span>startup vs. Python</span></div>
+    </div>
+    <div class="race reveal" id="race">
+      <div class="race-row"><span>Rust 2.0</span><div class="race-track"><i class="rust" style="--d:.085s"></i></div><em>28 ms</em></div>
+      <div class="race-row"><span>Python 1.3</span><div class="race-track"><i class="py" style="--d:2.98s"></i></div><em>994 ms</em></div>
+      <button class="race-btn" type="button" id="raceBtn">Replay ↻</button>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── Runtime: architecture ───────── -->
+<section class="dark section" id="runtime">
+  <div class="wrap">
+    <p class="eyebrow reveal">Under the hood</p>
+    <h2 class="display reveal">One core.<br><span class="grad">Every surface.</span></h2>
+
+    <div class="arch reveal">
+      <svg viewBox="0 0 1000 460" class="arch-svg" role="img" aria-label="Desktop and TUI speak NDJSON v2 to the Rust runtime; the CLI calls it directly. The runtime drives model providers, tools and SQLite.">
+        <defs>
+          <linearGradient id="gWire" gradientUnits="userSpaceOnUse" x1="180" y1="0" x2="800" y2="0"><stop offset="0" stop-color="#ff9a6b"/><stop offset="1" stop-color="#c75330"/></linearGradient>
+          <radialGradient id="gCore"><stop offset="0" stop-color="#ff8a5b" stop-opacity=".55"/><stop offset="1" stop-color="#c75330" stop-opacity="0"/></radialGradient>
+          <path id="pD" d="M180 90 C 260 90, 260 170, 330 170"/>
+          <path id="pT" d="M180 230 C 250 230, 260 170, 330 170"/>
+          <path id="pB" d="M410 170 C 440 170, 440 230, 470 230"/>
+          <path id="pC" d="M180 370 C 330 370, 360 280, 470 250"/>
+          <path id="pP" d="M650 230 C 720 230, 720 90, 800 90"/>
+          <path id="pX" d="M650 230 L 800 230"/>
+          <path id="pS" d="M650 230 C 720 230, 720 370, 800 370"/>
+        </defs>
+
+        <g class="wires">
+          <use href="#pD"/><use href="#pT"/><use href="#pB"/><use href="#pC"/>
+          <use href="#pP"/><use href="#pX"/><use href="#pS"/>
+        </g>
+        <g class="wires flow">
+          <use href="#pD"/><use href="#pT"/><use href="#pB"/><use href="#pC"/>
+          <use href="#pP"/><use href="#pX"/><use href="#pS"/>
+        </g>
+
+        <g class="packets">
+          <circle r="5"><animateMotion dur="2.4s" repeatCount="indefinite"><mpath href="#pD"/></animateMotion></circle>
+          <circle r="5"><animateMotion dur="2.4s" begin=".8s" repeatCount="indefinite"><mpath href="#pT"/></animateMotion></circle>
+          <circle r="5"><animateMotion dur="1.2s" begin=".3s" repeatCount="indefinite"><mpath href="#pB"/></animateMotion></circle>
+          <circle r="5"><animateMotion dur="2.8s" begin="1.1s" repeatCount="indefinite"><mpath href="#pC"/></animateMotion></circle>
+          <circle r="5" class="out"><animateMotion dur="2s" begin=".5s" repeatCount="indefinite"><mpath href="#pP"/></animateMotion></circle>
+          <circle r="5" class="out"><animateMotion dur="1.4s" begin="1s" repeatCount="indefinite"><mpath href="#pX"/></animateMotion></circle>
+          <circle r="5" class="out"><animateMotion dur="2.2s" begin="1.6s" repeatCount="indefinite"><mpath href="#pS"/></animateMotion></circle>
+        </g>
+
+        <g class="node"><rect x="40" y="62" width="140" height="56" rx="16"/><text x="110" y="96">Desktop</text></g>
+        <g class="node"><rect x="40" y="202" width="140" height="56" rx="16"/><text x="110" y="236">Ink TUI</text></g>
+        <g class="node"><rect x="40" y="342" width="140" height="56" rx="16"/><text x="110" y="376">CLI</text></g>
+
+        <g class="node pill"><rect x="330" y="150" width="80" height="40" rx="20"/><text x="370" y="175">NDJSON</text></g>
+
+        <circle cx="560" cy="240" r="150" fill="url(#gCore)" class="core-halo"/>
+        <g class="node core-node"><rect x="470" y="190" width="180" height="100" rx="26"/>
+          <text x="560" y="232" class="big">Rust</text><text x="560" y="258" class="small">Runtime · Tokio</text></g>
+
+        <g class="node"><rect x="800" y="62" width="160" height="56" rx="16"/><text x="880" y="96">Providers</text></g>
+        <g class="node"><rect x="800" y="202" width="160" height="56" rx="16"/><text x="880" y="236">Tools</text></g>
+        <g class="node"><rect x="800" y="342" width="160" height="56" rx="16"/><text x="880" y="376">SQLite</text></g>
+
+        <text x="880" y="140" class="cap">OpenAI · Anthropic · SSE</text>
+        <text x="880" y="280" class="cap">files · shell · MCP</text>
+        <text x="880" y="420" class="cap">sessions · checkpoints</text>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── Runtime: tool pipeline (scroll-scrubbed) ───────── -->
+<section class="dark pipeline" id="pipeline" data-scrub>
+  <div class="sticky">
+    <div class="wrap">
+      <p class="eyebrow">Every tool call</p>
+      <h2 class="display">Six checkpoints. <span class="muted">Zero surprises.</span></h2>
+
+      <div class="pipe">
+        <div class="pipe-track"><div class="pipe-fill"></div></div>
+        <div class="pipe-call"><code>edit_file</code><span>src/parser.rs</span></div>
+        <ol class="pipe-stages">
+          <li><i><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></i><b>Record</b></li>
+          <li><i><svg viewBox="0 0 24 24"><path d="M9 4c-2 0-2.5 1-2.5 3s.5 4-2.5 5c3 1 2.5 3 2.5 5s.5 3 2.5 3M15 4c2 0 2.5 1 2.5 3s-.5 4 2.5 5c-3 1-2.5 3-2.5 5s-.5 3-2.5 3"/></svg></i><b>Validate</b></li>
+          <li><i><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></svg></i><b>Preflight</b></li>
+          <li><i><svg viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg></i><b>Approve</b></li>
+          <li><i><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></i><b>Execute</b></li>
+          <li><i><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/></svg></i><b>Commit</b></li>
+        </ol>
+        <div class="approve-card">
+          <div class="ac-head"><span class="ac-dot"></span>Allow edit?</div>
+          <code>src/parser.rs <em class="ok">+3</em> <em class="bad">−1</em></code>
+          <div class="ac-btns"><span>Deny</span><span class="yes">Allow</span></div>
+        </div>
+        <p class="pipe-note">
+          <span data-step="0">Logged before anything runs.</span>
+          <span data-step="1">JSON-schema checked. Bad args never reach you.</span>
+          <span data-step="2">Workspace &amp; AGENTS.md rules applied.</span>
+          <span data-step="3">You stay in control.</span>
+          <span data-step="4">Process trees reaped on cancel.</span>
+          <span data-step="5">Result written atomically.</span>
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── Runtime: bento ───────── -->
+<section class="dark section bento-section">
+  <div class="wrap">
+    <div class="bento">
+
+      <article class="card span2 reveal tilt" id="lanes">
+        <h3>Reads in parallel.<br><span class="muted">Writes in order.</span></h3>
+        <div class="lanes">
+          <div class="lane"><i class="r" style="--s:0;--w:22"></i><i class="r" style="--s:26;--w:14"></i><i class="w" style="--s:44;--w:14"></i><i class="r" style="--s:62;--w:20"></i></div>
+          <div class="lane"><i class="r" style="--s:0;--w:16"></i><i class="r" style="--s:18;--w:20"></i><i class="ghost" style="--s:44;--w:14"></i><i class="r" style="--s:62;--w:30"></i></div>
+          <div class="lane"><i class="r" style="--s:0;--w:26"></i><i class="ghost" style="--s:44;--w:14"></i><i class="r" style="--s:62;--w:12"></i><i class="r" style="--s:76;--w:16"></i></div>
+          <div class="lane"><i class="r" style="--s:0;--w:12"></i><i class="r" style="--s:14;--w:24"></i><i class="ghost" style="--s:44;--w:14"></i><i class="r" style="--s:62;--w:24"></i></div>
+          <div class="barrier" style="--s:44"></div><div class="barrier" style="--s:58"></div>
+          <div class="playhead"></div>
+        </div>
+        <div class="legend"><span><i class="r"></i>read ×4</span><span><i class="w"></i>write · barrier</span></div>
+      </article>
+
+      <article class="card reveal tilt" id="ctx">
+        <h3>Context that<br><span class="muted">never overflows.</span></h3>
+        <div class="ctx">
+          <div class="ctx-bar" id="ctxBar"></div>
+          <div class="ctx-limit"><span>90%</span></div>
+        </div>
+        <div class="ctx-meta"><span id="ctxPct">0%</span><span id="ctxState">streaming</span></div>
+      </article>
+
+      <article class="card reveal tilt" id="recover">
+        <h3>Crash.<br><span class="muted">Resume.</span></h3>
+        <div class="tl">
+          <span class="ev ok">read</span><span class="ev ok">grep</span><span class="ev unk">edit</span>
+          <span class="crash">⚡</span>
+          <span class="ev retry">read ↻</span><span class="ev verify">edit ?</span>
+        </div>
+        <p class="fine">Side effects are verified, never replayed.</p>
+      </article>
+
+      <article class="card reveal tilt" id="dag">
+        <h3>Subagents.</h3>
+        <svg viewBox="0 0 220 120" class="dag">
+          <path d="M110 22 L50 90 M110 22 L110 90 M110 22 L170 90"/>
+          <circle cx="110" cy="22" r="13" class="p"/>
+          <circle cx="50" cy="90" r="10"/><circle cx="110" cy="90" r="10"/><circle cx="170" cy="90" r="10"/>
+        </svg>
+        <p class="fine">Explore · review · test — shared budget &amp; permissions.</p>
+      </article>
+
+      <article class="card reveal tilt" id="mcp">
+        <h3>MCP, <span class="muted">three ways.</span></h3>
+        <div class="mcp">
+          <span style="--i:0">stdio</span><span style="--i:1">HTTP</span><span style="--i:2">SSE</span>
+        </div>
+      </article>
+
+      <article class="card reveal tilt" id="db">
+        <h3>SQLite.<br><span class="muted">Single writer.</span></h3>
+        <div class="db">
+          <div class="cyl"><i></i><i></i><i></i></div>
+          <div class="lock">🔒</div>
+        </div>
+        <p class="fine">Transactional checkpoints · OS file lock.</p>
+      </article>
+
+      <article class="card span2 reveal tilt" id="reap">
+        <h3>Cancel means <span class="muted">cancelled.</span></h3>
+        <div class="reap">
+          <svg viewBox="0 0 420 130" class="ptree">
+            <path d="M60 65 H140 M140 65 C170 65 170 25 200 25 M140 65 H200 M140 65 C170 65 170 105 200 105 M250 25 H330 M250 105 H330"/>
+            <g class="pn" style="--i:0"><rect x="10" y="50" width="100" height="30" rx="9"/><text x="60" y="70">cargo test</text></g>
+            <g class="pn" style="--i:1"><rect x="200" y="10" width="50" height="30" rx="9"/><text x="225" y="30">rustc</text></g>
+            <g class="pn" style="--i:2"><rect x="200" y="50" width="50" height="30" rx="9"/><text x="225" y="70">ld</text></g>
+            <g class="pn" style="--i:3"><rect x="200" y="90" width="50" height="30" rx="9"/><text x="225" y="110">test</text></g>
+            <g class="pn" style="--i:4"><rect x="330" y="10" width="80" height="30" rx="9"/><text x="370" y="30">build.rs</text></g>
+            <g class="pn" style="--i:5"><rect x="330" y="90" width="80" height="30" rx="9"/><text x="370" y="110">node</text></g>
+          </svg>
+          <kbd class="ctrlc">Ctrl C</kbd>
+        </div>
+        <p class="fine">Windows Job Objects · Unix process groups. Nothing left behind.</p>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<!-- ───────── Extensions orbit ───────── -->
+<section class="dark section orbit-section">
+  <div class="wrap center">
+    <h2 class="display reveal">Extend <span class="grad">everything.</span></h2>
+    <div class="orbit reveal" id="orbit">
+      <div class="orbit-core"><img src="assets/app-mark.svg" alt="MiniCode"></div>
+      <div class="ring ring-a">
+        <span style="--a:0deg">Skills</span><span style="--a:120deg">MCP</span><span style="--a:240deg">Plugins</span>
+      </div>
+      <div class="ring ring-b">
+        <span style="--a:60deg">AGENTS.md</span><span style="--a:180deg">Subagents</span><span style="--a:300deg">Memory</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── CLI ───────── -->
+<section class="light section" id="cli">
+  <div class="wrap">
+    <p class="eyebrow reveal">CLI</p>
+    <h2 class="display reveal">Say it. <span class="muted">Ship it.</span></h2>
+    <div class="term-wrap reveal">
+      <div class="term" id="cliTerm">
+        <div class="win-bar dark"><i></i><i></i><i></i><b>PowerShell — my-app</b></div>
+        <pre class="term-body" id="cliBody" aria-live="off"></pre>
+      </div>
+      <div class="seg" role="tablist" id="cliTabs">
+        <button role="tab" data-script="run" aria-selected="true">run</button>
+        <button role="tab" data-script="chat">chat</button>
+        <button role="tab" data-script="eval">eval</button>
+        <span class="seg-pill"></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── TUI ───────── -->
+<section class="dark section" id="tui">
+  <div class="wrap">
+    <p class="eyebrow reveal">TUI</p>
+    <h2 class="display reveal">Your terminal. <span class="grad">Upgraded.</span></h2>
+    <p class="hint reveal">Try it — type <kbd>/</kbd> below.</p>
+    <div class="tui reveal" id="tuiBox">
+      <div class="win-bar dark"><i></i><i></i><i></i><b>minicode tui</b></div>
+      <div class="tui-body">
+        <div class="tui-banner"><em>✻</em> Welcome to <b>MiniCode</b><span class="dim">  ~/projects/my-app</span></div>
+        <div class="tui-feed" id="tuiFeed">
+          <div class="tm user">› why does the build fail on Windows?</div>
+          <div class="tm tool"><em>●</em> Search <span class="dim">"path.join" in src/</span></div>
+          <div class="tm tool"><em>●</em> Read <span class="dim">scripts/build.mjs</span></div>
+          <div class="tm text">Backslashes in a glob. Switching to <code>path.posix</code> fixes it.</div>
+        </div>
+        <div class="tui-palette" id="tuiPalette" role="listbox"></div>
+        <label class="tui-input">
+          <span class="caret-p">›</span>
+          <input id="tuiInput" type="text" autocomplete="off" spellcheck="false" placeholder="Ask anything · / for commands" aria-label="TUI demo input">
+        </label>
+        <div class="tui-status"><span>deepseek-v4.1-flash</span><span>⏵⏵ accept edits</span><span class="dim">ctx 9%</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── Desktop ───────── -->
+<section class="light section" id="desktop">
+  <div class="wrap">
+    <p class="eyebrow reveal">Desktop</p>
+    <h2 class="display reveal">Native. <span class="muted">Direct3D fast.</span></h2>
+    <div class="seg small reveal" id="themeSeg" role="tablist">
+      <button role="tab" data-theme="dark" aria-selected="true">Dark</button>
+      <button role="tab" data-theme="light">Light</button>
+      <span class="seg-pill"></span>
+    </div>
+  </div>
+
+  <div class="app-stage" id="appStage">
+    <div class="app" id="app" data-theme="dark">
+      <div class="app-bar">
+        <span class="ab-brand"><img src="assets/app-mark.svg" alt="">MiniCode</span>
+        <span class="ab-crumb">my-app › <b>Review uncommitted changes</b> <em class="ab-ok">● Ready</em></span>
+        <span class="ab-win"><i>—</i><i>▢</i><i>✕</i></span>
+      </div>
+      <div class="app-body">
+        <aside class="app-side">
+          <div class="as-new">＋ New task <kbd>Ctrl N</kbd></div>
+          <div class="as-h">Workspace</div>
+          <div class="as-item on">Review uncommitted changes</div>
+          <div class="as-item">Fix flaky render test</div>
+          <div class="as-item">Explain the event loop</div>
+        </aside>
+        <div class="app-chat">
+          <div class="ac-group" id="acGroup">
+            <div class="acg-h">Ran 4 actions</div>
+            <div class="acg-row" data-i="0"><span>Read</span><code>src/App.tsx</code></div>
+            <div class="acg-row" data-i="1"><span>Search</span><code>src/</code></div>
+            <div class="acg-row" data-i="2"><span>Edit</span><code>src/App.tsx</code></div>
+            <div class="acg-diff" data-i="3">
+              <div class="dl del"><b>3</b>− const [theme, setTheme] = useState("dark")</div>
+              <div class="dl add"><b>3</b>+ const [theme, setTheme] = useState("system")</div>
+              <div class="dl add"><b>4</b>+ // follow the OS appearance</div>
+            </div>
+            <div class="acg-row" data-i="4"><span>Ran</span><code>npm run build</code><em class="ok">✓</em></div>
+          </div>
+          <div class="ac-answer" id="acAnswer"><span></span><span></span><span></span></div>
+          <div class="app-composer">Describe a task, / for commands, @ to reference files<span class="send">↑</span></div>
+        </div>
+        <aside class="app-panel">
+          <div class="ap-tabs"><span class="on">Tasks</span><span>Diff</span><span>Files</span><span>Terminal</span></div>
+          <div class="ap-prog"><span>Progress</span><b id="apCount">0 / 3</b></div>
+          <div class="ap-bar"><i id="apFill"></i></div>
+          <div class="ap-task" data-t="0"><span class="chk"></span>Read changed files</div>
+          <div class="ap-task" data-t="1"><span class="chk"></span>Run the build</div>
+          <div class="ap-task" data-t="2"><span class="chk"></span>Summarise findings</div>
+          <div class="ap-stats">
+            <div><small>Input</small><b>42K</b></div><div><small>Output</small><b>3.1K</b></div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="feature-row">
+      <div class="feat reveal"><span class="fi"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M12 4v16M6 9h3M6 13h3M15 9h3M16.5 7.5v3M15 15h3"/></svg></span><b>Diff review</b></div>
+      <div class="feat reveal"><span class="fi"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg></span><b>Approvals</b></div>
+      <div class="feat reveal"><span class="fi"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/></svg></span><b>Session resume</b></div>
+      <div class="feat reveal"><span class="fi"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></span><b>Signed auto-update</b></div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────── CTA ───────── -->
+<section class="dark section cta" id="get">
+  <div class="wrap center">
+    <img class="cta-mark reveal" src="assets/app-mark.svg" alt="" width="96" height="96">
+    <h2 class="display reveal">Open source.<br><span class="grad">MIT licensed.</span></h2>
+    <div class="clone reveal">
+      <code id="cloneCmd">git clone https://github.com/oysterhyd/minicode.git</code>
+      <button type="button" id="copyBtn" aria-label="Copy clone command">Copy</button>
+    </div>
+    <div class="ctas reveal">
+      <a class="btn btn-primary" href="https://github.com/oysterhyd/minicode" target="_blank" rel="noopener">Star on GitHub</a>
+      <a class="btn btn-link" href="https://github.com/oysterhyd/minicode/releases/latest" target="_blank" rel="noopener">Windows installer <span aria-hidden="true">›</span></a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <span>MiniCode · MIT License</span>
+    <a href="https://github.com/oysterhyd/minicode" target="_blank" rel="noopener">github.com/oysterhyd/minicode</a>
+  </div>
+</footer>
+
+<script src="main.js"></script>
+</body>
+</html>
