@@ -647,6 +647,9 @@ impl Provider {
                     + 1024,
             )
             .max(1);
+        if self.style == "anthropic" {
+            chat = normalize_anthropic(chat);
+        }
         let mut body = json!({"model":self.model,"messages":null,"stream":true,"max_tokens":self.max_output.min(available)});
         body["messages"] = Value::Array(chat);
         if self.style == "anthropic" {
@@ -665,6 +668,32 @@ impl Provider {
         }
         Ok(body)
     }
+}
+/// Strict Anthropic endpoints (Bedrock, some gateways) reject adjacent
+/// messages with the same role, while the runtime appends user notices right
+/// after user tool results. Merge them on the wire only, so persisted history
+/// stays untouched and sessions written before this fix still resume.
+fn normalize_anthropic(chat: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(chat.len());
+    for mut message in chat {
+        if let Some(previous) = out.last_mut().filter(|p| p["role"] == message["role"]) {
+            if let (Some(into), Value::Array(from)) = (
+                previous["content"].as_array_mut(),
+                message["content"].take(),
+            ) {
+                into.extend(from);
+            }
+            continue;
+        }
+        out.push(message);
+    }
+    for message in out.iter_mut().filter(|m| m["role"] == "user") {
+        if let Some(content) = message["content"].as_array_mut() {
+            // Stable: tool results first, other blocks keep their order.
+            content.sort_by_key(|block| block["type"] != "tool_result");
+        }
+    }
+    out
 }
 fn media_part(b: &Block, store: &Attachments, style: &str) -> Result<Value> {
     let Block::Media {

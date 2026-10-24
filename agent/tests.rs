@@ -1123,3 +1123,179 @@ async fn harness_fake_provider_scripts_errors_tool_calls_and_usage() {
             .any(|e| e["event"] == "text_delta" && e["text"] == "done")
     );
 }
+
+// R40: every runtime path that appends a user notice right after a user
+// tool_result must still produce a strictly alternating Anthropic payload.
+#[tokio::test]
+async fn anthropic_roles_alternate_after_truncated_response() {
+    let mut h = Harness::new(json!({"turns":[
+        {"text":"partial","stop_reason":"max_tokens","tool_calls":[{"name":"write","arguments":{"path":"x.txt","content":"no"}}]},
+        {"text":"done"}
+    ]}))
+    .await;
+    assert_eq!(h.run(Some("task")).await.unwrap().exit_reason, "completed");
+    let roles = h
+        .runtime
+        .messages
+        .iter()
+        .map(|m| m.role.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(roles, ["user", "assistant", "user", "user", "assistant"]);
+    let messages = h.anthropic_messages();
+    assert_strict_anthropic_roles(&messages);
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+    assert_eq!(messages[2]["content"][1]["type"], "text");
+}
+
+#[tokio::test]
+async fn anthropic_roles_alternate_after_stall_notice() {
+    let call = json!({"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]});
+    let mut h = Harness::new(json!({"turns":[call,call,call,call,call,call]})).await;
+    assert_eq!(h.run(Some("task")).await.unwrap().exit_reason, "stalled");
+    assert_eq!(
+        h.runtime
+            .messages
+            .iter()
+            .rev()
+            .take(2)
+            .map(|m| m.role.as_str())
+            .collect::<Vec<_>>(),
+        ["user", "user"]
+    );
+    assert_strict_anthropic_roles(&h.anthropic_messages());
+}
+
+#[tokio::test]
+async fn anthropic_roles_alternate_after_background_completion_notice() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[
+            {"name":"bash","arguments":{"command":"node -e \"console.log(42)\"","background":true}},
+            {"name":"bash","arguments":{"command":"node -e \"setTimeout(()=>{},1500)\""}}
+        ]},
+        {"text":"done"}
+    ]}))
+    .await;
+    assert_eq!(h.run(Some("task")).await.unwrap().exit_reason, "completed");
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.text().starts_with("后台任务已完成"))
+    );
+    assert_strict_anthropic_roles(&h.anthropic_messages());
+}
+
+#[tokio::test]
+async fn anthropic_roles_alternate_after_recovery_backfill_and_lost_job() {
+    let mut h = Harness::new(json!({"turns":[{"text":"recovered"}]})).await;
+    let session = h.runtime.session.clone();
+    for message in [
+        Message::user("task"),
+        Message {
+            role: "assistant".into(),
+            content: vec![Block::ToolUse {
+                id: "interrupted".into(),
+                name: "write".into(),
+                input: json!({"path":"x.txt","content":"?"}),
+            }],
+        },
+    ] {
+        h.runtime.store.append(&session, &message).unwrap();
+        h.runtime.messages.push(message);
+    }
+    h.runtime
+        .store
+        .event(
+            &session,
+            "background_job_started",
+            &json!({"job_id":"bg_lost","command":"sleep"}),
+        )
+        .unwrap();
+    h.runtime.pending = true;
+    assert_eq!(h.run(None).await.unwrap().exit_reason, "completed");
+    let types = h.event_types();
+    assert!(types.contains(&"side_effect_unknown".to_string()));
+    assert!(types.contains(&"background_job_lost".to_string()));
+    let messages = h.anthropic_messages();
+    assert_strict_anthropic_roles(&messages);
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], "interrupted");
+}
+
+#[test]
+fn anthropic_normalization_merges_and_orders_blocks_without_touching_history() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    provider.style = "anthropic".into();
+    let result = |id: &str| Block::ToolResult {
+        tool_use_id: id.into(),
+        content: "ok".into(),
+        is_error: false,
+        images: vec![],
+    };
+    let messages = vec![
+        Message::user("first"),
+        Message::user("second"),
+        Message {
+            role: "assistant".into(),
+            content: vec![
+                Block::ToolUse {
+                    id: "a".into(),
+                    name: "read".into(),
+                    input: json!({}),
+                },
+                Block::ToolUse {
+                    id: "b".into(),
+                    name: "read".into(),
+                    input: json!({}),
+                },
+            ],
+        },
+        Message {
+            role: "user".into(),
+            content: vec![Block::text("note before"), result("a")],
+        },
+        Message {
+            role: "user".into(),
+            content: vec![result("b"), Block::text("note after")],
+        },
+    ];
+    let original = messages.clone();
+    let payload = provider
+        .payload("system", &messages, &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(messages, original);
+    assert_eq!(
+        payload["messages"],
+        json!([
+            {"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}},{"type":"tool_use","id":"b","name":"read","input":{}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"a","content":"ok","is_error":false},
+                {"type":"tool_result","tool_use_id":"b","content":"ok","is_error":false},
+                {"type":"text","text":"note before"},
+                {"type":"text","text":"note after"}
+            ]}
+        ])
+    );
+    provider.style = "openai".into();
+    let openai = provider
+        .payload("system", &messages, &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(
+        openai["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "user")
+            .count(),
+        4
+    );
+}
