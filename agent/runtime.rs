@@ -12,6 +12,7 @@ use crate::{
     util,
 };
 use anyhow::{Context, Result, bail};
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -599,24 +600,56 @@ impl Runtime {
             CancellationToken,
             tokio::task::JoinHandle<Result<Outcome>>,
         )> = vec![];
-        let result = self.run_inner(text, attachments, &hooks, &mut jobs).await;
-        for (job, command, cancel, handle) in jobs {
-            let was_running = !handle.is_finished();
+        // A panic in the loop is caught so the teardown below still runs; it
+        // is then reported as a run failure. Persisted history stays the
+        // source of truth for the next run.
+        let (result, panicked) = match std::panic::AssertUnwindSafe(self.run_inner(
+            text,
+            attachments,
+            &hooks,
+            &mut jobs,
+        ))
+        .catch_unwind()
+        .await
+        {
+            Ok(result) => (result, false),
+            Err(panic) => (
+                Err(anyhow::anyhow!(
+                    "internal panic: {}",
+                    util::panic_message(&*panic)
+                )),
+                true,
+            ),
+        };
+        // Teardown is best-effort: every step runs even when an earlier one
+        // fails, and the failures are reported together at the end.
+        let mut failures = vec![];
+        let running = jobs
+            .iter()
+            .map(|(_, _, _, handle)| !handle.is_finished())
+            .collect::<Vec<_>>();
+        for (_, _, cancel, _) in &jobs {
             cancel.cancel();
+        }
+        for ((job, command, _, handle), was_running) in jobs.into_iter().zip(running) {
             let outcome = handle.await.ok().and_then(Result::ok);
-            self.event(&hooks,if was_running{"background_job_lost"}else{"background_job_completed"},json!({"job_id":job,"command":command,"status":if was_running{"lost"}else if outcome.as_ref().is_some_and(|o|o.success){"completed"}else{"failed"},"exit_code":outcome.as_ref().and_then(|o|o.exit_code),"output":outcome.map(|o|o.output).unwrap_or_default()}))?;
+            if let Err(error) = self.event(&hooks,if was_running{"background_job_lost"}else{"background_job_completed"},json!({"job_id":job,"command":command,"status":if was_running{"lost"}else if outcome.as_ref().is_some_and(|o|o.success){"completed"}else{"failed"},"exit_code":outcome.as_ref().and_then(|o|o.exit_code),"output":outcome.map(|o|o.output).unwrap_or_default()})) {
+                failures.push(format!("background job {job}: {error}"));
+            }
         }
         self.mcp.close().await;
         self.mcp = Arc::new(McpRegistry::default());
-        if self.child {
-            let prefix = format!("{}:", self.session);
-            hooks
+        {
+            let mut approvals = hooks
                 .approvals
                 .lock()
-                .unwrap()
-                .retain(|id, _| !id.starts_with(&prefix));
-        } else {
-            hooks.approvals.lock().unwrap().clear();
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.child {
+                let prefix = format!("{}:", self.session);
+                approvals.retain(|id, _| !id.starts_with(&prefix));
+            } else {
+                approvals.clear();
+            }
         }
         let (reason, error) = match result {
             Ok(reason) => (reason, None),
@@ -639,26 +672,47 @@ impl Runtime {
         let mut counters = store::counters(self.rounds, &self.usage);
         counters["status"] = json!(if self.pending { "paused" } else { "completed" });
         counters["exit_reason"] = json!(reason);
-        let run_id = hooks.snapshot.lock().unwrap().run_id.clone();
+        let run_id = hooks
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .run_id
+            .clone();
         let mut data = json!({"exit_reason":reason,"status":counters["status"],"rounds":self.rounds,"total_usage":self.usage,"run_id":run_id});
         data["total_usage"]["total_tokens"] = json!(self.usage.total());
         if let Some(error) = &error {
             data["error"] = json!(error)
         }
-        let event = self.store.checkpoint(
+        match self.store.checkpoint(
             &self.session,
             "session_end",
             &data,
             None,
             None,
             Some(&counters),
-        )?;
-        (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
-        self.refresh_snapshot(&hooks).await?;
+        ) {
+            Ok(event) => {
+                (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}))
+            }
+            Err(e) => failures.push(format!("session_end: {e}")),
+        }
+        if let Err(e) = self.refresh_snapshot(&hooks).await {
+            failures.push(format!("snapshot: {e}"));
+        }
         {
-            let mut s = hooks.snapshot.lock().unwrap();
+            let mut s = hooks
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.running = false;
             s.phase = if self.pending { "paused" } else { "idle" }.into();
+        }
+        if panicked || !failures.is_empty() {
+            let mut report = error.into_iter().collect::<Vec<_>>();
+            if !failures.is_empty() {
+                report.push(format!("run teardown failed: {}", failures.join("; ")));
+            }
+            bail!(report.join("; "))
         }
         Ok(RunResult {
             session_id: self.session.clone(),
@@ -851,14 +905,19 @@ impl Runtime {
             };
             let mut attempt = 0;
             let (response, mut metrics) = loop {
+                // Only the turn deadline bounds the whole request; silence on
+                // the wire is the provider's idle timeout, so long streams that
+                // keep producing bytes are never cut off.
                 let deadline = hooks.shared.lock().unwrap().deadline;
-                let timeout = deadline
-                    .map(|d| {
-                        d.saturating_duration_since(Instant::now())
-                            .min(Duration::from_secs(180))
-                    })
-                    .unwrap_or(Duration::from_secs(180));
-                let value = tokio::select! {_ = hooks.cancel.cancelled()=>bail!("turn cancelled"),r=tokio::time::timeout(timeout,self.provider.stream(&system,&self.messages,&specs,&attachments,&delta))=>r.map_err(|_|anyhow::anyhow!(if deadline.is_some_and(|d|Instant::now()>=d){"turn deadline exceeded"}else{"provider request timed out"})).and_then(|r|r)};
+                let request =
+                    self.provider
+                        .stream(&system, &self.messages, &specs, &attachments, &delta);
+                let value = tokio::select! {_ = hooks.cancel.cancelled()=>bail!("turn cancelled"),r=async {
+                    match deadline {
+                        Some(d) => tokio::time::timeout(d.saturating_duration_since(Instant::now()), request).await.map_err(|_| anyhow::anyhow!("turn deadline exceeded")).and_then(|r| r),
+                        None => request.await,
+                    }
+                }=>r};
                 match value {
                     Ok(value) => break value,
                     Err(error) => {
@@ -867,7 +926,7 @@ impl Runtime {
                         let retryable = text.contains("connection")
                             || text.contains("HTTP 429")
                             || text.contains("HTTP 5")
-                            || text == "provider request timed out";
+                            || text.contains("idle timeout");
                         if !retryable || seen.load(Ordering::Relaxed) || attempt >= 2 {
                             return Err(if text == "turn deadline exceeded" {
                                 error

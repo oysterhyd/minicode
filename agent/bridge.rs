@@ -11,6 +11,7 @@ use crate::{
     util,
 };
 use anyhow::{Context, Result, bail};
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -230,20 +231,42 @@ impl Router {
             snapshot.phase = "preparing".into();
         }
         c.running = Some(tokio::spawn(async move {
-            let mut r = runtime.lock().await;
-            match r.run(text, attachments, hooks.clone()).await {
-                Ok(result) => sink(json!({"event":"run_done","sessionId":session,"result":result})),
-                Err(error) => {
-                    let mut s = hooks.snapshot.lock().unwrap();
-                    s.running = false;
-                    s.pending = true;
-                    s.phase = "paused".into();
-                    drop(s);
-                    sink(
-                        json!({"event":"run_error","sessionId":session,"error":error.to_string()}),
-                    );
+            // Runtime::run catches panics in its loop; this guard covers a
+            // panic anywhere else in the run so the session never stays
+            // "running" and its jobs and MCP servers are stopped.
+            let run = std::panic::AssertUnwindSafe(async {
+                let mut r = runtime.lock().await;
+                r.run(text, attachments, hooks.clone()).await
+            })
+            .catch_unwind()
+            .await;
+            let error = match run {
+                Ok(Ok(result)) => {
+                    sink(json!({"event":"run_done","sessionId":session,"result":result}));
+                    return;
                 }
-            }
+                Ok(Err(error)) => error.to_string(),
+                Err(panic) => {
+                    hooks.cancel.cancel();
+                    let r = runtime.lock().await;
+                    r.mcp.close().await;
+                    hooks
+                        .approvals
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clear();
+                    format!("internal panic: {}", util::panic_message(&*panic))
+                }
+            };
+            let mut s = hooks
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.running = false;
+            s.pending = true;
+            s.phase = "paused".into();
+            drop(s);
+            sink(json!({"event":"run_error","sessionId":session,"error":error}));
         }));
         Ok(json!({"sessionId":returned_session}))
     }

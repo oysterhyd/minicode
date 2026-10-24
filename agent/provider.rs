@@ -58,9 +58,10 @@ impl Provider {
             fake: None,
             index: 0,
             call_counter: 0,
+            // No total request timeout: it would also cap the streamed body.
+            // Reads are bounded by idle_timeout and the run by its deadline.
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(20))
-                .timeout(Duration::from_secs(180))
                 .build()?,
         };
         if model == "fake" {
@@ -158,7 +159,15 @@ impl Provider {
         self.fake.as_ref().map(|v|{
             let turns=v["turns"].as_array().unwrap_or(&vec![]).iter().map(|turn|{
                 let calls=turn["tool_calls"].as_array().unwrap_or(&vec![]).iter().map(|call|json!({"name":call["name"],"arguments":call.get("arguments").cloned().unwrap_or(json!({})),"id":call["id"]})).collect::<Vec<_>>();
-                json!({"text":turn["text"],"tool_calls":calls,"input_tokens":turn["input_tokens"],"output_tokens":turn["output_tokens"],"cache_read_tokens":turn["cache_read_tokens"],"cache_write_tokens":turn["cache_write_tokens"],"stop_reason":turn["stop_reason"]})
+                let mut entry=json!({"text":turn["text"],"tool_calls":calls,"input_tokens":turn["input_tokens"],"output_tokens":turn["output_tokens"],"cache_read_tokens":turn["cache_read_tokens"],"cache_write_tokens":turn["cache_write_tokens"],"stop_reason":turn["stop_reason"]});
+                // Optional failure keys join the identity only when present, so
+                // scripts written before they existed keep their resume identity.
+                for key in ["error","panic"] {
+                    if let Some(value)=turn.get(key) {
+                        entry[key]=value.clone();
+                    }
+                }
+                entry
             }).collect::<Vec<_>>();
             util::hash(json!({"turns":turns,"exhausted_text":v["exhausted_text"].as_str().unwrap_or("(fake provider: script exhausted)"),"default_input_tokens":v["default_input_tokens"].as_u64().unwrap_or(100),"default_output_tokens":v["default_output_tokens"].as_u64().unwrap_or(20)}).to_string().as_bytes())
         })
@@ -179,6 +188,14 @@ impl Provider {
         if let Some(script) = &self.fake {
             let turn=script["turns"].as_array().and_then(|v|v.get(self.index)).cloned().unwrap_or_else(||json!({"text":script["exhausted_text"].as_str().unwrap_or("(fake provider: script exhausted)")}));
             self.index += 1;
+            // Scripted failures let tests drive retry, error and panic paths
+            // without a network endpoint.
+            if let Some(message) = turn["panic"].as_str() {
+                panic!("fake provider panic: {message}");
+            }
+            if let Some(error) = turn["error"].as_str() {
+                bail!("{error}");
+            }
             let mut blocks = vec![];
             if let Some(text) = turn["text"].as_str().filter(|s| !s.is_empty()) {
                 let chars = text.chars().collect::<Vec<_>>();
@@ -243,9 +260,9 @@ impl Provider {
         } else {
             request = request.bearer_auth(&self.key);
         }
-        let response = request
-            .send()
-            .await
+        let limit = idle_timeout();
+        let response = idle(limit, request.send())
+            .await?
             .map_err(|_| anyhow::anyhow!("provider connection failed"))?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -258,7 +275,7 @@ impl Provider {
         if !sse {
             let mut stream = response.bytes_stream();
             let mut bytes = vec![];
-            while let Some(chunk) = stream.next().await {
+            while let Some(chunk) = idle(limit, stream.next()).await? {
                 bytes.extend_from_slice(&chunk?);
                 if bytes.len() > 16_000_000 {
                     bail!("provider response exceeds the capture limit")
@@ -297,7 +314,7 @@ impl Provider {
         };
         let mut first = None;
         let mut last = None;
-        'stream: while let Some(chunk) = stream.next().await {
+        'stream: while let Some(chunk) = idle(limit, stream.next()).await? {
             let bytes = chunk.map_err(|_| anyhow::anyhow!("provider stream interrupted"))?;
             captured += bytes.len();
             if captured > 64_000_000 {
@@ -631,6 +648,9 @@ impl Provider {
                     + 1024,
             )
             .max(1);
+        if self.style == "anthropic" {
+            chat = normalize_anthropic(chat);
+        }
         let mut body = json!({"model":self.model,"messages":null,"stream":true,"max_tokens":self.max_output.min(available)});
         body["messages"] = Value::Array(chat);
         if self.style == "anthropic" {
@@ -649,6 +669,50 @@ impl Provider {
         }
         Ok(body)
     }
+}
+/// Longest silence tolerated while waiting for response headers or the next
+/// body chunk. MINICODE_PROVIDER_IDLE_TIMEOUT_S overrides the default.
+fn idle_timeout() -> Duration {
+    std::env::var("MINICODE_PROVIDER_IDLE_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .and_then(|s| Duration::try_from_secs_f64(s).ok())
+        .unwrap_or(Duration::from_secs(120))
+}
+async fn idle<F: std::future::Future>(limit: Duration, future: F) -> Result<F::Output> {
+    tokio::time::timeout(limit, future).await.map_err(|_| {
+        anyhow::anyhow!(
+            "provider stream idle timeout: no data for {}s",
+            limit.as_secs_f64()
+        )
+    })
+}
+/// Strict Anthropic endpoints (Bedrock, some gateways) reject adjacent
+/// messages with the same role, while the runtime appends user notices right
+/// after user tool results. Merge them on the wire only, so persisted history
+/// stays untouched and sessions written before this fix still resume.
+fn normalize_anthropic(chat: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(chat.len());
+    for mut message in chat {
+        if let Some(previous) = out.last_mut().filter(|p| p["role"] == message["role"]) {
+            if let (Some(into), Value::Array(from)) = (
+                previous["content"].as_array_mut(),
+                message["content"].take(),
+            ) {
+                into.extend(from);
+            }
+            continue;
+        }
+        out.push(message);
+    }
+    for message in out.iter_mut().filter(|m| m["role"] == "user") {
+        if let Some(content) = message["content"].as_array_mut() {
+            // Stable: tool results first, other blocks keep their order.
+            content.sort_by_key(|block| block["type"] != "tool_result");
+        }
+    }
+    out
 }
 fn media_part(b: &Block, store: &Attachments, style: &str) -> Result<Value> {
     let Block::Media {
@@ -814,8 +878,15 @@ fn validate_fake(v: &Value) -> Result<()> {
                 "cache_read_tokens",
                 "cache_write_tokens",
                 "stop_reason",
+                "error",
+                "panic",
             ],
         )?;
+        for key in ["error", "panic"] {
+            if !turn[key].is_null() && !turn[key].is_string() {
+                bail!("{key} must be a string")
+            }
+        }
         if let Some(calls) = turn["tool_calls"].as_array() {
             for c in calls {
                 fields(c, &["name", "arguments", "id"])?;

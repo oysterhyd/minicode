@@ -996,3 +996,370 @@ fn running_sessions_cannot_be_deleted_from_a_second_store() {
     other.delete(&ctx.session).unwrap();
     assert!(ctx.store.require(&ctx.session).is_err());
 }
+
+// Runtime harness: a real Runtime driven by the scripted fake provider, with
+// every bridge event captured. Main-loop regressions build on this instead of
+// a network endpoint.
+struct Harness {
+    _dir: tempfile::TempDir,
+    root: std::path::PathBuf,
+    runtime: crate::runtime::Runtime,
+    hooks: crate::runtime::Hooks,
+    events: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+impl Harness {
+    async fn new(script: serde_json::Value) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = util::canonical(dir.path()).unwrap();
+        let workspace = root.join("repo");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("README.md"), "harness repository\n").unwrap();
+        let store = Store::open(root.join("sessions.db")).unwrap();
+        let configuration = Configuration {
+            path: root.join("config.json"),
+        };
+        let settings = crate::runtime::Settings {
+            model: "fake".into(),
+            effort: "off".into(),
+            mode: "bypass".into(),
+            budget: crate::models::Budget::default(),
+            acceptance: None,
+            always_allow: Default::default(),
+            pending_model: false,
+            registry_dirty: false,
+        };
+        let mut runtime =
+            crate::runtime::Runtime::new(&workspace, "fake", None, store, configuration, &settings)
+                .await
+                .unwrap();
+        runtime.set_script(script).unwrap();
+        let events = Arc::new(std::sync::Mutex::new(vec![]));
+        let captured = events.clone();
+        let hooks = crate::runtime::Hooks {
+            settings: Arc::new(std::sync::Mutex::new(settings)),
+            snapshot: Default::default(),
+            approvals: Default::default(),
+            approval_sequence: Default::default(),
+            sink: Arc::new(move |value| captured.lock().unwrap().push(value)),
+            cancel: CancellationToken::new(),
+            shared: Default::default(),
+        };
+        Self {
+            _dir: dir,
+            root,
+            runtime,
+            hooks,
+            events,
+        }
+    }
+    async fn run(&mut self, text: Option<&str>) -> anyhow::Result<crate::models::RunResult> {
+        self.hooks.cancel = CancellationToken::new();
+        self.runtime
+            .run(text.map(str::to_string), vec![], self.hooks.clone())
+            .await
+    }
+    fn event_types(&self) -> Vec<String> {
+        self.runtime
+            .store
+            .events(&self.runtime.session, -1)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.r#type)
+            .collect()
+    }
+    /// The exact Anthropic `messages` array the next request would send.
+    fn anthropic_messages(&self) -> Vec<serde_json::Value> {
+        let mut provider = self.runtime.provider.clone();
+        provider.style = "anthropic".into();
+        let attachments = Attachments {
+            root: self.root.join("attachments"),
+        };
+        provider
+            .payload("system", &self.runtime.messages, &[], &attachments)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+}
+fn assert_strict_anthropic_roles(messages: &[serde_json::Value]) {
+    assert_eq!(messages.first().map(|m| &m["role"]), Some(&json!("user")));
+    for pair in messages.windows(2) {
+        assert_ne!(pair[0]["role"], pair[1]["role"], "{messages:#?}");
+    }
+    for message in messages.iter().filter(|m| m["role"] == "user") {
+        let content = message["content"].as_array().unwrap();
+        let first_other = content
+            .iter()
+            .position(|b| b["type"] != "tool_result")
+            .unwrap_or(content.len());
+        assert!(
+            content[first_other..]
+                .iter()
+                .all(|b| b["type"] != "tool_result"),
+            "tool_result blocks must lead the user message: {message:#}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn harness_fake_provider_scripts_errors_tool_calls_and_usage() {
+    let mut h = Harness::new(json!({"turns":[
+        {"error":"provider HTTP 503"},
+        {"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}],"input_tokens":7,"output_tokens":3},
+        {"text":"done"}
+    ]}))
+    .await;
+    let result = h.run(Some("inspect")).await.unwrap();
+    assert_eq!(result.exit_reason, "completed");
+    let types = h.event_types();
+    assert_eq!(types.iter().filter(|t| *t == "provider_retry").count(), 1);
+    assert!(types.contains(&"tool_call_result".to_string()));
+    assert_eq!(result.total_usage.input_tokens, 107);
+    assert_strict_anthropic_roles(&h.anthropic_messages());
+    let sink = h.events.lock().unwrap();
+    assert!(
+        sink.iter()
+            .any(|e| e["event"] == "text_delta" && e["text"] == "done")
+    );
+}
+
+// R40: every runtime path that appends a user notice right after a user
+// tool_result must still produce a strictly alternating Anthropic payload.
+#[tokio::test]
+async fn anthropic_roles_alternate_after_truncated_response() {
+    let mut h = Harness::new(json!({"turns":[
+        {"text":"partial","stop_reason":"max_tokens","tool_calls":[{"name":"write","arguments":{"path":"x.txt","content":"no"}}]},
+        {"text":"done"}
+    ]}))
+    .await;
+    assert_eq!(h.run(Some("task")).await.unwrap().exit_reason, "completed");
+    let roles = h
+        .runtime
+        .messages
+        .iter()
+        .map(|m| m.role.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(roles, ["user", "assistant", "user", "user", "assistant"]);
+    let messages = h.anthropic_messages();
+    assert_strict_anthropic_roles(&messages);
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+    assert_eq!(messages[2]["content"][1]["type"], "text");
+}
+
+#[tokio::test]
+async fn anthropic_roles_alternate_after_stall_notice() {
+    let call = json!({"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]});
+    let mut h = Harness::new(json!({"turns":[call,call,call,call,call,call]})).await;
+    assert_eq!(h.run(Some("task")).await.unwrap().exit_reason, "stalled");
+    assert_eq!(
+        h.runtime
+            .messages
+            .iter()
+            .rev()
+            .take(2)
+            .map(|m| m.role.as_str())
+            .collect::<Vec<_>>(),
+        ["user", "user"]
+    );
+    assert_strict_anthropic_roles(&h.anthropic_messages());
+}
+
+#[tokio::test]
+async fn anthropic_roles_alternate_after_background_completion_notice() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[
+            {"name":"bash","arguments":{"command":"node -e \"console.log(42)\"","background":true}},
+            {"name":"bash","arguments":{"command":"node -e \"setTimeout(()=>{},1500)\""}}
+        ]},
+        {"text":"done"}
+    ]}))
+    .await;
+    assert_eq!(h.run(Some("task")).await.unwrap().exit_reason, "completed");
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.text().starts_with("后台任务已完成"))
+    );
+    assert_strict_anthropic_roles(&h.anthropic_messages());
+}
+
+#[tokio::test]
+async fn anthropic_roles_alternate_after_recovery_backfill_and_lost_job() {
+    let mut h = Harness::new(json!({"turns":[{"text":"recovered"}]})).await;
+    let session = h.runtime.session.clone();
+    for message in [
+        Message::user("task"),
+        Message {
+            role: "assistant".into(),
+            content: vec![Block::ToolUse {
+                id: "interrupted".into(),
+                name: "write".into(),
+                input: json!({"path":"x.txt","content":"?"}),
+            }],
+        },
+    ] {
+        h.runtime.store.append(&session, &message).unwrap();
+        h.runtime.messages.push(message);
+    }
+    h.runtime
+        .store
+        .event(
+            &session,
+            "background_job_started",
+            &json!({"job_id":"bg_lost","command":"sleep"}),
+        )
+        .unwrap();
+    h.runtime.pending = true;
+    assert_eq!(h.run(None).await.unwrap().exit_reason, "completed");
+    let types = h.event_types();
+    assert!(types.contains(&"side_effect_unknown".to_string()));
+    assert!(types.contains(&"background_job_lost".to_string()));
+    let messages = h.anthropic_messages();
+    assert_strict_anthropic_roles(&messages);
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], "interrupted");
+}
+
+#[test]
+fn anthropic_normalization_merges_and_orders_blocks_without_touching_history() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    provider.style = "anthropic".into();
+    let result = |id: &str| Block::ToolResult {
+        tool_use_id: id.into(),
+        content: "ok".into(),
+        is_error: false,
+        images: vec![],
+    };
+    let messages = vec![
+        Message::user("first"),
+        Message::user("second"),
+        Message {
+            role: "assistant".into(),
+            content: vec![
+                Block::ToolUse {
+                    id: "a".into(),
+                    name: "read".into(),
+                    input: json!({}),
+                },
+                Block::ToolUse {
+                    id: "b".into(),
+                    name: "read".into(),
+                    input: json!({}),
+                },
+            ],
+        },
+        Message {
+            role: "user".into(),
+            content: vec![Block::text("note before"), result("a")],
+        },
+        Message {
+            role: "user".into(),
+            content: vec![result("b"), Block::text("note after")],
+        },
+    ];
+    let original = messages.clone();
+    let payload = provider
+        .payload("system", &messages, &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(messages, original);
+    assert_eq!(
+        payload["messages"],
+        json!([
+            {"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}},{"type":"tool_use","id":"b","name":"read","input":{}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"a","content":"ok","is_error":false},
+                {"type":"tool_result","tool_use_id":"b","content":"ok","is_error":false},
+                {"type":"text","text":"note before"},
+                {"type":"text","text":"note after"}
+            ]}
+        ])
+    );
+    provider.style = "openai".into();
+    let openai = provider
+        .payload("system", &messages, &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(
+        openai["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "user")
+            .count(),
+        4
+    );
+}
+
+// R41 / B16: run teardown is best-effort. Storage failures and panics must not
+// skip cancelling background jobs, closing MCP, clearing approvals, writing
+// session_end or resetting the running flag.
+fn inject_storage_failure(h: &Harness, event_type: &str) {
+    rusqlite::Connection::open(&h.runtime.store.path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER inject_failure BEFORE INSERT ON events WHEN NEW.type='{event_type}' BEGIN SELECT RAISE(ABORT,'injected storage failure'); END;"
+        ))
+        .unwrap();
+}
+fn background_then(last: serde_json::Value) -> serde_json::Value {
+    json!({"turns":[
+        {"tool_calls":[
+            // Bounded lifetime: a leaked job must not outlive the test run.
+            {"name":"bash","arguments":{"command":"node -e \"setTimeout(()=>{},30000)\"","background":true}}
+        ]},
+        last
+    ]})
+}
+fn assert_torn_down(h: &Harness) {
+    let snapshot = h.hooks.snapshot.lock().unwrap();
+    assert!(!snapshot.running);
+    assert_ne!(snapshot.phase, "model");
+    drop(snapshot);
+    assert!(h.hooks.approvals.lock().unwrap().is_empty());
+    assert!(h.runtime.mcp.statuses.is_empty());
+}
+
+#[tokio::test]
+async fn teardown_continues_after_a_failed_background_job_event() {
+    let mut h = Harness::new(background_then(json!({"text":"done"}))).await;
+    inject_storage_failure(&h, "background_job_lost");
+    let error = h.run(Some("task")).await.unwrap_err().to_string();
+    assert!(error.contains("injected storage failure"), "{error}");
+    assert_torn_down(&h);
+    assert!(h.event_types().contains(&"session_end".to_string()));
+}
+
+#[tokio::test]
+async fn teardown_reports_a_failed_session_end_and_resets_running() {
+    let mut h = Harness::new(background_then(json!({"text":"done"}))).await;
+    inject_storage_failure(&h, "session_end");
+    let error = h.run(Some("task")).await.unwrap_err().to_string();
+    assert!(error.contains("injected storage failure"), "{error}");
+    assert_torn_down(&h);
+    let types = h.event_types();
+    assert!(types.contains(&"background_job_lost".to_string()));
+    assert!(!types.contains(&"session_end".to_string()));
+}
+
+#[tokio::test]
+async fn a_panicking_run_is_torn_down_and_reported() {
+    let mut h = Harness::new(background_then(json!({"panic":"boom"}))).await;
+    let error = h.run(Some("task")).await.unwrap_err().to_string();
+    assert!(error.contains("panic") && error.contains("boom"), "{error}");
+    assert_torn_down(&h);
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    assert!(events.iter().any(|e| e.r#type == "background_job_lost"));
+    let end = events.iter().find(|e| e.r#type == "session_end").unwrap();
+    assert_eq!(end.data["exit_reason"], "internal_error");
+    assert!(h.runtime.pending);
+}
