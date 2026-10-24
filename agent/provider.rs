@@ -58,9 +58,10 @@ impl Provider {
             fake: None,
             index: 0,
             call_counter: 0,
+            // No total request timeout: it would also cap the streamed body.
+            // Reads are bounded by idle_timeout and the run by its deadline.
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(20))
-                .timeout(Duration::from_secs(180))
                 .build()?,
         };
         if model == "fake" {
@@ -259,9 +260,9 @@ impl Provider {
         } else {
             request = request.bearer_auth(&self.key);
         }
-        let response = request
-            .send()
-            .await
+        let limit = idle_timeout();
+        let response = idle(limit, request.send())
+            .await?
             .map_err(|_| anyhow::anyhow!("provider connection failed"))?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -274,7 +275,7 @@ impl Provider {
         if !sse {
             let mut stream = response.bytes_stream();
             let mut bytes = vec![];
-            while let Some(chunk) = stream.next().await {
+            while let Some(chunk) = idle(limit, stream.next()).await? {
                 bytes.extend_from_slice(&chunk?);
                 if bytes.len() > 16_000_000 {
                     bail!("provider response exceeds the capture limit")
@@ -313,7 +314,7 @@ impl Provider {
         };
         let mut first = None;
         let mut last = None;
-        'stream: while let Some(chunk) = stream.next().await {
+        'stream: while let Some(chunk) = idle(limit, stream.next()).await? {
             let bytes = chunk.map_err(|_| anyhow::anyhow!("provider stream interrupted"))?;
             captured += bytes.len();
             if captured > 64_000_000 {
@@ -668,6 +669,24 @@ impl Provider {
         }
         Ok(body)
     }
+}
+/// Longest silence tolerated while waiting for response headers or the next
+/// body chunk. MINICODE_PROVIDER_IDLE_TIMEOUT_S overrides the default.
+fn idle_timeout() -> Duration {
+    std::env::var("MINICODE_PROVIDER_IDLE_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .and_then(|s| Duration::try_from_secs_f64(s).ok())
+        .unwrap_or(Duration::from_secs(120))
+}
+async fn idle<F: std::future::Future>(limit: Duration, future: F) -> Result<F::Output> {
+    tokio::time::timeout(limit, future).await.map_err(|_| {
+        anyhow::anyhow!(
+            "provider stream idle timeout: no data for {}s",
+            limit.as_secs_f64()
+        )
+    })
 }
 /// Strict Anthropic endpoints (Bedrock, some gateways) reject adjacent
 /// messages with the same role, while the runtime appends user notices right

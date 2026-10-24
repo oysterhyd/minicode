@@ -867,7 +867,7 @@ impl Runtime {
                         let retryable = text.contains("connection")
                             || text.contains("HTTP 429")
                             || text.contains("HTTP 5")
-                            || text == "provider request timed out";
+                            || text.contains("idle timeout");
                         if !retryable || seen.load(Ordering::Relaxed) || attempt >= 2 {
                             return Err(if text == "turn deadline exceeded" {
                                 error

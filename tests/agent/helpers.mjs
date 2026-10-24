@@ -30,7 +30,7 @@ export function connect(fixture,extraEnv={}){
 }
 // Windows can briefly retain directory handles after a cancelled job exits.
 // Bound retries to transient cleanup errors; persistent process leaks still fail.
-export async function fixture(t,turns=[]){const f=profile(turns),c=connect(f);t.after(async()=>{for(const connection of f.connections)await connection.close();await c.close();if(path.dirname(f.root)!==path.resolve(os.tmpdir()))throw Error('unsafe test cleanup');fs.rmSync(f.root,{recursive:true,force:true,maxRetries:10,retryDelay:100})});return {...f,...c}}
+export async function fixture(t,turns=[],env={}){const f=profile(turns),c=connect(f,env);t.after(async()=>{for(const connection of f.connections)await connection.close();await c.close();if(path.dirname(f.root)!==path.resolve(os.tmpdir()))throw Error('unsafe test cleanup');fs.rmSync(f.root,{recursive:true,force:true,maxRetries:10,retryDelay:100})});return {...f,...c}}
 // Asserts that events contain matches for every predicate, in order (other events may interleave).
 export function expectSequence(events,predicates){let at=0;for(const [n,check] of predicates.entries()){const found=events.slice(at).findIndex(check);if(found<0)throw Error(`sequence step ${n} missing after index ${at}: ${JSON.stringify(events.map(e=>e.event==='agent_event'?e.item.type:e.event))}`);at+=found+1}}
 export function pidAlive(pid){try{process.kill(pid,0);return true}catch(error){return error.code==='EPERM'}}
