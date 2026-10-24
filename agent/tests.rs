@@ -1299,3 +1299,54 @@ fn anthropic_normalization_merges_and_orders_blocks_without_touching_history() {
         4
     );
 }
+
+// R41 / B16: run teardown is best-effort. Storage failures and panics must not
+// skip cancelling background jobs, closing MCP, clearing approvals, writing
+// session_end or resetting the running flag.
+fn inject_storage_failure(h: &Harness, event_type: &str) {
+    rusqlite::Connection::open(&h.runtime.store.path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER inject_failure BEFORE INSERT ON events WHEN NEW.type='{event_type}' BEGIN SELECT RAISE(ABORT,'injected storage failure'); END;"
+        ))
+        .unwrap();
+}
+fn background_then(last: serde_json::Value) -> serde_json::Value {
+    json!({"turns":[
+        {"tool_calls":[
+            // Bounded lifetime: a leaked job must not outlive the test run.
+            {"name":"bash","arguments":{"command":"node -e \"setTimeout(()=>{},30000)\"","background":true}}
+        ]},
+        last
+    ]})
+}
+fn assert_torn_down(h: &Harness) {
+    let snapshot = h.hooks.snapshot.lock().unwrap();
+    assert!(!snapshot.running);
+    assert_ne!(snapshot.phase, "model");
+    drop(snapshot);
+    assert!(h.hooks.approvals.lock().unwrap().is_empty());
+    assert!(h.runtime.mcp.statuses.is_empty());
+}
+
+#[tokio::test]
+async fn teardown_continues_after_a_failed_background_job_event() {
+    let mut h = Harness::new(background_then(json!({"text":"done"}))).await;
+    inject_storage_failure(&h, "background_job_lost");
+    let error = h.run(Some("task")).await.unwrap_err().to_string();
+    assert!(error.contains("injected storage failure"), "{error}");
+    assert_torn_down(&h);
+    assert!(h.event_types().contains(&"session_end".to_string()));
+}
+
+#[tokio::test]
+async fn teardown_reports_a_failed_session_end_and_resets_running() {
+    let mut h = Harness::new(background_then(json!({"text":"done"}))).await;
+    inject_storage_failure(&h, "session_end");
+    let error = h.run(Some("task")).await.unwrap_err().to_string();
+    assert!(error.contains("injected storage failure"), "{error}");
+    assert_torn_down(&h);
+    let types = h.event_types();
+    assert!(types.contains(&"background_job_lost".to_string()));
+    assert!(!types.contains(&"session_end".to_string()));
+}

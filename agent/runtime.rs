@@ -600,23 +600,35 @@ impl Runtime {
             tokio::task::JoinHandle<Result<Outcome>>,
         )> = vec![];
         let result = self.run_inner(text, attachments, &hooks, &mut jobs).await;
-        for (job, command, cancel, handle) in jobs {
-            let was_running = !handle.is_finished();
+        // Teardown is best-effort: every step runs even when an earlier one
+        // fails, and the failures are reported together at the end.
+        let mut failures = vec![];
+        let running = jobs
+            .iter()
+            .map(|(_, _, _, handle)| !handle.is_finished())
+            .collect::<Vec<_>>();
+        for (_, _, cancel, _) in &jobs {
             cancel.cancel();
+        }
+        for ((job, command, _, handle), was_running) in jobs.into_iter().zip(running) {
             let outcome = handle.await.ok().and_then(Result::ok);
-            self.event(&hooks,if was_running{"background_job_lost"}else{"background_job_completed"},json!({"job_id":job,"command":command,"status":if was_running{"lost"}else if outcome.as_ref().is_some_and(|o|o.success){"completed"}else{"failed"},"exit_code":outcome.as_ref().and_then(|o|o.exit_code),"output":outcome.map(|o|o.output).unwrap_or_default()}))?;
+            if let Err(error) = self.event(&hooks,if was_running{"background_job_lost"}else{"background_job_completed"},json!({"job_id":job,"command":command,"status":if was_running{"lost"}else if outcome.as_ref().is_some_and(|o|o.success){"completed"}else{"failed"},"exit_code":outcome.as_ref().and_then(|o|o.exit_code),"output":outcome.map(|o|o.output).unwrap_or_default()})) {
+                failures.push(format!("background job {job}: {error}"));
+            }
         }
         self.mcp.close().await;
         self.mcp = Arc::new(McpRegistry::default());
-        if self.child {
-            let prefix = format!("{}:", self.session);
-            hooks
+        {
+            let mut approvals = hooks
                 .approvals
                 .lock()
-                .unwrap()
-                .retain(|id, _| !id.starts_with(&prefix));
-        } else {
-            hooks.approvals.lock().unwrap().clear();
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.child {
+                let prefix = format!("{}:", self.session);
+                approvals.retain(|id, _| !id.starts_with(&prefix));
+            } else {
+                approvals.clear();
+            }
         }
         let (reason, error) = match result {
             Ok(reason) => (reason, None),
@@ -639,26 +651,47 @@ impl Runtime {
         let mut counters = store::counters(self.rounds, &self.usage);
         counters["status"] = json!(if self.pending { "paused" } else { "completed" });
         counters["exit_reason"] = json!(reason);
-        let run_id = hooks.snapshot.lock().unwrap().run_id.clone();
+        let run_id = hooks
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .run_id
+            .clone();
         let mut data = json!({"exit_reason":reason,"status":counters["status"],"rounds":self.rounds,"total_usage":self.usage,"run_id":run_id});
         data["total_usage"]["total_tokens"] = json!(self.usage.total());
         if let Some(error) = &error {
             data["error"] = json!(error)
         }
-        let event = self.store.checkpoint(
+        match self.store.checkpoint(
             &self.session,
             "session_end",
             &data,
             None,
             None,
             Some(&counters),
-        )?;
-        (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
-        self.refresh_snapshot(&hooks).await?;
+        ) {
+            Ok(event) => {
+                (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}))
+            }
+            Err(e) => failures.push(format!("session_end: {e}")),
+        }
+        if let Err(e) = self.refresh_snapshot(&hooks).await {
+            failures.push(format!("snapshot: {e}"));
+        }
         {
-            let mut s = hooks.snapshot.lock().unwrap();
+            let mut s = hooks
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.running = false;
             s.phase = if self.pending { "paused" } else { "idle" }.into();
+        }
+        if !failures.is_empty() {
+            let cleanup = format!("run teardown failed: {}", failures.join("; "));
+            bail!(match error {
+                Some(error) => format!("{error}; {cleanup}"),
+                None => cleanup,
+            })
         }
         Ok(RunResult {
             session_id: self.session.clone(),
