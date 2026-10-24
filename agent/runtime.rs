@@ -12,6 +12,7 @@ use crate::{
     util,
 };
 use anyhow::{Context, Result, bail};
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -599,7 +600,27 @@ impl Runtime {
             CancellationToken,
             tokio::task::JoinHandle<Result<Outcome>>,
         )> = vec![];
-        let result = self.run_inner(text, attachments, &hooks, &mut jobs).await;
+        // A panic in the loop is caught so the teardown below still runs; it
+        // is then reported as a run failure. Persisted history stays the
+        // source of truth for the next run.
+        let (result, panicked) = match std::panic::AssertUnwindSafe(self.run_inner(
+            text,
+            attachments,
+            &hooks,
+            &mut jobs,
+        ))
+        .catch_unwind()
+        .await
+        {
+            Ok(result) => (result, false),
+            Err(panic) => (
+                Err(anyhow::anyhow!(
+                    "internal panic: {}",
+                    util::panic_message(&*panic)
+                )),
+                true,
+            ),
+        };
         // Teardown is best-effort: every step runs even when an earlier one
         // fails, and the failures are reported together at the end.
         let mut failures = vec![];
@@ -686,12 +707,12 @@ impl Runtime {
             s.running = false;
             s.phase = if self.pending { "paused" } else { "idle" }.into();
         }
-        if !failures.is_empty() {
-            let cleanup = format!("run teardown failed: {}", failures.join("; "));
-            bail!(match error {
-                Some(error) => format!("{error}; {cleanup}"),
-                None => cleanup,
-            })
+        if panicked || !failures.is_empty() {
+            let mut report = error.into_iter().collect::<Vec<_>>();
+            if !failures.is_empty() {
+                report.push(format!("run teardown failed: {}", failures.join("; ")));
+            }
+            bail!(report.join("; "))
         }
         Ok(RunResult {
             session_id: self.session.clone(),

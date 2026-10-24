@@ -1350,3 +1350,16 @@ async fn teardown_reports_a_failed_session_end_and_resets_running() {
     assert!(types.contains(&"background_job_lost".to_string()));
     assert!(!types.contains(&"session_end".to_string()));
 }
+
+#[tokio::test]
+async fn a_panicking_run_is_torn_down_and_reported() {
+    let mut h = Harness::new(background_then(json!({"panic":"boom"}))).await;
+    let error = h.run(Some("task")).await.unwrap_err().to_string();
+    assert!(error.contains("panic") && error.contains("boom"), "{error}");
+    assert_torn_down(&h);
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    assert!(events.iter().any(|e| e.r#type == "background_job_lost"));
+    let end = events.iter().find(|e| e.r#type == "session_end").unwrap();
+    assert_eq!(end.data["exit_reason"], "internal_error");
+    assert!(h.runtime.pending);
+}
