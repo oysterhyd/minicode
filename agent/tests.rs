@@ -996,3 +996,130 @@ fn running_sessions_cannot_be_deleted_from_a_second_store() {
     other.delete(&ctx.session).unwrap();
     assert!(ctx.store.require(&ctx.session).is_err());
 }
+
+// Runtime harness: a real Runtime driven by the scripted fake provider, with
+// every bridge event captured. Main-loop regressions build on this instead of
+// a network endpoint.
+struct Harness {
+    _dir: tempfile::TempDir,
+    root: std::path::PathBuf,
+    runtime: crate::runtime::Runtime,
+    hooks: crate::runtime::Hooks,
+    events: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+impl Harness {
+    async fn new(script: serde_json::Value) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = util::canonical(dir.path()).unwrap();
+        let workspace = root.join("repo");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("README.md"), "harness repository\n").unwrap();
+        let store = Store::open(root.join("sessions.db")).unwrap();
+        let configuration = Configuration {
+            path: root.join("config.json"),
+        };
+        let settings = crate::runtime::Settings {
+            model: "fake".into(),
+            effort: "off".into(),
+            mode: "bypass".into(),
+            budget: crate::models::Budget::default(),
+            acceptance: None,
+            always_allow: Default::default(),
+            pending_model: false,
+            registry_dirty: false,
+        };
+        let mut runtime =
+            crate::runtime::Runtime::new(&workspace, "fake", None, store, configuration, &settings)
+                .await
+                .unwrap();
+        runtime.set_script(script).unwrap();
+        let events = Arc::new(std::sync::Mutex::new(vec![]));
+        let captured = events.clone();
+        let hooks = crate::runtime::Hooks {
+            settings: Arc::new(std::sync::Mutex::new(settings)),
+            snapshot: Default::default(),
+            approvals: Default::default(),
+            approval_sequence: Default::default(),
+            sink: Arc::new(move |value| captured.lock().unwrap().push(value)),
+            cancel: CancellationToken::new(),
+            shared: Default::default(),
+        };
+        Self {
+            _dir: dir,
+            root,
+            runtime,
+            hooks,
+            events,
+        }
+    }
+    async fn run(&mut self, text: Option<&str>) -> anyhow::Result<crate::models::RunResult> {
+        self.hooks.cancel = CancellationToken::new();
+        self.runtime
+            .run(text.map(str::to_string), vec![], self.hooks.clone())
+            .await
+    }
+    fn event_types(&self) -> Vec<String> {
+        self.runtime
+            .store
+            .events(&self.runtime.session, -1)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.r#type)
+            .collect()
+    }
+    /// The exact Anthropic `messages` array the next request would send.
+    fn anthropic_messages(&self) -> Vec<serde_json::Value> {
+        let mut provider = self.runtime.provider.clone();
+        provider.style = "anthropic".into();
+        let attachments = Attachments {
+            root: self.root.join("attachments"),
+        };
+        provider
+            .payload("system", &self.runtime.messages, &[], &attachments)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+}
+fn assert_strict_anthropic_roles(messages: &[serde_json::Value]) {
+    assert_eq!(messages.first().map(|m| &m["role"]), Some(&json!("user")));
+    for pair in messages.windows(2) {
+        assert_ne!(pair[0]["role"], pair[1]["role"], "{messages:#?}");
+    }
+    for message in messages.iter().filter(|m| m["role"] == "user") {
+        let content = message["content"].as_array().unwrap();
+        let first_other = content
+            .iter()
+            .position(|b| b["type"] != "tool_result")
+            .unwrap_or(content.len());
+        assert!(
+            content[first_other..]
+                .iter()
+                .all(|b| b["type"] != "tool_result"),
+            "tool_result blocks must lead the user message: {message:#}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn harness_fake_provider_scripts_errors_tool_calls_and_usage() {
+    let mut h = Harness::new(json!({"turns":[
+        {"error":"provider HTTP 503"},
+        {"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}],"input_tokens":7,"output_tokens":3},
+        {"text":"done"}
+    ]}))
+    .await;
+    let result = h.run(Some("inspect")).await.unwrap();
+    assert_eq!(result.exit_reason, "completed");
+    let types = h.event_types();
+    assert_eq!(types.iter().filter(|t| *t == "provider_retry").count(), 1);
+    assert!(types.contains(&"tool_call_result".to_string()));
+    assert_eq!(result.total_usage.input_tokens, 107);
+    assert_strict_anthropic_roles(&h.anthropic_messages());
+    let sink = h.events.lock().unwrap();
+    assert!(
+        sink.iter()
+            .any(|e| e["event"] == "text_delta" && e["text"] == "done")
+    );
+}

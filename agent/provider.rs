@@ -158,7 +158,15 @@ impl Provider {
         self.fake.as_ref().map(|v|{
             let turns=v["turns"].as_array().unwrap_or(&vec![]).iter().map(|turn|{
                 let calls=turn["tool_calls"].as_array().unwrap_or(&vec![]).iter().map(|call|json!({"name":call["name"],"arguments":call.get("arguments").cloned().unwrap_or(json!({})),"id":call["id"]})).collect::<Vec<_>>();
-                json!({"text":turn["text"],"tool_calls":calls,"input_tokens":turn["input_tokens"],"output_tokens":turn["output_tokens"],"cache_read_tokens":turn["cache_read_tokens"],"cache_write_tokens":turn["cache_write_tokens"],"stop_reason":turn["stop_reason"]})
+                let mut entry=json!({"text":turn["text"],"tool_calls":calls,"input_tokens":turn["input_tokens"],"output_tokens":turn["output_tokens"],"cache_read_tokens":turn["cache_read_tokens"],"cache_write_tokens":turn["cache_write_tokens"],"stop_reason":turn["stop_reason"]});
+                // Optional failure keys join the identity only when present, so
+                // scripts written before they existed keep their resume identity.
+                for key in ["error","panic"] {
+                    if let Some(value)=turn.get(key) {
+                        entry[key]=value.clone();
+                    }
+                }
+                entry
             }).collect::<Vec<_>>();
             util::hash(json!({"turns":turns,"exhausted_text":v["exhausted_text"].as_str().unwrap_or("(fake provider: script exhausted)"),"default_input_tokens":v["default_input_tokens"].as_u64().unwrap_or(100),"default_output_tokens":v["default_output_tokens"].as_u64().unwrap_or(20)}).to_string().as_bytes())
         })
@@ -179,6 +187,14 @@ impl Provider {
         if let Some(script) = &self.fake {
             let turn=script["turns"].as_array().and_then(|v|v.get(self.index)).cloned().unwrap_or_else(||json!({"text":script["exhausted_text"].as_str().unwrap_or("(fake provider: script exhausted)")}));
             self.index += 1;
+            // Scripted failures let tests drive retry, error and panic paths
+            // without a network endpoint.
+            if let Some(message) = turn["panic"].as_str() {
+                panic!("fake provider panic: {message}");
+            }
+            if let Some(error) = turn["error"].as_str() {
+                bail!("{error}");
+            }
             let mut blocks = vec![];
             if let Some(text) = turn["text"].as_str().filter(|s| !s.is_empty()) {
                 let chars = text.chars().collect::<Vec<_>>();
@@ -814,8 +830,15 @@ fn validate_fake(v: &Value) -> Result<()> {
                 "cache_read_tokens",
                 "cache_write_tokens",
                 "stop_reason",
+                "error",
+                "panic",
             ],
         )?;
+        for key in ["error", "panic"] {
+            if !turn[key].is_null() && !turn[key].is_string() {
+                bail!("{key} must be a string")
+            }
+        }
         if let Some(calls) = turn["tool_calls"].as_array() {
             for c in calls {
                 fields(c, &["name", "arguments", "id"])?;
