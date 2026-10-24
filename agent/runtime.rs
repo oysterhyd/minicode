@@ -851,14 +851,19 @@ impl Runtime {
             };
             let mut attempt = 0;
             let (response, mut metrics) = loop {
+                // Only the turn deadline bounds the whole request; silence on
+                // the wire is the provider's idle timeout, so long streams that
+                // keep producing bytes are never cut off.
                 let deadline = hooks.shared.lock().unwrap().deadline;
-                let timeout = deadline
-                    .map(|d| {
-                        d.saturating_duration_since(Instant::now())
-                            .min(Duration::from_secs(180))
-                    })
-                    .unwrap_or(Duration::from_secs(180));
-                let value = tokio::select! {_ = hooks.cancel.cancelled()=>bail!("turn cancelled"),r=tokio::time::timeout(timeout,self.provider.stream(&system,&self.messages,&specs,&attachments,&delta))=>r.map_err(|_|anyhow::anyhow!(if deadline.is_some_and(|d|Instant::now()>=d){"turn deadline exceeded"}else{"provider request timed out"})).and_then(|r|r)};
+                let request =
+                    self.provider
+                        .stream(&system, &self.messages, &specs, &attachments, &delta);
+                let value = tokio::select! {_ = hooks.cancel.cancelled()=>bail!("turn cancelled"),r=async {
+                    match deadline {
+                        Some(d) => tokio::time::timeout(d.saturating_duration_since(Instant::now()), request).await.map_err(|_| anyhow::anyhow!("turn deadline exceeded")).and_then(|r| r),
+                        None => request.await,
+                    }
+                }=>r};
                 match value {
                     Ok(value) => break value,
                     Err(error) => {
