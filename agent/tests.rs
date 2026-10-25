@@ -1058,6 +1058,25 @@ impl Harness {
             .run(text.map(str::to_string), vec![], self.hooks.clone())
             .await
     }
+    /// Reload the session from the store, as `/resume` does.
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        let configuration = self.runtime.catalog.lock().await.configuration.clone();
+        let settings = self.hooks.settings.lock().unwrap().clone();
+        let mut runtime = crate::runtime::Runtime::new(
+            &self.runtime.workspace,
+            "fake",
+            Some(&self.runtime.session),
+            self.runtime.store.clone(),
+            configuration,
+            &settings,
+        )
+        .await?;
+        if let Some(script) = self.runtime.provider.fake.clone() {
+            runtime.set_script(script)?;
+        }
+        self.runtime = runtime;
+        Ok(())
+    }
     fn event_types(&self) -> Vec<String> {
         self.runtime
             .store
@@ -1362,4 +1381,130 @@ async fn a_panicking_run_is_torn_down_and_reported() {
     let end = events.iter().find(|e| e.r#type == "session_end").unwrap();
     assert_eq!(end.data["exit_reason"], "internal_error");
     assert!(h.runtime.pending);
+}
+
+// R1: instruction or skill drift on resume re-pins the current version and
+// tells the model, instead of making the session impossible to resume.
+#[tokio::test]
+async fn resume_repins_changed_instructions_and_skills() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[{"name":"skill_load","arguments":{"name":"helper"}}]},
+        {"text":"first"},
+        {"text":"second"},
+        {"text":"third"}
+    ]}))
+    .await;
+    let workspace = h.runtime.workspace.clone();
+    let skill = workspace.join(".minicode/skills/helper");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: helper\ndescription: Helper\n---\nhelper body",
+    )
+    .unwrap();
+    fs::write(workspace.join("AGENTS.md"), "original rules").unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("go")).await.unwrap().exit_reason, "completed");
+
+    fs::write(workspace.join("AGENTS.md"), "changed rules").unwrap();
+    fs::remove_dir_all(&skill).unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("again")).await.unwrap().exit_reason, "completed");
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let changed = events
+        .iter()
+        .filter(|e| e.r#type == "project_instructions_changed")
+        .collect::<Vec<_>>();
+    assert_eq!(changed.len(), 1);
+    let statuses = changed[0].data["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["status"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, ["changed", "removed"]);
+    let reminder = h
+        .runtime
+        .messages
+        .iter()
+        .map(Message::text)
+        .find(|t| t.contains("<system-reminder>"))
+        .expect("the model is told about the change");
+    assert!(reminder.contains("AGENTS.md") && reminder.contains("helper"));
+    {
+        let catalog = h.runtime.catalog.lock().await;
+        assert!(catalog.active.is_empty());
+        assert!(catalog.prompt(&[]).unwrap().contains("changed rules"));
+    }
+
+    // The new version is pinned: an unchanged resume reports nothing new.
+    h.reopen().await.unwrap();
+    fs::remove_file(workspace.join("AGENTS.md")).unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("third")).await.unwrap().exit_reason, "completed");
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let changed = events
+        .iter()
+        .filter(|e| e.r#type == "project_instructions_changed")
+        .collect::<Vec<_>>();
+    assert_eq!(changed.len(), 2);
+    assert_eq!(changed[1].data["changes"][0]["status"], "deleted");
+    assert!(
+        !h.runtime
+            .catalog
+            .lock()
+            .await
+            .prompt(&[])
+            .unwrap()
+            .contains("changed rules")
+    );
+}
+
+// R1: a paused subagent resumed after the instructions changed must not turn
+// the parent run into an internal_error.
+#[tokio::test]
+async fn resumed_subagent_repins_changed_instructions() {
+    let delegate =
+        json!({"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]});
+    let mut h = Harness::new(json!({"turns":[
+        delegate,
+        {"error":"provider HTTP 400 bad request"},
+        {"text":"parent paused"},
+        delegate,
+        {"text":"{\"summary\":\"ok\",\"findings\":[],\"evidence_refs\":[],\"unresolved\":[]}"},
+        {"text":"parent done"}
+    ]}))
+    .await;
+    let workspace = h.runtime.workspace.clone();
+    fs::write(workspace.join("AGENTS.md"), "original rules").unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("first")).await.unwrap().exit_reason, "completed");
+    let child = h
+        .runtime
+        .store
+        .events(&h.runtime.session, -1)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.r#type == "subagent_result")
+        .unwrap();
+    assert_ne!(child.data["exit_reason"], "completed");
+    let child = child.data["child_session_id"].as_str().unwrap().to_string();
+
+    fs::write(workspace.join("AGENTS.md"), "changed rules").unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("again")).await.unwrap().exit_reason, "completed");
+    let child_events = h.runtime.store.events(&child, -1).unwrap();
+    assert!(
+        child_events
+            .iter()
+            .any(|e| e.r#type == "project_instructions_changed")
+    );
+    assert!(
+        h.runtime
+            .store
+            .messages(&child)
+            .unwrap()
+            .iter()
+            .any(|m| m.text().contains("<system-reminder>"))
+    );
 }
