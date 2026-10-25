@@ -457,7 +457,11 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 					}
 				})
 				if send.Clicked() {
-					d.submit()
+					if stopping {
+						d.cancel(v)
+					} else {
+						d.submit()
+					}
 				}
 			})
 			if d.completion != nil && !d.completion.Dismissed {

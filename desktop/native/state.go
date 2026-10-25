@@ -555,8 +555,9 @@ func (d *desktop) submit() {
 	if v.Uploading || v.Loading {
 		return
 	}
+	// An empty Enter while a task runs (a stray key, an IME commit) does
+	// nothing; cancelling is bound to the stop button and Cmd+. only.
 	if v.Busy && strings.TrimSpace(v.Draft) == "" && len(v.Attachments) == 0 {
-		d.cancel(v)
 		return
 	}
 	text := v.Draft
