@@ -118,6 +118,8 @@ pub struct Runtime {
     used_call_ids: HashSet<String>,
     /// Instruction and skill drift found on resume, reported by `prepare`.
     instruction_changes: Vec<Value>,
+    /// Files this session has read or written; shared with its delegates.
+    pub files: tools::Files,
 }
 impl Runtime {
     pub async fn new(
@@ -311,6 +313,7 @@ impl Runtime {
             delegation_branch: false,
             used_call_ids,
             instruction_changes,
+            files: Default::default(),
         };
         let child_ids = events
             .iter()
@@ -826,6 +829,7 @@ impl Runtime {
             cancel: hooks.cancel.clone(),
             output,
             deadline: hooks.shared.lock().unwrap().deadline,
+            files: self.files.clone(),
         }
     }
     async fn run_inner(
@@ -1233,6 +1237,7 @@ impl Runtime {
                                 delegation_branch: true,
                                 used_call_ids: self.used_call_ids.clone(),
                                 instruction_changes: vec![],
+                                files: self.files.clone(),
                             },
                         ));
                     }
@@ -1722,6 +1727,7 @@ impl Runtime {
             };
             child.child = true;
             child.goal = None;
+            child.files = self.files.clone();
             // A delegated task must see the same pinned project instructions
             // and activated skills as the request that created it.
             {

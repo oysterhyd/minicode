@@ -119,8 +119,24 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     if let Ok(metadata) = path.metadata() {
         file.as_file().set_permissions(metadata.permissions())?;
     }
-    file.persist(path).map_err(|e| e.error)?;
-    Ok(())
+    // Windows briefly denies replacing a file that was itself just replaced
+    // (scanners and the pending delete of the previous version hold it).
+    let mut attempt = 0;
+    loop {
+        match file.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(e)
+                if cfg!(windows)
+                    && attempt < 20
+                    && e.error.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                attempt += 1;
+                file = e.file;
+                std::thread::sleep(std::time::Duration::from_millis(5 * attempt));
+            }
+            Err(e) => return Err(e.error.into()),
+        }
+    }
 }
 pub fn prefix(text: &str, max: usize) -> &str {
     let mut end = text.len().min(max);

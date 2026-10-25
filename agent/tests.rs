@@ -52,6 +52,7 @@ fn fixture() -> (tempfile::TempDir, ToolContext) {
         cancel: CancellationToken::new(),
         output: None,
         deadline: None,
+        files: Default::default(),
     };
     (dir, ctx)
 }
@@ -262,6 +263,11 @@ async fn read_write_edit_search() {
 async fn ambiguous_edit_is_atomic() {
     let (_dir, ctx) = fixture();
     fs::write(ctx.workspace.join("a.txt"), "x x").unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"a.txt"}), &ctx)
+            .await
+            .success
+    );
     let out = tools::execute(
         "edit",
         &json!({"path":"a.txt","old_text":"x","new_text":"y"}),
@@ -799,6 +805,11 @@ async fn multiline_edits_preserve_crlf_for_small_and_large_files() {
     for (name, padding) in [("small.txt", 0), ("large.txt", 300_000)] {
         let before = "x".repeat(padding) + "one\r\ntwo\r\n";
         fs::write(ctx.workspace.join(name), before).unwrap();
+        assert!(
+            tools::execute("read", &json!({"path":name}), &ctx)
+                .await
+                .success
+        );
         let result = tools::execute(
             "edit",
             &json!({"path":name,"old_text":"one\ntwo\n","new_text":"one\nchanged\n"}),
@@ -1507,4 +1518,112 @@ async fn resumed_subagent_repins_changed_instructions() {
             .iter()
             .any(|m| m.text().contains("<system-reminder>"))
     );
+}
+
+// T3: edit / write must not clobber a file the session has not read, or one
+// that changed on disk after the session last saw it.
+#[tokio::test]
+async fn edit_and_write_require_a_current_read() {
+    let (_dir, ctx) = fixture();
+    let large = "x".repeat(300_000) + "needle";
+    fs::write(ctx.workspace.join("user.txt"), "original\n").unwrap();
+    fs::write(ctx.workspace.join("large.txt"), &large).unwrap();
+    for (name, args) in [
+        ("write", json!({"path":"user.txt","content":"clobbered"})),
+        (
+            "edit",
+            json!({"path":"user.txt","old_text":"original","new_text":"edited"}),
+        ),
+        (
+            "edit",
+            json!({"path":"large.txt","old_text":"needle","new_text":"pin"}),
+        ),
+    ] {
+        let out = tools::execute(name, &args, &ctx).await;
+        assert!(!out.success, "{name} of an unread file must fail");
+        let error = out.error.unwrap_or_default();
+        assert!(error.contains("read"), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(ctx.workspace.join("user.txt")).unwrap(),
+        "original\n"
+    );
+    let created = tools::execute("write", &json!({"path":"new.txt","content":"new"}), &ctx).await;
+    assert!(created.success, "{:?}", created.error);
+    // A file written by the session can be edited again without a read.
+    let again = tools::execute(
+        "edit",
+        &json!({"path":"new.txt","old_text":"new","new_text":"newer"}),
+        &ctx,
+    )
+    .await;
+    assert!(again.success, "{:?}", again.error);
+
+    for path in ["user.txt", "large.txt"] {
+        assert!(
+            tools::execute("read", &json!({"path":path}), &ctx)
+                .await
+                .success
+        );
+    }
+    fs::write(ctx.workspace.join("user.txt"), "changed in the IDE\n").unwrap();
+    fs::write(ctx.workspace.join("large.txt"), large.clone() + "!").unwrap();
+    for (name, args) in [
+        ("write", json!({"path":"user.txt","content":"clobbered"})),
+        (
+            "edit",
+            json!({"path":"user.txt","old_text":"changed","new_text":"edited"}),
+        ),
+        (
+            "edit",
+            json!({"path":"large.txt","old_text":"needle","new_text":"pin"}),
+        ),
+    ] {
+        let out = tools::execute(name, &args, &ctx).await;
+        assert!(!out.success, "{name} after an external change must fail");
+        let error = out.error.unwrap_or_default();
+        assert!(error.contains("外部修改"), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(ctx.workspace.join("user.txt")).unwrap(),
+        "changed in the IDE\n"
+    );
+    assert!(
+        tools::execute("read", &json!({"path":"user.txt"}), &ctx)
+            .await
+            .success
+    );
+    let edited = tools::execute(
+        "edit",
+        &json!({"path":"user.txt","old_text":"changed","new_text":"edited"}),
+        &ctx,
+    )
+    .await;
+    assert!(edited.success, "{:?}", edited.error);
+}
+
+#[tokio::test]
+async fn concurrent_edits_of_one_file_are_serialized() {
+    let (_dir, ctx) = fixture();
+    for round in 0..20 {
+        let words = (0..8).map(|i| format!("w{i}")).collect::<Vec<_>>();
+        fs::write(ctx.workspace.join("shared.txt"), words.join(" ")).unwrap();
+        assert!(
+            tools::execute("read", &json!({"path":"shared.txt"}), &ctx)
+                .await
+                .success
+        );
+        let edits = words.iter().map(|word| {
+            let ctx = ctx.clone();
+            let args = json!({"path":"shared.txt","old_text":word,"new_text":word.to_uppercase()});
+            async move { tools::execute("edit", &args, &ctx).await }
+        });
+        for out in futures_util::future::join_all(edits).await {
+            assert!(out.success, "round {round}: {:?}", out.error);
+        }
+        assert_eq!(
+            fs::read_to_string(ctx.workspace.join("shared.txt")).unwrap(),
+            words.join(" ").to_uppercase()
+        );
+    }
 }
