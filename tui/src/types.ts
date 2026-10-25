@@ -79,6 +79,9 @@ export type SessionDetail = {
 export type SlashResult = { action?: string; message?: string; sessionId?: string; state?: AgentState }
 
 export type InitializeResult = {
+  protocolVersion?: number
+  minClientProtocol?: number
+  capabilities?: string[]
   sessions: SessionSummary[]
   models: ModelInfo[]
   defaultModel: string

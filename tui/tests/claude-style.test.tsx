@@ -75,6 +75,36 @@ test('approval panel replaces the prompt and supports arrow selection', async ()
   }
 })
 
+// SEC1: the workspace trust request names the plugin and its command and
+// can be declined from the keyboard.
+test('workspace trust requests show the plugin commands and can be declined', async () => {
+  const { client, ui } = await mount()
+  try {
+    ui.stdin.write('hello')
+    ui.stdin.write('\r')
+    await delay(40)
+    client.emit({
+      event: 'approval', sessionId: 'sess-1', approvalId: 't1',
+      request: {
+        tool_name: 'workspace_trust',
+        arguments: { workspace: '/repo', plugins: [{ name: 'evil', version: '1.0.0', sha256: 'abc', servers: [] }] },
+        summary: '信任此工作区的插件？\n插件 evil@1.0.0 要启动 MCP 服务：node server.js',
+      },
+    })
+    await delay(40)
+    const frame = stripAnsi(ui.lastFrame() || '')
+    assert.match(frame, /信任工作区插件/)
+    assert.match(frame, /插件 evil@1\.0\.0 要启动 MCP 服务：node server\.js/)
+    assert.match(frame, /❯ 1\. 是，信任并启动这些 MCP 服务/)
+    ui.stdin.write('n')
+    await delay(30)
+    const resolved = client.requests.find(item => item.method === 'resolveApproval')
+    assert.deepEqual(resolved?.params, { approvalId: 't1', granted: false, sessionId: 'sess-1' })
+  } finally {
+    ui.unmount()
+  }
+})
+
 test('shift+tab cycles permission modes and the footer shows the mode', async () => {
   const { client, ui } = await mount()
   try {

@@ -10,12 +10,13 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
     borrow::Cow,
+    collections::HashMap,
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::{process::Command, sync::Mutex};
 use tokio_util::sync::CancellationToken;
@@ -33,6 +34,64 @@ pub struct ToolContext {
     pub cancel: CancellationToken,
     pub output: Option<Sink>,
     pub deadline: Option<Instant>,
+    pub files: Files,
+}
+/// What the session last saw of each file: the state after its latest read or
+/// after its own successful edit / write. Edits are checked against it so a
+/// change made outside the session is never silently overwritten.
+#[derive(Default)]
+pub struct FileLedger {
+    seen: HashMap<PathBuf, Seen>,
+    locks: HashMap<PathBuf, Arc<std::sync::Mutex<()>>>,
+}
+pub type Files = Arc<std::sync::Mutex<FileLedger>>;
+#[derive(Clone)]
+struct Seen {
+    size: u64,
+    modified: Option<SystemTime>,
+    digest: String,
+}
+impl Seen {
+    fn matches(&self, metadata: &fs::Metadata) -> bool {
+        self.size == metadata.len() && self.modified == metadata.modified().ok()
+    }
+    /// The current state of `path`; reuses `previous` when size and mtime agree.
+    fn of(path: &Path, previous: Option<&Seen>) -> Result<Self> {
+        let metadata = path.metadata()?;
+        if let Some(previous) = previous.filter(|p| p.matches(&metadata)) {
+            return Ok(previous.clone());
+        }
+        let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+        std::io::copy(&mut File::open(path)?, &mut hasher)?;
+        Ok(Self {
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            digest: format!("{:x}", sha2::Digest::finalize(hasher)),
+        })
+    }
+}
+fn remember(ctx: &ToolContext, path: &Path) {
+    let previous = ctx.files.lock().unwrap().seen.get(path).cloned();
+    if let Ok(state) = Seen::of(path, previous.as_ref()) {
+        ctx.files.lock().unwrap().seen.insert(path.into(), state);
+    }
+}
+/// Refuses to modify an existing file the session has not read, or one that
+/// changed on disk since the session last saw it. New files are unrestricted.
+fn ensure_current(ctx: &ToolContext, path: &Path, relative: &str) -> Result<Option<Seen>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let Some(previous) = ctx.files.lock().unwrap().seen.get(path).cloned() else {
+        bail!(
+            "{relative} 已存在，但本会话还没有读取过它（会话恢复后也需要重新读取）；请先 read 当前内容再修改"
+        )
+    };
+    let current = Seen::of(path, Some(&previous))?;
+    if current.digest != previous.digest {
+        bail!("{relative} 在上次读取后已被外部修改；请重新 read 后再修改")
+    }
+    Ok(Some(current))
 }
 pub fn builtins() -> &'static Vec<ToolSpec> {
     static TOOLS: OnceLock<Vec<ToolSpec>> = OnceLock::new();
@@ -260,7 +319,14 @@ async fn execute_inner(name: &str, args: &Value, ctx: &ToolContext) -> Result<Ou
 }
 fn execute_sync(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     match name {
-        "read" => read_file(args, ctx),
+        "read" => {
+            let outcome = read_file(args, ctx)?;
+            remember(
+                ctx,
+                &util::in_workspace(&ctx.workspace, util::string(args, "path")?)?,
+            );
+            Ok(outcome)
+        }
         "ls" => list(args, ctx),
         "grep" => grep(args, ctx),
         "write" | "edit" => edit(name, args, ctx),
@@ -548,7 +614,38 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         .map(|g| g.compile_matcher());
     let max = args["max_results"].as_i64().unwrap_or(100).clamp(1, 1000) as usize;
     let mut lines = vec![];
+    let mut skipped = 0;
     let start = Instant::now();
+    let search_line = |line: &str,
+                       number: &mut usize,
+                       workspace_path: &str,
+                       lines: &mut Vec<String>|
+     -> Result<bool> {
+        if ctx.cancel.is_cancelled() {
+            bail!("tool cancelled")
+        }
+        if start.elapsed().as_secs() > 30 {
+            bail!("search timed out; narrow path or glob and retry")
+        }
+        *number += 1;
+        if regex.is_match(line)? {
+            let mut chars = line.chars();
+            let snippet = chars.by_ref().take(500).collect::<String>();
+            lines.push(format!(
+                "{workspace_path}:{number}: {snippet}{}",
+                if chars.next().is_some() {
+                    "...[行已截断]"
+                } else {
+                    ""
+                }
+            ));
+            if lines.len() >= max {
+                lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
     let files = util::walk(&base).filter(|e| e.file_type().is_file());
     'files: for entry in files {
         if ctx.cancel.is_cancelled() {
@@ -576,64 +673,71 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         if util::is_link(path) {
             continue;
         }
-        let Ok(file) = File::open(path) else { continue };
-        if file.metadata()?.len() == 0 {
-            continue;
-        }
-        // File-backed pages avoid copying an entire large file into the heap.
-        let mapped = unsafe { memmap2::Mmap::map(&file)? };
-        if mapped[..mapped.len().min(8192)].contains(&0) {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&mapped);
-        let mut number = 0;
-        let mut previous_cr = false;
-        for line in text.split([
-            '\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}',
-        ]) {
-            if ctx.cancel.is_cancelled() {
-                bail!("tool cancelled")
-            }
-            if start.elapsed().as_secs() > 30 {
-                bail!("search timed out; narrow path or glob and retry")
-            }
-            // CRLF counts as one line, as in the original universal-newline reader.
-            let start_offset = line.as_ptr() as usize - text.as_ptr() as usize;
-            let skipped_lf =
-                previous_cr && line.is_empty() && text.as_bytes().get(start_offset) == Some(&b'\n');
-            previous_cr = text.as_bytes().get(start_offset + line.len()) == Some(&b'\r');
-            if skipped_lf {
+        // Buffered reads, never a mapping: a file truncated while mapped
+        // faults the whole process (SIGBUS / in-page error).
+        let mut reader = match File::open(path) {
+            Ok(file) => BufReader::new(file),
+            Err(_) => {
+                skipped += 1;
                 continue;
             }
-            number += 1;
-            if regex.is_match(line)? {
-                let mut chars = line.chars();
-                let snippet = chars.by_ref().take(500).collect::<String>();
-                let workspace_path = path
-                    .strip_prefix(&ctx.workspace)?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                lines.push(format!(
-                    "{workspace_path}:{}: {snippet}{}",
-                    number,
-                    if chars.next().is_some() {
-                        "...[行已截断]"
-                    } else {
-                        ""
-                    }
-                ));
-                if lines.len() >= max {
-                    lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
+        };
+        let mut head = vec![];
+        if reader.by_ref().take(8192).read_to_end(&mut head).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if head.is_empty() || head.contains(&0) {
+            continue;
+        }
+        let mut reader = BufReader::new(std::io::Cursor::new(head).chain(reader));
+        let workspace_path = path
+            .strip_prefix(&ctx.workspace)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut number = 0;
+        let mut chunk = vec![];
+        let mut ended_with_lf = false;
+        loop {
+            chunk.clear();
+            match reader.read_until(b'\n', &mut chunk) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    skipped += 1;
+                    continue 'files;
+                }
+            }
+            ended_with_lf = chunk.last() == Some(&b'\n');
+            let text = String::from_utf8_lossy(&chunk);
+            let body = text.strip_suffix('\n').unwrap_or(&text);
+            let mut pieces = body
+                .split([
+                    '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}',
+                ])
+                .collect::<Vec<_>>();
+            // CRLF counts as one line, as in the original universal-newline reader.
+            if ended_with_lf && body.ends_with('\r') {
+                pieces.pop();
+            }
+            for line in pieces {
+                if search_line(line, &mut number, &workspace_path, &mut lines)? {
                     break 'files;
                 }
             }
         }
+        // Text that ends with a line break has one more, empty, line.
+        if ended_with_lf && search_line("", &mut number, &workspace_path, &mut lines)? {
+            break 'files;
+        }
     }
     if lines.is_empty() {
-        Ok(Outcome::ok("(no matches)"))
-    } else {
-        Ok(bounded(lines.join("\n")))
+        lines.push("(no matches)".into());
     }
+    if skipped > 0 {
+        lines.push(format!("...[跳过 {skipped} 个无法读取的文件]"));
+    }
+    Ok(bounded(lines.join("\n")))
 }
 fn replacement_texts<'a>(text: &str, args: &'a Value) -> Result<(Cow<'a, str>, Cow<'a, str>)> {
     let old = util::string(args, "old_text")?;
@@ -671,13 +775,29 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     if path.exists() && !path.is_file() {
         bail!("path exists and is not a file: {relative}")
     }
+    // Mutations of one file are serialized, so concurrent edits each apply to
+    // the result of the previous one instead of racing on the same original.
+    let lock = ctx
+        .files
+        .lock()
+        .unwrap()
+        .locks
+        .entry(path.clone())
+        .or_default()
+        .clone();
+    let _serialized = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let seen = ensure_current(ctx, &path, &relative)?;
     let size = if path.exists() {
         path.metadata()?.len()
     } else {
         0
     };
     if name == "edit" && size > 256_000 {
-        return edit_large(&path, &relative, args, ctx);
+        let outcome = edit_large(&path, &relative, args, ctx, seen)?;
+        remember(ctx, &path);
+        return Ok(outcome);
     }
     let before = if path.exists() && size <= 256_000 {
         fs::read_to_string(&path).context("binary or non-UTF-8 file")?
@@ -707,6 +827,16 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         bail!("tool cancelled")
     }
     util::atomic_write(&path, after.as_bytes())?;
+    if let Ok(metadata) = path.metadata() {
+        ctx.files.lock().unwrap().seen.insert(
+            path.clone(),
+            Seen {
+                size: metadata.len(),
+                modified: metadata.modified().ok(),
+                digest: util::hash(after.as_bytes()),
+            },
+        );
+    }
     if size > 256_000 || after.len() > 256_000 {
         return Ok(Outcome::ok(format!(
             "Applied write to {relative}; old={size} bytes, new={} bytes. Large diff omitted; use read pages to inspect.",
@@ -750,9 +880,19 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         "Applied change to {relative} (+{adds} -{dels})\n{body}"
     )))
 }
-fn edit_large(path: &Path, relative: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+fn edit_large(
+    path: &Path,
+    relative: &str,
+    args: &Value,
+    ctx: &ToolContext,
+    seen: Option<Seen>,
+) -> Result<Outcome> {
     let input = File::open(path)?;
     let original = input.metadata()?;
+    let seen = seen.context("large file is not in the read ledger")?;
+    if !seen.matches(&original) {
+        bail!("{relative} 在上次读取后已被外部修改；请重新 read 后再修改")
+    }
     // The mapped source is borrowed; no second heap copy of a large file.
     let mapped = unsafe { memmap2::MmapOptions::new().map(&input)? };
     let text = std::str::from_utf8(&mapped).context("binary or non-UTF-8 file")?;
@@ -787,9 +927,8 @@ fn edit_large(path: &Path, relative: &str, args: &Value, ctx: &ToolContext) -> R
     temp.as_file().set_permissions(original.permissions())?;
     drop(mapped);
     drop(input);
-    let current = path.metadata()?;
-    if current.len() != original.len() || current.modified()? != original.modified()? {
-        bail!("file changed while editing {relative}; re-read and retry")
+    if !seen.matches(&path.metadata()?) {
+        bail!("{relative} 在编辑过程中被外部修改；请重新 read 后再修改")
     }
     if ctx.cancel.is_cancelled() {
         bail!("tool cancelled")

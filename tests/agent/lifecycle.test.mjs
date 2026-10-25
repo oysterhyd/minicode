@@ -34,3 +34,11 @@ test('a storage failure while tearing down reports run_error and still stops its
   await assertStopped(f,processes,r.id)
   db.exec('DROP TRIGGER inject_failure');db.close()
 })
+
+// B-COMPAT: the handshake states the protocol so clients can give an upgrade
+// hint instead of failing on the first unknown event.
+test('initialize reports the protocol version, the minimum client and capabilities',async t=>{
+  const f=await fixture(t);const initial=await f.request('initialize',{workspace:f.workspace})
+  assert.equal(initial.protocolVersion,2);assert.equal(initial.minClientProtocol,2);assert.equal(initial.state.protocolVersion,2)
+  assert.ok(initial.capabilities.includes('workspaceTrust'))
+})

@@ -116,6 +116,10 @@ pub struct Runtime {
     pub compaction: bool,
     delegation_branch: bool,
     used_call_ids: HashSet<String>,
+    /// Instruction and skill drift found on resume, reported by `prepare`.
+    instruction_changes: Vec<Value>,
+    /// Files this session has read or written; shared with its delegates.
+    pub files: tools::Files,
 }
 impl Runtime {
     pub async fn new(
@@ -170,7 +174,8 @@ impl Runtime {
             None
         };
         let events = store.events(&id, -1)?;
-        if session.is_some() {
+        let mut instruction_changes = vec![];
+        if session.is_some() && events.iter().any(|e| e.r#type == "session_start") {
             let global = catalog
                 .configuration
                 .path
@@ -208,30 +213,60 @@ impl Runtime {
                     );
                 } else if e.r#type == "skill_deactivated" {
                     active.remove(e.data["name"].as_str().unwrap_or_default());
+                } else if e.r#type == "project_instructions_changed" {
+                    for change in e.data["changes"].as_array().into_iter().flatten() {
+                        let sha = change["sha256"].as_str().unwrap_or_default().to_string();
+                        match (change["kind"].as_str(), change["status"].as_str()) {
+                            (Some("instructions"), Some("deleted")) => {
+                                expected.remove(&PathBuf::from(util::string(change, "path")?));
+                            }
+                            (Some("instructions"), _) => {
+                                expected.insert(PathBuf::from(util::string(change, "path")?), sha);
+                            }
+                            (Some("skill"), Some("removed")) => {
+                                active.remove(change["name"].as_str().unwrap_or_default());
+                            }
+                            (Some("skill"), _) => {
+                                active.insert(util::string(change, "name")?.into(), sha);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // Drift is not fatal: the current version is re-pinned and the
+            // model is told about it before the next request (see prepare).
+            for path in catalog.instructions.keys() {
+                if *path != global && !expected.contains_key(path) {
+                    instruction_changes.push(json!({"kind":"instructions","path":path,"sha256":catalog.instructions[path].digest,"status":"added"}));
                 }
             }
             for (path, sha) in expected {
                 if path == global {
                     continue;
                 }
-                let source = crate::extensions::Source::read(&path, 64_000)?;
-                if source.digest != sha {
-                    bail!(
-                        "project instructions changed since session start: {}",
-                        path.display()
-                    )
+                if !path.is_file() {
+                    catalog.instructions.remove(&path);
+                    instruction_changes.push(json!({"kind":"instructions","path":path,"previous_sha256":sha,"status":"deleted"}));
+                    continue;
                 }
                 if !util::canonical(&path)?.starts_with(&workspace) {
                     bail!("project instructions outside workspace")
+                }
+                let source = crate::extensions::Source::read(&path, 64_000)?;
+                if source.digest != sha {
+                    instruction_changes.push(json!({"kind":"instructions","path":path,"previous_sha256":sha,"sha256":source.digest,"status":"changed"}));
                 }
                 catalog.instructions.insert(path, source);
             }
             for (name, sha) in active {
                 if !catalog.skills.contains_key(&name) {
+                    instruction_changes.push(json!({"kind":"skill","name":name,"previous_sha256":sha,"status":"removed"}));
                     continue;
                 }
-                if catalog.load(&name)?.digest != sha {
-                    bail!("activated skill changed since session start: {name}")
+                let digest = catalog.load(&name)?.digest;
+                if digest != sha {
+                    instruction_changes.push(json!({"kind":"skill","name":name,"previous_sha256":sha,"sha256":digest,"status":"changed"}));
                 }
             }
         }
@@ -277,6 +312,8 @@ impl Runtime {
             compaction: true,
             delegation_branch: false,
             used_call_ids,
+            instruction_changes,
+            files: Default::default(),
         };
         let child_ids = events
             .iter()
@@ -444,6 +481,7 @@ impl Runtime {
         Ok(prompt)
     }
     async fn connect_mcp(&mut self, hooks: &Hooks) -> Result<()> {
+        self.trust_plugins(hooks).await?;
         let servers = self.catalog.lock().await.servers.clone();
         let deadline = hooks.shared.lock().unwrap().deadline;
         let prepare = McpRegistry::prepare(servers);
@@ -547,6 +585,46 @@ impl Runtime {
             self.append(Message::user(format!(
                 "后台任务 {} 在恢复会话时失联，结果未知，请核实。",
                 job["job_id"]
+            )))?;
+        }
+        if !self.instruction_changes.is_empty() {
+            let changes = std::mem::take(&mut self.instruction_changes);
+            self.event(
+                hooks,
+                "project_instructions_changed",
+                json!({"changes":changes}),
+            )?;
+            let lines = changes
+                .iter()
+                .map(|change| {
+                    let status = change["status"].as_str().unwrap_or_default();
+                    if change["kind"] == "skill" {
+                        let what = if status == "removed" {
+                            "已不存在，已卸载"
+                        } else {
+                            "内容已更新"
+                        };
+                        format!(
+                            "- Skill {}：{what}",
+                            change["name"].as_str().unwrap_or_default()
+                        )
+                    } else {
+                        let path = Path::new(change["path"].as_str().unwrap_or_default());
+                        let what = match status {
+                            "deleted" => "已删除，其中的指令不再生效",
+                            "added" => "新增",
+                            _ => "已修改",
+                        };
+                        format!(
+                            "- {}：{what}",
+                            path.strip_prefix(&self.workspace).unwrap_or(path).display()
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.append(Message::user(format!(
+                "<system-reminder>\n自上次运行以来，项目指令或已激活的 Skill 发生了变化，系统提示已更新为当前版本：\n{lines}\n请以系统提示中的最新指令为准。\n</system-reminder>"
             )))?;
         }
         Ok(())
@@ -752,6 +830,7 @@ impl Runtime {
             cancel: hooks.cancel.clone(),
             output,
             deadline: hooks.shared.lock().unwrap().deadline,
+            files: self.files.clone(),
         }
     }
     async fn run_inner(
@@ -1158,6 +1237,8 @@ impl Runtime {
                                 compaction: self.compaction,
                                 delegation_branch: true,
                                 used_call_ids: self.used_call_ids.clone(),
+                                instruction_changes: vec![],
+                                files: self.files.clone(),
                             },
                         ));
                     }
@@ -1369,27 +1450,7 @@ impl Runtime {
             );
             true
         } else {
-            Self::phase(hooks, "approval");
-            let approval = format!(
-                "{}:{}",
-                self.session,
-                hooks.approval_sequence.fetch_add(1, Ordering::Relaxed) + 1
-            );
-            let (tx, rx) = oneshot::channel();
-            hooks
-                .approvals
-                .lock()
-                .unwrap()
-                .insert(approval.clone(), (name.clone(), tx));
-            (hooks.sink)(
-                json!({"event":"approval","sessionId":self.session,"approvalId":approval,"request":request}),
-            );
-            let deadline = hooks.shared.lock().unwrap().deadline;
-            let duration = deadline
-                .map(|d| d.saturating_duration_since(Instant::now()))
-                .unwrap_or(Duration::from_secs(86400 * 365));
-            let granted = tokio::select! {_ = hooks.cancel.cancelled()=>{hooks.approvals.lock().unwrap().remove(&approval);bail!("turn cancelled")},_ = tokio::time::sleep(duration)=>{hooks.approvals.lock().unwrap().remove(&approval);bail!("turn deadline exceeded")},value=rx=>value.unwrap_or(false)};
-            hooks.approvals.lock().unwrap().remove(&approval);
+            let granted = self.ask(hooks, name, request).await?;
             Self::phase(hooks, "tools");
             granted
         };
@@ -1399,6 +1460,108 @@ impl Runtime {
             json!({"call_id":id,"name":name,"granted":granted}),
         )?;
         Ok(granted)
+    }
+    /// Shows `request` to the user and waits for the answer.
+    async fn ask(&self, hooks: &Hooks, name: &str, request: Value) -> Result<bool> {
+        Self::phase(hooks, "approval");
+        let approval = format!(
+            "{}:{}",
+            self.session,
+            hooks.approval_sequence.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        let (tx, rx) = oneshot::channel();
+        hooks
+            .approvals
+            .lock()
+            .unwrap()
+            .insert(approval.clone(), (name.to_string(), tx));
+        (hooks.sink)(
+            json!({"event":"approval","sessionId":self.session,"approvalId":approval,"request":request}),
+        );
+        let deadline = hooks.shared.lock().unwrap().deadline;
+        let duration = deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_secs(86400 * 365));
+        let granted = tokio::select! {_ = hooks.cancel.cancelled()=>{hooks.approvals.lock().unwrap().remove(&approval);bail!("turn cancelled")},_ = tokio::time::sleep(duration)=>{hooks.approvals.lock().unwrap().remove(&approval);bail!("turn deadline exceeded")},value=rx=>value.unwrap_or(false)};
+        hooks.approvals.lock().unwrap().remove(&approval);
+        Ok(granted)
+    }
+    /// Workspace plugins that declare MCP servers run only after the user
+    /// explicitly trusts them. Permission mode and "always allow" never count
+    /// as that answer; a refusal just leaves the servers stopped.
+    async fn trust_plugins(&self, hooks: &Hooks) -> Result<()> {
+        let pending = self.catalog.lock().await.trust_required();
+        if self.child || pending.is_empty() {
+            return Ok(());
+        }
+        let call_id = format!("workspace_trust_{}", util::id());
+        let arguments = json!({"workspace":self.workspace,"plugins":pending.iter().map(|p|json!({"name":p["name"],"version":p["version"],"sha256":p["sha256"],"servers":p["commands"]})).collect::<Vec<_>>()});
+        let summary = pending
+            .iter()
+            .map(|p| {
+                let commands = p["commands"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|c| {
+                        format!(
+                            "{} {}",
+                            c["command"].as_str().unwrap_or_default(),
+                            c["args"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                format!(
+                    "插件 {}@{} 要启动 MCP 服务：{commands}",
+                    p["name"].as_str().unwrap_or_default(),
+                    p["version"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.event(
+            hooks,
+            "approval_request",
+            json!({"call_id":call_id,"name":"workspace_trust","arguments":arguments}),
+        )?;
+        let request = json!({"tool_name":"workspace_trust","arguments":arguments,"summary":format!("信任此工作区的插件？\n{summary}")});
+        let granted = self.ask(hooks, "workspace_trust", request).await?;
+        Self::phase(hooks, "preparing");
+        self.event(
+            hooks,
+            "approval_decision",
+            json!({"call_id":call_id,"name":"workspace_trust","granted":granted}),
+        )?;
+        let mut catalog = self.catalog.lock().await;
+        if granted {
+            let reviewed = pending
+                .iter()
+                .map(|p| {
+                    (
+                        p["name"].as_str().unwrap_or_default().to_string(),
+                        p["sha256"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            catalog.set_trust(&reviewed, true)?;
+            let next = catalog.refresh()?;
+            *catalog = next;
+        } else {
+            drop(catalog);
+            self.event(
+                hooks,
+                "workspace_trust_required",
+                json!({"workspace":self.workspace,"plugins":arguments["plugins"],"hint":"工作区插件未获信任，其 MCP 服务没有启动。审阅后可在界面中信任，或运行 `minicode plugins trust --workspace <路径>`。"}),
+            )?;
+        }
+        Ok(())
     }
     async fn invoke_read(&self, call: Block, hooks: &Hooks, recovered: bool) -> Result<Block> {
         let started = Instant::now();
@@ -1647,6 +1810,7 @@ impl Runtime {
             };
             child.child = true;
             child.goal = None;
+            child.files = self.files.clone();
             // A delegated task must see the same pinned project instructions
             // and activated skills as the request that created it.
             {

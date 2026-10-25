@@ -52,6 +52,7 @@ fn fixture() -> (tempfile::TempDir, ToolContext) {
         cancel: CancellationToken::new(),
         output: None,
         deadline: None,
+        files: Default::default(),
     };
     (dir, ctx)
 }
@@ -262,6 +263,11 @@ async fn read_write_edit_search() {
 async fn ambiguous_edit_is_atomic() {
     let (_dir, ctx) = fixture();
     fs::write(ctx.workspace.join("a.txt"), "x x").unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"a.txt"}), &ctx)
+            .await
+            .success
+    );
     let out = tools::execute(
         "edit",
         &json!({"path":"a.txt","old_text":"x","new_text":"y"}),
@@ -799,6 +805,11 @@ async fn multiline_edits_preserve_crlf_for_small_and_large_files() {
     for (name, padding) in [("small.txt", 0), ("large.txt", 300_000)] {
         let before = "x".repeat(padding) + "one\r\ntwo\r\n";
         fs::write(ctx.workspace.join(name), before).unwrap();
+        assert!(
+            tools::execute("read", &json!({"path":name}), &ctx)
+                .await
+                .success
+        );
         let result = tools::execute(
             "edit",
             &json!({"path":name,"old_text":"one\ntwo\n","new_text":"one\nchanged\n"}),
@@ -1057,6 +1068,25 @@ impl Harness {
         self.runtime
             .run(text.map(str::to_string), vec![], self.hooks.clone())
             .await
+    }
+    /// Reload the session from the store, as `/resume` does.
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        let configuration = self.runtime.catalog.lock().await.configuration.clone();
+        let settings = self.hooks.settings.lock().unwrap().clone();
+        let mut runtime = crate::runtime::Runtime::new(
+            &self.runtime.workspace,
+            "fake",
+            Some(&self.runtime.session),
+            self.runtime.store.clone(),
+            configuration,
+            &settings,
+        )
+        .await?;
+        if let Some(script) = self.runtime.provider.fake.clone() {
+            runtime.set_script(script)?;
+        }
+        self.runtime = runtime;
+        Ok(())
     }
     fn event_types(&self) -> Vec<String> {
         self.runtime
@@ -1362,4 +1392,413 @@ async fn a_panicking_run_is_torn_down_and_reported() {
     let end = events.iter().find(|e| e.r#type == "session_end").unwrap();
     assert_eq!(end.data["exit_reason"], "internal_error");
     assert!(h.runtime.pending);
+}
+
+// R1: instruction or skill drift on resume re-pins the current version and
+// tells the model, instead of making the session impossible to resume.
+#[tokio::test]
+async fn resume_repins_changed_instructions_and_skills() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[{"name":"skill_load","arguments":{"name":"helper"}}]},
+        {"text":"first"},
+        {"text":"second"},
+        {"text":"third"}
+    ]}))
+    .await;
+    let workspace = h.runtime.workspace.clone();
+    let skill = workspace.join(".minicode/skills/helper");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: helper\ndescription: Helper\n---\nhelper body",
+    )
+    .unwrap();
+    fs::write(workspace.join("AGENTS.md"), "original rules").unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("go")).await.unwrap().exit_reason, "completed");
+
+    fs::write(workspace.join("AGENTS.md"), "changed rules").unwrap();
+    fs::remove_dir_all(&skill).unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("again")).await.unwrap().exit_reason, "completed");
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let changed = events
+        .iter()
+        .filter(|e| e.r#type == "project_instructions_changed")
+        .collect::<Vec<_>>();
+    assert_eq!(changed.len(), 1);
+    let statuses = changed[0].data["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["status"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, ["changed", "removed"]);
+    let reminder = h
+        .runtime
+        .messages
+        .iter()
+        .map(Message::text)
+        .find(|t| t.contains("<system-reminder>"))
+        .expect("the model is told about the change");
+    assert!(reminder.contains("AGENTS.md") && reminder.contains("helper"));
+    {
+        let catalog = h.runtime.catalog.lock().await;
+        assert!(catalog.active.is_empty());
+        assert!(catalog.prompt(&[]).unwrap().contains("changed rules"));
+    }
+
+    // The new version is pinned: an unchanged resume reports nothing new.
+    h.reopen().await.unwrap();
+    fs::remove_file(workspace.join("AGENTS.md")).unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("third")).await.unwrap().exit_reason, "completed");
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let changed = events
+        .iter()
+        .filter(|e| e.r#type == "project_instructions_changed")
+        .collect::<Vec<_>>();
+    assert_eq!(changed.len(), 2);
+    assert_eq!(changed[1].data["changes"][0]["status"], "deleted");
+    assert!(
+        !h.runtime
+            .catalog
+            .lock()
+            .await
+            .prompt(&[])
+            .unwrap()
+            .contains("changed rules")
+    );
+}
+
+// R1: a paused subagent resumed after the instructions changed must not turn
+// the parent run into an internal_error.
+#[tokio::test]
+async fn resumed_subagent_repins_changed_instructions() {
+    let delegate =
+        json!({"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]});
+    let mut h = Harness::new(json!({"turns":[
+        delegate,
+        {"error":"provider HTTP 400 bad request"},
+        {"text":"parent paused"},
+        delegate,
+        {"text":"{\"summary\":\"ok\",\"findings\":[],\"evidence_refs\":[],\"unresolved\":[]}"},
+        {"text":"parent done"}
+    ]}))
+    .await;
+    let workspace = h.runtime.workspace.clone();
+    fs::write(workspace.join("AGENTS.md"), "original rules").unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("first")).await.unwrap().exit_reason, "completed");
+    let child = h
+        .runtime
+        .store
+        .events(&h.runtime.session, -1)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.r#type == "subagent_result")
+        .unwrap();
+    assert_ne!(child.data["exit_reason"], "completed");
+    let child = child.data["child_session_id"].as_str().unwrap().to_string();
+
+    fs::write(workspace.join("AGENTS.md"), "changed rules").unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("again")).await.unwrap().exit_reason, "completed");
+    let child_events = h.runtime.store.events(&child, -1).unwrap();
+    assert!(
+        child_events
+            .iter()
+            .any(|e| e.r#type == "project_instructions_changed")
+    );
+    assert!(
+        h.runtime
+            .store
+            .messages(&child)
+            .unwrap()
+            .iter()
+            .any(|m| m.text().contains("<system-reminder>"))
+    );
+}
+
+// T3: edit / write must not clobber a file the session has not read, or one
+// that changed on disk after the session last saw it.
+#[tokio::test]
+async fn edit_and_write_require_a_current_read() {
+    let (_dir, ctx) = fixture();
+    let large = "x".repeat(300_000) + "needle";
+    fs::write(ctx.workspace.join("user.txt"), "original\n").unwrap();
+    fs::write(ctx.workspace.join("large.txt"), &large).unwrap();
+    for (name, args) in [
+        ("write", json!({"path":"user.txt","content":"clobbered"})),
+        (
+            "edit",
+            json!({"path":"user.txt","old_text":"original","new_text":"edited"}),
+        ),
+        (
+            "edit",
+            json!({"path":"large.txt","old_text":"needle","new_text":"pin"}),
+        ),
+    ] {
+        let out = tools::execute(name, &args, &ctx).await;
+        assert!(!out.success, "{name} of an unread file must fail");
+        let error = out.error.unwrap_or_default();
+        assert!(error.contains("read"), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(ctx.workspace.join("user.txt")).unwrap(),
+        "original\n"
+    );
+    let created = tools::execute("write", &json!({"path":"new.txt","content":"new"}), &ctx).await;
+    assert!(created.success, "{:?}", created.error);
+    // A file written by the session can be edited again without a read.
+    let again = tools::execute(
+        "edit",
+        &json!({"path":"new.txt","old_text":"new","new_text":"newer"}),
+        &ctx,
+    )
+    .await;
+    assert!(again.success, "{:?}", again.error);
+
+    for path in ["user.txt", "large.txt"] {
+        assert!(
+            tools::execute("read", &json!({"path":path}), &ctx)
+                .await
+                .success
+        );
+    }
+    fs::write(ctx.workspace.join("user.txt"), "changed in the IDE\n").unwrap();
+    fs::write(ctx.workspace.join("large.txt"), large.clone() + "!").unwrap();
+    for (name, args) in [
+        ("write", json!({"path":"user.txt","content":"clobbered"})),
+        (
+            "edit",
+            json!({"path":"user.txt","old_text":"changed","new_text":"edited"}),
+        ),
+        (
+            "edit",
+            json!({"path":"large.txt","old_text":"needle","new_text":"pin"}),
+        ),
+    ] {
+        let out = tools::execute(name, &args, &ctx).await;
+        assert!(!out.success, "{name} after an external change must fail");
+        let error = out.error.unwrap_or_default();
+        assert!(error.contains("外部修改"), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(ctx.workspace.join("user.txt")).unwrap(),
+        "changed in the IDE\n"
+    );
+    assert!(
+        tools::execute("read", &json!({"path":"user.txt"}), &ctx)
+            .await
+            .success
+    );
+    let edited = tools::execute(
+        "edit",
+        &json!({"path":"user.txt","old_text":"changed","new_text":"edited"}),
+        &ctx,
+    )
+    .await;
+    assert!(edited.success, "{:?}", edited.error);
+}
+
+#[tokio::test]
+async fn concurrent_edits_of_one_file_are_serialized() {
+    let (_dir, ctx) = fixture();
+    for round in 0..20 {
+        let words = (0..8).map(|i| format!("w{i}")).collect::<Vec<_>>();
+        fs::write(ctx.workspace.join("shared.txt"), words.join(" ")).unwrap();
+        assert!(
+            tools::execute("read", &json!({"path":"shared.txt"}), &ctx)
+                .await
+                .success
+        );
+        let edits = words.iter().map(|word| {
+            let ctx = ctx.clone();
+            let args = json!({"path":"shared.txt","old_text":word,"new_text":word.to_uppercase()});
+            async move { tools::execute("edit", &args, &ctx).await }
+        });
+        for out in futures_util::future::join_all(edits).await {
+            assert!(out.success, "round {round}: {:?}", out.error);
+        }
+        assert_eq!(
+            fs::read_to_string(ctx.workspace.join("shared.txt")).unwrap(),
+            words.join(" ").to_uppercase()
+        );
+    }
+}
+
+// T7: one unreadable file must not abort the search, and grep must never map
+// workspace files (a concurrent truncation of a mapping is a SIGBUS crash).
+#[tokio::test]
+async fn grep_skips_unreadable_files_and_reports_them() {
+    let (_dir, ctx) = fixture();
+    fs::write(ctx.workspace.join("a.txt"), "needle one\n").unwrap();
+    fs::write(ctx.workspace.join("b.txt"), "needle locked\n").unwrap();
+    fs::write(ctx.workspace.join("c.txt"), "needle three\n").unwrap();
+    // A mandatory lock on Windows: open succeeds, every read fails.
+    #[cfg(windows)]
+    let _held = {
+        let file = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(ctx.workspace.join("b.txt"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&file).unwrap();
+        file
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            ctx.workspace.join("b.txt"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        if fs::read(ctx.workspace.join("b.txt")).is_ok() {
+            return; // Running as root: nothing is unreadable.
+        }
+    }
+    let out = tools::execute("grep", &json!({"pattern":"needle"}), &ctx).await;
+    assert!(out.success, "{:?}", out.error);
+    assert!(out.output.contains("a.txt:1: needle one"), "{}", out.output);
+    assert!(
+        out.output.contains("c.txt:1: needle three"),
+        "{}",
+        out.output
+    );
+    assert!(!out.output.contains("locked"), "{}", out.output);
+    assert!(out.output.contains("跳过 1 个"), "{}", out.output);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn grep_survives_concurrent_truncation() {
+    let (_dir, ctx) = fixture();
+    let path = ctx.workspace.join("growing.log");
+    let content = "line needle\n".repeat(200_000);
+    fs::write(&path, &content).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (path, stop) = (path.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+                file.set_len(0).unwrap();
+                file.set_len(content.len() as u64).unwrap();
+            }
+        })
+    };
+    for _ in 0..50 {
+        let out = tools::execute(
+            "grep",
+            &json!({"pattern":"needle","max_results":1000}),
+            &ctx,
+        )
+        .await;
+        assert!(out.success, "{:?}", out.error);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+}
+
+// SEC1: MCP servers declared by a workspace plugin never start until the user
+// trusts that plugin's current fingerprint; the trust lives outside the
+// workspace, and changing the plugin asks again.
+fn untrusted_plugin(h: &Harness, description: &str) -> std::path::PathBuf {
+    let marker = h.root.join("started");
+    let dir = h.runtime.workspace.join(".minicode/plugins/evil");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("plugin.json"),
+        serde_json::to_vec(&json!({
+            "name":"evil","version":"1.0.0","minicode_version":crate::VERSION,"enabled":true,
+            "description":description,
+            "mcp_servers":[{"name":"evil","command":"node","args":["-e",format!("require('fs').writeFileSync({:?},'x')",marker.to_string_lossy())],"timeout_s":5}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    marker
+}
+/// Answers every approval with `grant` and returns the requests it saw.
+fn approver(h: &Harness, grant: bool) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let seen = Arc::new(std::sync::Mutex::new(vec![]));
+    let (approvals, recorded) = (h.hooks.approvals.clone(), seen.clone());
+    tokio::spawn(async move {
+        loop {
+            let pending = approvals.lock().unwrap().drain().collect::<Vec<_>>();
+            for (_, (tool, tx)) in pending {
+                recorded.lock().unwrap().push(tool);
+                let _ = tx.send(grant);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    seen
+}
+
+#[tokio::test]
+async fn untrusted_workspace_plugins_start_no_processes() {
+    let mut h = Harness::new(
+        json!({"turns":[{"text":"one"},{"text":"two"},{"text":"three"},{"text":"four"}]}),
+    )
+    .await;
+    let marker = untrusted_plugin(&h, "first");
+    // Neither bypass mode nor "always allow" may grant workspace trust.
+    h.hooks
+        .settings
+        .lock()
+        .unwrap()
+        .always_allow
+        .insert("workspace_trust".into());
+    h.reopen().await.unwrap();
+    let asked = approver(&h, false);
+    assert_eq!(h.run(Some("go")).await.unwrap().exit_reason, "completed");
+    assert_eq!(*asked.lock().unwrap(), ["workspace_trust"]);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!marker.exists(), "an untrusted plugin started a process");
+    assert!(!h.root.join("trusted-plugins.json").exists());
+}
+
+#[tokio::test]
+async fn trusted_workspace_plugins_start_until_they_change() {
+    let mut h =
+        Harness::new(json!({"turns":[{"text":"one"},{"text":"two"},{"text":"three"}]})).await;
+    let marker = untrusted_plugin(&h, "first");
+    h.reopen().await.unwrap();
+    let asked = approver(&h, true);
+    assert_eq!(h.run(Some("go")).await.unwrap().exit_reason, "completed");
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert!(
+        crate::tests::wait_for(|| marker.exists()).await,
+        "the trusted plugin did not start"
+    );
+    assert!(h.root.join("trusted-plugins.json").exists());
+    fs::remove_file(&marker).unwrap();
+
+    // Trusted fingerprint: no question on the next run.
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("again")).await.unwrap().exit_reason, "completed");
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert!(crate::tests::wait_for(|| marker.exists()).await);
+    fs::remove_file(&marker).unwrap();
+
+    // A changed manifest is a different plugin: ask again.
+    untrusted_plugin(&h, "second");
+    h.reopen().await.unwrap();
+    assert_eq!(
+        h.run(Some("changed")).await.unwrap().exit_reason,
+        "completed"
+    );
+    assert_eq!(asked.lock().unwrap().len(), 2);
+}
+async fn wait_for(check: impl Fn() -> bool) -> bool {
+    for _ in 0..500 {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
 }

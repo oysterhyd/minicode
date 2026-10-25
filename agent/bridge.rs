@@ -25,6 +25,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Bridge protocol spoken by this agent. Clients compare it during
+/// `initialize` and ignore event types they do not know.
+pub const PROTOCOL_VERSION: u64 = 2;
+/// The oldest client protocol this agent still serves correctly.
+pub const MIN_CLIENT_PROTOCOL: u64 = 2;
+/// Optional features a client may rely on when listed here.
+pub const CAPABILITIES: &[&str] = &["workspaceTrust", "projectInstructionsChanged"];
 pub struct Conversation {
     pub settings: Arc<Mutex<Settings>>,
     pub snapshot: Arc<Mutex<Snapshot>>,
@@ -75,7 +82,7 @@ impl Conversation {
         let mut always = settings.always_allow.iter().cloned().collect::<Vec<_>>();
         always.sort();
         Ok(
-            json!({"protocolVersion":2,"model":settings.model,"runId":snapshot.run_id,"phase":snapshot.phase,"running":snapshot.running,"activeModel":if snapshot.active_model.is_empty(){&settings.model}else{&snapshot.active_model},"pendingSettings":settings.pending_model||settings.registry_dirty,"effort":settings.effort,"permissionMode":settings.mode,"sessionId":snapshot.session,"taskPending":snapshot.pending,"rounds":snapshot.rounds,"contextTokens":snapshot.breakdown.as_object().map(|m|m.values().filter_map(Value::as_u64).sum::<u64>()).unwrap_or(0),"contextBreakdown":snapshot.breakdown,"contextWindow":snapshot.window,"usage":snapshot.usage,"statistics":stats,"budget":settings.budget,"acceptance":settings.acceptance.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"alwaysAllow":always}),
+            json!({"protocolVersion":PROTOCOL_VERSION,"model":settings.model,"runId":snapshot.run_id,"phase":snapshot.phase,"running":snapshot.running,"activeModel":if snapshot.active_model.is_empty(){&settings.model}else{&snapshot.active_model},"pendingSettings":settings.pending_model||settings.registry_dirty,"effort":settings.effort,"permissionMode":settings.mode,"sessionId":snapshot.session,"taskPending":snapshot.pending,"rounds":snapshot.rounds,"contextTokens":snapshot.breakdown.as_object().map(|m|m.values().filter_map(Value::as_u64).sum::<u64>()).unwrap_or(0),"contextBreakdown":snapshot.breakdown,"contextWindow":snapshot.window,"usage":snapshot.usage,"statistics":stats,"budget":settings.budget,"acceptance":settings.acceptance.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"alwaysAllow":always}),
         )
     }
 }
@@ -404,6 +411,7 @@ impl Router {
             "setPluginEnabled",
             "lockPlugins",
             "setLocalExtensionEnabled",
+            "trustWorkspace",
         ]
         .contains(&method)
         {
@@ -530,7 +538,7 @@ impl Router {
             "initialize" => {
                 let model = c.settings.lock().unwrap().model.clone();
                 Ok(
-                    json!({"sessions":store.sessions()?,"models":self.configuration.models()?,"defaultModel":model,"commands":serde_json::from_str::<Value>(include_str!("assets/commands.json"))?,"state":c.state(store)?}),
+                    json!({"protocolVersion":PROTOCOL_VERSION,"minClientProtocol":MIN_CLIENT_PROTOCOL,"capabilities":CAPABILITIES,"sessions":store.sessions()?,"models":self.configuration.models()?,"defaultModel":model,"commands":serde_json::from_str::<Value>(include_str!("assets/commands.json"))?,"state":c.state(store)?}),
                 )
             }
             "listSessions" => Ok(json!(store.sessions()?)),
@@ -733,6 +741,41 @@ impl Router {
                 } else {
                     Ok(json!({"entries":catalog.local,"diagnostics":[]}))
                 }
+            }
+            "getWorkspaceTrust" | "trustWorkspace" => {
+                let workspace = Self::workspace(p)?;
+                let mut catalog = Catalog::scan(&workspace, self.configuration.clone(), false)?;
+                if method == "trustWorkspace" {
+                    let trusted = p["trusted"] != false;
+                    // Callers pass the fingerprints the user reviewed; without
+                    // them, the plugins currently awaiting trust are meant.
+                    let reviewed = match p["plugins"].as_array() {
+                        Some(plugins) => plugins
+                            .iter()
+                            .map(|p| {
+                                Ok((
+                                    util::string(p, "name")?.to_string(),
+                                    p["sha256"].as_str().unwrap_or_default().to_string(),
+                                ))
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                        None => catalog
+                            .trust_required()
+                            .iter()
+                            .map(|p| {
+                                (
+                                    p["name"].as_str().unwrap_or_default().to_string(),
+                                    p["sha256"].as_str().unwrap_or_default().to_string(),
+                                )
+                            })
+                            .collect(),
+                    };
+                    catalog.set_trust(&reviewed, trusted)?;
+                    catalog = Catalog::scan(&workspace, self.configuration.clone(), false)?;
+                }
+                Ok(
+                    json!({"workspace":workspace,"plugins":catalog.plugins.iter().filter(|p|p["commands"].as_array().is_some_and(|c|!c.is_empty())).collect::<Vec<_>>()}),
+                )
             }
             "setPluginEnabled" | "lockPlugins" => {
                 let workspace = Self::workspace(p)?;

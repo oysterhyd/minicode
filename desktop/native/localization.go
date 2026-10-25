@@ -108,6 +108,12 @@ const englishUIText = `排队中|Queued
 允许 MiniCode 运行这条命令吗？|Allow MiniCode to run this command?
 允许 MiniCode 写入这个文件吗？|Allow MiniCode to write this file?
 允许 MiniCode 使用 %s 吗？|Allow MiniCode to use %s?
+信任此工作区的插件并启动其 MCP 服务吗？|Trust this workspace's plugins and start their MCP servers?
+信任并启动|Trust and start
+协议版本不匹配|Protocol version mismatch
+Agent 协议版本 %d 低于桌面端需要的 %d，请升级 MiniCode agent。|Agent protocol %d is older than the %d this desktop needs; please upgrade the MiniCode agent.
+Agent 需要协议版本 %d 以上的客户端，请升级桌面端。|The agent needs a client with protocol %d or later; please upgrade the desktop app.
+Agent 协议版本 %d 比桌面端支持的 %d 新，部分新功能不可用；请升级桌面端。|Agent protocol %d is newer than the %d this desktop supports; some new features are unavailable. Please upgrade the desktop app.
 选择|Select
 打开|Open
 搜索设置|Search settings

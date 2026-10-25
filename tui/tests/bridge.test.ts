@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { spawn } from 'node:child_process'
-import { BridgeClient } from '../src/bridge.js'
+import { BridgeClient, protocolProblem } from '../src/bridge.js'
 import { bridgeLaunch } from '../src/launch.js'
 
 test('packaged launch uses the native agent and writable cwd', () => {
@@ -49,4 +49,43 @@ test('NDJSON client maps ids and events', async () => {
   client.close()
   await new Promise(resolve => child.on('exit', resolve))
   fs.unlinkSync(file)
+})
+
+// B-COMPAT: an agent newer than the TUI may send event types the TUI does not
+// know yet; they are ignored and the connection stays usable.
+test('unknown bridge events are ignored without failing the connection', async () => {
+  const script = `
+    const rl = require('node:readline').createInterface({ input: process.stdin })
+    rl.on('line', line => {
+      const msg = JSON.parse(line)
+      process.stdout.write(JSON.stringify({ event: 'future_event', data: 1 }) + '\\n')
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { method: msg.method } }) + '\\n')
+    })
+  `
+  const file = path.join(os.tmpdir(), `minicode-bridge-unknown-${process.pid}.cjs`)
+  fs.writeFileSync(file, script)
+  const child = spawn(process.execPath, [file], { stdio: ['pipe', 'pipe', 'pipe'] })
+  const client = new BridgeClient(child)
+  const events: { event: string; fatal?: boolean }[] = []
+  client.onEvent(event => events.push(event as { event: string; fatal?: boolean }))
+  try {
+    assert.deepEqual(await client.request('initialize'), { method: 'initialize' })
+    assert.deepEqual(await client.request('getState'), { method: 'getState' })
+    assert.equal(events.some(event => event.event === 'bridge_error' && event.fatal), false)
+    assert.equal(events.some(event => event.event === 'future_event'), false)
+    assert.deepEqual([...client.ignoredEvents], ['future_event'])
+  } finally {
+    await client.close()
+    fs.unlinkSync(file)
+  }
+})
+
+test('protocol versions are compared with an upgrade hint instead of a crash', () => {
+  assert.equal(protocolProblem({ protocolVersion: 2 }), null)
+  assert.equal(protocolProblem({ state: { protocolVersion: 2 } }), null)
+  assert.match(protocolProblem({ protocolVersion: 1 })!.message, /升级 MiniCode agent/)
+  assert.equal(protocolProblem({ protocolVersion: 1 })!.level, 'error')
+  assert.match(protocolProblem({ protocolVersion: 3 })!.message, /升级 TUI/)
+  assert.equal(protocolProblem({ protocolVersion: 3 })!.level, 'warning')
+  assert.match(protocolProblem({ protocolVersion: 2, minClientProtocol: 3 })!.message, /升级 TUI/)
 })

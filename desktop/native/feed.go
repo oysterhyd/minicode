@@ -581,6 +581,8 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 		question, iconName = tr("允许 MiniCode 运行这条命令吗？"), "Terminal"
 	case "write":
 		question, iconName = tr("允许 MiniCode 写入这个文件吗？"), "FilePlus2"
+	case "workspace_trust":
+		question, iconName = tr("信任此工作区的插件并启动其 MCP 服务吗？"), "ShieldCheck"
 	case "edit":
 	default:
 		question, iconName = trf("允许 MiniCode 使用 %s 吗？", item.Name), "Wrench"
@@ -626,10 +628,16 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 			if key(tr("拒绝"), "N", false).Disabled(item.Deciding).Clicked() {
 				d.decide(item, false, false)
 			}
-			if key(tr("本会话始终允许 ")+item.Name, "A", false).Disabled(item.Deciding).Clicked() {
+			// Trust is kept per plugin fingerprint; "always allow" has no meaning there.
+			trust := item.Name == "workspace_trust"
+			if !trust && key(tr("本会话始终允许 ")+item.Name, "A", false).Disabled(item.Deciding).Clicked() {
 				d.decide(item, true, true)
 			}
-			if key(tr("批准执行"), "Y", true).Disabled(item.Deciding).Clicked() {
+			approve := tr("批准执行")
+			if trust {
+				approve = tr("信任并启动")
+			}
+			if key(approve, "Y", true).Disabled(item.Deciding).Clicked() {
 				d.decide(item, true, false)
 			}
 		})
