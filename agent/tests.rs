@@ -1627,3 +1627,77 @@ async fn concurrent_edits_of_one_file_are_serialized() {
         );
     }
 }
+
+// T7: one unreadable file must not abort the search, and grep must never map
+// workspace files (a concurrent truncation of a mapping is a SIGBUS crash).
+#[tokio::test]
+async fn grep_skips_unreadable_files_and_reports_them() {
+    let (_dir, ctx) = fixture();
+    fs::write(ctx.workspace.join("a.txt"), "needle one\n").unwrap();
+    fs::write(ctx.workspace.join("b.txt"), "needle locked\n").unwrap();
+    fs::write(ctx.workspace.join("c.txt"), "needle three\n").unwrap();
+    // A mandatory lock on Windows: open succeeds, every read fails.
+    #[cfg(windows)]
+    let _held = {
+        let file = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(ctx.workspace.join("b.txt"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&file).unwrap();
+        file
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            ctx.workspace.join("b.txt"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        if fs::read(ctx.workspace.join("b.txt")).is_ok() {
+            return; // Running as root: nothing is unreadable.
+        }
+    }
+    let out = tools::execute("grep", &json!({"pattern":"needle"}), &ctx).await;
+    assert!(out.success, "{:?}", out.error);
+    assert!(out.output.contains("a.txt:1: needle one"), "{}", out.output);
+    assert!(
+        out.output.contains("c.txt:1: needle three"),
+        "{}",
+        out.output
+    );
+    assert!(!out.output.contains("locked"), "{}", out.output);
+    assert!(out.output.contains("跳过 1 个"), "{}", out.output);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn grep_survives_concurrent_truncation() {
+    let (_dir, ctx) = fixture();
+    let path = ctx.workspace.join("growing.log");
+    let content = "line needle\n".repeat(200_000);
+    fs::write(&path, &content).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (path, stop) = (path.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+                file.set_len(0).unwrap();
+                file.set_len(content.len() as u64).unwrap();
+            }
+        })
+    };
+    for _ in 0..50 {
+        let out = tools::execute(
+            "grep",
+            &json!({"pattern":"needle","max_results":1000}),
+            &ctx,
+        )
+        .await;
+        assert!(out.success, "{:?}", out.error);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+}

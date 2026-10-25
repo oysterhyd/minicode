@@ -614,7 +614,38 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         .map(|g| g.compile_matcher());
     let max = args["max_results"].as_i64().unwrap_or(100).clamp(1, 1000) as usize;
     let mut lines = vec![];
+    let mut skipped = 0;
     let start = Instant::now();
+    let search_line = |line: &str,
+                       number: &mut usize,
+                       workspace_path: &str,
+                       lines: &mut Vec<String>|
+     -> Result<bool> {
+        if ctx.cancel.is_cancelled() {
+            bail!("tool cancelled")
+        }
+        if start.elapsed().as_secs() > 30 {
+            bail!("search timed out; narrow path or glob and retry")
+        }
+        *number += 1;
+        if regex.is_match(line)? {
+            let mut chars = line.chars();
+            let snippet = chars.by_ref().take(500).collect::<String>();
+            lines.push(format!(
+                "{workspace_path}:{number}: {snippet}{}",
+                if chars.next().is_some() {
+                    "...[行已截断]"
+                } else {
+                    ""
+                }
+            ));
+            if lines.len() >= max {
+                lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
     let files = util::walk(&base).filter(|e| e.file_type().is_file());
     'files: for entry in files {
         if ctx.cancel.is_cancelled() {
@@ -642,64 +673,71 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         if util::is_link(path) {
             continue;
         }
-        let Ok(file) = File::open(path) else { continue };
-        if file.metadata()?.len() == 0 {
-            continue;
-        }
-        // File-backed pages avoid copying an entire large file into the heap.
-        let mapped = unsafe { memmap2::Mmap::map(&file)? };
-        if mapped[..mapped.len().min(8192)].contains(&0) {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&mapped);
-        let mut number = 0;
-        let mut previous_cr = false;
-        for line in text.split([
-            '\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}',
-        ]) {
-            if ctx.cancel.is_cancelled() {
-                bail!("tool cancelled")
-            }
-            if start.elapsed().as_secs() > 30 {
-                bail!("search timed out; narrow path or glob and retry")
-            }
-            // CRLF counts as one line, as in the original universal-newline reader.
-            let start_offset = line.as_ptr() as usize - text.as_ptr() as usize;
-            let skipped_lf =
-                previous_cr && line.is_empty() && text.as_bytes().get(start_offset) == Some(&b'\n');
-            previous_cr = text.as_bytes().get(start_offset + line.len()) == Some(&b'\r');
-            if skipped_lf {
+        // Buffered reads, never a mapping: a file truncated while mapped
+        // faults the whole process (SIGBUS / in-page error).
+        let mut reader = match File::open(path) {
+            Ok(file) => BufReader::new(file),
+            Err(_) => {
+                skipped += 1;
                 continue;
             }
-            number += 1;
-            if regex.is_match(line)? {
-                let mut chars = line.chars();
-                let snippet = chars.by_ref().take(500).collect::<String>();
-                let workspace_path = path
-                    .strip_prefix(&ctx.workspace)?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                lines.push(format!(
-                    "{workspace_path}:{}: {snippet}{}",
-                    number,
-                    if chars.next().is_some() {
-                        "...[行已截断]"
-                    } else {
-                        ""
-                    }
-                ));
-                if lines.len() >= max {
-                    lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
+        };
+        let mut head = vec![];
+        if reader.by_ref().take(8192).read_to_end(&mut head).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if head.is_empty() || head.contains(&0) {
+            continue;
+        }
+        let mut reader = BufReader::new(std::io::Cursor::new(head).chain(reader));
+        let workspace_path = path
+            .strip_prefix(&ctx.workspace)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut number = 0;
+        let mut chunk = vec![];
+        let mut ended_with_lf = false;
+        loop {
+            chunk.clear();
+            match reader.read_until(b'\n', &mut chunk) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    skipped += 1;
+                    continue 'files;
+                }
+            }
+            ended_with_lf = chunk.last() == Some(&b'\n');
+            let text = String::from_utf8_lossy(&chunk);
+            let body = text.strip_suffix('\n').unwrap_or(&text);
+            let mut pieces = body
+                .split([
+                    '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}',
+                ])
+                .collect::<Vec<_>>();
+            // CRLF counts as one line, as in the original universal-newline reader.
+            if ended_with_lf && body.ends_with('\r') {
+                pieces.pop();
+            }
+            for line in pieces {
+                if search_line(line, &mut number, &workspace_path, &mut lines)? {
                     break 'files;
                 }
             }
         }
+        // Text that ends with a line break has one more, empty, line.
+        if ended_with_lf && search_line("", &mut number, &workspace_path, &mut lines)? {
+            break 'files;
+        }
     }
     if lines.is_empty() {
-        Ok(Outcome::ok("(no matches)"))
-    } else {
-        Ok(bounded(lines.join("\n")))
+        lines.push("(no matches)".into());
     }
+    if skipped > 0 {
+        lines.push(format!("...[跳过 {skipped} 个无法读取的文件]"));
+    }
+    Ok(bounded(lines.join("\n")))
 }
 fn replacement_texts<'a>(text: &str, args: &'a Value) -> Result<(Cow<'a, str>, Cow<'a, str>)> {
     let old = util::string(args, "old_text")?;
