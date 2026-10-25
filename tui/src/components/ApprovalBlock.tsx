@@ -27,6 +27,7 @@ export function ApprovalBlock({ item }: { item: FeedItem }) {
 }
 
 function title(item: FeedItem): string {
+  if (item.name === 'workspace_trust') return '信任工作区插件'
   if (item.name === 'bash') return 'Bash 命令'
   if (item.name === 'edit') return '编辑文件'
   if (item.name === 'write') return '写入文件'
@@ -34,6 +35,8 @@ function title(item: FeedItem): string {
 }
 
 export function approvalOptions(item: FeedItem): string[] {
+  // Trust is remembered per plugin fingerprint either way; a changed plugin asks again.
+  if (item.name === 'workspace_trust') return ['是，信任并启动这些 MCP 服务', '是（插件内容变化前不再询问）', '否，不启动']
   const always = item.name === 'bash' ? '是，并且本会话不再询问 Bash 命令'
     : item.name === 'edit' ? '是，并且本会话不再询问文件编辑'
       : item.name === 'write' ? '是，并且本会话不再询问文件写入'
@@ -43,6 +46,7 @@ export function approvalOptions(item: FeedItem): string[] {
 
 function previewLines(item: FeedItem): { text: string[]; diff: DiffLine[] } {
   const args = item.args || {}
+  if (item.name === 'workspace_trust') return { text: terminalText(item.text || '').split('\n').slice(1), diff: [] }
   if (item.name === 'bash') return { text: terminalText(String(args.command || '')).split('\n'), diff: [] }
   if (item.name === 'edit') {
     return { text: [String(args.path || '')], diff: previewDiff(String(args.old_text ?? ''), String(args.new_text ?? '')) }

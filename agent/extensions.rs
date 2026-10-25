@@ -292,6 +292,9 @@ impl Catalog {
             return Ok(());
         }
         let mut lock = json!({"fingerprint_format":2,"plugins":{}});
+        let trust = self.trust_store();
+        let trusted_plugins =
+            &trust["workspaces"][self.workspace.to_string_lossy().as_ref()]["plugins"];
         static NAME: OnceLock<regex::Regex> = OnceLock::new();
         let valid_name = NAME.get_or_init(|| regex::Regex::new(r"^[a-z][a-z0-9_]{0,31}$").unwrap());
         for dir in directories(&root) {
@@ -337,7 +340,11 @@ impl Catalog {
             let digest = fingerprint(&dir)?;
             lock["plugins"][name] = json!({"version":version,"sha256":digest});
             let enabled = raw["enabled"] == true;
+            // Plugin MCP servers are processes chosen by the repository, so they
+            // only start once the user trusted this exact plugin fingerprint.
+            let trusted = trusted_plugins[name] == digest.as_str();
             let mut server_names = vec![];
+            let mut commands = vec![];
             if let Some(servers) = raw["mcp_servers"].as_array() {
                 for s in servers {
                     let server = util::string(s, "name")?;
@@ -349,6 +356,10 @@ impl Catalog {
                     let timeout = s["timeout_s"].as_f64().unwrap_or(30.0);
                     if !(0.0 < timeout && timeout <= 300.0) {
                         bail!("invalid MCP timeout")
+                    }
+                    commands.push(json!({"name":server,"command":command,"args":s.get("args").cloned().unwrap_or(json!([]))}));
+                    if !trusted {
+                        continue;
                     }
                     self.servers.push(Server {
                         name: server.into(),
@@ -390,7 +401,7 @@ impl Catalog {
                     }
                 }
             }
-            self.plugins.push(json!({"name":name,"version":version,"enabled":enabled,"digest":&digest[..12],"path":dir,"skills":raw["skills"].is_string(),"agents":raw["agents"].is_string(),"servers":server_names}));
+            self.plugins.push(json!({"name":name,"version":version,"enabled":enabled,"digest":&digest[..12],"sha256":digest,"path":dir,"skills":raw["skills"].is_string(),"agents":raw["agents"].is_string(),"servers":server_names,"trusted":trusted,"trustRequired":!trusted&&!commands.is_empty(),"commands":commands}));
         }
         let lockpath = self.workspace.join(".minicode/plugins.lock.json");
         if check_lock && lockpath.exists() && json_file(&lockpath, 1_000_000)? != lock {
@@ -403,6 +414,53 @@ impl Catalog {
             bail!("duplicate MCP server name")
         }
         Ok(())
+    }
+    /// Workspace trust lives in the user directory, never in the workspace.
+    fn trust_path(&self) -> PathBuf {
+        self.configuration
+            .path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("trusted-plugins.json")
+    }
+    fn trust_store(&self) -> Value {
+        fs::read(self.trust_path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .filter(|v| v["workspaces"].is_object())
+            .unwrap_or(json!({"workspaces":{}}))
+    }
+    /// Enabled plugins whose MCP servers wait for the user's trust.
+    pub fn trust_required(&self) -> Vec<Value> {
+        self.plugins
+            .iter()
+            .filter(|p| p["trustRequired"] == true)
+            .cloned()
+            .collect()
+    }
+    /// Trusts (or revokes) plugins at the fingerprints the user reviewed. A
+    /// plugin that changed since then is refused rather than trusted blind.
+    pub fn set_trust(&self, reviewed: &[(String, String)], trusted: bool) -> Result<()> {
+        let mut store = self.trust_store();
+        let workspace = self.workspace.to_string_lossy().into_owned();
+        if !store["workspaces"][&workspace]["plugins"].is_object() {
+            store["workspaces"][&workspace] = json!({"plugins":{}});
+        }
+        for (name, digest) in reviewed {
+            let Some(plugin) = self.plugins.iter().find(|p| p["name"] == name.as_str()) else {
+                bail!("unknown plugin: {name}")
+            };
+            if trusted {
+                if plugin["sha256"] != digest.as_str() {
+                    bail!("plugin {name} changed since it was reviewed; review it again")
+                }
+                store["workspaces"][&workspace]["plugins"][name] = json!(digest);
+            } else if let Some(plugins) = store["workspaces"][&workspace]["plugins"].as_object_mut()
+            {
+                plugins.remove(name);
+            }
+        }
+        util::atomic_write(&self.trust_path(), &serde_json::to_vec_pretty(&store)?)
     }
     pub fn write_lock(&self) -> Result<PathBuf> {
         let mut lock = json!({"fingerprint_format":2,"plugins":{}});

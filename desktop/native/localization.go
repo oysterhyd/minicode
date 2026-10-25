@@ -108,6 +108,8 @@ const englishUIText = `排队中|Queued
 允许 MiniCode 运行这条命令吗？|Allow MiniCode to run this command?
 允许 MiniCode 写入这个文件吗？|Allow MiniCode to write this file?
 允许 MiniCode 使用 %s 吗？|Allow MiniCode to use %s?
+信任此工作区的插件并启动其 MCP 服务吗？|Trust this workspace's plugins and start their MCP servers?
+信任并启动|Trust and start
 选择|Select
 打开|Open
 搜索设置|Search settings

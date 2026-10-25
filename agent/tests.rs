@@ -1701,3 +1701,104 @@ async fn grep_survives_concurrent_truncation() {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     writer.join().unwrap();
 }
+
+// SEC1: MCP servers declared by a workspace plugin never start until the user
+// trusts that plugin's current fingerprint; the trust lives outside the
+// workspace, and changing the plugin asks again.
+fn untrusted_plugin(h: &Harness, description: &str) -> std::path::PathBuf {
+    let marker = h.root.join("started");
+    let dir = h.runtime.workspace.join(".minicode/plugins/evil");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("plugin.json"),
+        serde_json::to_vec(&json!({
+            "name":"evil","version":"1.0.0","minicode_version":crate::VERSION,"enabled":true,
+            "description":description,
+            "mcp_servers":[{"name":"evil","command":"node","args":["-e",format!("require('fs').writeFileSync({:?},'x')",marker.to_string_lossy())],"timeout_s":5}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    marker
+}
+/// Answers every approval with `grant` and returns the requests it saw.
+fn approver(h: &Harness, grant: bool) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let seen = Arc::new(std::sync::Mutex::new(vec![]));
+    let (approvals, recorded) = (h.hooks.approvals.clone(), seen.clone());
+    tokio::spawn(async move {
+        loop {
+            let pending = approvals.lock().unwrap().drain().collect::<Vec<_>>();
+            for (_, (tool, tx)) in pending {
+                recorded.lock().unwrap().push(tool);
+                let _ = tx.send(grant);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    seen
+}
+
+#[tokio::test]
+async fn untrusted_workspace_plugins_start_no_processes() {
+    let mut h = Harness::new(
+        json!({"turns":[{"text":"one"},{"text":"two"},{"text":"three"},{"text":"four"}]}),
+    )
+    .await;
+    let marker = untrusted_plugin(&h, "first");
+    // Neither bypass mode nor "always allow" may grant workspace trust.
+    h.hooks
+        .settings
+        .lock()
+        .unwrap()
+        .always_allow
+        .insert("workspace_trust".into());
+    h.reopen().await.unwrap();
+    let asked = approver(&h, false);
+    assert_eq!(h.run(Some("go")).await.unwrap().exit_reason, "completed");
+    assert_eq!(*asked.lock().unwrap(), ["workspace_trust"]);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!marker.exists(), "an untrusted plugin started a process");
+    assert!(!h.root.join("trusted-plugins.json").exists());
+}
+
+#[tokio::test]
+async fn trusted_workspace_plugins_start_until_they_change() {
+    let mut h =
+        Harness::new(json!({"turns":[{"text":"one"},{"text":"two"},{"text":"three"}]})).await;
+    let marker = untrusted_plugin(&h, "first");
+    h.reopen().await.unwrap();
+    let asked = approver(&h, true);
+    assert_eq!(h.run(Some("go")).await.unwrap().exit_reason, "completed");
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert!(
+        crate::tests::wait_for(|| marker.exists()).await,
+        "the trusted plugin did not start"
+    );
+    assert!(h.root.join("trusted-plugins.json").exists());
+    fs::remove_file(&marker).unwrap();
+
+    // Trusted fingerprint: no question on the next run.
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("again")).await.unwrap().exit_reason, "completed");
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert!(crate::tests::wait_for(|| marker.exists()).await);
+    fs::remove_file(&marker).unwrap();
+
+    // A changed manifest is a different plugin: ask again.
+    untrusted_plugin(&h, "second");
+    h.reopen().await.unwrap();
+    assert_eq!(
+        h.run(Some("changed")).await.unwrap().exit_reason,
+        "completed"
+    );
+    assert_eq!(asked.lock().unwrap().len(), 2);
+}
+async fn wait_for(check: impl Fn() -> bool) -> bool {
+    for _ in 0..500 {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}

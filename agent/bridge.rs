@@ -404,6 +404,7 @@ impl Router {
             "setPluginEnabled",
             "lockPlugins",
             "setLocalExtensionEnabled",
+            "trustWorkspace",
         ]
         .contains(&method)
         {
@@ -733,6 +734,41 @@ impl Router {
                 } else {
                     Ok(json!({"entries":catalog.local,"diagnostics":[]}))
                 }
+            }
+            "getWorkspaceTrust" | "trustWorkspace" => {
+                let workspace = Self::workspace(p)?;
+                let mut catalog = Catalog::scan(&workspace, self.configuration.clone(), false)?;
+                if method == "trustWorkspace" {
+                    let trusted = p["trusted"] != false;
+                    // Callers pass the fingerprints the user reviewed; without
+                    // them, the plugins currently awaiting trust are meant.
+                    let reviewed = match p["plugins"].as_array() {
+                        Some(plugins) => plugins
+                            .iter()
+                            .map(|p| {
+                                Ok((
+                                    util::string(p, "name")?.to_string(),
+                                    p["sha256"].as_str().unwrap_or_default().to_string(),
+                                ))
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                        None => catalog
+                            .trust_required()
+                            .iter()
+                            .map(|p| {
+                                (
+                                    p["name"].as_str().unwrap_or_default().to_string(),
+                                    p["sha256"].as_str().unwrap_or_default().to_string(),
+                                )
+                            })
+                            .collect(),
+                    };
+                    catalog.set_trust(&reviewed, trusted)?;
+                    catalog = Catalog::scan(&workspace, self.configuration.clone(), false)?;
+                }
+                Ok(
+                    json!({"workspace":workspace,"plugins":catalog.plugins.iter().filter(|p|p["commands"].as_array().is_some_and(|c|!c.is_empty())).collect::<Vec<_>>()}),
+                )
             }
             "setPluginEnabled" | "lockPlugins" => {
                 let workspace = Self::workspace(p)?;

@@ -125,6 +125,14 @@ enum PluginCommand {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
+    /// Trust the workspace plugins' MCP servers as they are now (after review).
+    Trust {
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Revoke the trust instead.
+        #[arg(long)]
+        revoke: bool,
+    },
 }
 #[derive(Subcommand)]
 enum MemoryCommand {
@@ -254,23 +262,58 @@ pub async fn main() -> Result<()> {
             output.as_deref(),
         ),
         Commands::Plugins { command } => {
-            let (workspace, lock) = match command {
-                PluginCommand::List { workspace } => (workspace, false),
-                PluginCommand::Lock { workspace } => (workspace, true),
+            let (workspace, lock, trust) = match command {
+                PluginCommand::List { workspace } => (workspace, false, None),
+                PluginCommand::Lock { workspace } => (workspace, true, None),
+                PluginCommand::Trust { workspace, revoke } => (workspace, false, Some(!revoke)),
             };
             let catalog = Catalog::scan(&workspace, Configuration::default(), !lock)?;
-            if lock {
+            if let Some(trusted) = trust {
+                let plugins = catalog
+                    .plugins
+                    .iter()
+                    .filter(|p| p["commands"].as_array().is_some_and(|c| !c.is_empty()))
+                    .collect::<Vec<_>>();
+                for p in &plugins {
+                    for c in p["commands"].as_array().into_iter().flatten() {
+                        println!(
+                            "{} {}: {} {}",
+                            if trusted { "信任" } else { "撤销" },
+                            p["name"].as_str().unwrap_or_default(),
+                            c["command"].as_str().unwrap_or_default(),
+                            c["args"]
+                        );
+                    }
+                }
+                catalog.set_trust(
+                    &plugins
+                        .iter()
+                        .map(|p| {
+                            (
+                                p["name"].as_str().unwrap_or_default().to_string(),
+                                p["sha256"].as_str().unwrap_or_default().to_string(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    trusted,
+                )?;
+            } else if lock {
                 println!("{}", catalog.write_lock()?.display());
             } else {
                 for p in catalog.plugins {
                     println!(
-                        "{} {} {} sha256:{}",
+                        "{} {} {}{} sha256:{}",
                         p["name"].as_str().unwrap(),
                         p["version"].as_str().unwrap(),
                         if p["enabled"] == true {
                             "enabled"
                         } else {
                             "disabled"
+                        },
+                        if p["trustRequired"] == true {
+                            " untrusted (run `minicode plugins trust` after review)"
+                        } else {
+                            ""
                         },
                         p["digest"].as_str().unwrap()
                     );

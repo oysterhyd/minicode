@@ -481,6 +481,7 @@ impl Runtime {
         Ok(prompt)
     }
     async fn connect_mcp(&mut self, hooks: &Hooks) -> Result<()> {
+        self.trust_plugins(hooks).await?;
         let servers = self.catalog.lock().await.servers.clone();
         let deadline = hooks.shared.lock().unwrap().deadline;
         let prepare = McpRegistry::prepare(servers);
@@ -1449,27 +1450,7 @@ impl Runtime {
             );
             true
         } else {
-            Self::phase(hooks, "approval");
-            let approval = format!(
-                "{}:{}",
-                self.session,
-                hooks.approval_sequence.fetch_add(1, Ordering::Relaxed) + 1
-            );
-            let (tx, rx) = oneshot::channel();
-            hooks
-                .approvals
-                .lock()
-                .unwrap()
-                .insert(approval.clone(), (name.clone(), tx));
-            (hooks.sink)(
-                json!({"event":"approval","sessionId":self.session,"approvalId":approval,"request":request}),
-            );
-            let deadline = hooks.shared.lock().unwrap().deadline;
-            let duration = deadline
-                .map(|d| d.saturating_duration_since(Instant::now()))
-                .unwrap_or(Duration::from_secs(86400 * 365));
-            let granted = tokio::select! {_ = hooks.cancel.cancelled()=>{hooks.approvals.lock().unwrap().remove(&approval);bail!("turn cancelled")},_ = tokio::time::sleep(duration)=>{hooks.approvals.lock().unwrap().remove(&approval);bail!("turn deadline exceeded")},value=rx=>value.unwrap_or(false)};
-            hooks.approvals.lock().unwrap().remove(&approval);
+            let granted = self.ask(hooks, name, request).await?;
             Self::phase(hooks, "tools");
             granted
         };
@@ -1479,6 +1460,108 @@ impl Runtime {
             json!({"call_id":id,"name":name,"granted":granted}),
         )?;
         Ok(granted)
+    }
+    /// Shows `request` to the user and waits for the answer.
+    async fn ask(&self, hooks: &Hooks, name: &str, request: Value) -> Result<bool> {
+        Self::phase(hooks, "approval");
+        let approval = format!(
+            "{}:{}",
+            self.session,
+            hooks.approval_sequence.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        let (tx, rx) = oneshot::channel();
+        hooks
+            .approvals
+            .lock()
+            .unwrap()
+            .insert(approval.clone(), (name.to_string(), tx));
+        (hooks.sink)(
+            json!({"event":"approval","sessionId":self.session,"approvalId":approval,"request":request}),
+        );
+        let deadline = hooks.shared.lock().unwrap().deadline;
+        let duration = deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_secs(86400 * 365));
+        let granted = tokio::select! {_ = hooks.cancel.cancelled()=>{hooks.approvals.lock().unwrap().remove(&approval);bail!("turn cancelled")},_ = tokio::time::sleep(duration)=>{hooks.approvals.lock().unwrap().remove(&approval);bail!("turn deadline exceeded")},value=rx=>value.unwrap_or(false)};
+        hooks.approvals.lock().unwrap().remove(&approval);
+        Ok(granted)
+    }
+    /// Workspace plugins that declare MCP servers run only after the user
+    /// explicitly trusts them. Permission mode and "always allow" never count
+    /// as that answer; a refusal just leaves the servers stopped.
+    async fn trust_plugins(&self, hooks: &Hooks) -> Result<()> {
+        let pending = self.catalog.lock().await.trust_required();
+        if self.child || pending.is_empty() {
+            return Ok(());
+        }
+        let call_id = format!("workspace_trust_{}", util::id());
+        let arguments = json!({"workspace":self.workspace,"plugins":pending.iter().map(|p|json!({"name":p["name"],"version":p["version"],"sha256":p["sha256"],"servers":p["commands"]})).collect::<Vec<_>>()});
+        let summary = pending
+            .iter()
+            .map(|p| {
+                let commands = p["commands"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|c| {
+                        format!(
+                            "{} {}",
+                            c["command"].as_str().unwrap_or_default(),
+                            c["args"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                format!(
+                    "插件 {}@{} 要启动 MCP 服务：{commands}",
+                    p["name"].as_str().unwrap_or_default(),
+                    p["version"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.event(
+            hooks,
+            "approval_request",
+            json!({"call_id":call_id,"name":"workspace_trust","arguments":arguments}),
+        )?;
+        let request = json!({"tool_name":"workspace_trust","arguments":arguments,"summary":format!("信任此工作区的插件？\n{summary}")});
+        let granted = self.ask(hooks, "workspace_trust", request).await?;
+        Self::phase(hooks, "preparing");
+        self.event(
+            hooks,
+            "approval_decision",
+            json!({"call_id":call_id,"name":"workspace_trust","granted":granted}),
+        )?;
+        let mut catalog = self.catalog.lock().await;
+        if granted {
+            let reviewed = pending
+                .iter()
+                .map(|p| {
+                    (
+                        p["name"].as_str().unwrap_or_default().to_string(),
+                        p["sha256"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            catalog.set_trust(&reviewed, true)?;
+            let next = catalog.refresh()?;
+            *catalog = next;
+        } else {
+            drop(catalog);
+            self.event(
+                hooks,
+                "workspace_trust_required",
+                json!({"workspace":self.workspace,"plugins":arguments["plugins"],"hint":"工作区插件未获信任，其 MCP 服务没有启动。审阅后可在界面中信任，或运行 `minicode plugins trust --workspace <路径>`。"}),
+            )?;
+        }
+        Ok(())
     }
     async fn invoke_read(&self, call: Block, hooks: &Hooks, recovered: bool) -> Result<Block> {
         let started = Instant::now();
