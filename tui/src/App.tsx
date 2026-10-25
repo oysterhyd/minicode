@@ -2,7 +2,7 @@ import { useApp, useStdout } from 'ink'
 import { Box, Text, type DOMElement } from 'ink'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LaunchOptions } from './args.js'
-import type { BridgeApi } from './bridge.js'
+import { protocolProblem, type BridgeApi } from './bridge.js'
 import {
   applySuggestion,
   isSubmenu,
@@ -212,6 +212,8 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
       try {
         const initial = await client.request<InitializeResult>('initialize', { workspace: workspaceRef.current })
         if (!active) return
+        const protocol = protocolProblem(initial)
+        if (protocol) addNotice(protocol.message, protocol.level)
         setCommands(initial.commands)
         setModels(initial.models || [])
         setSessions(initial.sessions || [])

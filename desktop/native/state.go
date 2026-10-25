@@ -225,18 +225,47 @@ func (d *desktop) toast(title, detail, tone string) {
 	d.toasts = append(d.toasts, toast{ID: d.next.Add(1), Title: title, Detail: detail, Tone: tone, At: time.Now()})
 }
 
+// Bridge protocol versions this desktop understands.
+const protocolMin, protocolMax = 2, 2
+
+// protocolProblem compares the agent's handshake with the supported range and
+// returns an upgrade hint (and toast tone), or "" when they are compatible.
+// A missing version is an older agent that only reports it in its state.
+func protocolProblem(version, minClient int) (string, string) {
+	switch {
+	case version == 0:
+		return "", ""
+	case version < protocolMin:
+		return trf("Agent 协议版本 %d 低于桌面端需要的 %d，请升级 MiniCode agent。", version, protocolMin), "error"
+	case minClient > protocolMax:
+		return trf("Agent 需要协议版本 %d 以上的客户端，请升级桌面端。", minClient), "error"
+	case version > protocolMax:
+		return trf("Agent 协议版本 %d 比桌面端支持的 %d 新，部分新功能不可用；请升级桌面端。", version, protocolMax), "warning"
+	}
+	return "", ""
+}
+
 func (d *desktop) initialize() {
 	v := d.current()
 	var result struct {
-		Sessions []model.Session `json:"sessions"`
-		Models   []model.Model   `json:"models"`
-		Commands []model.Command `json:"commands"`
-		State    model.State     `json:"state"`
+		ProtocolVersion   int             `json:"protocolVersion"`
+		MinClientProtocol int             `json:"minClientProtocol"`
+		Sessions          []model.Session `json:"sessions"`
+		Models            []model.Model   `json:"models"`
+		Commands          []model.Command `json:"commands"`
+		State             model.State     `json:"state"`
 	}
 	d.request(v, "initialize", nil, &result, func(err error) {
 		if err != nil {
 			d.error(v, err)
 			return
+		}
+		version := result.ProtocolVersion
+		if version == 0 {
+			version = result.State.ProtocolVersion
+		}
+		if message, tone := protocolProblem(version, result.MinClientProtocol); message != "" {
+			d.toast(tr("协议版本不匹配"), message, tone)
 		}
 		d.sessions, d.models, d.commands = result.Sessions, result.Models, result.Commands
 		v.State = result.State

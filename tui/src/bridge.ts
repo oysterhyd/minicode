@@ -10,6 +10,27 @@ export type BridgeApi = {
 }
 
 const EVENTS = new Set(['agent_event', 'text_delta', 'reasoning_delta', 'approval', 'approval_auto', 'run_done', 'run_error', 'bridge_error'])
+// Bridge protocol versions this TUI understands.
+export const PROTOCOL = { min: 2, max: 2 }
+
+export type ProtocolProblem = { message: string; level: 'error' | 'warning' }
+
+// Compares the agent's handshake with PROTOCOL. A mismatch is reported as an
+// upgrade hint; the connection itself stays usable.
+export function protocolProblem(initial: { protocolVersion?: number; minClientProtocol?: number; state?: { protocolVersion?: number } }): ProtocolProblem | null {
+  const version = initial.protocolVersion ?? initial.state?.protocolVersion
+  if (typeof version !== 'number') return null
+  if (version < PROTOCOL.min) {
+    return { level: 'error', message: `Agent 协议版本 ${version} 低于 TUI 需要的 ${PROTOCOL.min}，部分功能不可用；请升级 MiniCode agent。` }
+  }
+  if ((initial.minClientProtocol ?? 0) > PROTOCOL.max) {
+    return { level: 'error', message: `Agent 需要协议版本 ${initial.minClientProtocol} 以上的客户端，当前 TUI 为 ${PROTOCOL.max}；请升级 TUI。` }
+  }
+  if (version > PROTOCOL.max) {
+    return { level: 'warning', message: `Agent 协议版本 ${version} 比 TUI 支持的 ${PROTOCOL.max} 新，未知事件会被忽略；请升级 TUI。` }
+  }
+  return null
+}
 
 export class BridgeClient implements BridgeApi {
   private nextId = 1
@@ -19,6 +40,8 @@ export class BridgeClient implements BridgeApi {
   private failure: Error | null = null
   private closePromise?: Promise<void>
   private reader: readline.Interface
+  /** Event types from a newer agent that this TUI ignored. */
+  readonly ignoredEvents = new Set<string>()
 
   constructor(private readonly child: ChildProcess, private readonly requestTimeoutMs = 35000) {
     if (!child.stdout || !child.stdin) throw new Error('Agent bridge requires piped stdio')
@@ -119,7 +142,7 @@ export class BridgeClient implements BridgeApi {
       message = JSON.parse(line)
       if (!message || typeof message !== 'object' || Array.isArray(message)) throw new Error('消息不是对象')
       if ('event' in message) {
-        if (typeof message.event !== 'string' || !EVENTS.has(message.event)) throw new Error('未知事件')
+        if (typeof message.event !== 'string') throw new Error('事件类型无效')
         if (message.event === 'agent_event' && (!message.item || typeof message.item !== 'object')) throw new Error('缺少 agent event')
       } else if (!Number.isSafeInteger(message.id) || (!('result' in message) && !('error' in message))) {
         throw new Error('缺少请求 ID 或结果')
@@ -129,6 +152,14 @@ export class BridgeClient implements BridgeApi {
       return
     }
     if (message.event) {
+      // A newer agent may send events this TUI does not know: ignore them.
+      if (!EVENTS.has(message.event as string)) {
+        if (!this.ignoredEvents.has(message.event as string) && process.env.MINICODE_TUI_DEBUG) {
+          process.stderr.write(`minicode tui: ignored unknown bridge event ${message.event}\n`)
+        }
+        this.ignoredEvents.add(message.event as string)
+        return
+      }
       this.events.emit('event', message)
       return
     }

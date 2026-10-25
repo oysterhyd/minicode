@@ -45,3 +45,24 @@ func TestEmptyEnterDoesNotCancelARunningTask(t *testing.T) {
 	}
 	r.settle()
 }
+
+// B-COMPAT: a protocol mismatch is reported as an upgrade hint and unknown
+// events from a newer agent change nothing.
+func TestProtocolMismatchIsAHintAndUnknownEventsAreIgnored(t *testing.T) {
+	for _, c := range []struct {
+		version, minClient int
+		tone               string
+	}{{2, 2, ""}, {0, 0, ""}, {1, 0, "error"}, {2, 3, "error"}, {3, 2, "warning"}} {
+		if message, tone := protocolProblem(c.version, c.minClient); tone != c.tone || (tone != "") != (message != "") {
+			t.Fatalf("protocolProblem(%d, %d) = %q, %q", c.version, c.minClient, message, tone)
+		}
+	}
+	r := newTestRig(t, "home")
+	v := r.d.current()
+	items := len(v.Items)
+	r.d.handleEvent(bridge.Event{Event: "future_event", ClientKey: v.Key, Text: "from a newer agent"})
+	r.ui.Frame()
+	if len(v.Items) != items || v.Error != "" {
+		t.Fatal("an unknown event changed the conversation")
+	}
+}
