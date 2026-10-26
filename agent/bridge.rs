@@ -36,6 +36,7 @@ pub const CAPABILITIES: &[&str] = &[
     "projectInstructionsChanged",
     "sessionPaging",
     "diagnosticEvents",
+    "runIdentity",
 ];
 pub struct Conversation {
     pub settings: Arc<Mutex<Settings>>,
@@ -75,7 +76,15 @@ impl Conversation {
             snapshot: self.snapshot.clone(),
             approvals: self.approvals.clone(),
             approval_sequence: self.sequence.clone(),
-            sink,
+            sink: {
+                let run_id = self.snapshot.lock().unwrap().run_id.clone();
+                Arc::new(move |mut value| {
+                    if let Some(id) = &run_id {
+                        value["runId"] = json!(id);
+                    }
+                    sink(value);
+                })
+            },
             cancel: self.cancel.lock().unwrap().clone(),
             shared: Arc::new(Mutex::new(Ledger::default())),
         }
@@ -258,13 +267,18 @@ impl Router {
         let session = runtime.lock().await.session.clone();
         *c.cancel.lock().unwrap() = CancellationToken::new();
         let sink = self.event_sink(&c.client_key);
-        let hooks = c.hooks(sink.clone());
         let returned_session = session.clone();
+        let run_id = util::id();
         {
             let mut snapshot = c.snapshot.lock().unwrap();
             snapshot.running = true;
             snapshot.phase = "preparing".into();
+            snapshot.run_id = Some(run_id.clone());
         }
+        let hooks = c.hooks(sink);
+        let sink = hooks.sink.clone();
+        sink(json!({"event":"run_started","sessionId":session}));
+        let task_run_id = run_id.clone();
         let driver = tokio::runtime::Handle::current();
         c.running = Some(tokio::task::spawn_blocking(move || {
             driver.block_on(async move {
@@ -299,14 +313,16 @@ impl Router {
                     .snapshot
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                s.running = false;
-                s.pending = true;
-                s.phase = "paused".into();
+                if s.run_id.as_deref() == Some(&task_run_id) {
+                    s.running = false;
+                    s.pending = true;
+                    s.phase = "paused".into();
+                }
                 drop(s);
                 sink(json!({"event":"run_error","sessionId":session,"error":error}));
             })
         }));
-        Ok(json!({"sessionId":returned_session}))
+        Ok(json!({"sessionId":returned_session,"runId":run_id}))
     }
     pub async fn handle(&self, method: &str, params: &Value) -> Result<Value> {
         if !params.is_object() {

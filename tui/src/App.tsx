@@ -24,7 +24,7 @@ import {
   prevWord,
   promptRows,
 } from './caret.js'
-import { applyDesktopEvent, emptyFeed, pendingApproval, type FeedState } from './feed.js'
+import { acceptsRunEvent, applyDesktopEvent, emptyFeed, pendingApproval, type FeedState } from './feed.js'
 import { AssistantMarkdown } from './components/AssistantMarkdown.js'
 import { ApprovalBlock, ApprovalPanel, approvalRows } from './components/ApprovalBlock.js'
 import { Banner, type BannerProps } from './components/Banner.js'
@@ -187,7 +187,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
     let active = true
     activeRef.current = true
     const unsubscribe = client.onEvent((event: DesktopEvent) => {
-      if (!active) return
+      if (!active || !acceptsRunEvent(feedRef.current, event)) return
       if (event.sessionId && sessionRef.current && event.sessionId !== sessionRef.current) return
       updateFeed(current => applyDesktopEvent(current, event))
       if (event.event === 'bridge_error' && event.fatal) {
@@ -332,7 +332,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
     if (continuing) {
       setOutputStart(agentRef.current.usage?.output_tokens || 0)
       drainAllowedRef.current = false
-      updateFeed(current => ({ ...current, busy: true, startedAt: Date.now(), error: '' }))
+      updateFeed(current => ({ ...current, busy: true, awaitingRun: true, startedAt: Date.now(), error: '' }))
     }
     try {
       const result = await client.request<SlashResult>('runSlash', {
@@ -425,18 +425,19 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
       ...current,
       error: '',
       busy: true,
+      awaitingRun: true,
       startedAt: started,
       items: [...current.items, { id: `user-${started}`, kind: 'user', text: trimmed, startedAt: started }],
     }))
     try {
-      const result = await client.request<{ sessionId: string }>('sendPrompt', {
+      const result = await client.request<{ sessionId: string; runId?: string }>('sendPrompt', {
         text: trimmed,
         workspace: workspaceRef.current,
         sessionId: sessionRef.current,
         model: agentRef.current.model,
       })
       if (!activeRef.current) return
-      updateFeed(current => ({ ...current, sessionId: result.sessionId }))
+      updateFeed(current => ({ ...current, sessionId: result.sessionId, runId: result.runId, awaitingRun: false }))
     } catch (error) {
       updateFeed(current => ({ ...current, busy: false, startedAt: null, error: cleanError(error) }))
       if (!draftRef.current) replaceDraft(trimmed)

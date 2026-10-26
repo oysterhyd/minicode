@@ -12,7 +12,7 @@ export type BridgeApi = {
   close: () => void | Promise<void>
 }
 
-const EVENTS = new Set(['agent_event', 'text_delta', 'reasoning_delta', 'approval', 'approval_auto', 'run_done', 'run_error', 'bridge_error', 'log', 'warning'])
+const EVENTS = new Set(['run_started', 'agent_event', 'text_delta', 'reasoning_delta', 'approval', 'approval_auto', 'run_done', 'run_error', 'bridge_error', 'log', 'warning'])
 // Bridge protocol versions this TUI understands.
 export const PROTOCOL = { min: 2, max: 2 }
 

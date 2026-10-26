@@ -662,9 +662,11 @@ impl Runtime {
         let budget = hooks.settings.lock().unwrap().budget.clone();
         {
             let mut snapshot = hooks.snapshot.lock().unwrap();
+            if !snapshot.running || snapshot.run_id.is_none() {
+                snapshot.run_id = Some(util::id());
+            }
             snapshot.running = true;
             snapshot.phase = "preparing".into();
-            snapshot.run_id = Some(util::id());
         }
         if !self.child {
             let mut ledger = hooks.shared.lock().unwrap();

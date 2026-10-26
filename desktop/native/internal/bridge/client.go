@@ -17,6 +17,7 @@ import (
 )
 
 type Event struct {
+	RunID      string          `json:"runId"`
 	Event      string          `json:"event"`
 	ClientKey  string          `json:"clientKey"`
 	SessionID  string          `json:"sessionId"`

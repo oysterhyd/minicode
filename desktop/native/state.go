@@ -38,6 +38,7 @@ type queuedPrompt struct {
 }
 
 type conversation struct {
+	AwaitingRun                   bool
 	History                       *model.Detail
 	HistoryCount                  int
 	HistoryLoading                bool
@@ -601,6 +602,7 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 	}
 	v.Error = ""
 	v.Busy = true
+	v.AwaitingRun = true
 	v.CancelPending = false
 	v.Loaded = true
 	v.StartedAt = time.Now()
@@ -610,6 +612,7 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 		&model.FeedItem{ID: fmt.Sprint("thinking-", d.next.Add(1)), Kind: "thinking", Text: "正在思考", StartedAt: v.StartedAt})
 	var result struct {
 		SessionID string `json:"sessionId"`
+		RunID     string `json:"runId"`
 	}
 	d.request(v, "sendPrompt", map[string]any{"text": text, "model": v.State.Model, "attachments": attachments}, &result, func(err error) {
 		if err != nil {
@@ -628,6 +631,8 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 			return
 		}
 		v.SessionID = result.SessionID
+		v.State.RunID = result.RunID
+		v.AwaitingRun = false
 		d.refreshSessions(v)
 	})
 }
@@ -757,6 +762,7 @@ func (d *desktop) slash(text string, v *conversation) {
 	}
 	continuing := command[0] == "/continue" && !v.Busy
 	if continuing {
+		v.AwaitingRun = true
 		v.Busy = true
 		v.CancelPending = false
 		v.StartedAt = time.Now()
@@ -874,7 +880,23 @@ func (d *desktop) handleEvent(event bridge.Event) {
 	if event.SessionID != "" && v.SessionID == "" {
 		v.SessionID = event.SessionID
 	}
+	if event.RunID != "" {
+		if event.Event == "run_started" {
+			if v.AwaitingRun && event.RunID == v.State.RunID {
+				return
+			}
+			if !v.AwaitingRun && v.State.RunID != "" && event.RunID != v.State.RunID && v.Busy {
+				return
+			}
+		} else if v.AwaitingRun || (v.State.RunID != "" && event.RunID != v.State.RunID) {
+			return
+		}
+	}
 	switch event.Event {
+	case "run_started":
+		v.State.RunID = event.RunID
+		v.AwaitingRun = false
+		v.Busy = true
 	case "warning":
 		v.append(&model.FeedItem{ID: fmt.Sprint("warning-", d.next.Add(1)), Kind: "notice", Tone: "warning", Text: event.Text})
 	case "reasoning_delta":
@@ -1081,6 +1103,7 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 }
 
 func (d *desktop) finish(v *conversation, event bridge.Event) {
+	v.AwaitingRun = false
 	v.stateVersion++
 	cancelled := v.CancelPending
 	v.CancelPending = false

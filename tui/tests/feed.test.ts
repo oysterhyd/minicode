@@ -107,3 +107,22 @@ test('protocol warnings are notices and log events do not change feed state', ()
   assert.equal(warned.error,'')
   assert.equal(warned.items[0].tone,'warning')
 })
+
+test('B20: stale terminal events do not finish the current run, legacy events still work', () => {
+  const state={...emptyFeed(),busy:true,sessionId:'session',runId:'new'}
+  for (const event of ['run_done','run_error'] as const) {
+    assert.equal(applyDesktopEvent(state,{event,sessionId:'session',runId:'old',error:'old failure'}),state)
+  }
+  assert.equal(applyDesktopEvent(state,{event:'run_done',sessionId:'session',runId:'new'}).busy,false)
+  assert.equal(applyDesktopEvent(state,{event:'run_done',sessionId:'session'}).busy,false)
+})
+
+test('B20: a terminal arriving while the next send is awaiting its identity stays ignored', () => {
+  let state={...emptyFeed(),busy:true,awaitingRun:true,sessionId:'session',runId:'old'}
+  assert.equal(applyDesktopEvent(state,{event:'run_done',sessionId:'session',runId:'old'}),state)
+  state=applyDesktopEvent(state,{event:'run_started',sessionId:'session',runId:'new'})
+  assert.equal(state.runId,'new')
+  assert.equal(state.busy,true)
+  assert.equal(applyDesktopEvent(state,{event:'run_done',sessionId:'session',runId:'old'}),state)
+  assert.equal(applyDesktopEvent(state,{event:'run_done',sessionId:'session',runId:'new'}).busy,false)
+})

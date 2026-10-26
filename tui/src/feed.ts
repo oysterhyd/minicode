@@ -1,6 +1,8 @@
 import type { DesktopEvent, FeedItem } from './types.js'
 
 export type FeedState = {
+  runId?: string | null
+  awaitingRun?: boolean
   items: FeedItem[]
   busy: boolean
   error: string
@@ -59,6 +61,7 @@ function finishRun(state: FeedState, event: DesktopEvent): FeedState {
   if (event.event === 'run_error') {
     return {
       ...state,
+      awaitingRun: false,
       busy: false,
       startedAt: null,
       error: event.error || '执行失败',
@@ -68,6 +71,7 @@ function finishRun(state: FeedState, event: DesktopEvent): FeedState {
   if (reason && reason !== 'completed' && reason !== 'cancelled') {
     return {
       ...state,
+      awaitingRun: false,
       busy: false,
       startedAt: null,
       items: [...items, {
@@ -78,11 +82,17 @@ function finishRun(state: FeedState, event: DesktopEvent): FeedState {
       }],
     }
   }
-  return { ...state, busy: false, startedAt: null, items, approvalCallId: undefined }
+  return { ...state, awaitingRun: false, busy: false, startedAt: null, items, approvalCallId: undefined }
+}
+
+export function acceptsRunEvent(state: FeedState, event: DesktopEvent): boolean {
+  if (!event.runId || event.event === 'bridge_error') return true
+  if (event.event === 'run_started') return state.awaitingRun ? event.runId !== state.runId : !state.busy || !state.runId || event.runId === state.runId
+  return !state.awaitingRun && (!state.runId || event.runId === state.runId)
 }
 
 export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedState {
-  if (event.event === 'log') return state
+  if (event.event === 'log' || !acceptsRunEvent(state, event)) return state
   if (event.event === 'bridge_error') {
     const fatal = event.fatal ?? /exited|不可用|无效消息/.test(event.error || '')
     if (!fatal && !/Traceback|Error|错误/.test(event.error || '')) return state
@@ -91,6 +101,7 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
   }
   if (event.sessionId && state.sessionId && event.sessionId !== state.sessionId) return state
   if (event.sessionId && !state.sessionId) state = { ...state, sessionId: event.sessionId }
+  if (event.event === 'run_started') return { ...state, runId: event.runId, awaitingRun: false, busy: true }
   if (event.event === 'warning') return { ...state, items: [...state.items, { id: `warning-${state.items.length}`, kind: 'notice', tone: 'warning', text: event.text }] }
   if (event.event === 'run_done' || event.event === 'run_error') return finishRun(state, event)
   if (event.event === 'text_delta' && event.text) {

@@ -173,3 +173,11 @@
 - `tui/tests/bridge.test.ts`
 - `tui/tests/feed.test.ts`
 - `tui/tests/history.test.tsx`
+
+# MiniCode 3.0.3：run 生命周期与多端状态（批次 1B）
+
+## B20：run 事件身份与迟到终止事件
+
+- 核查：原 bridge::start 的终止事件只有 sessionId，Runtime::run 才生成 run_id；两端直接处理所有匹配会话的终止事件，均已用失败测试复现。
+- 修复：在 bridge 注册 run 时生成 runId，sendPrompt 响应、run_started、delta、工具/审批及终止事件携带同一可选字段。Hooks 捕获该次 runId，不随下一次快照变化；Runtime 复用 bridge 注册的身份，CLI 每次仍生成新身份。旧 run 的异常收尾只复位属于自己的快照。两端过滤过期 run 的事件及终止副作用，等待新发送身份期间忽略上一轮的终止事件。缺 runId 按旧协议处理，协议版本仍为 2，新增 runIdentity capability。
+- 测试：run-state.test.mjs 验证两轮响应/事件/快照身份一致且不重复；TUI feed 验证迟到终止与发送等待窗口；Desktop TestOldRunTerminalDoesNotFinishNewRun 先复现旧事件清空 Busy，再验证新事件结束和旧协议兼容。
