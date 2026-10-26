@@ -94,34 +94,31 @@ func (c *Client) emit(event Event) {
 }
 
 func (c *Client) read(reader io.Reader) {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64<<10), 64<<20)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		var result reply
-		if err := json.Unmarshal(line, &result); err != nil {
-			c.fail(fmt.Errorf("Agent bridge returned invalid JSON: %w", err))
+	decoder := json.NewDecoder(bufio.NewReader(reader))
+	for {
+		var message struct {
+			Event
+			ID uint64 `json:"id"`
+		}
+		if err := decoder.Decode(&message); err != nil {
+			if errors.Is(err, io.EOF) {
+				c.fail(errors.New("Agent bridge output closed"))
+			} else {
+				c.fail(fmt.Errorf("Agent bridge returned invalid JSON: %w", err))
+			}
 			return
 		}
-		if result.ID != 0 {
+		if message.ID != 0 {
 			c.mu.Lock()
-			waiter := c.pending[result.ID]
-			delete(c.pending, result.ID)
+			waiter := c.pending[message.ID]
+			delete(c.pending, message.ID)
 			c.mu.Unlock()
 			if waiter != nil {
-				waiter <- result
+				waiter <- reply{ID: message.ID, Result: message.Result, Error: message.Error}
 			}
 		} else {
-			var event Event
-			if err := json.Unmarshal(line, &event); err == nil {
-				c.emit(event)
-			}
+			c.emit(message.Event)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		c.fail(fmt.Errorf("Agent bridge stream: %w", err))
-	} else {
-		c.fail(errors.New("Agent bridge output closed"))
 	}
 }
 
