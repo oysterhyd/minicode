@@ -122,7 +122,7 @@ func (d *desktop) suggestions(v *conversation, caret int) *completionState {
 				}
 			case "/resume":
 				for _, s := range d.sessions[:min(30, len(d.sessions))] {
-					items = append(items, suggestion{s.ID[:min(8, len(s.ID))], s.Title, "value"})
+					items = append(items, suggestion{s.ID, s.Title, "value"})
 				}
 			case "/skill":
 				for _, s := range v.Capabilities.Skills {

@@ -244,3 +244,9 @@ TU1、TU2 已有本地失败复现，分别保存在 output/1B-TU1.test.mjs、ou
 - 测试：approval_state_test.go 覆盖请求交错、未知 call、旧协议顺序；approval-identity.test.mjs 先复现缺字段，再验证请求与决定身份一致。
 - 兼容性：仅增加可选协议字段，没有存储迁移与新增依赖。
 - 验证：全部 CI 命令最终通过（1B-D1-final-*），包括 87 项协议测试、两组评测与 Go 全量测试/vet/vendor。启动锁与后台时序的不稳定失败记录在同项初次/重试日志中。
+
+## D2：恢复补全插入完整会话 ID
+
+- 核查：composer 的 /resume 候选只插入前八位；相同前缀的两个会话测试先复现歧义。
+- 修复：候选值直接使用完整 ID，保留标题显示与前缀筛选。
+- 测试：TestResumeCompletionKeepsFullIDsWithTheSamePrefix 验证同前缀两个候选均插入各自完整 ID。
