@@ -1241,6 +1241,7 @@ async fn anthropic_roles_alternate_after_recovery_backfill_and_lost_job() {
             &json!({"job_id":"bg_lost","command":"sleep"}),
         )
         .unwrap();
+    h.runtime.message_revision = Some(h.runtime.store.message_revision(&session).unwrap());
     h.runtime.pending = true;
     assert_eq!(h.run(None).await.unwrap().exit_reason, "completed");
     let types = h.event_types();
@@ -1801,4 +1802,42 @@ async fn wait_for(check: impl Fn() -> bool) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     false
+}
+
+#[test]
+fn message_revision_detects_same_length_changes_and_rolls_back_atomically() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path().join("sessions.db")).unwrap();
+    let id = store.create("/repo", "fake", "fake").unwrap();
+    store
+        .replace_messages(&id, &[Message::user("first"), Message::user("last")])
+        .unwrap();
+    let (messages, version) = store.versioned_messages(&id).unwrap();
+    assert_eq!(messages.len(), 2);
+    // An old binary or another process writes the same database: triggers
+    // must see updates even when count and last message are unchanged.
+    let external = rusqlite::Connection::open(&store.path).unwrap();
+    external
+        .execute(
+            "UPDATE messages SET content=? WHERE session_id=? AND seq=0",
+            rusqlite::params![r#"[{"type":"text","text":"other"}]"#, id],
+        )
+        .unwrap();
+    assert!(store.message_revision(&id).unwrap() > version);
+    assert_eq!(store.messages(&id).unwrap()[0].text(), "other");
+    let version = store.message_revision(&id).unwrap();
+    assert!(
+        store
+            .transaction(|db| -> anyhow::Result<()> {
+                db.execute("DELETE FROM messages WHERE session_id=?", [&id])?;
+                anyhow::bail!("rollback")
+            })
+            .is_err()
+    );
+    assert_eq!(store.message_revision(&id).unwrap(), version);
+    assert_eq!(store.messages(&id).unwrap().len(), 2);
+    store
+        .replace_messages(&id, &[Message::user("changed"), Message::user("last")])
+        .unwrap();
+    assert!(store.message_revision(&id).unwrap() > version);
 }

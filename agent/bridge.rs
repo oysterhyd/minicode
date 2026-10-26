@@ -161,7 +161,7 @@ impl Router {
             let r = runtime.lock().await;
             let stale = r.workspace == workspace
                 && session.is_none_or(|s| s == r.session)
-                && self.store.messages(&r.session)? != r.messages;
+                && Some(self.store.message_revision(&r.session)?) != r.message_revision;
             if stale {
                 reload_session = Some(r.session.clone());
             }
@@ -1520,6 +1520,34 @@ pub async fn serve(store: Store) -> Result<()> {
 #[cfg(test)]
 mod concurrency_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ensure_checks_metadata_without_reading_message_bodies() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(":memory:").unwrap();
+        let session = store
+            .create(&root.path().to_string_lossy(), "fake", "fake")
+            .unwrap();
+        store
+            .append(&session, &crate::models::Message::user("saved"))
+            .unwrap();
+        let mut router = Router::new(store.clone(), Arc::new(|_| {}));
+        router.configuration = Configuration {
+            path: root.path().join("config.json"),
+        };
+        let mut c = Conversation::new(&router.configuration).unwrap();
+        router
+            .ensure(&mut c, root.path(), Some(&session), Some("fake"))
+            .await
+            .unwrap();
+        // The metadata is unchanged; selecting a message body now fails at
+        // the SQL boundary. A freshness check must not touch that column.
+        store.with(|db| { db.execute_batch("ALTER TABLE messages RENAME TO saved_messages; CREATE VIEW messages AS SELECT session_id,seq,role,json('invalid JSON') AS content FROM saved_messages;")?; Ok(()) }).unwrap();
+        router
+            .ensure(&mut c, root.path(), Some(&session), Some("fake"))
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn slow_stdout_is_queued_and_drained_in_order() {

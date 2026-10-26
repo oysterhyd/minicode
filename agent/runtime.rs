@@ -104,6 +104,7 @@ pub struct Runtime {
     pub catalog: Arc<tokio::sync::Mutex<Catalog>>,
     pub provider: Provider,
     pub messages: Vec<Message>,
+    pub message_revision: Option<i64>,
     pub usage: Usage,
     pub rounds: u64,
     pub pending: bool,
@@ -136,7 +137,7 @@ impl Runtime {
         }
         let provider = Provider::new(model, &settings.effort, &configuration)?;
         let mut catalog = Catalog::scan(&workspace, configuration, true)?;
-        let (id, messages, usage, rounds, pending) = if let Some(id) = session {
+        let (id, messages, message_revision, usage, rounds, pending) = if let Some(id) = session {
             let summary = store.require(id)?;
             if util::canonical(Path::new(
                 summary["workspace"].as_str().context("invalid workspace")?,
@@ -144,9 +145,11 @@ impl Runtime {
             {
                 bail!("会话不属于当前工作区")
             }
+            let (messages, revision) = store.versioned_messages(id)?;
             (
                 id.to_string(),
-                store.messages(id)?,
+                messages,
+                revision,
                 Usage {
                     input_tokens: summary["input_tokens"].as_u64().unwrap_or(0),
                     output_tokens: summary["output_tokens"].as_u64().unwrap_or(0),
@@ -161,6 +164,7 @@ impl Runtime {
             (
                 store.create(&workspace.to_string_lossy(), &provider.name, model)?,
                 vec![],
+                0,
                 Usage::default(),
                 0,
                 false,
@@ -300,6 +304,7 @@ impl Runtime {
             catalog: Arc::new(tokio::sync::Mutex::new(catalog)),
             provider,
             messages,
+            message_revision: Some(message_revision),
             usage,
             rounds,
             pending,
@@ -630,8 +635,10 @@ impl Runtime {
         Ok(())
     }
     fn append(&mut self, message: Message) -> Result<()> {
+        self.message_revision = None;
         self.store.append(&self.session, &message)?;
         self.messages.push(message);
+        self.message_revision = Some(self.store.message_revision(&self.session)?);
         Ok(())
     }
     pub async fn run(
@@ -642,7 +649,7 @@ impl Runtime {
     ) -> Result<RunResult> {
         let _ownership = self.store.activation(&self.session)?;
         self.store.require(&self.session)?;
-        if self.store.messages(&self.session)? != self.messages {
+        if Some(self.store.message_revision(&self.session)?) != self.message_revision {
             bail!("会话已被另一个进程更新，请重新加载会话后继续；本次没有执行任何操作")
         }
         if text.is_none()
@@ -923,8 +930,9 @@ impl Runtime {
                 let system = self.system(&catalog, &specs)?;
                 (specs, system)
             };
-            if self.compaction
-                && let Some(stats) = context::compact(
+            if self.compaction {
+                self.message_revision = None;
+                let stats = context::compact(
                     &self.store,
                     &self.session,
                     &system,
@@ -932,15 +940,18 @@ impl Runtime {
                     &mut self.messages,
                     (self.provider.window as f64 / self.provider.prompt_scale) as u64,
                     false,
-                )?
-            {
-                self.event(hooks, "context_compacted", stats)?;
+                )?;
+                self.message_revision = Some(self.store.message_revision(&self.session)?);
+                if let Some(stats) = stats {
+                    self.event(hooks, "context_compacted", stats)?;
+                }
             }
             let mut context_tokens = (context::estimate(&system, &self.messages, &specs) as f64
                 * self.provider.prompt_scale) as u64;
             // Offloading is a last resort after normal compaction. A large tool
             // result alone must not truncate a fresh, otherwise small context.
             if self.compaction && context_tokens.saturating_add(1024) >= self.provider.window {
+                self.message_revision = None;
                 let offloaded =
                     context::offload_large(&self.store, &self.session, &mut self.messages)?;
                 if offloaded > 0 {
@@ -953,6 +964,7 @@ impl Runtime {
                     context_tokens = (context::estimate(&system, &self.messages, &specs) as f64
                         * self.provider.prompt_scale) as u64;
                 }
+                self.message_revision = Some(self.store.message_revision(&self.session)?);
             }
             if context_tokens.saturating_add(1024) >= self.provider.window {
                 return Ok("context_limit".into());
@@ -1071,6 +1083,7 @@ impl Runtime {
             );
             metrics["provider_progress"] =
                 json!({"index":self.provider.index,"call_counter":self.provider.call_counter});
+            self.message_revision = None;
             let event = self.store.checkpoint(
                 &self.session,
                 "assistant_message",
@@ -1080,6 +1093,7 @@ impl Runtime {
                 Some(&store::counters(self.rounds, &self.usage)),
             )?;
             self.messages.push(assistant);
+            self.message_revision = Some(self.store.message_revision(&self.session)?);
             self.used_call_ids.extend(calls.iter().filter_map(|b| {
                 if let Block::ToolUse { id, .. } = b {
                     Some(id.clone())
@@ -1225,6 +1239,7 @@ impl Runtime {
                                     .into_iter()
                                     .rev()
                                     .collect(),
+                                message_revision: None,
                                 usage: Usage::default(),
                                 rounds: self.rounds,
                                 pending: self.pending,
@@ -1962,6 +1977,7 @@ impl Runtime {
         let specs = self.tool_specs(&catalog, &catalog.configuration.agents()?);
         let system = self.system(&catalog, &specs)?;
         drop(catalog);
+        self.message_revision = None;
         let changed = context::compact(
             &self.store,
             &self.session,
@@ -1971,6 +1987,7 @@ impl Runtime {
             (self.provider.window as f64 / self.provider.prompt_scale) as u64,
             true,
         )?;
+        self.message_revision = Some(self.store.message_revision(&self.session)?);
         if let Some(stats) = changed {
             self.event(hooks, "context_compacted", stats)?;
             self.refresh_snapshot(hooks).await?;

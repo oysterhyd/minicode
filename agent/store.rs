@@ -82,7 +82,16 @@ impl Store {
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch("CREATE INDEX IF NOT EXISTS events_activity ON events(session_id,timestamp);
             CREATE INDEX IF NOT EXISTS messages_first_user ON messages(session_id,seq) WHERE role='user';
-            CREATE INDEX IF NOT EXISTS sessions_created ON sessions(created_at); PRAGMA user_version=7;")?;
+            CREATE INDEX IF NOT EXISTS sessions_created ON sessions(created_at);
+            CREATE TABLE IF NOT EXISTS message_revisions(session_id TEXT PRIMARY KEY,version INTEGER NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS messages_revision_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO message_revisions VALUES(NEW.session_id,1) ON CONFLICT(session_id) DO UPDATE SET version=version+1; END;
+            CREATE TRIGGER IF NOT EXISTS messages_revision_update AFTER UPDATE ON messages BEGIN
+                INSERT INTO message_revisions VALUES(OLD.session_id,1) ON CONFLICT(session_id) DO UPDATE SET version=version+1;
+                INSERT INTO message_revisions SELECT NEW.session_id,1 WHERE NEW.session_id<>OLD.session_id ON CONFLICT(session_id) DO UPDATE SET version=version+1; END;
+            CREATE TRIGGER IF NOT EXISTS messages_revision_delete AFTER DELETE ON messages BEGIN
+                INSERT INTO message_revisions VALUES(OLD.session_id,1) ON CONFLICT(session_id) DO UPDATE SET version=version+1; END;
+            PRAGMA user_version=7;")?;
         tx.commit()?;
         Ok(Self {
             path,
@@ -191,19 +200,20 @@ impl Store {
         self.transaction(|c| append_message(c, id, message))
     }
     pub fn messages(&self, id: &str) -> Result<Vec<Message>> {
+        self.with(|c| read_messages(c, id))
+    }
+    pub fn message_revision(&self, id: &str) -> Result<i64> {
+        self.with(|c| message_revision(c, id))
+    }
+    pub fn versioned_messages(&self, id: &str) -> Result<(Vec<Message>, i64)> {
         self.with(|c| {
-            let mut q =
-                c.prepare("SELECT role,content FROM messages WHERE session_id=? ORDER BY seq")?;
-            let mut rows = q.query([id])?;
-            let mut messages = Vec::new();
-            while let Some(row) = rows.next()? {
-                let content: String = row.get(1)?;
-                messages.push(Message {
-                    role: row.get(0)?,
-                    content: serde_json::from_str(&content)?,
-                });
-            }
-            Ok(messages)
+            // Messages and version must describe the same SQLite snapshot,
+            // including when another bridge process writes this database.
+            let tx = c.unchecked_transaction()?;
+            let revision = message_revision(&tx, id)?;
+            let messages = read_messages(&tx, id)?;
+            tx.commit()?;
+            Ok((messages, revision))
         })
     }
     /// Newest-first SQL reads, returned in chronological order. A byte budget
@@ -389,6 +399,7 @@ impl Store {
                 "session_meta",
                 "tool_results",
                 "tasks",
+                "message_revisions",
             ] {
                 c.execute(&format!("DELETE FROM {table} WHERE session_id=?"), [id])?;
             }
@@ -651,4 +662,25 @@ fn append_message(c: &Connection, id: &str, m: &Message) -> Result<()> {
 }
 pub fn counters(rounds: u64, usage: &Usage) -> Value {
     json!({"rounds":rounds,"input_tokens":usage.input_tokens,"output_tokens":usage.output_tokens,"cache_read_tokens":usage.cache_read_tokens,"cache_write_tokens":usage.cache_write_tokens,"usage_available":usage.available})
+}
+
+fn message_revision(c: &Connection, id: &str) -> Result<i64> {
+    Ok(c.query_row(
+        "SELECT COALESCE((SELECT version FROM message_revisions WHERE session_id=?),0)",
+        [id],
+        |r| r.get(0),
+    )?)
+}
+fn read_messages(c: &Connection, id: &str) -> Result<Vec<Message>> {
+    let mut q = c.prepare("SELECT role,content FROM messages WHERE session_id=? ORDER BY seq")?;
+    let mut rows = q.query([id])?;
+    let mut messages = Vec::new();
+    while let Some(row) = rows.next()? {
+        let content: String = row.get(1)?;
+        messages.push(Message {
+            role: row.get(0)?,
+            content: serde_json::from_str(&content)?,
+        });
+    }
+    Ok(messages)
 }

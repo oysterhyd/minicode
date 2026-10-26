@@ -106,3 +106,9 @@
 - 修复：异步 worker 从 2 提高到 4，避免每个 bridge 按主机全部核数展开过多线程。bridge 非控制请求和 run 在 spawn_blocking 中由 Handle::block_on 驱动，网络等待仍由 Tokio 驱动；取消和审批留在异步快路径。同步 SQLite 与扫描在阻塞线程执行。stdout 使用专用 blocking writer，生产者仅入队，按 FIFO 编码、写入与 flush；EOF 时先取消，再排空请求、收尾会话、排空 writer。没有新增依赖。
 - 测试：`concurrency.test.mjs` 用 E4 helper 并发扫描两个含 15MB 文件的插件目录，同时取消另一会话；修复前取消确认约 3795ms，修复后小于 100ms。`slow_stdout_is_queued_and_drained_in_order` 用每次写入延迟 150ms 的 writer 验证入队不阻塞及退出前顺序排空。
 - 取舍：阻塞线程的上界沿用 72 个在途请求，并另有 run/writer；阻塞请求启动后不能强制 abort，EOF 等待其完成，客户端已有的关闭超时仍可兜底。writer 队列保持无界以免日志生产者堵住取消；极慢或不读 stdout 的客户端可能积压内存，后续可设计带优先级的背压。
+
+## B18：会话新鲜度比较消息版本
+
+- 问题与根因：ensure 每次反序列化全量 messages 并深比较；Runtime::run 的所有权检查也重复同样工作。
+- 修复：新增可重建的 message_revisions 表和消息 INSERT/UPDATE/DELETE 触发器。版本与消息写入同事务提交/回滚；同长度替换、较早消息修改以及旧程序直接写数据库也会递增。旧库缺失版本时从 0 开始，保留 user_version=7，旧程序仍能写入并触发版本更新。Runtime 首次加载在同一 SQLite 读事务中取得消息与版本；之后 ensure/run 只查询一个版本号。自身写入、压缩和卸载后更新版本缓存；失败写入使缓存失效，下一次加载不复用可能已改动的内存副本。删除会话同时删除版本元数据。
+- 测试：`ensure_checks_metadata_without_reading_message_bodies` 在加载后把正文列改成读取即报错的测试视图，旧 ensure 报 malformed JSON，新 ensure 不碰正文。`message_revision_detects_same_length_changes_and_rolls_back_atomically` 验证跨连接修改较早消息、相同消息数的替换、写事务回滚。原有 stale in-memory 协议测试验证另一进程写入后能重新加载。
