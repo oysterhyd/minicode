@@ -1154,6 +1154,37 @@ async fn harness_fake_provider_scripts_errors_tool_calls_and_usage() {
     );
 }
 
+#[tokio::test]
+async fn provider_retry_does_not_use_error_message_keywords() {
+    let mut h = Harness::new(json!({"turns":[
+        {"error":"connection policy rejected the request"},
+        {"text":"must not retry"}
+    ]}))
+    .await;
+    let result = h.run(Some("inspect")).await.unwrap();
+    assert_eq!(result.exit_reason, "provider_error");
+    assert!(result.error.unwrap().contains("connection policy"));
+    assert!(!h.event_types().contains(&"provider_retry".to_string()));
+}
+
+#[test]
+fn provider_error_retry_classification_uses_variants_and_status() {
+    use crate::provider::ProviderError;
+    for status in [408, 429, 500, 503, 529] {
+        assert!(ProviderError::Http { status }.is_retryable(), "{status}");
+    }
+    for status in [400, 401, 403, 404] {
+        assert!(!ProviderError::Http { status }.is_retryable(), "{status}");
+    }
+    assert!(
+        ProviderError::Timeout {
+            idle: std::time::Duration::from_secs(1)
+        }
+        .is_retryable()
+    );
+    assert!(!ProviderError::Protocol("connection HTTP 503".into()).is_retryable());
+}
+
 // R40: every runtime path that appends a user notice right after a user
 // tool_result must still produce a strictly alternating Anthropic payload.
 #[tokio::test]

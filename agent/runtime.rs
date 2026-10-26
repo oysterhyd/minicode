@@ -6,7 +6,7 @@ use crate::{
     goals::{Goal, Spec},
     mcp::McpRegistry,
     models::{Block, Budget, Event, Message, Outcome, RunResult, Usage},
-    provider::{Provider, validate_response},
+    provider::{Provider, ProviderError, validate_response},
     store::{self, Store},
     tools::{self, Sink, ToolContext},
     util,
@@ -1016,15 +1016,15 @@ impl Runtime {
                     Err(error) => {
                         self.usage.available = false;
                         let text = error.to_string();
-                        let retryable = text.contains("connection")
-                            || text.contains("HTTP 429")
-                            || text.contains("HTTP 5")
-                            || text.contains("idle timeout");
+                        let retryable = error
+                            .downcast_ref::<ProviderError>()
+                            .is_some_and(ProviderError::is_retryable);
                         if !retryable || seen.load(Ordering::Relaxed) || attempt >= 2 {
                             return Err(if text == "turn deadline exceeded" {
                                 error
                             } else {
-                                anyhow::anyhow!("provider error: {error}")
+                                let detail = format!("provider error: {error:#}");
+                                error.context(detail)
                             });
                         }
                         let delay = 0.25 * 2f64.powi(attempt);

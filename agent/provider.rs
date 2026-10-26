@@ -11,9 +11,56 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashSet},
-    fs,
+    fmt, fs,
     time::{Duration, Instant},
 };
+
+/// Provider failures carry their retry semantics independently of their display text.
+#[derive(Debug)]
+pub enum ProviderError {
+    Http { status: u16 },
+    Network(reqwest::Error),
+    Timeout { idle: Duration },
+    Interrupted,
+    Protocol(String),
+}
+
+impl ProviderError {
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http { status } => {
+                *status == 408 || *status == 429 || (500..600).contains(status)
+            }
+            Self::Network(_) | Self::Timeout { .. } | Self::Interrupted => true,
+            Self::Protocol(_) => false,
+        }
+    }
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http { status } => write!(f, "provider HTTP {status}"),
+            Self::Network(_) => write!(f, "provider connection failed"),
+            Self::Timeout { idle } => write!(
+                f,
+                "provider stream idle timeout: no data for {}s",
+                idle.as_secs_f64()
+            ),
+            Self::Interrupted => write!(f, "provider stream ended without a final response"),
+            Self::Protocol(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ProviderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Network(source) => Some(source),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Default)]
 struct CallBuffer {
@@ -194,7 +241,16 @@ impl Provider {
                 panic!("fake provider panic: {message}");
             }
             if let Some(error) = turn["error"].as_str() {
-                bail!("{error}");
+                // Preserve the existing fake-script convention for simulated HTTP errors.
+                let status = error
+                    .strip_prefix("provider HTTP ")
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<u16>().ok());
+                return Err(match status {
+                    Some(status) => ProviderError::Http { status },
+                    None => ProviderError::Protocol(error.into()),
+                }
+                .into());
             }
             let mut blocks = vec![];
             if let Some(text) = turn["text"].as_str().filter(|s| !s.is_empty()) {
@@ -263,10 +319,10 @@ impl Provider {
         let limit = idle_timeout();
         let response = idle(limit, request.send())
             .await?
-            .map_err(|_| anyhow::anyhow!("provider connection failed"))?;
+            .map_err(ProviderError::Network)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            bail!("provider HTTP {status}")
+            return Err(ProviderError::Http { status }.into());
         }
         let sse = response
             .headers()
@@ -276,7 +332,7 @@ impl Provider {
             let mut stream = response.bytes_stream();
             let mut bytes = vec![];
             while let Some(chunk) = idle(limit, stream.next()).await? {
-                bytes.extend_from_slice(&chunk?);
+                bytes.extend_from_slice(&chunk.map_err(ProviderError::Network)?);
                 if bytes.len() > 16_000_000 {
                     bail!("provider response exceeds the capture limit")
                 }
@@ -315,7 +371,7 @@ impl Provider {
         let mut first = None;
         let mut last = None;
         'stream: while let Some(chunk) = idle(limit, stream.next()).await? {
-            let bytes = chunk.map_err(|_| anyhow::anyhow!("provider stream interrupted"))?;
+            let bytes = chunk.map_err(ProviderError::Network)?;
             captured += bytes.len();
             if captured > 64_000_000 {
                 bail!("SSE stream exceeds the capture limit")
@@ -485,7 +541,7 @@ impl Provider {
             }
         }
         if !ended && stop.is_none() {
-            bail!("provider stream ended without a final response")
+            return Err(ProviderError::Interrupted.into());
         }
         let mut blocks = vec![];
         if !content.is_empty() {
@@ -681,12 +737,9 @@ fn idle_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(120))
 }
 async fn idle<F: std::future::Future>(limit: Duration, future: F) -> Result<F::Output> {
-    tokio::time::timeout(limit, future).await.map_err(|_| {
-        anyhow::anyhow!(
-            "provider stream idle timeout: no data for {}s",
-            limit.as_secs_f64()
-        )
-    })
+    tokio::time::timeout(limit, future)
+        .await
+        .map_err(|_| ProviderError::Timeout { idle: limit }.into())
 }
 /// Strict Anthropic endpoints (Bedrock, some gateways) reject adjacent
 /// messages with the same role, while the runtime appends user notices right

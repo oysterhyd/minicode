@@ -283,3 +283,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 批次外风险仍保留：Windows 后台进程收尾/完成通知时序与 SQLite 启动锁竞争偶发导致协议测试失败，本批没有扩展修改这些路径。失败日志与最终通过日志均保存在 output/checks。建议下一批先给这些已知不稳定测试做独立定位，再增加多视图切换、进程重启和长时间会话压力场景。
 - 最终验证：1B-D5-final-* 的全部 Rust/协议/生成器/两组评测/TUI 检查通过；协议 87 通过、1 个既有 200 秒慢测默认跳过，TUI 114 通过，60 次任务评测与 9 个场景结果通过。恢复边界补改后，Go 全量测试、vet、vendor UI 检查再次通过（1B-D5-recovery-go-*）。先前真实 35 秒发送超时测试已启用并通过。
+
+## R5：按错误类型判断重试
+
+- 问题与根因：运行时从错误文字中查找 `connection`、`HTTP 5` 等片段，普通错误也可能被误重试；HTTP 408 和未产生输出就断开的流则无法正确分类。
+- 修复：provider 以结构化错误区分 HTTP 状态、网络错误、空闲超时、流中断和协议错误，运行时按类型及状态判断；保留 fake 脚本既有 `provider HTTP <status>` 约定。服务端错误详情及 SSE 错误类型分别在 P2、P14 处理。
+- 测试：`provider_retry_does_not_use_error_message_keywords` 先复现含 `connection` 的普通错误被错误重试；`provider_error_retry_classification_uses_variants_and_status` 覆盖 408、429、5xx、400/401/403/404、空闲超时和误导性协议错误文本；既有 fake 重试测试覆盖向后兼容。
+- 验证：`2A-R5-final-*` 全部通过，协议测试 87 通过、1 个既有慢测跳过，60 个离线任务和场景验收通过，TUI 构建及桥接测试通过。旧评测目录因二进制哈希不同被保存在 `output/checks/2A-preexisting-*`。
