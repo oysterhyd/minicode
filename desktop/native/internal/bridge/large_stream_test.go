@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -37,5 +38,13 @@ func TestStreamRejectsMalformedJSON(t *testing.T) {
 	c.read(strings.NewReader("{invalid}\n"))
 	if c.err == nil || !strings.Contains(c.err.Error(), "invalid JSON") {
 		t.Fatalf("invalid stream accepted: %v", c.err)
+	}
+}
+
+func TestOversizedRequestIsRejectedBeforeWriting(t *testing.T) {
+	c := &Client{}
+	err := c.Request(context.Background(), "sendPrompt", map[string]any{"text": strings.Repeat("x", 5_000_000)}, nil)
+	if err == nil || !strings.Contains(err.Error(), "size limit") {
+		t.Fatalf("missing local size check: %v", err)
 	}
 }

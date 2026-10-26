@@ -115,3 +115,12 @@ test('stderr and protocol logs go to disk while warnings stay nonfatal', async (
     assert.match(fs.readFileSync(log,'utf8'),/protocol diagnostic/)
   } finally { fs.rmSync(root,{recursive:true,force:true}) }
 })
+
+test('B19: oversized requests fail locally and leave the connection usable', async()=>{
+ const child=spawn(process.execPath,['-e',`require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);process.stdout.write(JSON.stringify({id:r.id,result:true})+'\\n')})`],{stdio:['pipe','pipe','pipe']})
+ const client=new BridgeClient(child)
+ try {
+  await assert.rejects(client.request('sendPrompt',{text:'x'.repeat(5_000_000)}),/size limit/)
+  assert.equal(await client.request('initialize'),true)
+ }finally{await client.close()}
+})

@@ -1557,6 +1557,42 @@ fn output_writer(
     )
 }
 
+// Recover only a top-level id from the retained prefix. JSON parsing handles
+// escaped strings and skips nested ids; an id beyond the prefix is unknown.
+fn request_id_prefix(prefix: &[u8]) -> Option<Value> {
+    struct FindId<'a>(&'a mut Option<Value>);
+    impl<'de> serde::de::Visitor<'de> for FindId<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("request object")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> std::result::Result<(), M::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "id" {
+                    let id = map.next_value::<Value>()?;
+                    if id.is_string() || id.is_i64() {
+                        *self.0 = Some(id);
+                    }
+                    return Ok(());
+                }
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+            Ok(())
+        }
+    }
+    let mut id = None;
+    // A partial map is expected: keep a fully parsed id even if the final
+    // map delimiter or the rest of the oversized body is absent.
+    let _ = serde::Deserializer::deserialize_map(
+        &mut serde_json::Deserializer::from_slice(prefix),
+        FindId(&mut id),
+    );
+    id
+}
+
 pub async fn serve(store: Store) -> Result<()> {
     let (sink, writer) = output_writer(std::io::stdout());
     let router = Arc::new(Router::new(store, sink.clone()));
@@ -1578,11 +1614,11 @@ pub async fn serve(store: Store) -> Result<()> {
                 .position(|b| *b == b'\n')
                 .map(|n| n + 1)
                 .unwrap_or(buf.len());
-            if line.len() + n > 4_000_000 {
-                over = true
-            } else {
-                line.extend_from_slice(&buf[..n]);
+            let retained = n.min(4_000_000 - line.len());
+            if retained < n {
+                over = true;
             }
+            line.extend_from_slice(&buf[..retained]);
             let complete = buf[n - 1] == b'\n';
             reader.consume(n);
             if complete {
@@ -1614,10 +1650,14 @@ pub async fn serve(store: Store) -> Result<()> {
         let (id, method, params) = match parsed {
             Ok(v) => v,
             Err(e) => {
-                let id = serde_json::from_slice::<Value>(&line)
-                    .ok()
-                    .and_then(|v| v.get("id").cloned())
-                    .filter(|v| v.is_string() || v.is_i64());
+                let id = if over {
+                    request_id_prefix(&line)
+                } else {
+                    serde_json::from_slice::<Value>(&line)
+                        .ok()
+                        .and_then(|v| v.get("id").cloned())
+                        .filter(|v| v.is_string() || v.is_i64())
+                };
                 sink(if let Some(id) = id {
                     json!({"id":id,"error":e.to_string()})
                 } else {
@@ -1693,6 +1733,22 @@ pub async fn serve(store: Store) -> Result<()> {
 #[cfg(test)]
 mod concurrency_tests {
     use super::*;
+
+    #[test]
+    fn oversized_prefix_ids_are_top_level_and_json_decoded() {
+        for (prefix, expected) in [
+            (r#"{"id":42,"params":{"text":"partial"#, Some(json!(42))),
+            (r#"{"id":"a\u4e2d\"b","params":{"#, Some(json!("a中\"b"))),
+            (
+                r#"{"params":{"id":8},"id":-2,"text":"partial"#,
+                Some(json!(-2)),
+            ),
+            (r#"{"params":{"id":8,"text":"partial"#, None),
+            (r#"{"id":[],"text":"partial"#, None),
+        ] {
+            assert_eq!(request_id_prefix(prefix.as_bytes()), expected, "{prefix}");
+        }
+    }
 
     #[tokio::test]
     async fn accepted_prompt_and_state_do_not_wait_for_preparation_lock() {
