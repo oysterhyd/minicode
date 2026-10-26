@@ -4,7 +4,7 @@ Rust Agent 是 Desktop、CLI 与 Ink TUI 共用的运行核心。Desktop 仍采�
 
 ## 运行链路
 
-`Desktop / Ink TUI → NDJSON v2 → Rust Runtime → Provider / Tools / SQLite`。CLI 直接调用同一个 Runtime。Tokio 使用两个异步工作线程，文件操作在阻塞任务中执行。
+`Desktop / Ink TUI → NDJSON v2 → Rust Runtime → Provider / Tools / SQLite`。CLI 直接调用同一个 Runtime。Tokio 使用四个异步工作线程。Bridge 的会话请求与 run 在阻塞任务中驱动，SQLite、仓库扫描和附件 IO 不占用异步 worker；取消与审批绕过会话锁，stdout 由独立 writer 排队写入。
 
 | 模块 | 职责 |
 | --- | --- |

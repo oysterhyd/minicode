@@ -99,3 +99,10 @@
 - 问题与根因：stdout 的 bufio.Scanner 限制一行 64MiB，超限时将整个连接判为致命错误。
 - 修复：bufio.Reader + json.Decoder 逐个解码协议对象，一次解码直接分发回复或事件，移除人为行长限制。JSON 损坏、EOF 和进程异常仍使用真实的 fatal 错误通道。
 - 测试：`TestStreamAcceptsAnEventLargerThan64MiB` 流式生成超过 64MiB 的事件，旧代码报 token too long，修复后完整接受并交付紧随其后的响应；`TestStreamRejectsMalformedJSON` 保留损坏数据检测。
+
+## B15：阻塞工作与 stdout 离开异步 worker
+
+- 问题与根因：主运行时固定两个 worker；Catalog 扫描、SQLite、附件导入、JSON 编码和 stdout 同步写入会占用它们，取消请求即使没有 Router 锁也无法调度。
+- 修复：异步 worker 从 2 提高到 4，避免每个 bridge 按主机全部核数展开过多线程。bridge 非控制请求和 run 在 spawn_blocking 中由 Handle::block_on 驱动，网络等待仍由 Tokio 驱动；取消和审批留在异步快路径。同步 SQLite 与扫描在阻塞线程执行。stdout 使用专用 blocking writer，生产者仅入队，按 FIFO 编码、写入与 flush；EOF 时先取消，再排空请求、收尾会话、排空 writer。没有新增依赖。
+- 测试：`concurrency.test.mjs` 用 E4 helper 并发扫描两个含 15MB 文件的插件目录，同时取消另一会话；修复前取消确认约 3795ms，修复后小于 100ms。`slow_stdout_is_queued_and_drained_in_order` 用每次写入延迟 150ms 的 writer 验证入队不阻塞及退出前顺序排空。
+- 取舍：阻塞线程的上界沿用 72 个在途请求，并另有 run/writer；阻塞请求启动后不能强制 abort，EOF 等待其完成，客户端已有的关闭超时仍可兜底。writer 队列保持无界以免日志生产者堵住取消；极慢或不读 stdout 的客户端可能积压内存，后续可设计带优先级的背压。

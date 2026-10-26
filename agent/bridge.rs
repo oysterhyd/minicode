@@ -264,43 +264,46 @@ impl Router {
             snapshot.running = true;
             snapshot.phase = "preparing".into();
         }
-        c.running = Some(tokio::spawn(async move {
-            // Runtime::run catches panics in its loop; this guard covers a
-            // panic anywhere else in the run so the session never stays
-            // "running" and its jobs and MCP servers are stopped.
-            let run = std::panic::AssertUnwindSafe(async {
-                let mut r = runtime.lock().await;
-                r.run(text, attachments, hooks.clone()).await
+        let driver = tokio::runtime::Handle::current();
+        c.running = Some(tokio::task::spawn_blocking(move || {
+            driver.block_on(async move {
+                // Runtime::run catches panics in its loop; this guard covers a
+                // panic anywhere else in the run so the session never stays
+                // "running" and its jobs and MCP servers are stopped.
+                let run = std::panic::AssertUnwindSafe(async {
+                    let mut r = runtime.lock().await;
+                    r.run(text, attachments, hooks.clone()).await
+                })
+                .catch_unwind()
+                .await;
+                let error = match run {
+                    Ok(Ok(result)) => {
+                        sink(json!({"event":"run_done","sessionId":session,"result":result}));
+                        return;
+                    }
+                    Ok(Err(error)) => error.to_string(),
+                    Err(panic) => {
+                        hooks.cancel.cancel();
+                        let r = runtime.lock().await;
+                        r.mcp.close().await;
+                        hooks
+                            .approvals
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clear();
+                        format!("internal panic: {}", util::panic_message(&*panic))
+                    }
+                };
+                let mut s = hooks
+                    .snapshot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                s.running = false;
+                s.pending = true;
+                s.phase = "paused".into();
+                drop(s);
+                sink(json!({"event":"run_error","sessionId":session,"error":error}));
             })
-            .catch_unwind()
-            .await;
-            let error = match run {
-                Ok(Ok(result)) => {
-                    sink(json!({"event":"run_done","sessionId":session,"result":result}));
-                    return;
-                }
-                Ok(Err(error)) => error.to_string(),
-                Err(panic) => {
-                    hooks.cancel.cancel();
-                    let r = runtime.lock().await;
-                    r.mcp.close().await;
-                    hooks
-                        .approvals
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clear();
-                    format!("internal panic: {}", util::panic_message(&*panic))
-                }
-            };
-            let mut s = hooks
-                .snapshot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            s.running = false;
-            s.pending = true;
-            s.phase = "paused".into();
-            drop(s);
-            sink(json!({"event":"run_error","sessionId":session,"error":error}));
         }));
         Ok(json!({"sessionId":returned_session}))
     }
@@ -1195,7 +1198,14 @@ impl Router {
             _ => bail!("未知命令：{verb}"),
         }
     }
+    fn cancel_all(&self) {
+        let routes = self.routes.read().unwrap();
+        for c in routes.clients.values().chain(routes.sessions.values()) {
+            c.cancel.lock().unwrap().cancel();
+        }
+    }
     pub async fn close(&self) {
+        self.cancel_all();
         let mut seen = HashSet::new();
         let owners = {
             let routes = self.routes.read().unwrap();
@@ -1348,16 +1358,34 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
     let models=data["data"].as_array().unwrap_or(&vec![]).iter().filter(|m|m["id"].is_string()).map(|m|json!({"modelId":m["id"],"name":m.get("display_name").unwrap_or(&m["id"]),"contextWindow":200000,"maxOutputTokens":8192,"supportsEffort":false})).collect::<Vec<_>>();
     Ok(json!({"message":format!("已连接，发现 {} 个模型",models.len()),"models":models}))
 }
-pub async fn serve(store: Store) -> Result<()> {
-    let output = Mutex::new(std::io::BufWriter::new(std::io::stdout()));
-    let sink: Sink = Arc::new(move |value| {
-        use std::io::Write;
-        let mut out = output.lock().unwrap();
-        if serde_json::to_writer(&mut *out, &value).is_ok() {
-            let _ = out.write_all(b"\n");
-            let _ = out.flush();
+// The producer only enqueues values. Serialization, stdout writes and flushes
+// run on a dedicated blocking task, preserving FIFO event/reply ordering.
+fn output_writer(
+    output: impl std::io::Write + Send + 'static,
+) -> (Sink, tokio::task::JoinHandle<()>) {
+    use std::io::Write;
+    let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut out = std::io::BufWriter::new(output);
+        for value in rx {
+            if serde_json::to_writer(&mut out, &value).is_err()
+                || out.write_all(b"\n").is_err()
+                || out.flush().is_err()
+            {
+                break;
+            }
         }
     });
+    (
+        Arc::new(move |value| {
+            let _ = tx.send(value);
+        }),
+        writer,
+    )
+}
+
+pub async fn serve(store: Store) -> Result<()> {
+    let (sink, writer) = output_writer(std::io::stdout());
     let router = Arc::new(Router::new(store, sink.clone()));
     let configuration = Configuration::default();
     let ids = Arc::new(Mutex::new(HashSet::<String>::new()));
@@ -1448,12 +1476,25 @@ pub async fn serve(store: Store) -> Result<()> {
         let configuration = configuration.clone();
         tasks.spawn(async move {
             let _permit = permit;
-            let value = if ["fetchServiceModels", "testServiceConnection", "refreshMcp"]
-                .contains(&method.as_str())
-            {
-                network(&method, &params, &configuration).await
-            } else {
+            let value = if ["cancelTurn", "resolveApproval"].contains(&method.as_str()) {
                 router.handle(&method, &params).await
+            } else {
+                // SQLite, repository scanning and attachment import are synchronous.
+                // Keep them off the workers that drive stdin and cancellations.
+                let driver = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    driver.block_on(async {
+                        if ["fetchServiceModels", "testServiceConnection", "refreshMcp"]
+                            .contains(&method.as_str())
+                        {
+                            network(&method, &params, &configuration).await
+                        } else {
+                            router.handle(&method, &params).await
+                        }
+                    })
+                })
+                .await
+                .unwrap_or_else(|error| Err(anyhow::anyhow!("bridge request task failed: {error}")))
             };
             let mut reply = json!({"id":id});
             match value {
@@ -1465,15 +1506,55 @@ pub async fn serve(store: Store) -> Result<()> {
         });
         while tasks.try_join_next().is_some() {}
     }
-    tasks.abort_all();
+    // Blocking requests cannot be aborted once started. Drain their handles
+    // before closing owners and the writer so shutdown cannot orphan work.
+    router.cancel_all();
     while tasks.join_next().await.is_some() {}
     router.close().await;
+    drop(router);
+    drop(sink);
+    writer.await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod concurrency_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn slow_stdout_is_queued_and_drained_in_order() {
+        struct SlowOutput(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SlowOutput {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(150));
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (sink, writer) = output_writer(SlowOutput(bytes.clone()));
+        let start = std::time::Instant::now();
+        sink(json!({"event":"log","text":"first"}));
+        sink(json!({"id":1,"result":true}));
+        assert!(start.elapsed() < Duration::from_millis(100));
+        drop(sink);
+        writer.await.unwrap();
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let messages = output
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![
+                json!({"event":"log","text":"first"}),
+                json!({"id":1,"result":true})
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn one_locked_conversation_does_not_block_another() {
