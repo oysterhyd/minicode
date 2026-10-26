@@ -255,6 +255,7 @@ type FeedItem struct {
 	Pending        bool
 	Interrupted    bool
 	ApprovalID     string
+	CallID         string
 	Granted        bool
 	Deciding       bool
 	Auto           bool
@@ -267,6 +268,7 @@ type FeedItem struct {
 }
 
 type ApprovalRequest struct {
+	CallID    string         `json:"call_id"`
 	ToolName  string         `json:"tool_name"`
 	Arguments map[string]any `json:"arguments"`
 	Summary   string         `json:"summary"`

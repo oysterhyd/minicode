@@ -39,6 +39,7 @@ type queuedPrompt struct {
 }
 
 type conversation struct {
+	approvalCallID                string
 	sendGeneration                uint64
 	AwaitingRun                   bool
 	History                       *model.Detail
@@ -988,7 +989,14 @@ func (d *desktop) handleEvent(event bridge.Event) {
 		}
 		v.finishStream()
 		v.removeThinking()
-		v.append(&model.FeedItem{ID: "approval-" + event.ApprovalID, Kind: "approval", Name: request.ToolName, Args: request.Arguments, ApprovalID: event.ApprovalID})
+		callID := request.CallID
+		if callID == "" {
+			callID = v.approvalCallID
+		}
+		if callID == v.approvalCallID {
+			v.approvalCallID = ""
+		}
+		v.append(&model.FeedItem{ID: "approval-" + event.ApprovalID, Kind: "approval", Name: request.ToolName, Args: request.Arguments, ApprovalID: event.ApprovalID, CallID: callID})
 		d.signal(v, "需要审批", request.ToolName)
 	case "run_done", "run_error":
 		d.finish(v, event)
@@ -1107,9 +1115,11 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 			item.Output = model.String(data["output_preview"])
 			item.Version++
 		}
+	case "approval_request":
+		v.approvalCallID = model.String(data["call_id"])
 	case "approval_decision":
 		for _, item := range v.Items {
-			if item.Kind == "approval" && item.ApprovalID != "" {
+			if item.Kind == "approval" && item.ApprovalID != "" && item.CallID == model.String(data["call_id"]) {
 				item.ApprovalID = ""
 				item.Granted = model.Bool(data["granted"])
 				item.Version++

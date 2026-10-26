@@ -1455,7 +1455,7 @@ impl Runtime {
         if decision == "allow" {
             return Ok(true);
         }
-        let request = json!({"tool_name":name,"arguments":input,"summary":format!("{name}: {}",util::prefix(&input.to_string(),1000))});
+        let request = json!({"call_id":id,"tool_name":name,"arguments":input,"summary":format!("{name}: {}",util::prefix(&input.to_string(),1000))});
         self.event(
             hooks,
             "approval_request",
@@ -1548,7 +1548,7 @@ impl Runtime {
             "approval_request",
             json!({"call_id":call_id,"name":"workspace_trust","arguments":arguments}),
         )?;
-        let request = json!({"tool_name":"workspace_trust","arguments":arguments,"summary":format!("信任此工作区的插件？\n{summary}")});
+        let request = json!({"call_id":call_id,"tool_name":"workspace_trust","arguments":arguments,"summary":format!("信任此工作区的插件？\n{summary}")});
         let granted = self.ask(hooks, "workspace_trust", request).await?;
         Self::phase(hooks, "preparing");
         self.event(
