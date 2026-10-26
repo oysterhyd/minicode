@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, atomic::AtomicU64},
+    sync::{Arc, Mutex, RwLock, atomic::AtomicU64},
     time::Duration,
 };
 use tokio::{
@@ -38,7 +38,7 @@ pub struct Conversation {
     pub approvals: Approvals,
     pub sequence: Arc<AtomicU64>,
     pub runtime: Option<Arc<tokio::sync::Mutex<Runtime>>>,
-    pub cancel: CancellationToken,
+    pub cancel: Arc<Mutex<CancellationToken>>,
     pub client_key: String,
     pub running: Option<tokio::task::JoinHandle<()>>,
     pub statistics: Statistics,
@@ -53,7 +53,7 @@ impl Conversation {
             approvals: Arc::new(Mutex::new(HashMap::new())),
             sequence: Arc::new(AtomicU64::new(0)),
             runtime: None,
-            cancel: CancellationToken::new(),
+            cancel: Arc::new(Mutex::new(CancellationToken::new())),
             client_key: "default".into(),
             running: None,
             statistics: Statistics::default(),
@@ -71,7 +71,7 @@ impl Conversation {
             approvals: self.approvals.clone(),
             approval_sequence: self.sequence.clone(),
             sink,
-            cancel: self.cancel.clone(),
+            cancel: self.cancel.lock().unwrap().clone(),
             shared: Arc::new(Mutex::new(Ledger::default())),
         }
     }
@@ -86,12 +86,36 @@ impl Conversation {
         )
     }
 }
+// Controls never acquire the async conversation lock.
+struct Owner {
+    conversation: tokio::sync::Mutex<Conversation>,
+    settings: Arc<Mutex<Settings>>,
+    snapshot: Arc<Mutex<Snapshot>>,
+    approvals: Approvals,
+    cancel: Arc<Mutex<CancellationToken>>,
+}
+impl Owner {
+    fn new(c: Conversation) -> Self {
+        Self {
+            settings: c.settings.clone(),
+            snapshot: c.snapshot.clone(),
+            approvals: c.approvals.clone(),
+            cancel: c.cancel.clone(),
+            conversation: tokio::sync::Mutex::new(c),
+        }
+    }
+}
+#[derive(Default)]
+struct Routes {
+    clients: HashMap<String, Arc<Owner>>,
+    sessions: HashMap<String, Arc<Owner>>,
+    recent: VecDeque<String>,
+}
 pub struct Router {
     pub store: Store,
     pub configuration: Configuration,
-    pub clients: HashMap<String, Arc<tokio::sync::Mutex<Conversation>>>,
-    pub sessions: HashMap<String, Arc<tokio::sync::Mutex<Conversation>>>,
-    recent: VecDeque<String>,
+    routes: RwLock<Routes>,
+    configuration_write: tokio::sync::Mutex<()>,
     pub sink: Sink,
 }
 impl Router {
@@ -99,9 +123,8 @@ impl Router {
         Self {
             store,
             configuration: Configuration::default(),
-            clients: HashMap::new(),
-            sessions: HashMap::new(),
-            recent: VecDeque::new(),
+            routes: RwLock::new(Routes::default()),
+            configuration_write: tokio::sync::Mutex::new(()),
             sink,
         }
     }
@@ -228,7 +251,7 @@ impl Router {
         }
         let runtime = c.runtime.clone().context("请先选择工作区")?;
         let session = runtime.lock().await.session.clone();
-        c.cancel = CancellationToken::new();
+        *c.cancel.lock().unwrap() = CancellationToken::new();
         let sink = self.event_sink(&c.client_key);
         let hooks = c.hooks(sink.clone());
         let returned_session = session.clone();
@@ -277,7 +300,7 @@ impl Router {
         }));
         Ok(json!({"sessionId":returned_session}))
     }
-    pub async fn handle(&mut self, method: &str, params: &Value) -> Result<Value> {
+    pub async fn handle(&self, method: &str, params: &Value) -> Result<Value> {
         if !params.is_object() {
             bail!("params must be an object")
         }
@@ -292,6 +315,25 @@ impl Router {
                 bail!("{field} must be a boolean")
             }
         }
+        let _configuration_write = if [
+            "saveService",
+            "deleteService",
+            "saveAgent",
+            "deleteAgent",
+            "setAgentEnabled",
+            "setDefaultModel",
+            "setPluginEnabled",
+            "lockPlugins",
+            "setLocalExtensionEnabled",
+            "trustWorkspace",
+            "saveInstructions",
+        ]
+        .contains(&method)
+        {
+            Some(self.configuration_write.lock().await)
+        } else {
+            None
+        };
         if ["renameSession", "pinSession", "deleteSession"].contains(&method) {
             let id = util::string(params, "sessionId")?;
             self.store.require(id)?;
@@ -309,16 +351,21 @@ impl Router {
                 }
                 "pinSession" => self.store.pin(id, params["pinned"] == true)?,
                 _ => {
-                    if let Some(owner) = self.sessions.get(id)
-                        && owner.lock().await.busy()
-                    {
+                    let owner = self.routes.read().unwrap().sessions.get(id).cloned();
+                    let conversation = if let Some(owner) = &owner {
+                        Some(owner.conversation.lock().await)
+                    } else {
+                        None
+                    };
+                    if conversation.as_ref().is_some_and(|c| c.busy()) {
                         bail!("任务运行中，无法删除会话")
                     }
                     self.store.delete(id)?;
-                    if let Some(owner) = self.sessions.remove(id) {
-                        self.clients.retain(|_, c| !Arc::ptr_eq(c, &owner));
+                    let mut routes = self.routes.write().unwrap();
+                    if let Some(owner) = routes.sessions.remove(id) {
+                        routes.clients.retain(|_, c| !Arc::ptr_eq(c, &owner));
                     }
-                    self.recent.retain(|s| s != id);
+                    routes.recent.retain(|s| s != id);
                 }
             }
             return Ok(json!(self.store.sessions()?));
@@ -329,40 +376,41 @@ impl Router {
             .unwrap_or("default")
             .to_string();
         let session = params["sessionId"].as_str();
-        let mut owner = session
-            .and_then(|s| self.sessions.get(s))
-            .cloned()
-            .or_else(|| self.clients.get(&key).cloned());
+        let lookup = |routes: &Routes| {
+            session
+                .and_then(|s| routes.sessions.get(s))
+                .cloned()
+                .or_else(|| routes.clients.get(&key).cloned())
+        };
+        let owner = { lookup(&self.routes.read().unwrap()) };
         if ["cancelTurn", "resolveApproval"].contains(&method) {
             let Some(owner) = owner else {
                 return Ok(json!(false));
             };
-            let c = owner.lock().await;
-            if session.is_some() && c.snapshot.lock().unwrap().session.as_deref() != session {
+            if session.is_some() && owner.snapshot.lock().unwrap().session.as_deref() != session {
                 return Ok(json!(false));
             }
             if method == "cancelTurn" {
-                c.cancel.cancel();
+                owner.cancel.lock().unwrap().cancel();
                 return Ok(json!(true));
             }
             let id = util::string(params, "approvalId")?;
-            let entry = c.approvals.lock().unwrap().remove(id);
+            let entry = owner.approvals.lock().unwrap().remove(id);
             if let Some((tool, tx)) = entry {
                 let granted = params["granted"] == true;
                 if granted && params["remember"] == "session" {
-                    c.settings.lock().unwrap().always_allow.insert(tool);
+                    owner.settings.lock().unwrap().always_allow.insert(tool);
                 }
                 return Ok(json!(tx.send(granted).is_ok()));
             }
             return Ok(json!(false));
         }
-        if owner.is_none() {
+        let candidate = if owner.is_none() {
             let c = Conversation::new(&self.configuration)?;
-            if let Some(source) = params["sourceClientKey"]
+            let source = params["sourceClientKey"]
                 .as_str()
-                .and_then(|s| self.clients.get(s))
-            {
-                let source = source.lock().await;
+                .and_then(|s| self.routes.read().unwrap().clients.get(s).cloned());
+            if let Some(source) = source {
                 let mut settings = source.settings.lock().unwrap().clone();
                 settings.always_allow.clear();
                 settings.pending_model = false;
@@ -373,40 +421,74 @@ impl Router {
                 }
                 *c.settings.lock().unwrap() = settings;
             }
-            owner = Some(Arc::new(tokio::sync::Mutex::new(c)));
-        }
-        let owner = owner.unwrap();
-        self.clients.insert(key.clone(), owner.clone());
-        let mut c = owner.lock().await;
+            Some(Arc::new(Owner::new(c)))
+        } else {
+            None
+        };
+        let owner = {
+            let mut routes = self.routes.write().unwrap();
+            let owner = lookup(&routes).or(owner).or(candidate).unwrap();
+            routes.clients.insert(key.clone(), owner.clone());
+            // Reserve before loading: concurrent clients share one runtime.
+            if let Some(id) = session {
+                routes.sessions.insert(id.into(), owner.clone());
+            }
+            owner
+        };
+        let mut c = owner.conversation.lock().await;
         if !c.busy() {
             c.client_key = key;
         }
-        let result = self.dispatch(&mut c, method, params).await?;
+        let result = self.dispatch(&mut c, method, params).await;
         let current = c.snapshot.lock().unwrap().session.clone();
-        drop(c);
-        self.sessions
-            .retain(|id, v| !Arc::ptr_eq(v, &owner) || Some(id) == current.as_ref());
-        if let Some(id) = current {
-            self.sessions.insert(id.clone(), owner);
-            self.recent.retain(|s| s != &id);
-            self.recent.push_back(id);
-        }
-        let mut attempts = 0;
-        while self.sessions.len() > 6 && attempts < self.recent.len() {
-            let Some(id) = self.recent.pop_front() else {
-                break;
-            };
-            let candidate = self.sessions.get(&id).cloned();
-            if let Some(candidate) = candidate {
-                if !candidate.lock().await.busy() {
-                    self.sessions.remove(&id);
-                    self.clients.retain(|_, c| !Arc::ptr_eq(c, &candidate));
+        // Publish while still owning the conversation lock.
+        {
+            let mut routes = self.routes.write().unwrap();
+            routes
+                .sessions
+                .retain(|id, v| !Arc::ptr_eq(v, &owner) || Some(id) == current.as_ref());
+            if let Some(id) = current {
+                routes.sessions.insert(id.clone(), owner.clone());
+                routes.recent.retain(|s| s != &id);
+                routes.recent.push_back(id);
+            }
+            let mut attempts = routes.recent.len();
+            while routes.sessions.len() > 6 && attempts > 0 {
+                attempts -= 1;
+                let Some(id) = routes.recent.pop_front() else {
+                    break;
+                };
+                let Some(candidate) = routes.sessions.get(&id).cloned() else {
+                    continue;
+                };
+                let references = routes
+                    .clients
+                    .values()
+                    .chain(routes.sessions.values())
+                    .filter(|c| Arc::ptr_eq(c, &candidate))
+                    .count();
+                // Do not evict runs or owners held by in-flight requests.
+                if Arc::strong_count(&candidate) == references + 1
+                    && candidate.conversation.try_lock().is_ok_and(|c| !c.busy())
+                {
+                    routes.sessions.remove(&id);
+                    routes.clients.retain(|_, c| !Arc::ptr_eq(c, &candidate));
                 } else {
-                    self.recent.push_back(id);
-                    attempts += 1;
+                    routes.recent.push_back(id);
                 }
             }
         }
+        drop(c);
+        let result = result?;
+        let clients = || {
+            self.routes
+                .read()
+                .unwrap()
+                .clients
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         if [
             "setPluginEnabled",
             "lockPlugins",
@@ -415,15 +497,14 @@ impl Router {
         ]
         .contains(&method)
         {
-            for c in self.clients.values() {
-                c.lock().await.settings.lock().unwrap().registry_dirty = true;
+            for c in clients() {
+                c.settings.lock().unwrap().registry_dirty = true;
             }
         }
         if ["saveService", "deleteService"].contains(&method) {
             let models = self.configuration.models()?;
             let default = self.configuration.default_model()?;
-            for c in self.clients.values() {
-                let c = c.lock().await;
+            for c in clients() {
                 let mut settings = c.settings.lock().unwrap();
                 if settings.model != "fake"
                     && !models
@@ -432,7 +513,7 @@ impl Router {
                 {
                     settings.model = default.clone();
                 }
-                if c.runtime.is_some() {
+                if c.snapshot.lock().unwrap().session.is_some() {
                     settings.pending_model = true;
                 } else {
                     settings.model = self.configuration.default_model()?;
@@ -1066,15 +1147,26 @@ impl Router {
             _ => bail!("未知命令：{verb}"),
         }
     }
-    pub async fn close(&mut self) {
+    pub async fn close(&self) {
         let mut seen = HashSet::new();
-        for c in self.clients.values().chain(self.sessions.values()) {
+        let owners = {
+            let routes = self.routes.read().unwrap();
+            routes
+                .clients
+                .values()
+                .chain(routes.sessions.values())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for c in &owners {
+            c.cancel.lock().unwrap().cancel();
+        }
+        for c in &owners {
             let ptr = Arc::as_ptr(c) as usize;
             if !seen.insert(ptr) {
                 continue;
             }
-            let mut c = c.lock().await;
-            c.cancel.cancel();
+            let mut c = c.conversation.lock().await;
             if let Some(handle) = c.running.take() {
                 let _ = handle.await;
             }
@@ -1218,7 +1310,7 @@ pub async fn serve(store: Store) -> Result<()> {
             let _ = out.flush();
         }
     });
-    let router = Arc::new(tokio::sync::Mutex::new(Router::new(store, sink.clone())));
+    let router = Arc::new(Router::new(store, sink.clone()));
     let configuration = Configuration::default();
     let ids = Arc::new(Mutex::new(HashSet::<String>::new()));
     let semaphore = Arc::new(Semaphore::new(72));
@@ -1313,7 +1405,7 @@ pub async fn serve(store: Store) -> Result<()> {
             {
                 network(&method, &params, &configuration).await
             } else {
-                router.lock().await.handle(&method, &params).await
+                router.handle(&method, &params).await
             };
             let mut reply = json!({"id":id});
             match value {
@@ -1327,6 +1419,80 @@ pub async fn serve(store: Store) -> Result<()> {
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    router.lock().await.close().await;
+    router.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn one_locked_conversation_does_not_block_another() {
+        let router = Arc::new(Router::new(
+            Store::open(":memory:").unwrap(),
+            Arc::new(|_| {}),
+        ));
+        router
+            .handle("getState", &json!({"clientKey":"slow"}))
+            .await
+            .unwrap();
+        let owner = router.routes.read().unwrap().clients["slow"].clone();
+        let _guard = owner.conversation.lock().await;
+        let slow = {
+            let router = router.clone();
+            tokio::spawn(async move {
+                router
+                    .handle("getState", &json!({"clientKey":"slow"}))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            router.handle("getState", &json!({"clientKey":"other"})),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        slow.abort();
+    }
+
+    #[tokio::test]
+    async fn controls_do_not_wait_for_the_conversation_lock() {
+        let router = Router::new(Store::open(":memory:").unwrap(), Arc::new(|_| {}));
+        router.handle("getState", &json!({})).await.unwrap();
+        let owner = router
+            .routes
+            .read()
+            .unwrap()
+            .clients
+            .get("default")
+            .unwrap()
+            .clone();
+        let c = owner.conversation.lock().await;
+        let token = c.cancel.lock().unwrap().clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        c.approvals
+            .lock()
+            .unwrap()
+            .insert("approval".into(), ("write".into(), tx));
+        for (method, params) in [
+            ("cancelTurn", json!({})),
+            (
+                "resolveApproval",
+                json!({"approvalId":"approval","granted":true}),
+            ),
+        ] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_millis(100), router.handle(method, &params))
+                    .await
+                    .expect("control blocked by conversation lock")
+                    .unwrap(),
+                true
+            );
+        }
+        assert!(token.is_cancelled());
+        assert!(rx.await.unwrap());
+    }
 }
