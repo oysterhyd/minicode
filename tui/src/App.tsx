@@ -2,7 +2,7 @@ import { useApp, useStdout } from 'ink'
 import { Box, Text, type DOMElement } from 'ink'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LaunchOptions } from './args.js'
-import { protocolProblem, type BridgeApi } from './bridge.js'
+import { BridgeRequestTimeout, protocolProblem, type BridgeApi } from './bridge.js'
 import {
   applySuggestion,
   isSubmenu,
@@ -419,6 +419,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
     drainAllowedRef.current = false
     stateRevision.current += 1
     const started = Date.now()
+    const previousRun = feedRef.current.runId
     setOutputStart(agentRef.current.usage?.output_tokens || 0)
     setExpanded(new Set())
     updateFeed(current => ({
@@ -435,11 +436,24 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         workspace: workspaceRef.current,
         sessionId: sessionRef.current,
         model: agentRef.current.model,
+        asyncStart: true,
       })
       if (!activeRef.current) return
       updateFeed(current => ({ ...current, sessionId: result.sessionId, runId: result.runId, awaitingRun: false }))
     } catch (error) {
-      updateFeed(current => ({ ...current, busy: false, startedAt: null, error: cleanError(error) }))
+      if (error instanceof BridgeRequestTimeout) {
+        if (!feedRef.current.awaitingRun && feedRef.current.runId !== previousRun) return
+        try {
+          const state = await client.request<AgentState>('getState', { workspace: workspaceRef.current })
+          if (!activeRef.current || (!feedRef.current.awaitingRun && feedRef.current.runId !== previousRun)) return
+          if (state.running || (state.runId && state.runId !== previousRun)) {
+            updateAgent(state)
+            updateFeed(current => ({ ...current, sessionId: state.sessionId, runId: state.runId, awaitingRun: false, busy: Boolean(state.running) }))
+            return
+          }
+        } catch { addNotice('发送状态尚未确认，正在等待 Agent 状态', 'warning'); return }
+      }
+      updateFeed(current => ({ ...current, busy: false, awaitingRun: false, startedAt: null, error: cleanError(error) }))
       if (!draftRef.current) replaceDraft(trimmed)
     } finally {
       operationRef.current = false

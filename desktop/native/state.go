@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -38,6 +39,7 @@ type queuedPrompt struct {
 }
 
 type conversation struct {
+	sendGeneration                uint64
 	AwaitingRun                   bool
 	History                       *model.Detail
 	HistoryCount                  int
@@ -600,6 +602,10 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 		v.Queue = append(v.Queue, queuedPrompt{Text: text, Attachments: attachments})
 		return
 	}
+	v.sendGeneration++
+	generation := v.sendGeneration
+	previousRun := v.State.RunID
+	v.stateVersion++
 	v.Error = ""
 	v.Busy = true
 	v.AwaitingRun = true
@@ -614,8 +620,11 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 		SessionID string `json:"sessionId"`
 		RunID     string `json:"runId"`
 	}
-	d.request(v, "sendPrompt", map[string]any{"text": text, "model": v.State.Model, "attachments": attachments}, &result, func(err error) {
-		if err != nil {
+	d.request(v, "sendPrompt", map[string]any{"text": text, "model": v.State.Model, "attachments": attachments, "asyncStart": true}, &result, func(err error) {
+		if generation != v.sendGeneration {
+			return
+		}
+		rollback := func(err error) {
 			v.Busy = false
 			v.StartedAt = time.Time{}
 			v.removeThinking()
@@ -627,7 +636,41 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 			} else {
 				v.Queue = append([]queuedPrompt{{Text: text, Attachments: attachments}}, v.Queue...)
 			}
+			v.AwaitingRun = false
 			d.error(v, err)
+		}
+		if err != nil {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				rollback(err)
+				return
+			}
+			// A timeout does not revoke a request already accepted by the agent.
+			// A run_started/terminal may have settled it before this callback.
+			if !v.AwaitingRun && v.State.RunID != previousRun {
+				return
+			}
+			var state model.State
+			d.request(v, "getState", nil, &state, func(stateErr error) {
+				if generation != v.sendGeneration || (!v.AwaitingRun && v.State.RunID != previousRun) {
+					return
+				}
+				if stateErr != nil {
+					v.Error = "发送状态尚未确认：" + stateErr.Error()
+					return
+				}
+				if state.Running || (state.RunID != "" && state.RunID != previousRun) {
+					v.State = state
+					v.SessionID = state.SessionID
+					v.Busy = state.Running
+					v.AwaitingRun = false
+					if !state.Running {
+						v.removeThinking()
+						v.StartedAt = time.Time{}
+					}
+					return
+				}
+				rollback(err)
+			})
 			return
 		}
 		v.SessionID = result.SessionID

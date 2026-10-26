@@ -181,3 +181,13 @@
 - 核查：原 bridge::start 的终止事件只有 sessionId，Runtime::run 才生成 run_id；两端直接处理所有匹配会话的终止事件，均已用失败测试复现。
 - 修复：在 bridge 注册 run 时生成 runId，sendPrompt 响应、run_started、delta、工具/审批及终止事件携带同一可选字段。Hooks 捕获该次 runId，不随下一次快照变化；Runtime 复用 bridge 注册的身份，CLI 每次仍生成新身份。旧 run 的异常收尾只复位属于自己的快照。两端过滤过期 run 的事件及终止副作用，等待新发送身份期间忽略上一轮的终止事件。缺 runId 按旧协议处理，协议版本仍为 2，新增 runIdentity capability。
 - 测试：run-state.test.mjs 验证两轮响应/事件/快照身份一致且不重复；TUI feed 验证迟到终止与发送等待窗口；Desktop TestOldRunTerminalDoesNotFinishNewRun 先复现旧事件清空 Busy，再验证新事件结束和旧协议兼容。
+
+## D3：提前受理与发送超时对账
+
+- 核查：原 sendPrompt 等待 Runtime::new/扫描后才响应，Desktop 在 DeadlineExceeded 后直接删除气泡并 Busy=false；Rust 锁占用测试与 Desktop 超时测试均先失败。
+- 修复：新增可选 asyncStart 请求参数与 capability，两端显式启用，旧客户端保持同步错误约定。预检后先创建/选定会话、登记 runId/preparing 并返回，后台准备任务复用该身份与取消 token；getState 可在准备锁被占用时读取共享快照。准备异常统一发带 runId 的 run_error，EOF 等待准备与 run 收尾。两端请求超时先 getState 对账，接受/运行中保留气泡和 Busy，确认空闲且没有新 run 才回滚；状态查询也失败时保持待确认。发送回调和状态刷新使用代次拦截迟到响应。
+- 测试：accepted_prompt_and_state_do_not_wait_for_preparation_lock 验证持有准备锁时 100ms 内受理和查询；run-state.test.mjs 覆盖后台准备失败和下一次发送；Desktop 覆盖超时已接受/未接受两分支，另有可选真实 35 秒 Deadline 测试（MINICODE_SLOW_TESTS=1）。
+- 待确认决策：asyncStart 为显式可选，准备失败通过 run_error 而非同步 RPC error 告知；状态未知时维持忙碌并提示待确认，不自动重发。
+- 验证：完整 CI 命令通过；真实 35 秒测试已单独启用并通过（约 36.5 秒），TUI 同样覆盖超时后保留已接受发送。
+
+- 兼容性补测：提前受理的新会话继续继承首条消息前激活的技能；该测试先复现技能缺失，再修复后台准备的新会话标识。

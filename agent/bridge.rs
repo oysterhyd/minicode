@@ -37,6 +37,7 @@ pub const CAPABILITIES: &[&str] = &[
     "sessionPaging",
     "diagnosticEvents",
     "runIdentity",
+    "asyncStart",
 ];
 pub struct Conversation {
     pub settings: Arc<Mutex<Settings>>,
@@ -47,7 +48,9 @@ pub struct Conversation {
     pub cancel: Arc<Mutex<CancellationToken>>,
     pub client_key: String,
     pub running: Option<tokio::task::JoinHandle<()>>,
-    pub statistics: Statistics,
+    pub statistics: Arc<Mutex<Statistics>>,
+    preparing: bool,
+    preparing_new: bool,
     pub catalog: Option<Arc<tokio::sync::Mutex<Catalog>>>,
     pub workspace: Option<PathBuf>,
 }
@@ -62,13 +65,15 @@ impl Conversation {
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
             client_key: "default".into(),
             running: None,
-            statistics: Statistics::default(),
+            statistics: Arc::new(Mutex::new(Statistics::default())),
+            preparing: false,
+            preparing_new: false,
             catalog: None,
             workspace: None,
         })
     }
     fn busy(&self) -> bool {
-        self.snapshot.lock().unwrap().running
+        self.snapshot.lock().unwrap().running && !self.preparing
     }
     fn hooks(&self, sink: Sink) -> Hooks {
         Hooks {
@@ -89,19 +94,32 @@ impl Conversation {
             shared: Arc::new(Mutex::new(Ledger::default())),
         }
     }
-    fn state(&mut self, store: &Store) -> Result<Value> {
-        let settings = self.settings.lock().unwrap();
-        let snapshot = self.snapshot.lock().unwrap();
-        let stats = self.statistics.read(store, snapshot.session.as_deref())?;
-        let mut always = settings.always_allow.iter().cloned().collect::<Vec<_>>();
-        always.sort();
-        Ok(
-            json!({"protocolVersion":PROTOCOL_VERSION,"model":settings.model,"runId":snapshot.run_id,"phase":snapshot.phase,"running":snapshot.running,"activeModel":if snapshot.active_model.is_empty(){&settings.model}else{&snapshot.active_model},"pendingSettings":settings.pending_model||settings.registry_dirty,"effort":settings.effort,"permissionMode":settings.mode,"sessionId":snapshot.session,"taskPending":snapshot.pending,"rounds":snapshot.rounds,"contextTokens":snapshot.breakdown.as_object().map(|m|m.values().filter_map(Value::as_u64).sum::<u64>()).unwrap_or(0),"contextBreakdown":snapshot.breakdown,"contextWindow":snapshot.window,"usage":snapshot.usage,"statistics":stats,"budget":settings.budget,"acceptance":settings.acceptance.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"alwaysAllow":always}),
-        )
+    fn state(&self, store: &Store) -> Result<Value> {
+        snapshot_state(&self.settings, &self.snapshot, &self.statistics, store)
     }
+}
+fn snapshot_state(
+    settings: &Mutex<Settings>,
+    snapshot: &Mutex<Snapshot>,
+    statistics: &Mutex<Statistics>,
+    store: &Store,
+) -> Result<Value> {
+    let settings = settings.lock().unwrap();
+    let snapshot = snapshot.lock().unwrap();
+    let stats = statistics
+        .lock()
+        .unwrap()
+        .read(store, snapshot.session.as_deref())?;
+    let mut always = settings.always_allow.iter().cloned().collect::<Vec<_>>();
+    always.sort();
+    Ok(
+        json!({"protocolVersion":PROTOCOL_VERSION,"model":settings.model,"runId":snapshot.run_id,"phase":snapshot.phase,"running":snapshot.running,"activeModel":if snapshot.active_model.is_empty(){&settings.model}else{&snapshot.active_model},"pendingSettings":settings.pending_model||settings.registry_dirty,"effort":settings.effort,"permissionMode":settings.mode,"sessionId":snapshot.session,"taskPending":snapshot.pending,"rounds":snapshot.rounds,"contextTokens":snapshot.breakdown.as_object().map(|m|m.values().filter_map(Value::as_u64).sum::<u64>()).unwrap_or(0),"contextBreakdown":snapshot.breakdown,"contextWindow":snapshot.window,"usage":snapshot.usage,"statistics":stats,"budget":settings.budget,"acceptance":settings.acceptance.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"alwaysAllow":always}),
+    )
 }
 // Controls never acquire the async conversation lock.
 struct Owner {
+    preparation: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    statistics: Arc<Mutex<Statistics>>,
     conversation: tokio::sync::Mutex<Conversation>,
     settings: Arc<Mutex<Settings>>,
     snapshot: Arc<Mutex<Snapshot>>,
@@ -111,6 +129,8 @@ struct Owner {
 impl Owner {
     fn new(c: Conversation) -> Self {
         Self {
+            preparation: Mutex::new(None),
+            statistics: c.statistics.clone(),
             settings: c.settings.clone(),
             snapshot: c.snapshot.clone(),
             approvals: c.approvals.clone(),
@@ -125,11 +145,12 @@ struct Routes {
     sessions: HashMap<String, Arc<Owner>>,
     recent: VecDeque<String>,
 }
+#[derive(Clone)]
 pub struct Router {
     pub store: Store,
     pub configuration: Configuration,
-    routes: RwLock<Routes>,
-    configuration_write: tokio::sync::Mutex<()>,
+    routes: Arc<RwLock<Routes>>,
+    configuration_write: Arc<tokio::sync::Mutex<()>>,
     pub sink: Sink,
 }
 impl Router {
@@ -137,8 +158,8 @@ impl Router {
         Self {
             store,
             configuration: Configuration::default(),
-            routes: RwLock::new(Routes::default()),
-            configuration_write: tokio::sync::Mutex::new(()),
+            routes: Arc::new(RwLock::new(Routes::default())),
+            configuration_write: Arc::new(tokio::sync::Mutex::new(())),
             sink,
         }
     }
@@ -200,7 +221,7 @@ impl Router {
                 &settings,
             )
             .await?;
-            if session.is_none()
+            if (session.is_none() || c.preparing_new)
                 && c.workspace.as_deref() == Some(workspace)
                 && let Some(previous) = &c.catalog
             {
@@ -229,6 +250,9 @@ impl Router {
             }
             c.settings.lock().unwrap().model = model;
             c.settings.lock().unwrap().always_allow.clear();
+            if !c.preparing && c.snapshot.lock().unwrap().running {
+                bail!("当前任务仍在运行")
+            }
             let hooks = c.hooks(self.event_sink(&c.client_key));
             r.refresh_snapshot(&hooks).await?;
             c.catalog = Some(r.catalog.clone());
@@ -265,10 +289,21 @@ impl Router {
         }
         let runtime = c.runtime.clone().context("请先选择工作区")?;
         let session = runtime.lock().await.session.clone();
-        *c.cancel.lock().unwrap() = CancellationToken::new();
+        if !c.preparing {
+            *c.cancel.lock().unwrap() = CancellationToken::new();
+        }
         let sink = self.event_sink(&c.client_key);
         let returned_session = session.clone();
-        let run_id = util::id();
+        let run_id = if c.preparing {
+            c.snapshot
+                .lock()
+                .unwrap()
+                .run_id
+                .clone()
+                .context("missing accepted run")?
+        } else {
+            util::id()
+        };
         {
             let mut snapshot = c.snapshot.lock().unwrap();
             snapshot.running = true;
@@ -277,7 +312,9 @@ impl Router {
         }
         let hooks = c.hooks(sink);
         let sink = hooks.sink.clone();
-        sink(json!({"event":"run_started","sessionId":session}));
+        if !c.preparing {
+            sink(json!({"event":"run_started","sessionId":session}));
+        }
         let task_run_id = run_id.clone();
         let driver = tokio::runtime::Handle::current();
         c.running = Some(tokio::task::spawn_blocking(move || {
@@ -323,6 +360,100 @@ impl Router {
             })
         }));
         Ok(json!({"sessionId":returned_session,"runId":run_id}))
+    }
+    fn accept_prompt(&self, owner: Arc<Owner>, key: &str, params: &Value) -> Result<Value> {
+        let mut preparation = owner.preparation.lock().unwrap();
+        if owner.snapshot.lock().unwrap().running {
+            bail!("当前任务仍在运行")
+        }
+        let workspace = Self::workspace(params)?;
+        if !workspace.is_dir() {
+            bail!("workspace no longer exists")
+        }
+        let text = util::string(params, "text")?;
+        if text.trim().is_empty() && params["attachments"].as_array().is_none_or(Vec::is_empty) {
+            bail!("请输入任务内容")
+        }
+        let settings = owner.settings.lock().unwrap().clone();
+        let model = params["model"]
+            .as_str()
+            .filter(|m| !m.is_empty())
+            .unwrap_or(&settings.model)
+            .to_string();
+        let provider =
+            crate::provider::Provider::new(&model, &settings.effort, &self.configuration)?;
+        let selected = owner.snapshot.lock().unwrap().session.clone();
+        let requested = params["sessionId"].as_str().or(selected.as_deref());
+        let mut new_session = false;
+        let session = if let Some(id) = requested {
+            let summary = self.store.require(id)?;
+            if util::canonical(Path::new(util::string(&summary, "workspace")?))? == workspace {
+                id.to_string()
+            } else if params["sessionId"].is_string() {
+                bail!("会话不属于当前工作区")
+            } else {
+                new_session = true;
+                self.store
+                    .create(&workspace.to_string_lossy(), &provider.name, &model)?
+            }
+        } else {
+            new_session = true;
+            self.store
+                .create(&workspace.to_string_lossy(), &provider.name, &model)?
+        };
+        let run_id = util::id();
+        {
+            let mut snapshot = owner.snapshot.lock().unwrap();
+            if snapshot.running {
+                bail!("当前任务仍在运行")
+            }
+            *owner.cancel.lock().unwrap() = CancellationToken::new();
+            snapshot.running = true;
+            snapshot.phase = "preparing".into();
+            snapshot.run_id = Some(run_id.clone());
+            snapshot.session = Some(session.clone());
+        }
+        self.routes
+            .write()
+            .unwrap()
+            .sessions
+            .insert(session.clone(), owner.clone());
+        let sink = self.event_sink(key);
+        sink(json!({"event":"run_started","sessionId":session,"runId":run_id,"phase":"preparing"}));
+        let mut params = params.clone();
+        params["sessionId"] = json!(session);
+        params["model"] = json!(model);
+        params["workspace"] = json!(workspace);
+        let router = self.clone();
+        let task_owner = owner.clone();
+        let task_run = run_id.clone();
+        let task_session = session.clone();
+        let key = key.to_string();
+        let driver = tokio::runtime::Handle::current();
+        *preparation = Some(tokio::task::spawn_blocking(move || {
+            driver.block_on(async move {
+            let mut c = task_owner.conversation.lock().await;
+            c.preparing = true;
+            c.preparing_new = new_session;
+            c.client_key = key;
+            let prepared = std::panic::AssertUnwindSafe(router.dispatch(&mut c,"sendPrompt",&params)).catch_unwind().await;
+            c.preparing = false;
+            c.preparing_new = false;
+            let error = match prepared {
+                Ok(Ok(_)) => return,
+                Ok(Err(e)) => e.to_string(),
+                Err(panic) => format!("internal panic: {}",util::panic_message(&*panic)),
+            };
+            let mut snapshot = c.snapshot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if snapshot.run_id.as_deref() == Some(&task_run) {
+                snapshot.running = false;
+                snapshot.phase = "paused".into();
+            }
+            drop(snapshot);
+            sink(json!({"event":"run_error","sessionId":task_session,"runId":task_run,"error":error}));
+        })
+        }));
+        Ok(json!({"sessionId":session,"runId":run_id}))
     }
     pub async fn handle(&self, method: &str, params: &Value) -> Result<Value> {
         if !params.is_object() {
@@ -429,6 +560,24 @@ impl Router {
             }
             return Ok(json!(false));
         }
+        if method == "getState"
+            && let Some(owner) = &owner
+        {
+            let snapshot = owner.snapshot.lock().unwrap();
+            let running = snapshot.running;
+            if running && session.is_some() && snapshot.session.as_deref() != session {
+                bail!("当前任务仍在运行，不能替换会话或工作区")
+            }
+            drop(snapshot);
+            if running {
+                return snapshot_state(
+                    &owner.settings,
+                    &owner.snapshot,
+                    &owner.statistics,
+                    &self.store,
+                );
+            }
+        }
         let candidate = if owner.is_none() {
             let c = Conversation::new(&self.configuration)?;
             let source = params["sourceClientKey"]
@@ -459,6 +608,9 @@ impl Router {
             }
             owner
         };
+        if method == "sendPrompt" && params["asyncStart"] == true {
+            return self.accept_prompt(owner, &key, params);
+        }
         let mut c = owner.conversation.lock().await;
         if !c.busy() {
             c.client_key = key;
@@ -1241,6 +1393,10 @@ impl Router {
             if !seen.insert(ptr) {
                 continue;
             }
+            let preparation = c.preparation.lock().unwrap().take();
+            if let Some(handle) = preparation {
+                let _ = handle.await;
+            }
             let mut c = c.conversation.lock().await;
             if let Some(handle) = c.running.take() {
                 let _ = handle.await;
@@ -1537,6 +1693,39 @@ pub async fn serve(store: Store) -> Result<()> {
 #[cfg(test)]
 mod concurrency_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn accepted_prompt_and_state_do_not_wait_for_preparation_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let mut router = Router::new(Store::open(":memory:").unwrap(), Arc::new(|_| {}));
+        router.configuration = Configuration {
+            path: root.path().join("config.json"),
+        };
+        router.handle("getState", &json!({})).await.unwrap();
+        let owner = router.routes.read().unwrap().clients["default"].clone();
+        let lock = owner.conversation.lock().await;
+        let request =
+            json!({"asyncStart":true,"workspace":root.path(),"model":"fake","text":"accepted"});
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            router.handle("sendPrompt", &request),
+        )
+        .await
+        .expect("acceptance waited for preparation")
+        .unwrap();
+        let state = tokio::time::timeout(
+            Duration::from_millis(100),
+            router.handle("getState", &json!({})),
+        )
+        .await
+        .expect("state waited for preparation")
+        .unwrap();
+        assert_eq!(state["running"], true);
+        assert_eq!(state["runId"], result["runId"]);
+        assert_eq!(state["sessionId"], result["sessionId"]);
+        drop(lock);
+        router.close().await;
+    }
 
     #[tokio::test]
     async fn ensure_checks_metadata_without_reading_message_bodies() {

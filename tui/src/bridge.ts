@@ -6,6 +6,8 @@ import os from 'node:os'
 import path from 'node:path'
 import type { DesktopEvent } from './types.js'
 
+export class BridgeRequestTimeout extends Error {}
+
 export type BridgeApi = {
   request: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
   onEvent: (listener: (event: DesktopEvent) => void) => () => void
@@ -74,7 +76,7 @@ export class BridgeClient implements BridgeApi {
         if (Buffer.byteLength(line, 'utf8') > 4_000_000) throw new Error('request exceeds the size limit')
         const timer = setTimeout(() => {
           this.pending.delete(id)
-          reject(new Error(`Agent bridge 请求超时：${method}。请检查会话状态后重试。`))
+          reject(new BridgeRequestTimeout(`Agent bridge 请求超时：${method}。请检查会话状态后重试。`))
         }, this.requestTimeoutMs)
         this.pending.set(id, { resolve: value => resolve(value as T), reject, timer })
         this.child.stdin!.write(line, error => {
