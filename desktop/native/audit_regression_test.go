@@ -64,8 +64,9 @@ func TestStopIntentAndFatalBridgeErrorsPreserveQueuedInput(t *testing.T) {
 	v.Busy = true
 	item := &model.FeedItem{ID: "tool", Kind: "tool", Pending: true}
 	v.append(item)
+	previousError := v.Error
 	d.handleEvent(bridge.Event{Event: "bridge_error", Fatal: true, Error: "Agent bridge output closed"})
-	if v.Busy || item.Pending || !item.Interrupted || !strings.Contains(v.Error, "output closed") {
+	if v.Busy || item.Pending || !item.Interrupted || v.Error != previousError || !strings.Contains(d.bridgeError, "output closed") {
 		t.Fatal("fatal bridge error left active controls")
 	}
 	if len(v.Queue) != 1 {

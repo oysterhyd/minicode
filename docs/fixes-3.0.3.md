@@ -258,3 +258,28 @@ TU1、TU2 已有本地失败复现，分别保存在 output/1B-TU1.test.mjs、ou
 - 测试：resume_state_test.go 覆盖刷新后成功打开、刷新报错、刷新后仍不存在，以及延迟刷新不能撤销后续 /new 导航。
 - 取舍：只在缓存缺失时补查，保持已缓存会话的原有打开延迟；没有新依赖或协议变化。
 - 验证：D2 与 D4 的最终代码共同通过全部 CI 命令（1B-D2-retry-*）；分别提交，协议 87 通过、1 个既有慢测默认跳过，TUI 114 通过，Desktop 全量/vet/vendor 与两组评测均通过。TU2 补充验证等待期间新草稿与失败内容共同保留，未引入输入丢失。
+
+## D5：全局 bridge 错误只提示一次
+
+- 核查：全局 bridge_error 遍历全部视图写入 Error，按 Error/exited/invalid 等关键字判断终止；三个视图的失败测试复现三次通知、两条 toast，非致命与会话错误也误伤其他视图。
+- 修复：全局错误保存在 desktop 的连接状态，重复报告去重；fatal 明确标记连接失败，只收尾运行中或仍有实时输出的视图，保留队列与原会话错误，不逐视图通知。当前页面显示共享连接错误，后续发送保留草稿；拒绝迟到事件与发送回调，避免假恢复和重复回滚。会话范围内的错误正常路由，仅 fatal 终止对应视图，不再按文本关键词猜测。
+- 已修复部分证据：internal/bridge/client.go 的 stderr 持续 io.Copy 到 diagnostics，普通 stderr 不再生成协议错误（批次 1A D-ERR）；本项保持该日志通道，没有重复改动。
+- 测试：bridge_errors_test.go 先复现全局重复通知、非致命误终止、会话错误越界、迟到发送回调四种问题；修复后覆盖通知去重、共享状态可见、空闲视图不受影响、排空活动控件、队列/原错误保留、失败连接保留草稿与迟到事件过滤。原收尾/推理回归同步改为断言全局状态及实际客户端发送的 fatal 标记。
+- 取舍：fatal 后阻止继续发送，连接状态保持到应用重新建立 bridge；没有新增自动重启或自动重发行为，没有新增依赖。
+
+## 批次 1B 完成记录（恢复执行后）
+
+B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自独立提交；前面的暂停点仅保留为执行记录。没有跳过整个条目或留下本批未实现功能。D5 的 stderr 日志部分沿用批次 1A 已有实现（desktop/native/internal/bridge/client.go:86、:250），普通日志不作为错误事件。
+
+主要改动文件：
+- agent/bridge.rs、agent/runtime.rs：run 身份、提前受理、超限请求 ID、设置保留、订阅与审批身份。
+- tui/src/App.tsx、bridge.ts、feed.ts、types.ts：run/会话事件过滤、超时对账、发送回滚与恢复运行状态。
+- desktop/native/state.go、composer.go、internal/bridge/client.go、internal/model/types.go：状态、会话恢复、审批、完整 ID、请求预检和全局连接错误。
+- tests/agent/run-state.test.mjs、request-size.test.mjs、session-cache.test.mjs、subscriptions.test.mjs、approval-identity.test.mjs。
+- tui/tests/bridge.test.ts、feed.test.ts、run-state.test.tsx。
+- desktop/native/run_state_test.go、send_timeout_test.go、approval_state_test.go、completion_ids_test.go、resume_state_test.go、bridge_errors_test.go、audit_regression_test.go、ui_test.go、internal/bridge/large_stream_test.go。
+
+待确认决策保持保守默认：asyncStart 可选；未知发送结果保持待确认而不自动重发；授权仅在当前进程保留；运行会话支持多订阅者；连接致命错误不自动重启。显式 initialize 握手成功可以清除失败状态，旧握手迟到不能抹掉新的失败。失败发送期间用户继续输入时，失败内容与新草稿一起保留。
+
+批次外风险仍保留：Windows 后台进程收尾/完成通知时序与 SQLite 启动锁竞争偶发导致协议测试失败，本批没有扩展修改这些路径。失败日志与最终通过日志均保存在 output/checks。建议下一批先给这些已知不稳定测试做独立定位，再增加多视图切换、进程重启和长时间会话压力场景。
+- 最终验证：1B-D5-final-* 的全部 Rust/协议/生成器/两组评测/TUI 检查通过；协议 87 通过、1 个既有 200 秒慢测默认跳过，TUI 114 通过，60 次任务评测与 9 个场景结果通过。恢复边界补改后，Go 全量测试、vet、vendor UI 检查再次通过（1B-D5-recovery-go-*）。先前真实 35 秒发送超时测试已启用并通过。

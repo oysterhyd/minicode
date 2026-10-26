@@ -249,7 +249,7 @@ func TestReasoningStreamDisplayCompletionCancellationAndIsolation(t *testing.T) 
 	if len(v.Items) != count || other.reasoning == nil || other.reasoning.Text != "另一会话。" {
 		t.Fatal("reasoning crossed conversations")
 	}
-	r.d.handleEvent(bridge.Event{Event: "bridge_error", Error: "Agent bridge exited"})
+	r.d.handleEvent(bridge.Event{Event: "bridge_error", Fatal: true, Error: "Agent bridge exited"})
 	if other.reasoning != nil || other.Items[0].Pending || !other.Items[0].Interrupted {
 		t.Fatal("bridge exit left reasoning pending")
 	}

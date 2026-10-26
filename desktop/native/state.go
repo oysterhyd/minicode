@@ -87,6 +87,8 @@ type artifact struct {
 }
 
 type desktop struct {
+	bridgeFailed                           bool
+	bridgeError                            string
 	navigationVersion                      uint64
 	views                                  map[string]*conversation
 	active                                 string
@@ -225,7 +227,7 @@ func (d *desktop) request(v *conversation, method string, extra map[string]any, 
 }
 
 func (d *desktop) error(v *conversation, err error) {
-	if err != nil {
+	if err != nil && !d.bridgeFailed {
 		v.Error = err.Error()
 	}
 }
@@ -256,6 +258,7 @@ func protocolProblem(version, minClient int) (string, string) {
 
 func (d *desktop) initialize() {
 	v := d.current()
+	wasFailed := d.bridgeFailed
 	var result struct {
 		ProtocolVersion   int             `json:"protocolVersion"`
 		MinClientProtocol int             `json:"minClientProtocol"`
@@ -269,6 +272,10 @@ func (d *desktop) initialize() {
 			d.error(v, err)
 			return
 		}
+		if d.bridgeFailed && !wasFailed {
+			return
+		}
+		d.bridgeFailed, d.bridgeError = false, ""
 		version := result.ProtocolVersion
 		if version == 0 {
 			version = result.State.ProtocolVersion
@@ -624,6 +631,10 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 		d.slash(text, v)
 		return
 	}
+	if d.bridgeFailed {
+		v.Draft, v.Attachments = text, attachments
+		return
+	}
 	if v.Workspace == "" {
 		v.Error = "请先选择本地工作区"
 		v.Draft, v.Attachments = text, attachments
@@ -834,6 +845,12 @@ func (d *desktop) slash(text string, v *conversation) {
 		v.append(&model.FeedItem{ID: fmt.Sprint("help-", d.next.Add(1)), Kind: "notice", Text: text.String()})
 		return
 	}
+	if d.bridgeFailed {
+		if v.Draft == "" {
+			v.Draft = text
+		}
+		return
+	}
 	var result struct {
 		Action    string       `json:"action"`
 		Message   string       `json:"message"`
@@ -922,14 +939,27 @@ func (d *desktop) flushEvents() {
 }
 
 func (d *desktop) handleEvent(event bridge.Event) {
-	if event.Event == "bridge_error" {
-		if !event.Fatal && !strings.Contains(event.Error, "Error") && !strings.Contains(event.Error, "exited") && !strings.Contains(event.Error, "invalid") && !strings.Contains(event.Error, "Traceback") {
-			return
+	if d.bridgeFailed {
+		return
+	}
+	if event.Event == "bridge_error" && event.ClientKey == "" && event.SessionID == "" {
+		if event.Error == "" {
+			event.Error = "Agent bridge error"
 		}
-		for _, v := range d.views {
-			v.Error = event.Error
-			if event.Fatal || strings.Contains(event.Error, "exited") || strings.Contains(event.Error, "invalid") {
-				d.finish(v, bridge.Event{Event: "run_error", Error: event.Error, Fatal: true})
+		if event.Error != d.bridgeError || event.Fatal {
+			d.toast("Agent bridge", event.Error, "error")
+		}
+		d.bridgeError = event.Error
+		if event.Fatal {
+			d.bridgeFailed = true
+			if d.notify != nil && d.preferences.Notifications {
+				d.notify("Agent bridge", event.Error, "")
+			}
+			for _, v := range d.views {
+				if v.Busy || v.AwaitingRun || v.State.Running || (v.stream != nil && v.stream.Pending) || (v.reasoning != nil && v.reasoning.Pending) {
+					v.sendGeneration++
+					d.finish(v, bridge.Event{Event: "bridge_error", Fatal: true})
+				}
 			}
 		}
 		return
@@ -974,6 +1004,13 @@ func (d *desktop) handleEvent(event bridge.Event) {
 		}
 	}
 	switch event.Event {
+	case "bridge_error":
+		if event.Fatal {
+			event.Event = "run_error"
+			d.finish(v, event)
+		} else {
+			d.error(v, errors.New(event.Error))
+		}
 	case "run_started":
 		v.State.RunID = event.RunID
 		v.AwaitingRun = false
@@ -1201,7 +1238,7 @@ func (d *desktop) finish(v *conversation, event bridge.Event) {
 	var result model.RunResult
 	_ = json.Unmarshal(event.Result, &result)
 	if v.reasoning != nil && v.reasoning.Pending {
-		v.reasoning.Interrupted = event.Event == "run_error" || result.ExitReason == "cancelled" || result.ExitReason == "provider_error"
+		v.reasoning.Interrupted = event.Event == "run_error" || event.Event == "bridge_error" || result.ExitReason == "cancelled" || result.ExitReason == "provider_error"
 	}
 	v.finishStream()
 	v.removeThinking()
@@ -1254,7 +1291,9 @@ func (d *desktop) finish(v *conversation, event bridge.Event) {
 		d.refresh(v, true)
 		d.refreshSessions(v)
 	}
-	d.signal(v, "任务已结束", v.title(d.sessions))
+	if event.Event != "bridge_error" {
+		d.signal(v, "任务已结束", v.title(d.sessions))
+	}
 	if ok && !cancelled && len(v.Queue) > 0 {
 		next := v.Queue[0]
 		v.Queue = v.Queue[1:]

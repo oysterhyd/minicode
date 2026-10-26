@@ -317,11 +317,15 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			}
 			return []float32{0, 32, 10, 32}
 		}()...).Gap(8).Children(func() {
-		if v.Error != "" {
+		notice := v.Error
+		if d.bridgeFailed {
+			notice = d.bridgeError
+		}
+		if notice != "" {
 			ui.Row(c).Padding(9, 12).Radius(14).Border(1, p.Danger.Alpha(0.25)).Background(p.DangerSoft).Gap(9).Transition(enterMotion).Children(func() {
 				icon(c, "CircleAlert", 15, p.Danger)
-				ui.Text(c, localizeNotice(v.Error)).Grow(1).FontSize(p.font(12.04)).MaxHeight(100).Selectable()
-				if iconButton(c, p, "X", tr("关闭提示")).Size(22, 22).Clicked() {
+				ui.Text(c, localizeNotice(notice)).Grow(1).FontSize(p.font(12.04)).MaxHeight(100).Selectable()
+				if !d.bridgeFailed && iconButton(c, p, "X", tr("关闭提示")).Size(22, 22).Clicked() {
 					v.Error = ""
 				}
 			})
