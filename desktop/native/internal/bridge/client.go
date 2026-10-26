@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,16 +36,17 @@ type reply struct {
 }
 
 type Client struct {
-	cmd     *exec.Cmd
-	input   io.WriteCloser
-	writer  sync.Mutex
-	mu      sync.Mutex
-	pending map[uint64]chan reply
-	next    atomic.Uint64
-	closed  chan struct{}
-	done    chan struct{}
-	err     error
-	onEvent func(Event)
+	cmd         *exec.Cmd
+	input       io.WriteCloser
+	writer      sync.Mutex
+	mu          sync.Mutex
+	pending     map[uint64]chan reply
+	next        atomic.Uint64
+	closed      chan struct{}
+	done        chan struct{}
+	err         error
+	onEvent     func(Event)
+	diagnostics io.Writer
 }
 
 func Start(cmd *exec.Cmd, onEvent func(Event)) (*Client, error) {
@@ -60,7 +64,15 @@ func Start(cmd *exec.Cmd, onEvent func(Event)) (*Client, error) {
 	}
 	c := &Client{cmd: cmd, input: input, pending: make(map[uint64]chan reply),
 		closed: make(chan struct{}), done: make(chan struct{}), onEvent: onEvent}
+	logFile := diagnosticLog(cmd)
+	c.diagnostics = io.Discard
+	if logFile != nil {
+		c.diagnostics = logFile
+	}
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		return nil, err
 	}
 	outputDone := make(chan struct{})
@@ -68,16 +80,17 @@ func Start(cmd *exec.Cmd, onEvent func(Event)) (*Client, error) {
 	go func() { defer close(outputDone); c.read(output) }()
 	go func() {
 		defer close(stderrDone)
-		scanner := bufio.NewScanner(stderr)
-		scanner.Buffer(make([]byte, 4096), 1<<20)
-		for scanner.Scan() {
-			c.emit(Event{Event: "bridge_error", Error: scanner.Text()})
-		}
+		// Copy chunks, not lines: long diagnostics must not stop draining
+		// stderr and leave the agent blocked on a full pipe.
+		_, _ = io.Copy(c.diagnostics, stderr)
 	}()
 	go func() {
 		<-outputDone
 		<-stderrDone
 		err := cmd.Wait()
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		if err == nil {
 			err = errors.New("Agent bridge exited")
 		}
@@ -115,6 +128,10 @@ func (c *Client) read(reader io.Reader) {
 			c.mu.Unlock()
 			if waiter != nil {
 				waiter <- reply{ID: message.ID, Result: message.Result, Error: message.Error}
+			}
+		} else if message.Event.Event == "log" {
+			if c.diagnostics != nil {
+				_, _ = fmt.Fprintln(c.diagnostics, "[log]", message.Text)
 			}
 		} else {
 			c.emit(message.Event)
@@ -202,4 +219,38 @@ func (c *Client) Close() error {
 		<-c.done
 	}
 	return err
+}
+
+// Resolve against the child environment so profiles and packaged launches keep
+// diagnostics with the agent's own data. Log failures never become UI errors.
+func diagnosticLog(cmd *exec.Cmd) *os.File {
+	env := func(name string) string {
+		var value string
+		for _, entry := range cmd.Environ() {
+			key, v, _ := strings.Cut(entry, "=")
+			if strings.EqualFold(key, name) {
+				value = v
+			}
+		}
+		return value
+	}
+	path := env("MINICODE_BRIDGE_LOG")
+	if path == "" {
+		home := env("HOME")
+		if home == "" {
+			home = env("USERPROFILE")
+		}
+		if home == "" {
+			home, _ = os.UserHomeDir()
+		}
+		if home == "" {
+			return nil
+		}
+		path = filepath.Join(home, ".minicode", "logs", "agent-stderr.log")
+	}
+	if os.MkdirAll(filepath.Dir(path), 0700) != nil {
+		return nil
+	}
+	file, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	return file
 }

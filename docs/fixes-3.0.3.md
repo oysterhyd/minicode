@@ -118,3 +118,58 @@
 - 问题与根因：每个 stderr chunk 都被包装成 bridge_error，包含 Error 的普通日志会变成界面错误。
 - 修复：stderr 只追加到 `~/.minicode/logs/agent-stderr.log`，可通过 MINICODE_BRIDGE_LOG 覆盖；关闭连接时排空日志。新增可选协议事件 `log` / `warning`（text 为字符串），capability 为 diagnosticEvents，协议版本仍为 2。log 写文件，warning 显示警告 notice，不改变 running 或 error；协议损坏、进程退出与 run_error 仍报错。无法写日志时仍排空 stderr，不中断 bridge。
 - 测试：TUI bridge 子进程同时输出含 Error 和中文的普通 stderr、协议 log/warning，再返回响应；修复前出现 bridge_error，修复后只有 warning 进入界面且日志文件保存完整文本。feed 测试验证 warning 不结束正在运行的任务，log 不改变会话状态。
+
+## D-ERR：Desktop stderr 只记录日志
+
+- 问题与根因：每行 stderr 变成 bridge_error；stderr 的 Scanner 还有 1MiB 行长限制，超长日志会停止排空管道，阻塞 agent。
+- 修复：io.Copy 持续把 stderr chunk 写入与子进程 profile 对应的日志（同样支持 MINICODE_BRIDGE_LOG），进程结束后关闭文件；stdout 的 log 也写日志，warning 作为非致命 notice。日志不可写时用 io.Discard 持续排空。诊断不再猜测 Error / Traceback 等字样来决定是否报错。
+- 测试：`TestStderrIsDrainedToLogWithoutErrorEvents` 子进程先输出普通日志和一条 2MiB 日志，再发 log/warning 和响应；旧代码超时，修复后日志完整、响应正常、没有诊断错误事件。`TestProtocolWarningIsNonfatal` 验证 Desktop warning 保留 busy 且不填 error。
+
+## 批次 1A 的待确认决策与边界
+
+- 分页默认每类 100 条、2MB 原始正文预算（limit 可调小）；保留超大单条完整内容。旧客户端仍可读最近历史，新客户端使用游标访问更早历史。硬性限制单条内容需要内容级分块，未纳入本批。
+- 两端延迟选择 Runtime 是显式可选参数，选择后完整上下文 token 估算延迟到执行请求；不改变旧 selectSession 的行为。
+- log 与 warning 是可选协议事件；warning 只提示，运行错误仍通过 run_error / bridge_error。日志路径可配置，日志轮转暂未加入。
+- 本批未扩展处理旧文档中已记录的 Windows 后台进程树偶发退出问题。多个完整检查尝试中 lifecycle/runtime 的后台进程用例出现过超时；最终重跑通过，见下方验证记录。另遇到过并发启动桥接进程时 SQLite WAL 初始化 database is locked，属于既有启动路径，未修改。
+- 已有的工具状态边界留给下一批：恢复运行中会话时，缺少结果的历史工具被标为 interrupted，后续 tool_call_result 更新未清除该标记（TUI types/feed 与 Desktop model/feed、state 中的现有行为）。
+- 建议下一批优先处理 run 生命周期/客户端状态竞态，以及并发压缩使历史游标失效时的刷新策略；随后跟进 Windows 进程树绑定和 stdout 背压。
+
+## 批次 1A 最终验证（Windows / PowerShell 7）
+
+- cargo fmt --check、clippy --locked --all-targets -- -D warnings、test --locked（67 个库测试）、build --locked 均通过。
+- MINICODE_AGENT 指向 target/debug/minicode.exe：node --test tests/agent/*.test.mjs 最终 80 通过、1 个 200 秒慢测按 CI 默认跳过。并发 Catalog 扫描时 cancel 确认 0.8ms；大会话分页测试通过。
+- generate-tasks --verify、generate-trace 与生成文件 git diff 检查通过。b0/b1/b2、concurrency=3 的两组离线评测通过 verify-results：60 次任务运行、9 次场景运行符合预期。
+- npm ci、TUI build、MINICODE_TUI_BRIDGE_TEST=1 npm test 全部通过（104 个测试）。
+- Desktop go test -count=1 ./...、go vet ./...、go test -count=1 ./vendor/github.com/egoist/mygo/ui 全部通过；vendor 包当前无测试文件。
+- 本地日志保存在 output/checks/：batch-1A-verified-*（Rust）、batch-1A-protocol-complete.log、batch-1A-rest-*（评测）、batch-1A-clients-*（TUI / Go）。保留了失败复现和偶发失败日志，没有修改或跳过这些既有失败用例。
+- 没有新增依赖，没有修改生成的评测任务/trace，没有升级发布版本。
+
+## 批次 1A 修改文件
+
+- `agent/bridge.rs`
+- `agent/main.rs`
+- `agent/runtime.rs`
+- `agent/store.rs`
+- `agent/tests.rs`
+- `desktop/native/feed.go`
+- `desktop/native/history_test.go`
+- `desktop/native/internal/bridge/client.go`
+- `desktop/native/internal/bridge/large_stream_test.go`
+- `desktop/native/internal/bridge/stderr_test.go`
+- `desktop/native/internal/model/feed.go`
+- `desktop/native/internal/model/types.go`
+- `desktop/native/localization.go`
+- `desktop/native/state.go`
+- `desktop/native/stderr_ui_test.go`
+- `docs/architecture.md`
+- `docs/fixes-3.0.3.md`
+- `tests/agent/audit.test.mjs`
+- `tests/agent/concurrency.test.mjs`
+- `tests/agent/history.test.mjs`
+- `tui/src/App.tsx`
+- `tui/src/bridge.ts`
+- `tui/src/feed.ts`
+- `tui/src/types.ts`
+- `tui/tests/bridge.test.ts`
+- `tui/tests/feed.test.ts`
+- `tui/tests/history.test.tsx`

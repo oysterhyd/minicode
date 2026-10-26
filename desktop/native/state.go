@@ -848,6 +848,9 @@ func (d *desktop) handleEvent(event bridge.Event) {
 		return
 	}
 	v := d.views[event.ClientKey]
+	if event.Event == "warning" && event.ClientKey == "" && event.SessionID == "" {
+		v = d.current()
+	}
 	if event.SessionID != "" && (v == nil || v.SessionID == "") {
 		for _, candidate := range d.views {
 			if candidate.SessionID == event.SessionID {
@@ -872,6 +875,8 @@ func (d *desktop) handleEvent(event bridge.Event) {
 		v.SessionID = event.SessionID
 	}
 	switch event.Event {
+	case "warning":
+		v.append(&model.FeedItem{ID: fmt.Sprint("warning-", d.next.Add(1)), Kind: "notice", Tone: "warning", Text: event.Text})
 	case "reasoning_delta":
 		if event.Text == "" {
 			return
