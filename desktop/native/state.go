@@ -87,6 +87,7 @@ type artifact struct {
 }
 
 type desktop struct {
+	navigationVersion                      uint64
 	views                                  map[string]*conversation
 	active                                 string
 	sessions                               []model.Session
@@ -394,6 +395,7 @@ func (d *desktop) activate(key string) {
 	if d.views[key] == nil {
 		return
 	}
+	d.navigationVersion++
 	d.active = key
 	d.views[key].Unread = false
 	d.preview = nil
@@ -427,6 +429,39 @@ func (d *desktop) newSession(root string) {
 		v.Loaded = true
 		d.rememberWorkspace(root)
 		d.refresh(v, true)
+	})
+}
+
+func (d *desktop) resumeSession(v *conversation, id string, navigation uint64) {
+	open := func(sessions []model.Session) bool {
+		for _, session := range sessions {
+			if session.ID == id {
+				d.openSession(session)
+				return true
+			}
+		}
+		return false
+	}
+	if open(d.sessions) {
+		return
+	}
+	d.sessionVersion++
+	version := d.sessionVersion
+	var sessions []model.Session
+	d.request(v, "listSessions", nil, &sessions, func(err error) {
+		if navigation != d.navigationVersion || d.active != v.Key {
+			return
+		}
+		if err != nil {
+			d.error(v, err)
+			return
+		}
+		if version == d.sessionVersion {
+			d.sessions = sessions
+		}
+		if !open(sessions) {
+			d.error(v, fmt.Errorf("无法找到会话：%s", id))
+		}
 	})
 }
 
@@ -806,6 +841,10 @@ func (d *desktop) slash(text string, v *conversation) {
 		State     *model.State `json:"state"`
 	}
 	continuing := command[0] == "/continue" && !v.Busy
+	if command[0] == "/resume" {
+		d.navigationVersion++
+	}
+	navigation := d.navigationVersion
 	if continuing {
 		v.AwaitingRun = true
 		v.Busy = true
@@ -846,11 +885,8 @@ func (d *desktop) slash(text string, v *conversation) {
 				mygo.App.Quit()
 			}
 		case "resume":
-			for _, session := range d.sessions {
-				if session.ID == result.SessionID {
-					d.openSession(session)
-					break
-				}
+			if navigation == d.navigationVersion && d.active == v.Key {
+				d.resumeSession(v, result.SessionID, navigation)
 			}
 		}
 	})
