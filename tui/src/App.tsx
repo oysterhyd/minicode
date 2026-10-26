@@ -419,6 +419,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
     drainAllowedRef.current = false
     stateRevision.current += 1
     const started = Date.now()
+    const userId = `user-${started}-${++noticeRef.current}`
     const previousRun = feedRef.current.runId
     setOutputStart(agentRef.current.usage?.output_tokens || 0)
     setExpanded(new Set())
@@ -428,7 +429,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
       busy: true,
       awaitingRun: true,
       startedAt: started,
-      items: [...current.items, { id: `user-${started}`, kind: 'user', text: trimmed, startedAt: started }],
+      items: [...current.items, { id: userId, kind: 'user', text: trimmed, startedAt: started }],
     }))
     try {
       const result = await client.request<{ sessionId: string; runId?: string }>('sendPrompt', {
@@ -453,8 +454,8 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
           }
         } catch { addNotice('发送状态尚未确认，正在等待 Agent 状态', 'warning'); return }
       }
-      updateFeed(current => ({ ...current, busy: false, awaitingRun: false, startedAt: null, error: cleanError(error) }))
-      if (!draftRef.current) replaceDraft(trimmed)
+      updateFeed(current => ({ ...current, items: current.items.filter(item => item.id !== userId), busy: false, awaitingRun: false, startedAt: null, error: cleanError(error) }))
+      replaceDraft(draftRef.current ? `${trimmed}\n${draftRef.current}` : trimmed)
     } finally {
       operationRef.current = false
       if (cancelPendingRef.current && busyRef.current && activeRef.current) {

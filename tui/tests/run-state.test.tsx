@@ -49,3 +49,28 @@ test('TU1: /new discards late old-session events and sends without its old sessi
  }finally{unmount()}
 })
 
+test('TU2: a rejected send retains only the draft and retry creates one user bubble',async()=>{
+ const client=new FakeBridge();client.handlers.set('sendPrompt',()=>{throw Error('rejected')})
+ const {stdin,lastFrame,unmount}=render(React.createElement(App,{client,options:{workspace:'D:/demo',provider:'fake'}}))
+ try{
+  await delay(160);stdin.write('retry this prompt');await delay(40);stdin.write('\r');await delay(120)
+  assert.equal((lastFrame()||'').split('retry this prompt').length-1,1,'both draft and user bubble were retained')
+  client.handlers.set('sendPrompt',()=>({sessionId:'retry'}));stdin.write('\r');await delay(120)
+  assert.equal((lastFrame()||'').split('retry this prompt').length-1,1,'retry duplicated user bubbles')
+ }finally{unmount()}
+})
+
+test('TU2: rejection preserves a draft typed while the request was pending',async()=>{
+ const client=new FakeBridge();let rejectSend!:(error:Error)=>void
+ client.handlers.set('sendPrompt',()=>new Promise((_,reject)=>{rejectSend=reject}))
+ const {stdin,lastFrame,unmount}=render(React.createElement(App,{client,options:{workspace:'D:/demo',provider:'fake'}}))
+ try{
+  await delay(160);stdin.write('failed prompt');await delay(40);stdin.write('\r');await delay(100)
+  stdin.write('new draft');await delay(40);rejectSend(Error('rejected'));await delay(100)
+  assert.match(lastFrame()||'',/failed prompt/)
+  assert.match(lastFrame()||'',/new draft/)
+  client.handlers.set('sendPrompt',()=>({sessionId:'retry'}));stdin.write('\r');await delay(100)
+  assert.equal(client.requests.filter(r=>r.method==='sendPrompt')[1].params.text,'failed prompt\nnew draft')
+ }finally{unmount()}
+})
+
