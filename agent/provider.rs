@@ -35,6 +35,8 @@ pub enum ProviderError {
     Timeout {
         idle: Duration,
     },
+    Deadline,
+    Cancelled,
     Interrupted,
     Protocol(String),
 }
@@ -56,7 +58,9 @@ impl ProviderError {
                     | "server_error"
                     | "internal_server_error"
             ),
-            Self::Protocol(_) | Self::ContextOverflow { .. } => false,
+            Self::Protocol(_) | Self::ContextOverflow { .. } | Self::Deadline | Self::Cancelled => {
+                false
+            }
         }
     }
 
@@ -98,6 +102,8 @@ impl fmt::Display for ProviderError {
                 idle.as_secs_f64()
             ),
             Self::Interrupted => write!(f, "provider stream ended without a final response"),
+            Self::Deadline => write!(f, "turn deadline exceeded"),
+            Self::Cancelled => write!(f, "turn cancelled"),
             Self::Protocol(message) => f.write_str(message),
         }
     }
@@ -275,6 +281,24 @@ impl Provider {
         Ok(())
     }
     pub async fn stream(
+        &mut self,
+        system: &str,
+        messages: &[Message],
+        specs: &[ToolSpec],
+        attachments: &Attachments,
+        emit: &Sink,
+    ) -> Result<(Response, Value)> {
+        self.stream_inner(system, messages, specs, attachments, emit)
+            .await
+            .map_err(|error| {
+                if error.downcast_ref::<ProviderError>().is_some() {
+                    error
+                } else {
+                    ProviderError::Protocol(format!("{error:#}")).into()
+                }
+            })
+    }
+    async fn stream_inner(
         &mut self,
         system: &str,
         messages: &[Message],

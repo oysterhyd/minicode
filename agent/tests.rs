@@ -1167,6 +1167,13 @@ async fn provider_retry_does_not_use_error_message_keywords() {
     assert!(!h.event_types().contains(&"provider_retry".to_string()));
 }
 
+#[tokio::test]
+async fn provider_error_with_deadline_text_is_not_a_turn_deadline() {
+    let mut h = Harness::new(json!({"turns":[{"error":"turn deadline exceeded"}]})).await;
+    let result = h.run(Some("inspect")).await.unwrap();
+    assert_eq!(result.exit_reason, "provider_error");
+}
+
 #[test]
 fn provider_error_retry_classification_uses_variants_and_status() {
     use crate::provider::ProviderError;

@@ -304,3 +304,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 修复：解析 SSE 错误对象及有名称的错误事件，保留类型与消息；overloaded、rate limit、api/server error 可重试，invalid request 和未知错误不重试；上下文溢出保留独立类型。已经输出后的重试和撤回由 R8 处理。
 - 测试：协议测试先复现 Anthropic overloaded、具名 SSE 错误、OpenAI api_error 及 invalid request 丢失消息；Rust 单测覆盖错误类型、消息及 SSE 上下文溢出分类。
 - 验证：`2A-P14-*` 全部通过，协议、离线评测及 TUI 检查均通过。
+
+## R8：退避、截止时间与流式重放
+
+- 问题与根因：最多两次固定退避、不遵守服务端等待提示，且可见输出后断流会直接结束；Desktop 的重试提示也不会移除半截文本和推理。
+- 修复：默认最多重试六次，使用基数 1 秒、上限 30 秒的指数 full jitter；优先按 `Retry-After` 等待，默认上限 60 秒。回合截止时间与取消均可中断等待。可用 `MINICODE_PROVIDER_MAX_RETRIES`、`MINICODE_PROVIDER_RETRY_BASE_S`、`MINICODE_PROVIDER_RETRY_MAX_S`、`MINICODE_PROVIDER_RETRY_AFTER_MAX_S` 覆盖（重试次数上限 8，时间上限 60 秒）。断流或可重试 SSE 错误发生在可见输出后时，重试事件携带可选 `reset_output`，Desktop 丢弃当前文本与推理后重放；TUI 已有相应清理行为。补齐 provider 协议错误、回合截止和取消的类型，避免按错误文字猜测截止原因。
+- 测试：先复现 529 忽略 5 秒提示、部分流不重放、等待不受截止约束以及 Desktop 保留半截内容；协议测试覆盖断开、流内 overloaded、空闲超时、六次上限、取消及截止；Rust 单测覆盖抖动与等待上限、误导性截止文字；TUI 和 Desktop 分别验证保留历史而清除本次流。
+- 取舍：重试次数和等待上限采用保守有界默认值，提供环境变量以适配网关；旧事件仍可处理，未新增依赖。
+- 验证：`2A-R8-*` 全部通过；Rust 76 项、协议 100 项通过（1 个既有慢测跳过），两组离线评测、TUI 构建与桥接测试、Windows Desktop 全量测试/vet/vendor UI 检查通过。

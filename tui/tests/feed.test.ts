@@ -36,6 +36,17 @@ test('single-row updates preserve old state and completed row identities', () =>
   assert.equal(next.items[1].text, 'stream appended')
 })
 
+test('retry clears only the current streamed answer', () => {
+  let state = emptyFeed()
+  state.items.push({ id: 'history', kind: 'assistant', text: 'older answer' })
+  state = applyDesktopEvent(state, { event: 'text_delta', text: 'discard partial' })
+  state = applyDesktopEvent(state, { event: 'agent_event', item: { seq: 4, type: 'provider_retry', data: { reset_output: true, delay_s: 0, next_attempt: 2 } } })
+  state = applyDesktopEvent(state, { event: 'text_delta', text: 'new answer' })
+  assert.ok(state.items.some(item => item.text === 'older answer'))
+  assert.ok(state.items.some(item => item.text === 'new answer'))
+  assert.ok(!state.items.some(item => item.text?.includes('discard partial')))
+})
+
 test('text delta then assistant message becomes one reply', () => {
   let state = emptyFeed()
   state = applyDesktopEvent(state, { event: 'text_delta', text: '我会先' })

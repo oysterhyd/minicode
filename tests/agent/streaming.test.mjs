@@ -32,14 +32,14 @@ test('HTTP retry metadata preserves Retry-After even when it is zero',async t=>{
 test('connection failures include the underlying socket error without credentials',async t=>{
   const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve))
   const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve))
-  const f=await fixture(t);const r=await f.run({model:await configureService(f,`http://127.0.0.1:${port}`)})
+  const f=await fixture(t,[],{MINICODE_PROVIDER_MAX_RETRIES:'0'});const r=await f.run({model:await configureService(f,`http://127.0.0.1:${port}`)})
   assert.equal(r.result.exit_reason,'provider_error');assert.match(r.result.error,/provider connection failed/)
   assert.match(r.result.error,/connect|refused|连接/i);assert.doesNotMatch(r.result.error,/local-mock-key/)
 })
 test('a disconnected proxy reports its underlying connection failure',async t=>{
   const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve))
   const proxy=`http://127.0.0.1:${reservation.address().port}`;await new Promise(resolve=>reservation.close(resolve))
-  const f=await fixture(t,[],{HTTP_PROXY:proxy,http_proxy:proxy,HTTPS_PROXY:proxy,https_proxy:proxy,NO_PROXY:'',no_proxy:''})
+  const f=await fixture(t,[],{HTTP_PROXY:proxy,http_proxy:proxy,HTTPS_PROXY:proxy,https_proxy:proxy,NO_PROXY:'',no_proxy:'',MINICODE_PROVIDER_MAX_RETRIES:'0'})
   const r=await f.run({model:await configureService(f,'http://provider.invalid')})
   assert.equal(r.result.exit_reason,'provider_error');assert.match(r.result.error,/provider connection failed/)
   assert.match(r.result.error,/10061|refused|拒绝/i);assert.doesNotMatch(r.result.error,/local-mock-key/)
@@ -65,22 +65,63 @@ test('invalid SSE requests fail once and include the server message',async t=>{
   const r=await f.run({model:await configureService(f,mock.url)})
   assert.equal(r.result.exit_reason,'provider_error');assert.equal(mock.payloads.length,1);assert.match(r.result.error,/invalid_request_error/);assert.match(r.result.error,/unknown parameter/)
 })
-test('scaffold: a stream dropped after visible output fails without a retry',async t=>{
-  const f=await fixture(t);const mock=await sseMock(t,[{frames:anthropicFrames({text:'partial answer',chunks:2}),dropAfter:3}])
+test('529 respects Retry-After before retrying',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{status:529,retryAfter:5,body:'{"error":{"type":"overloaded_error","message":"busy"}}'},{frames:anthropicFrames({text:'recovered'})}])
+  const model=await configureService(f,mock.url);const started=Date.now();const r=await f.run({model});const elapsed=Date.now()-started
+  assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,2);assert.ok(elapsed>=4700&&elapsed<12000,`elapsed ${elapsed}ms`)
+  assert.equal(r.detail.events.find(e=>e.type==='provider_retry').data.delay_s,5)
+})
+test('the default policy allows more than two retries',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[...Array.from({length:4},()=>({status:429,retryAfter:0})),{frames:anthropicFrames({text:'finally'})}])
   const r=await f.run({model:await configureService(f,mock.url)})
-  assert.equal(r.result.exit_reason,'provider_error');assert.equal(mock.payloads.length,1);assert.equal(r.events.filter(delta).map(e=>e.text).join(''),'partial')
+  assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,5);assert.equal(r.detail.events.filter(e=>e.type==='provider_retry').length,4)
+})
+test('the default policy stops after six retries',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{status:429,retryAfter:0}]);const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'provider_error');assert.equal(mock.payloads.length,7);assert.equal(r.detail.events.filter(e=>e.type==='provider_retry').length,6)
+})
+test('partial streams are discarded before replay after disconnect or overload',async t=>{
+  const partial=anthropicFrames({text:'discard this partial'})
+  for(const first of [
+    {frames:partial,dropAfter:3},
+    {frames:[...partial.slice(0,3),{type:'error',error:{type:'overloaded_error',message:'busy mid-stream'}}]},
+  ]){
+    const f=await fixture(t);const mock=await sseMock(t,[first,{frames:anthropicFrames({text:'complete answer'})}]);const r=await f.run({model:await configureService(f,mock.url)})
+    assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,2)
+    const retry=r.events.find(item('provider_retry'));assert.equal(retry.item.data.reset_output,true)
+    let visible='';for(const e of r.events){if(delta(e))visible+=e.text;if(item('provider_retry')(e)&&e.item.data.reset_output)visible=''}
+    assert.equal(visible,'complete answer');assert.ok(!JSON.stringify(r.detail.messages).includes('discard this partial'))
+  }
+})
+test('turn deadline interrupts Retry-After waiting',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{status:529,retryAfter:5}]);const model=await configureService(f,mock.url)
+  await f.request('setBudget',{max_rounds:0,max_total_tokens:0,max_seconds:1});const started=Date.now();const r=await f.run({model})
+  assert.equal(r.result.exit_reason,'time_budget');assert.equal(mock.payloads.length,1);assert.ok(Date.now()-started<3500)
+})
+test('cancelling interrupts Retry-After waiting',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{status:529,retryAfter:5}]);const model=await configureService(f,mock.url)
+  const from=f.events.length;const started=await f.request('sendPrompt',{workspace:f.workspace,text:'cancel waiting',model})
+  await f.wait(e=>item('provider_retry')(e)&&e.sessionId===started.sessionId,from)
+  const begin=Date.now();await f.request('cancelTurn',{sessionId:started.sessionId})
+  const done=await f.wait(e=>e.event==='run_done'&&e.sessionId===started.sessionId,from)
+  assert.equal(done.result.exit_reason,'cancelled');assert.equal(mock.payloads.length,1);assert.ok(Date.now()-begin<2000)
+})
+test('scaffold: a stream dropped after visible output is retried',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{frames:anthropicFrames({text:'partial answer',chunks:2}),dropAfter:3},{frames:anthropicFrames({text:'replacement'})}])
+  const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,2);assert.ok(r.events.some(e=>item('provider_retry')(e)&&e.item.data.reset_output))
 })
 // R7 / P1: provider streams are bounded by an idle timer, not a total timer.
-const idle={MINICODE_PROVIDER_IDLE_TIMEOUT_S:'1'}
+const idle={MINICODE_PROVIDER_IDLE_TIMEOUT_S:'1',MINICODE_PROVIDER_RETRY_BASE_S:'0.01',MINICODE_PROVIDER_RETRY_MAX_S:'0.02'}
 test('a stream longer than the idle timeout completes while bytes keep arriving',async t=>{
   const f=await fixture(t,[],idle);const mock=await sseMock(t,[{frames:anthropicFrames({text:'x'.repeat(30),chunks:30}),intervalMs:150}])
   const r=await f.run({model:await configureService(f,mock.url)})
   assert.equal(r.result.exit_reason,'completed');assert.equal(r.events.filter(delta).length,30)
 })
-test('silence after visible output fails as an idle timeout without a retry',async t=>{
-  const f=await fixture(t,[],idle);const mock=await sseMock(t,[{frames:anthropicFrames({text:'partial'}).slice(0,3),hang:true}])
+test('silence after visible output retries and clears the partial answer',async t=>{
+  const f=await fixture(t,[],idle);const mock=await sseMock(t,[{frames:anthropicFrames({text:'partial'}).slice(0,3),hang:true},{frames:anthropicFrames({text:'replacement'})}])
   const started=Date.now();const r=await f.run({model:await configureService(f,mock.url)})
-  assert.equal(r.result.exit_reason,'provider_error');assert.match(r.result.error,/idle timeout/);assert.equal(mock.payloads.length,1);assert.ok(Date.now()-started<10000)
+  const retry=r.detail.events.find(e=>e.type==='provider_retry');assert.equal(r.result.exit_reason,'completed');assert.match(retry.data.error,/idle timeout/);assert.equal(retry.data.reset_output,true);assert.equal(mock.payloads.length,2);assert.ok(Date.now()-started<10000)
 })
 test('silence before any byte is an idle timeout that is retried',async t=>{
   const f=await fixture(t,[],idle);const mock=await sseMock(t,[{hang:true},{hang:true},{frames:anthropicFrames({text:'third attempt'})}])

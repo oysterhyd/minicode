@@ -1121,6 +1121,13 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 		v.append(&model.FeedItem{ID: fmt.Sprintf("thinking-%d", event.Seq), Kind: "thinking", Text: "正在思考", StartedAt: stamp})
 	case "provider_retry":
 		v.removeThinking()
+		if model.Bool(data["reset_output"]) {
+			v.Items = slices.DeleteFunc(v.Items, func(item *model.FeedItem) bool {
+				return item == v.stream || item == v.reasoning
+			})
+			v.finishStream()
+			v.rebuildRows()
+		}
 		v.append(&model.FeedItem{ID: fmt.Sprintf("retry-%d", event.Seq), Kind: "notice", Tone: "warning", Text: fmt.Sprintf("模型请求暂时失败，%g 秒后重试（第 %g 次）。", model.Number(data["delay_s"]), model.Number(data["next_attempt"]))})
 	case "assistant_message":
 		stream := v.stream

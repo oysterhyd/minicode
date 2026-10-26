@@ -51,6 +51,7 @@ impl Settings {
         })
     }
 }
+
 pub struct Snapshot {
     pub session: Option<String>,
     pub run_id: Option<String>,
@@ -97,6 +98,50 @@ pub struct Ledger {
     pub started: Option<Instant>,
     pub deadline: Option<Instant>,
 }
+
+struct RetryPolicy {
+    max_retries: u32,
+    base_s: f64,
+    max_s: f64,
+    retry_after_max_s: f64,
+}
+impl RetryPolicy {
+    fn from_env() -> Self {
+        fn seconds(name: &str, default: f64) -> f64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|s| s.is_finite() && *s >= 0.0)
+                .map(|s| s.min(60.0))
+                .unwrap_or(default)
+        }
+        Self {
+            max_retries: std::env::var("MINICODE_PROVIDER_MAX_RETRIES")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .map(|n| n.min(8))
+                .unwrap_or(6),
+            base_s: seconds("MINICODE_PROVIDER_RETRY_BASE_S", 1.0),
+            max_s: seconds("MINICODE_PROVIDER_RETRY_MAX_S", 30.0),
+            retry_after_max_s: seconds("MINICODE_PROVIDER_RETRY_AFTER_MAX_S", 60.0),
+        }
+    }
+    fn delay(&self, attempt: u32, retry_after: Option<Duration>, random: f64) -> Duration {
+        let seconds = if let Some(retry_after) = retry_after {
+            retry_after.as_secs_f64().min(self.retry_after_max_s)
+        } else {
+            (self.base_s * 2f64.powi(attempt.min(16) as i32)).min(self.max_s) * random
+        };
+        Duration::from_secs_f64(seconds)
+    }
+}
+fn retry_random() -> f64 {
+    let id = uuid::Uuid::new_v4();
+    let mut bytes = [0u8; 8];
+    bytes[..6].copy_from_slice(&id.as_bytes()[..6]);
+    u64::from_le_bytes(bytes) as f64 / ((1u64 << 48) - 1) as f64
+}
+
 pub struct Runtime {
     pub session: String,
     pub workspace: PathBuf,
@@ -997,6 +1042,7 @@ impl Runtime {
                 root: self.store.root().join("attachments"),
             };
             let mut attempt = 0;
+            let retry_policy = RetryPolicy::from_env();
             let (response, mut metrics) = loop {
                 // Only the turn deadline bounds the whole request; silence on
                 // the wire is the provider's idle timeout, so long streams that
@@ -1005,9 +1051,9 @@ impl Runtime {
                 let request =
                     self.provider
                         .stream(&system, &self.messages, &specs, &attachments, &delta);
-                let value = tokio::select! {_ = hooks.cancel.cancelled()=>bail!("turn cancelled"),r=async {
+                let value = tokio::select! {_ = hooks.cancel.cancelled()=>return Err(ProviderError::Cancelled.into()),r=async {
                     match deadline {
-                        Some(d) => tokio::time::timeout(d.saturating_duration_since(Instant::now()), request).await.map_err(|_| anyhow::anyhow!("turn deadline exceeded")).and_then(|r| r),
+                        Some(d) => tokio::time::timeout(d.saturating_duration_since(Instant::now()), request).await.map_err(|_| anyhow::Error::from(ProviderError::Deadline)).and_then(|r| r),
                         None => request.await,
                     }
                 }=>r};
@@ -1019,25 +1065,46 @@ impl Runtime {
                         let retryable = error
                             .downcast_ref::<ProviderError>()
                             .is_some_and(ProviderError::is_retryable);
-                        if !retryable || seen.load(Ordering::Relaxed) || attempt >= 2 {
-                            return Err(if text == "turn deadline exceeded" {
-                                error
-                            } else {
-                                let detail = format!("provider error: {error:#}");
-                                error.context(detail)
-                            });
+                        let reset_output = seen.swap(false, Ordering::Relaxed);
+                        if !retryable || attempt >= retry_policy.max_retries {
+                            return Err(
+                                if matches!(
+                                    error.downcast_ref::<ProviderError>(),
+                                    Some(ProviderError::Deadline)
+                                ) {
+                                    error
+                                } else {
+                                    let detail = format!("provider error: {error:#}");
+                                    error.context(detail)
+                                },
+                            );
                         }
-                        let delay = 0.25 * 2f64.powi(attempt);
-                        attempt += 1;
-                        let mut retry = json!({"attempt":attempt,"next_attempt":attempt+1,"delay_s":delay,"error":text});
-                        if let Some(retry_after) = error
+                        let retry_after = error
                             .downcast_ref::<ProviderError>()
-                            .and_then(ProviderError::retry_after)
-                        {
+                            .and_then(ProviderError::retry_after);
+                        let delay = retry_policy.delay(attempt, retry_after, retry_random());
+                        attempt += 1;
+                        let mut retry = json!({"attempt":attempt,"next_attempt":attempt+1,"delay_s":delay.as_secs_f64(),"error":text});
+                        if reset_output {
+                            retry["reset_output"] = json!(true);
+                        }
+                        if let Some(retry_after) = retry_after {
                             retry["retry_after_s"] = json!(retry_after.as_secs_f64());
                         }
                         self.event(hooks, "provider_retry", retry)?;
-                        tokio::select! {_ = hooks.cancel.cancelled()=>bail!("turn cancelled"),_ = tokio::time::sleep(Duration::from_secs_f64(delay))=>{}}
+                        if let Some(deadline) = deadline {
+                            tokio::select! {
+                                biased;
+                                _ = hooks.cancel.cancelled() => return Err(ProviderError::Cancelled.into()),
+                                _ = tokio::time::sleep(deadline.saturating_duration_since(Instant::now())) => return Err(ProviderError::Deadline.into()),
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                        } else {
+                            tokio::select! {
+                                _ = hooks.cancel.cancelled() => return Err(ProviderError::Cancelled.into()),
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                        }
                     }
                 }
             };
@@ -2003,6 +2070,36 @@ impl Runtime {
             Ok(true)
         } else {
             Ok(false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn full_jitter_and_retry_after_are_bounded() {
+        let policy = RetryPolicy {
+            max_retries: 6,
+            base_s: 1.0,
+            max_s: 30.0,
+            retry_after_max_s: 60.0,
+        };
+        assert_eq!(policy.delay(0, None, 0.0), Duration::ZERO);
+        assert_eq!(policy.delay(0, None, 1.0), Duration::from_secs(1));
+        assert_eq!(policy.delay(3, None, 0.5), Duration::from_secs(4));
+        assert_eq!(policy.delay(7, None, 1.0), Duration::from_secs(30));
+        assert_eq!(
+            policy.delay(0, Some(Duration::from_secs(5)), 0.0),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            policy.delay(0, Some(Duration::from_secs(90)), 0.0),
+            Duration::from_secs(60)
+        );
+        for _ in 0..32 {
+            assert!((0.0..=1.0).contains(&retry_random()));
         }
     }
 }
