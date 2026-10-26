@@ -200,7 +200,16 @@ impl Runtime {
                     output_tokens: summary["output_tokens"].as_u64().unwrap_or(0),
                     cache_read_tokens: summary["cache_read_tokens"].as_u64().unwrap_or(0),
                     cache_write_tokens: summary["cache_write_tokens"].as_u64().unwrap_or(0),
-                    available: summary["usage_available"] == true,
+                    available: summary["usage_available"] == true
+                        && (summary["rounds"].as_u64().unwrap_or(0) > 0
+                            || [
+                                "input_tokens",
+                                "output_tokens",
+                                "cache_read_tokens",
+                                "cache_write_tokens",
+                            ]
+                            .iter()
+                            .any(|key| summary[*key].as_u64().unwrap_or(0) > 0)),
                 },
                 summary["rounds"].as_u64().unwrap_or(0),
                 summary["status"] != "completed",
@@ -417,13 +426,27 @@ impl Runtime {
                 usage.cache_write_tokens = usage
                     .cache_write_tokens
                     .max(summary["cache_write_tokens"].as_u64().unwrap_or(0));
-                usage.available &= summary["usage_available"] == true;
+                if summary["rounds"].as_u64().unwrap_or(0) > 0 {
+                    usage.available |= summary["usage_available"] == true;
+                }
             }
             recovered_usage.add(&usage);
             recovery_events.extend(child_events);
         }
+        recovered_usage.available |= runtime.usage.available;
         if recovered_usage.total() > runtime.usage.total() {
             runtime.usage = recovered_usage;
+        } else {
+            runtime.usage.available |= recovered_usage.available;
+        }
+        if session.is_some()
+            && (runtime.store.require(&runtime.session)?["usage_available"] == true)
+                != runtime.usage.available
+        {
+            runtime.store.update(
+                &runtime.session,
+                &json!({"usage_available":runtime.usage.available}),
+            )?;
         }
         if resume_fake {
             runtime.restore_script_progress(&recovery_events);
@@ -1060,7 +1083,6 @@ impl Runtime {
                 match value {
                     Ok(value) => break value,
                     Err(error) => {
-                        self.usage.available = false;
                         let text = format!("{error:#}");
                         let retryable = error
                             .downcast_ref::<ProviderError>()

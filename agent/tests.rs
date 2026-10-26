@@ -174,6 +174,32 @@ fn usage_preserves_uncertainty() {
     assert_eq!(u.total(), 15);
     assert!(!u.available);
 }
+
+#[test]
+fn usage_is_available_if_any_response_reports_it() {
+    let missing = Usage {
+        available: false,
+        ..Usage::default()
+    };
+    let measured = Usage {
+        input_tokens: 10,
+        available: true,
+        ..Usage::default()
+    };
+    let mut usage = Usage::default();
+    usage.add(&missing);
+    assert!(!usage.available);
+    usage.add(&measured);
+    assert!(usage.available);
+    usage.add(&missing);
+    assert!(usage.available);
+    assert_eq!(usage.input_tokens, 10);
+    let legacy: Usage = serde_json::from_value(json!({"input_tokens": 1})).unwrap();
+    assert!(
+        legacy.available,
+        "old serialized usage without the field keeps its original default"
+    );
+}
 #[test]
 fn message_blocks_roundtrip() {
     let value = json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"read","is_error":false,"images":[]},{"type":"text","text":"中文"}]});
@@ -1172,6 +1198,82 @@ async fn provider_error_with_deadline_text_is_not_a_turn_deadline() {
     let mut h = Harness::new(json!({"turns":[{"error":"turn deadline exceeded"}]})).await;
     let result = h.run(Some("inspect")).await.unwrap();
     assert_eq!(result.exit_reason, "provider_error");
+}
+
+#[tokio::test]
+async fn resumed_legacy_session_recovers_available_usage_from_events() {
+    let mut h =
+        Harness::new(json!({"turns":[{"text":"done","input_tokens":0,"output_tokens":0}]})).await;
+    let first = h.run(Some("inspect")).await.unwrap();
+    assert!(first.total_usage.available);
+    h.runtime
+        .store
+        .update(&h.runtime.session, &json!({"usage_available":false}))
+        .unwrap();
+    h.reopen().await.unwrap();
+    assert!(
+        h.runtime.usage.available,
+        "available zero-token usage must survive resume"
+    );
+    assert_eq!(
+        h.runtime.store.require(&h.runtime.session).unwrap()["usage_available"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn empty_legacy_session_does_not_claim_usage_is_available() {
+    let mut h = Harness::new(json!({"turns":[]})).await;
+    h.runtime
+        .store
+        .update(&h.runtime.session, &json!({"usage_available":true}))
+        .unwrap();
+    h.reopen().await.unwrap();
+    assert!(!h.runtime.usage.available);
+    assert_eq!(
+        h.runtime.store.require(&h.runtime.session).unwrap()["usage_available"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn recovered_child_usage_is_available_even_if_legacy_summary_says_unavailable() {
+    let mut h = Harness::new(json!({"turns":[]})).await;
+    assert_eq!(
+        h.runtime.store.require(&h.runtime.session).unwrap()["usage_available"],
+        false
+    );
+    let child = h
+        .runtime
+        .store
+        .create(&h.runtime.workspace.to_string_lossy(), "fake", "fake")
+        .unwrap();
+    h.runtime
+        .store
+        .event(
+            &h.runtime.session,
+            "subagent_start",
+            &json!({"child_session_id":child}),
+        )
+        .unwrap();
+    h.runtime
+        .store
+        .event(
+            &child,
+            "assistant_message",
+            &json!({"usage":{"available":true,"input_tokens":0,"output_tokens":0}}),
+        )
+        .unwrap();
+    h.runtime
+        .store
+        .update(&child, &json!({"rounds":1,"usage_available":false}))
+        .unwrap();
+    h.reopen().await.unwrap();
+    assert!(h.runtime.usage.available);
+    assert_eq!(
+        h.runtime.store.require(&h.runtime.session).unwrap()["usage_available"],
+        true
+    );
 }
 
 #[test]

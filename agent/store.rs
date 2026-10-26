@@ -118,7 +118,7 @@ impl Store {
     }
     pub fn create(&self, workspace: &str, provider: &str, model: &str) -> Result<String> {
         let id = util::id();
-        self.with(|c|{c.execute("INSERT INTO sessions(session_id,created_at,workspace,provider,model) VALUES(?,?,?,?,?)",params![id,util::now(),workspace,provider,model])?;Ok(())})?;
+        self.with(|c|{c.execute("INSERT INTO sessions(session_id,created_at,workspace,provider,model,usage_available) VALUES(?,?,?,?,?,0)",params![id,util::now(),workspace,provider,model])?;Ok(())})?;
         Ok(id)
     }
     pub fn session(&self, id: &str) -> Result<Option<Value>> {

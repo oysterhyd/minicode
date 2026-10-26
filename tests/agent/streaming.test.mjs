@@ -29,6 +29,26 @@ test('HTTP retry metadata preserves Retry-After even when it is zero',async t=>{
   assert.equal(r.result.exit_reason,'completed');const retry=r.detail.events.find(e=>e.type==='provider_retry')
   assert.equal(retry.data.retry_after_s,0);assert.match(retry.data.error,/slow down/)
 })
+test('usage stays available after a failed attempt and a measured response',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{status:429,retryAfter:0},{frames:anthropicFrames({text:'measured',input:13,output:4})}])
+  const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'completed');assert.equal(r.result.total_usage.available,true);assert.equal(r.result.total_usage.input_tokens,13);assert.equal(r.detail.summary.usage_available,true)
+})
+test('mixed missing and present usage remains available and is persisted',async t=>{
+  const f=await fixture(t);const first=anthropicFrames({tools:[{id:'read-usage',name:'read',arguments:{path:'README.md'}}]})
+  delete first[0].message.usage;delete first.at(-2).usage
+  const mock=await sseMock(t,[{frames:first},{frames:anthropicFrames({text:'done',input:21,output:6})}])
+  const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,2);assert.equal(r.result.total_usage.available,true);assert.equal(r.result.total_usage.input_tokens,21);assert.equal(r.detail.summary.usage_available,true)
+})
+test('empty usage objects do not count as measured usage',async t=>{
+  for(const style of ['anthropic','openai']){
+    const f=await fixture(t);const frames=style==='anthropic'?anthropicFrames({text:'done'}):openaiFrames({text:'done'})
+    if(style==='anthropic'){frames[0].message.usage={};frames.at(-2).usage={}}else frames.at(-1).usage={}
+    const mock=await sseMock(t,[{frames,done:style==='openai'}]);const r=await f.run({model:await configureService(f,mock.url,style)})
+    assert.equal(r.result.exit_reason,'completed');assert.equal(r.result.total_usage.available,false,style);assert.equal(r.detail.summary.usage_available,false)
+  }
+})
 test('connection failures include the underlying socket error without credentials',async t=>{
   const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve))
   const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve))

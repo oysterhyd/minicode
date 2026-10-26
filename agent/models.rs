@@ -59,25 +59,18 @@ impl Message {
             .collect()
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    #[serde(default = "legacy_usage_available")]
     pub available: bool,
 }
-impl Default for Usage {
-    fn default() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            available: true,
-        }
-    }
+fn legacy_usage_available() -> bool {
+    true
 }
 impl Usage {
     pub fn total(&self) -> u64 {
@@ -92,7 +85,7 @@ impl Usage {
         self.cache_write_tokens = self
             .cache_write_tokens
             .saturating_add(other.cache_write_tokens);
-        self.available &= other.available;
+        self.available |= other.available;
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

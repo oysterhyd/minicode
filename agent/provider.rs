@@ -995,7 +995,22 @@ fn media_part(b: &Block, store: &Attachments, style: &str) -> Result<Value> {
     })
 }
 fn parse_usage(v: &Value, style: &str) -> Usage {
-    if !v.is_object() {
+    let fields: &[&str] = if style == "anthropic" {
+        &[
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+    } else {
+        &["prompt_tokens", "completion_tokens"]
+    };
+    let has_data = fields.iter().any(|key| v[*key].as_u64().is_some())
+        || (style != "anthropic"
+            && ["cached_tokens", "cache_creation_tokens"]
+                .iter()
+                .any(|key| v["prompt_tokens_details"][*key].as_u64().is_some()));
+    if !v.is_object() || !has_data {
         return Usage {
             available: false,
             ..Usage::default()
