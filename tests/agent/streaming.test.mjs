@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import {test} from 'node:test'
 import {fixture,expectSequence,until} from './helpers.mjs'
-import {sseMock,anthropicFrames,configureService} from './sse-mock.mjs'
+import {sseMock,anthropicFrames,openaiFrames,configureService} from './sse-mock.mjs'
 const delta=e=>e.event==='text_delta',item=type=>e=>e.event==='agent_event'&&e.item.type===type
 test('scaffold: paced SSE mock streams through the bridge in order',async t=>{
   const f=await fixture(t);const mock=await sseMock(t,[{frames:anthropicFrames({text:'paced answer',chunks:4}),intervalMs:20}])
@@ -43,6 +43,27 @@ test('a disconnected proxy reports its underlying connection failure',async t=>{
   const r=await f.run({model:await configureService(f,'http://provider.invalid')})
   assert.equal(r.result.exit_reason,'provider_error');assert.match(r.result.error,/provider connection failed/)
   assert.match(r.result.error,/10061|refused|拒绝/i);assert.doesNotMatch(r.result.error,/local-mock-key/)
+})
+test('Anthropic overloaded SSE errors retain details and retry',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{frames:[{type:'error',error:{type:'overloaded_error',message:'temporarily overloaded'}}]},{frames:anthropicFrames({text:'recovered'})}])
+  const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,2)
+  const retry=r.detail.events.find(e=>e.type==='provider_retry');assert.match(retry.data.error,/overloaded_error/);assert.match(retry.data.error,/temporarily overloaded/)
+})
+test('named SSE errors and OpenAI error objects are classified',async t=>{
+  for(const [style,step,success] of [
+    ['anthropic',{eventNames:['error'],frames:[{type:'rate_limit_error',message:'anthropic limit'}]},anthropicFrames({text:'ok'})],
+    ['openai',{frames:[{error:{type:'api_error',message:'gateway busy'}}]},openaiFrames({text:'ok'})],
+  ]){
+    const f=await fixture(t);const mock=await sseMock(t,[step,{frames:success,done:style==='openai'}])
+    const r=await f.run({model:await configureService(f,mock.url,style)});assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,2)
+    assert.match(r.detail.events.find(e=>e.type==='provider_retry').data.error,style==='anthropic'?/anthropic limit/:/gateway busy/)
+  }
+})
+test('invalid SSE requests fail once and include the server message',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{frames:[{type:'error',error:{type:'invalid_request_error',message:'unknown parameter'}}]}])
+  const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'provider_error');assert.equal(mock.payloads.length,1);assert.match(r.result.error,/invalid_request_error/);assert.match(r.result.error,/unknown parameter/)
 })
 test('scaffold: a stream dropped after visible output fails without a retry',async t=>{
   const f=await fixture(t);const mock=await sseMock(t,[{frames:anthropicFrames({text:'partial answer',chunks:2}),dropAfter:3}])

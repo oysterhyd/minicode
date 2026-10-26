@@ -24,8 +24,12 @@ pub enum ProviderError {
         retry_after: Option<Duration>,
     },
     ContextOverflow {
-        status: u16,
+        status: Option<u16>,
         body: String,
+    },
+    Stream {
+        kind: String,
+        message: String,
     },
     Network(reqwest::Error),
     Timeout {
@@ -42,6 +46,16 @@ impl ProviderError {
                 *status == 408 || *status == 429 || (500..600).contains(status)
             }
             Self::Network(_) | Self::Timeout { .. } | Self::Interrupted => true,
+            Self::Stream { kind, .. } => matches!(
+                kind.as_str(),
+                "overloaded"
+                    | "overloaded_error"
+                    | "rate_limit_error"
+                    | "rate_limit_exceeded"
+                    | "api_error"
+                    | "server_error"
+                    | "internal_server_error"
+            ),
             Self::Protocol(_) | Self::ContextOverflow { .. } => false,
         }
     }
@@ -57,7 +71,7 @@ impl ProviderError {
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Http { status, body, .. } | Self::ContextOverflow { status, body } => {
+            Self::Http { status, body, .. } => {
                 write!(f, "provider HTTP {status}")?;
                 if !body.is_empty() {
                     write!(f, ": {body}")?;
@@ -66,6 +80,16 @@ impl fmt::Display for ProviderError {
                     write!(f, " (请检查并重新配置 API 凭据)")?;
                 }
                 Ok(())
+            }
+            Self::ContextOverflow { status, body } => {
+                if let Some(status) = status {
+                    write!(f, "provider HTTP {status}: {body}")
+                } else {
+                    write!(f, "provider context overflow: {body}")
+                }
+            }
+            Self::Stream { kind, message } => {
+                write!(f, "provider stream error ({kind}): {message}")
             }
             Self::Network(_) => write!(f, "provider connection failed"),
             Self::Timeout { idle } => write!(
@@ -379,7 +403,10 @@ impl Provider {
                 body.push_str("…[truncated]");
             }
             return Err(if overflow {
-                ProviderError::ContextOverflow { status, body }
+                ProviderError::ContextOverflow {
+                    status: Some(status),
+                    body,
+                }
             } else {
                 ProviderError::Http {
                     status,
@@ -454,11 +481,13 @@ impl Provider {
                 }
                 let value: Value =
                     serde_json::from_str(data).context("invalid provider SSE JSON")?;
+                if event.kind == "error" || value["type"] == "error" || !value["error"].is_null() {
+                    return Err(stream_error(&value).into());
+                }
                 let mut text = None;
                 let mut thought = None;
                 if self.style == "anthropic" {
                     match value["type"].as_str() {
-                        Some("error") => bail!("provider stream error"),
                         Some("message_start") => {
                             let initial = &value["message"]["usage"];
                             usage = parse_usage(initial, "anthropic");
@@ -522,9 +551,6 @@ impl Provider {
                         _ => {}
                     }
                 } else {
-                    if value.get("error").is_some() {
-                        bail!("provider stream error")
-                    }
                     if value["usage"].is_object() {
                         usage = parse_usage(&value["usage"], "openai")
                     }
@@ -852,6 +878,31 @@ fn context_overflow(body: &str) -> bool {
         || message.contains("input is too long")
 }
 
+fn stream_error(value: &Value) -> ProviderError {
+    let error = value
+        .get("error")
+        .filter(|error| !error.is_null())
+        .unwrap_or(value);
+    let kind = error["type"]
+        .as_str()
+        .or_else(|| error["code"].as_str())
+        .unwrap_or("unknown");
+    let message = error["message"]
+        .as_str()
+        .or_else(|| error.as_str())
+        .unwrap_or("provider returned an unspecified error");
+    let kind = util::prefix(kind, 128).to_string();
+    let message = util::prefix(message, 4096).to_string();
+    if context_overflow(&json!({"error":error}).to_string()) {
+        ProviderError::ContextOverflow {
+            status: None,
+            body: format!("{kind}: {message}"),
+        }
+    } else {
+        ProviderError::Stream { kind, message }
+    }
+}
+
 /// Longest silence tolerated while waiting for response headers or the next
 /// body chunk. MINICODE_PROVIDER_IDLE_TIMEOUT_S overrides the default.
 fn idle_timeout() -> Duration {
@@ -1147,5 +1198,27 @@ mod error_tests {
             r#"{"error":{"type":"invalid_request_error","message":"bad parameter"}}"#
         ));
         assert!(!context_overflow("context_length_exceeded"));
+    }
+
+    #[test]
+    fn stream_error_classification_preserves_kind_and_message() {
+        for kind in ["overloaded_error", "rate_limit_error", "api_error"] {
+            let error = stream_error(&json!({"error":{"type":kind,"message":"please retry"}}));
+            assert!(error.is_retryable(), "{kind}");
+            assert!(error.to_string().contains(kind));
+            assert!(error.to_string().contains("please retry"));
+        }
+        let invalid = stream_error(
+            &json!({"error":{"type":"invalid_request_error","message":"bad parameter"}}),
+        );
+        assert!(!invalid.is_retryable());
+        let overflow = stream_error(
+            &json!({"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}),
+        );
+        assert!(matches!(
+            overflow,
+            ProviderError::ContextOverflow { status: None, .. }
+        ));
+        assert!(!overflow.is_retryable());
     }
 }

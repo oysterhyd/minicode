@@ -297,3 +297,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 修复：最多读取 4 KiB 响应正文并标记截断，读取等待最多五秒；解析秒数或 HTTP 日期格式的 `Retry-After`，将其作为可选重试事件字段保留；识别常见上下文溢出代码及消息，401 提示检查凭据。网络错误保留 source 链并移除请求 URL。按该提示调整等待时间由 R8 处理。
 - 测试：协议测试先复现 400 丢失正文及 429 丢失重试提示，并验证 4 KiB 上限、本地连接失败及不可用代理的底层原因；Rust 单测覆盖两种 `Retry-After` 格式、过期日期、无效值及上下文溢出分类。
 - 验证：`2A-P2-final3-*` 全部通过；协议测试 91 通过、1 个既有慢测跳过，离线评测结果和 TUI 构建及桥接测试通过。
+
+## P14：分类并透传 SSE 错误
+
+- 问题与根因：Anthropic 和 OpenAI 风格的 SSE 错误被统一替换为 `provider stream error`，服务端类型、消息与重试语义全部丢失；有名称的 `event: error` 也可能被误当作普通事件。
+- 修复：解析 SSE 错误对象及有名称的错误事件，保留类型与消息；overloaded、rate limit、api/server error 可重试，invalid request 和未知错误不重试；上下文溢出保留独立类型。已经输出后的重试和撤回由 R8 处理。
+- 测试：协议测试先复现 Anthropic overloaded、具名 SSE 错误、OpenAI api_error 及 invalid request 丢失消息；Rust 单测覆盖错误类型、消息及 SSE 上下文溢出分类。
+- 验证：`2A-P14-*` 全部通过，协议、离线评测及 TUI 检查均通过。

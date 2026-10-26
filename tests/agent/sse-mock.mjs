@@ -5,7 +5,7 @@ import {setTimeout as delay} from 'node:timers/promises'
 // Step fields: status, retryAfter, body (non-200 replies); frames (JSON SSE
 // events); intervalMs between frames; silentMs before the first frame;
 // dropAfter (destroy the socket after N frames); hang (never end); done
-// (append data: [DONE]).
+// (append data: [DONE]); eventNames optionally supplies SSE event names.
 export async function sseMock(t,steps){
   const payloads=[],sockets=new Set()
   const pick=(payload,index)=>typeof steps==='function'?steps(payload,index):steps[Math.min(index,steps.length-1)]
@@ -20,7 +20,7 @@ export async function sseMock(t,steps){
       // Let written frames reach the client before the abrupt close.
       if(step.dropAfter!==undefined&&i>=step.dropAfter){await delay(100);res.destroy();return}
       if(i>0&&step.intervalMs)await delay(step.intervalMs)
-      res.write(`data: ${JSON.stringify(frames[i])}\n\n`)
+      res.write(`${step.eventNames?.[i]?`event: ${step.eventNames[i]}\n`:''}data: ${JSON.stringify(frames[i])}\n\n`)
     }
     if(step.hang)return
     if(step.done)res.write('data: [DONE]\n\n')
