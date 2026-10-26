@@ -8,6 +8,7 @@ export type FeedState = {
   error: string
   startedAt: number | null
   sessionId: string | null
+  abandonedSessions?: ReadonlySet<string>
   approvalCallId?: string
 }
 
@@ -85,7 +86,18 @@ function finishRun(state: FeedState, event: DesktopEvent): FeedState {
   return { ...state, awaitingRun: false, busy: false, startedAt: null, items, approvalCallId: undefined }
 }
 
+export function bindFeedSession(state: FeedState, sessionId: string | null): FeedState {
+  const abandonedSessions = new Set(state.abandonedSessions)
+  if (state.sessionId && state.sessionId !== sessionId) abandonedSessions.add(state.sessionId)
+  if (sessionId) abandonedSessions.delete(sessionId)
+  return { ...state, sessionId, abandonedSessions }
+}
+
 export function acceptsRunEvent(state: FeedState, event: DesktopEvent): boolean {
+  if (event.sessionId) {
+    if (state.abandonedSessions?.has(event.sessionId)) return false
+    if (state.sessionId && event.sessionId !== state.sessionId) return false
+  }
   if (!event.runId || event.event === 'bridge_error') return true
   if (event.event === 'run_started') return state.awaitingRun ? event.runId !== state.runId : !state.busy || !state.runId || event.runId === state.runId
   return !state.awaitingRun && (!state.runId || event.runId === state.runId)

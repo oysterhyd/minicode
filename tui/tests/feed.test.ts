@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyDesktopEvent, emptyFeed, isLive, pendingApproval } from '../src/feed.js'
+import { acceptsRunEvent, applyDesktopEvent, bindFeedSession, emptyFeed, isLive, pendingApproval } from '../src/feed.js'
+
+test('TU1: abandoned sessions stay rejected during a new send and can be explicitly resumed', () => {
+  let state = bindFeedSession(emptyFeed(), 'old')
+  state = bindFeedSession(state, null)
+  state = { ...state, busy: true, awaitingRun: true }
+  const late = { event: 'run_done' as const, sessionId: 'old', result: { exit_reason: 'completed' } }
+  assert.equal(acceptsRunEvent(state, late), false)
+  assert.equal(applyDesktopEvent(state, late), state)
+  assert.equal(acceptsRunEvent(state, { event: 'run_started', sessionId: 'new', runId: 'new-run' }), true)
+  state = bindFeedSession(state, 'old')
+  assert.equal(acceptsRunEvent(state, { event: 'text_delta', sessionId: 'old', text: 'resumed' }), true)
+})
 
 test('MCP startup diagnostics stay out of chat while tool failures remain visible', () => {
   let state = emptyFeed()

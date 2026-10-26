@@ -24,7 +24,7 @@ import {
   prevWord,
   promptRows,
 } from './caret.js'
-import { acceptsRunEvent, applyDesktopEvent, emptyFeed, pendingApproval, type FeedState } from './feed.js'
+import { acceptsRunEvent, applyDesktopEvent, bindFeedSession, emptyFeed, pendingApproval, type FeedState } from './feed.js'
 import { AssistantMarkdown } from './components/AssistantMarkdown.js'
 import { ApprovalBlock, ApprovalPanel, approvalRows } from './components/ApprovalBlock.js'
 import { Banner, type BannerProps } from './components/Banner.js'
@@ -241,7 +241,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         }
         if (!active) return
         updateAgent(state)
-        updateFeed(current => ({ ...current, sessionId: state.sessionId }))
+        updateFeed(current => bindFeedSession(current, state.sessionId))
         setBanner({
           version,
           workspace: workspaceRef.current,
@@ -352,7 +352,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
       if (result.action === 'new') {
         updateQueue([])
         drainAllowedRef.current = false
-        updateFeed({ ...emptyFeed(), sessionId: null })
+        updateFeed(current => ({ ...emptyFeed(), abandonedSessions: bindFeedSession(current, null).abandonedSessions }))
         const state = await client.request<AgentState>('getState', { workspace: workspaceRef.current })
         updateAgent(state)
         resetScreen([])
@@ -377,7 +377,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         })
         const items = historyItems(detail)
         historyRef.current = { detail, count: items.length }
-        updateFeed({ items, busy: Boolean(state.running), runId: state.runId, awaitingRun: false, error: '', startedAt: null, sessionId: result.sessionId })
+        updateFeed(current => ({ ...bindFeedSession(current, result.sessionId!), items, busy: Boolean(state.running), runId: state.runId, awaitingRun: false, error: '', startedAt: null }))
         if (detail.cursor && (detail.cursor.messages !== null || detail.cursor.events !== null)) addNotice('已加载最近历史；/history 加载更早记录')
         try {
           const capabilities = await client.request<Capabilities>('getCapabilities', { workspace: workspaceRef.current })
@@ -439,7 +439,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         asyncStart: true,
       })
       if (!activeRef.current) return
-      updateFeed(current => ({ ...current, sessionId: result.sessionId, runId: result.runId, awaitingRun: false }))
+      updateFeed(current => ({ ...bindFeedSession(current, result.sessionId), runId: result.runId, awaitingRun: false }))
     } catch (error) {
       if (error instanceof BridgeRequestTimeout) {
         if (!feedRef.current.awaitingRun && feedRef.current.runId !== previousRun) return
@@ -448,7 +448,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
           if (!activeRef.current || (!feedRef.current.awaitingRun && feedRef.current.runId !== previousRun)) return
           if (state.running || (state.runId && state.runId !== previousRun)) {
             updateAgent(state)
-            updateFeed(current => ({ ...current, sessionId: state.sessionId, runId: state.runId, awaitingRun: false, busy: Boolean(state.running) }))
+            updateFeed(current => ({ ...bindFeedSession(current, state.sessionId), runId: state.runId, awaitingRun: false, busy: Boolean(state.running) }))
             return
           }
         } catch { addNotice('发送状态尚未确认，正在等待 Agent 状态', 'warning'); return }

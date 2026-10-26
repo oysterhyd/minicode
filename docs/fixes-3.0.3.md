@@ -222,3 +222,10 @@
 按用户要求，在完成 B22 后暂停。已完成并分别提交 B20、D3、B19、B21、B22；剩余 TU1、TU2、D1、D2、D4、D5 尚未修复。
 
 TU1、TU2 已有本地失败复现，分别保存在 output/1B-TU1.test.mjs、output/1B-TU2.test.mjs（日志在 output/checks/1B-TU1-before.log、1B-TU2-before.log）；它们是未提交的本地测试草稿，不属于 B22。后续继续时先将相应用例纳入 TUI 正式测试，再实现修复。D1/D2/D4/D5 的当前处理分支已核对，仍需各自补失败测试。
+
+## TU1：新会话拒绝旧会话迟到事件
+
+- 核查：/new 清空 sessionId 后，feed 将首个事件的 sessionId 当作当前会话；Ink 集成测试先复现旧输出重新出现、后续发送携带旧 ID。
+- 修复：保留当前 TUI 生命周期内已离开的会话 ID；reducer 与事件副作用共用过滤条件。初始化、发送响应和显式 resume 作为权威绑定；显式恢复会移除对应屏蔽，旧协议无 runId 的迟到事件同样被过滤。
+- 测试：run-state.test.tsx 覆盖 /new 后迟到输出与下一次发送参数；feed.test.ts 覆盖新发送等待期间的旧终止事件及显式恢复。用户已要求继续，前述暂停点为历史记录。
+- 验证：完整 Rust、协议、两组评测及 TUI 检查通过（1B-TU1-final-*）；首次协议检查的 Windows 子进程超时已保留日志，复跑通过。
