@@ -1171,10 +1171,26 @@ async fn provider_retry_does_not_use_error_message_keywords() {
 fn provider_error_retry_classification_uses_variants_and_status() {
     use crate::provider::ProviderError;
     for status in [408, 429, 500, 503, 529] {
-        assert!(ProviderError::Http { status }.is_retryable(), "{status}");
+        assert!(
+            ProviderError::Http {
+                status,
+                body: String::new(),
+                retry_after: None
+            }
+            .is_retryable(),
+            "{status}"
+        );
     }
     for status in [400, 401, 403, 404] {
-        assert!(!ProviderError::Http { status }.is_retryable(), "{status}");
+        assert!(
+            !ProviderError::Http {
+                status,
+                body: String::new(),
+                retry_after: None
+            }
+            .is_retryable(),
+            "{status}"
+        );
     }
     assert!(
         ProviderError::Timeout {

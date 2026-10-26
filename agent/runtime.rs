@@ -1015,7 +1015,7 @@ impl Runtime {
                     Ok(value) => break value,
                     Err(error) => {
                         self.usage.available = false;
-                        let text = error.to_string();
+                        let text = format!("{error:#}");
                         let retryable = error
                             .downcast_ref::<ProviderError>()
                             .is_some_and(ProviderError::is_retryable);
@@ -1029,7 +1029,14 @@ impl Runtime {
                         }
                         let delay = 0.25 * 2f64.powi(attempt);
                         attempt += 1;
-                        self.event(hooks,"provider_retry",json!({"attempt":attempt,"next_attempt":attempt+1,"delay_s":delay,"error":text}))?;
+                        let mut retry = json!({"attempt":attempt,"next_attempt":attempt+1,"delay_s":delay,"error":text});
+                        if let Some(retry_after) = error
+                            .downcast_ref::<ProviderError>()
+                            .and_then(ProviderError::retry_after)
+                        {
+                            retry["retry_after_s"] = json!(retry_after.as_secs_f64());
+                        }
+                        self.event(hooks, "provider_retry", retry)?;
                         tokio::select! {_ = hooks.cancel.cancelled()=>bail!("turn cancelled"),_ = tokio::time::sleep(Duration::from_secs_f64(delay))=>{}}
                     }
                 }

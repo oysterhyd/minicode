@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import net from 'node:net'
 import {test} from 'node:test'
 import {fixture,expectSequence,until} from './helpers.mjs'
 import {sseMock,anthropicFrames,configureService} from './sse-mock.mjs'
@@ -14,6 +15,34 @@ test('scaffold: status codes with Retry-After are retried before output',async t
   const f=await fixture(t);const mock=await sseMock(t,[{status:429,retryAfter:0},{status:503},{frames:anthropicFrames({text:'after retries'})}])
   const r=await f.run({model:await configureService(f,mock.url)})
   assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,3);assert.equal(r.detail.events.filter(e=>e.type==='provider_retry').length,2)
+})
+test('HTTP errors retain a bounded server message without retrying a bad request',async t=>{
+  const f=await fixture(t);const body=JSON.stringify({error:{code:'context_length_exceeded',message:'The prompt exceeds this model context'},padding:'x'.repeat(8000)})
+  const mock=await sseMock(t,[{status:400,body}]);const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'provider_error');assert.equal(mock.payloads.length,1)
+  assert.match(r.result.error,/context_length_exceeded/);assert.match(r.result.error,/The prompt exceeds this model context/)
+  assert.ok(Buffer.byteLength(r.result.error)<4400,'response body must be bounded')
+})
+test('HTTP retry metadata preserves Retry-After even when it is zero',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{status:429,retryAfter:0,body:'{"error":{"message":"slow down"}}'},{frames:anthropicFrames({text:'ok'})}])
+  const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'completed');const retry=r.detail.events.find(e=>e.type==='provider_retry')
+  assert.equal(retry.data.retry_after_s,0);assert.match(retry.data.error,/slow down/)
+})
+test('connection failures include the underlying socket error without credentials',async t=>{
+  const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve))
+  const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve))
+  const f=await fixture(t);const r=await f.run({model:await configureService(f,`http://127.0.0.1:${port}`)})
+  assert.equal(r.result.exit_reason,'provider_error');assert.match(r.result.error,/provider connection failed/)
+  assert.match(r.result.error,/connect|refused|连接/i);assert.doesNotMatch(r.result.error,/local-mock-key/)
+})
+test('a disconnected proxy reports its underlying connection failure',async t=>{
+  const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve))
+  const proxy=`http://127.0.0.1:${reservation.address().port}`;await new Promise(resolve=>reservation.close(resolve))
+  const f=await fixture(t,[],{HTTP_PROXY:proxy,http_proxy:proxy,HTTPS_PROXY:proxy,https_proxy:proxy,NO_PROXY:'',no_proxy:''})
+  const r=await f.run({model:await configureService(f,'http://provider.invalid')})
+  assert.equal(r.result.exit_reason,'provider_error');assert.match(r.result.error,/provider connection failed/)
+  assert.match(r.result.error,/10061|refused|拒绝/i);assert.doesNotMatch(r.result.error,/local-mock-key/)
 })
 test('scaffold: a stream dropped after visible output fails without a retry',async t=>{
   const f=await fixture(t);const mock=await sseMock(t,[{frames:anthropicFrames({text:'partial answer',chunks:2}),dropAfter:3}])

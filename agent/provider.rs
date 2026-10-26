@@ -18,9 +18,19 @@ use std::{
 /// Provider failures carry their retry semantics independently of their display text.
 #[derive(Debug)]
 pub enum ProviderError {
-    Http { status: u16 },
+    Http {
+        status: u16,
+        body: String,
+        retry_after: Option<Duration>,
+    },
+    ContextOverflow {
+        status: u16,
+        body: String,
+    },
     Network(reqwest::Error),
-    Timeout { idle: Duration },
+    Timeout {
+        idle: Duration,
+    },
     Interrupted,
     Protocol(String),
 }
@@ -28,11 +38,18 @@ pub enum ProviderError {
 impl ProviderError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Http { status } => {
+            Self::Http { status, .. } => {
                 *status == 408 || *status == 429 || (500..600).contains(status)
             }
             Self::Network(_) | Self::Timeout { .. } | Self::Interrupted => true,
-            Self::Protocol(_) => false,
+            Self::Protocol(_) | Self::ContextOverflow { .. } => false,
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Http { retry_after, .. } => *retry_after,
+            _ => None,
         }
     }
 }
@@ -40,7 +57,16 @@ impl ProviderError {
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Http { status } => write!(f, "provider HTTP {status}"),
+            Self::Http { status, body, .. } | Self::ContextOverflow { status, body } => {
+                write!(f, "provider HTTP {status}")?;
+                if !body.is_empty() {
+                    write!(f, ": {body}")?;
+                }
+                if *status == 401 {
+                    write!(f, " (请检查并重新配置 API 凭据)")?;
+                }
+                Ok(())
+            }
             Self::Network(_) => write!(f, "provider connection failed"),
             Self::Timeout { idle } => write!(
                 f,
@@ -242,12 +268,16 @@ impl Provider {
             }
             if let Some(error) = turn["error"].as_str() {
                 // Preserve the existing fake-script convention for simulated HTTP errors.
-                let status = error
-                    .strip_prefix("provider HTTP ")
-                    .and_then(|s| s.split_whitespace().next())
-                    .and_then(|s| s.parse::<u16>().ok());
-                return Err(match status {
-                    Some(status) => ProviderError::Http { status },
+                let http = error.strip_prefix("provider HTTP ").and_then(|s| {
+                    let (status, body) = s.split_once(' ').unwrap_or((s, ""));
+                    status.parse::<u16>().ok().map(|status| (status, body))
+                });
+                return Err(match http {
+                    Some((status, body)) => ProviderError::Http {
+                        status,
+                        body: body.to_string(),
+                        retry_after: None,
+                    },
                     None => ProviderError::Protocol(error.into()),
                 }
                 .into());
@@ -319,10 +349,45 @@ impl Provider {
         let limit = idle_timeout();
         let response = idle(limit, request.send())
             .await?
-            .map_err(ProviderError::Network)?;
+            .map_err(|error| ProviderError::Network(error.without_url()))?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            return Err(ProviderError::Http { status }.into());
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_retry_after);
+            let mut stream = response.bytes_stream();
+            let mut bytes = Vec::new();
+            let mut truncated = false;
+            // A slow or broken error body must not hide the already received status.
+            let _ = tokio::time::timeout(limit.min(Duration::from_secs(5)), async {
+                while let Some(Ok(chunk)) = stream.next().await {
+                    let remaining = 4097usize.saturating_sub(bytes.len());
+                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                    if bytes.len() > 4096 {
+                        bytes.truncate(4096);
+                        truncated = true;
+                        break;
+                    }
+                }
+            })
+            .await;
+            let mut body = String::from_utf8_lossy(&bytes).into_owned();
+            let overflow = context_overflow(&body);
+            if truncated {
+                body.push_str("…[truncated]");
+            }
+            return Err(if overflow {
+                ProviderError::ContextOverflow { status, body }
+            } else {
+                ProviderError::Http {
+                    status,
+                    body,
+                    retry_after,
+                }
+            }
+            .into());
         }
         let sse = response
             .headers()
@@ -332,7 +397,9 @@ impl Provider {
             let mut stream = response.bytes_stream();
             let mut bytes = vec![];
             while let Some(chunk) = idle(limit, stream.next()).await? {
-                bytes.extend_from_slice(&chunk.map_err(ProviderError::Network)?);
+                bytes.extend_from_slice(
+                    &chunk.map_err(|error| ProviderError::Network(error.without_url()))?,
+                );
                 if bytes.len() > 16_000_000 {
                     bail!("provider response exceeds the capture limit")
                 }
@@ -371,7 +438,7 @@ impl Provider {
         let mut first = None;
         let mut last = None;
         'stream: while let Some(chunk) = idle(limit, stream.next()).await? {
-            let bytes = chunk.map_err(ProviderError::Network)?;
+            let bytes = chunk.map_err(|error| ProviderError::Network(error.without_url()))?;
             captured += bytes.len();
             if captured > 64_000_000 {
                 bail!("SSE stream exceeds the capture limit")
@@ -726,6 +793,65 @@ impl Provider {
         Ok(body)
     }
 }
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let deadline = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some(
+        (deadline.with_timezone(&chrono::Utc) - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default(),
+    )
+}
+
+fn context_overflow(body: &str) -> bool {
+    let error = match serde_json::from_str::<Value>(body) {
+        Ok(value) => value["error"].clone(),
+        Err(_) => {
+            // The response may be truncated after a complete error object.
+            let Some(rest) = body
+                .split_once("\"error\"")
+                .map(|(_, rest)| rest.trim_start())
+            else {
+                return false;
+            };
+            let Some(rest) = rest.strip_prefix(':') else {
+                return false;
+            };
+            let Some(Ok(error)) = serde_json::Deserializer::from_str(rest.trim_start())
+                .into_iter::<Value>()
+                .next()
+            else {
+                return false;
+            };
+            error
+        }
+    };
+    let code = error["code"]
+        .as_str()
+        .or_else(|| error["type"].as_str())
+        .unwrap_or_default();
+    if matches!(
+        code,
+        "context_length_exceeded"
+            | "context_window_exceeded"
+            | "context_limit_exceeded"
+            | "prompt_too_long"
+            | "input_too_long"
+    ) {
+        return true;
+    }
+    let message = error["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    message.contains("maximum context length")
+        || message.contains("prompt is too long")
+        || message.contains("input is too long")
+}
+
 /// Longest silence tolerated while waiting for response headers or the next
 /// body chunk. MINICODE_PROVIDER_IDLE_TIMEOUT_S overrides the default.
 fn idle_timeout() -> Duration {
@@ -986,4 +1112,40 @@ pub fn validate_response(response: &Response, messages: &[Message]) -> Result<()
         bail!("provider response exceeds the capture limit")
     };
     Ok(())
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_accepts_seconds_and_http_dates() {
+        assert_eq!(parse_retry_after("0"), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after("5"), Some(Duration::from_secs(5)));
+        assert_eq!(
+            parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"),
+            Some(Duration::ZERO)
+        );
+        assert!(
+            parse_retry_after("Wed, 21 Oct 2099 07:28:00 GMT").unwrap() > Duration::from_secs(60)
+        );
+        assert_eq!(parse_retry_after("not a date"), None);
+    }
+
+    #[test]
+    fn context_overflow_uses_known_codes_and_messages() {
+        assert!(context_overflow(
+            r#"{"error":{"code":"context_length_exceeded"}}"#
+        ));
+        assert!(context_overflow(
+            r#"{"error":{"code":"context_length_exceeded"},"padding":"truncated"#
+        ));
+        assert!(context_overflow(
+            r#"{"error":{"type":"invalid_request_error","message":"prompt is too long"}}"#
+        ));
+        assert!(!context_overflow(
+            r#"{"error":{"type":"invalid_request_error","message":"bad parameter"}}"#
+        ));
+        assert!(!context_overflow("context_length_exceeded"));
+    }
 }
