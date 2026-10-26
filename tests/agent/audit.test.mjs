@@ -98,6 +98,10 @@ test('skill_load persists activation through a bridge restart', async t => {
   await c.request('selectSession', { sessionId: r.id })
   const caps = await c.request('getCapabilities', { sessionId: r.id, workspace: f.workspace })
   assert.equal(caps.skills.find(s => s.name === 'audit').active, true)
+  const lazy = connect(f)
+  await lazy.request('selectSession', { sessionId: r.id, deferRuntime: true })
+  const lazyCaps = await lazy.request('getCapabilities', { sessionId: r.id, workspace: f.workspace })
+  assert.equal(lazyCaps.skills.find(s => s.name === 'audit').active, true)
 })
 
 test('a shell cwd discovers nested instructions before any side effects', async t => {

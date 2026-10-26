@@ -228,10 +228,19 @@ type Message struct {
 	Content []map[string]any `json:"content"`
 }
 
+type HistoryCursor struct {
+	Messages *int64 `json:"messages"`
+	Events   *int64 `json:"events"`
+}
+
+func (c *HistoryCursor) HasMore() bool { return c != nil && (c.Messages != nil || c.Events != nil) }
+
 type Detail struct {
-	Summary  Session   `json:"summary"`
-	Messages []Message `json:"messages"`
-	Events   []Event   `json:"events"`
+	Summary       Session        `json:"summary"`
+	MessageOffset int            `json:"messageOffset"`
+	Cursor        *HistoryCursor `json:"cursor"`
+	Messages      []Message      `json:"messages"`
+	Events        []Event        `json:"events"`
 }
 
 type FeedItem struct {

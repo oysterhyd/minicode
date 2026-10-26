@@ -564,6 +564,7 @@ Agent 运行的终端命令会显示在这里。|Terminal commands run by the ag
 查看子助手会话|View subagent conversation
 查看完整归档输出|View full archived output
 加载更多|Load more
+加载更早历史|Load earlier history
 命令输出|Command output
 工具输出|Tool output
 已拒绝|Denied

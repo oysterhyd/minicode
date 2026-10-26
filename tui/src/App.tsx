@@ -115,6 +115,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
   const caretRef = useRef(0)
   const agentRef = useRef(agent)
   const workspaceRef = useRef(options.workspace)
+  const historyRef = useRef<{ detail: SessionDetail; count: number } | null>(null)
   const operationRef = useRef(false)
   const activeRef = useRef(true)
   const readyRef = useRef(false)
@@ -214,7 +215,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         if (!active) return
         const protocol = protocolProblem(initial)
         if (protocol) addNotice(protocol.message, protocol.level)
-        setCommands(initial.commands)
+        setCommands([...initial.commands, { name: '/history', usage: '/history', summary: '加载更早的会话历史' }])
         setModels(initial.models || [])
         setSessions(initial.sessions || [])
         let state = initial.state
@@ -274,6 +275,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
   }
 
   function resetScreen(items: FeedItem[] = []) {
+    historyRef.current = null
     transcriptRef.current?.returnToLatest()
     clearTranscript(stdout)
     setExpanded(new Set())
@@ -286,7 +288,38 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
     updateFeed(current => ({ ...current, items, error: '', startedAt: null }))
   }
 
+  async function loadEarlierHistory() {
+    const history = historyRef.current
+    const cursor = history?.detail.cursor
+    if (!history || !cursor || (cursor.messages === null && cursor.events === null)) {
+      addNotice('没有更早的历史记录')
+      return
+    }
+    if (operationRef.current) return
+    operationRef.current = true
+    try {
+      const page = await client.request<SessionDetail>('getSessionPage', { sessionId: history.detail.summary.session_id, cursor })
+      if (!activeRef.current || historyRef.current !== history || sessionRef.current !== history.detail.summary.session_id) return
+      const detail = { ...history.detail, cursor: page.cursor,
+        messageOffset: page.messages.length ? page.messageOffset : history.detail.messageOffset,
+        messages: [...page.messages, ...history.detail.messages], events: [...page.events, ...history.detail.events] }
+      const items = historyItems(detail)
+      historyRef.current = { detail, count: items.length }
+      const baseline = new Map(historyItems(history.detail).map(item => [item.id, JSON.stringify(item)]))
+      updateFeed(current => {
+        // A tool already present in the snapshot can receive live updates
+        // while its earlier history is loading. Keep those newer values.
+        const changed = new Map(current.items.slice(0, history.count)
+          .filter(item => JSON.stringify(item) !== baseline.get(item.id)).map(item => [item.id, item]))
+        return { ...current, items: [...items.map(item => changed.get(item.id) || item), ...current.items.slice(history.count)] }
+      })
+      transcriptRef.current?.scrollBy(-Number.MAX_SAFE_INTEGER)
+    } catch (error) { addNotice(cleanError(error), 'error') }
+    finally { operationRef.current = false; drainQueue() }
+  }
+
   async function runSlash(text: string) {
+    if (text === '/history') { await loadEarlierHistory(); return }
     if (operationRef.current) { addNotice('上一条命令仍在处理，请稍后重试'); return }
     if (busyRef.current && !LIVE_SLASH.test(text)) {
       addNotice('当前回合结束后再执行命令')
@@ -327,7 +360,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
       }
       if (result.action === 'resume' && result.sessionId) {
         const detail = await client.request<SessionDetail>('getSession', { sessionId: result.sessionId, workspace: workspaceRef.current })
-        const state = await client.request<AgentState>('selectSession', { sessionId: result.sessionId, workspace: workspaceRef.current })
+        const state = await client.request<AgentState>('selectSession', { sessionId: result.sessionId, workspace: workspaceRef.current, deferRuntime: true })
         if (!activeRef.current) return
         updateQueue([])
         workspaceRef.current = detail.summary.workspace
@@ -342,7 +375,10 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
           model: state.model,
           permissionMode: state.permissionMode,
         })
-        updateFeed({ items: historyItems(detail), busy: false, error: '', startedAt: null, sessionId: result.sessionId })
+        const items = historyItems(detail)
+        historyRef.current = { detail, count: items.length }
+        updateFeed({ items, busy: Boolean(state.running), error: '', startedAt: null, sessionId: result.sessionId })
+        if (detail.cursor && (detail.cursor.messages !== null || detail.cursor.events !== null)) addNotice('已加载最近历史；/history 加载更早记录')
         try {
           const capabilities = await client.request<Capabilities>('getCapabilities', { workspace: workspaceRef.current })
           if (activeRef.current) setSkills(capabilities.skills || [])

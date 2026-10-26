@@ -38,6 +38,11 @@ func (d *desktop) feed(c *ui.Context, p palette) {
 			ui.Row(c).Grow(1).Center().Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在恢复会话…")) })
 			return
 		}
+		if v.History != nil && v.History.Cursor.HasMore() {
+			if button(c, p, tr("加载更早历史"), "ChevronUp", false).Disabled(v.HistoryLoading).Clicked() {
+				d.loadEarlierHistory(v)
+			}
+		}
 		v.List.FollowEnd = true
 		if !reduceMotion(c) {
 			v.List.FollowAnimation = &ui.Smooth

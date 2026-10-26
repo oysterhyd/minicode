@@ -206,6 +206,100 @@ impl Store {
             Ok(messages)
         })
     }
+    /// Newest-first SQL reads, returned in chronological order. A byte budget
+    /// prevents many large events from becoming one unbounded NDJSON reply.
+    /// One oversized row is allowed so paging always makes lossless progress.
+    pub fn history_page(&self, id: &str, cursor: Option<&Value>, limit: usize) -> Result<Value> {
+        let before = |field: &str| -> Result<Option<i64>> {
+            match cursor {
+                None => Ok(Some(i64::MAX)),
+                Some(c) if c.is_object() => match c.get(field) {
+                    Some(Value::Null) => Ok(None),
+                    Some(v) => Ok(Some(
+                        v.as_i64()
+                            .filter(|n| *n >= 0)
+                            .context("invalid history cursor")?,
+                    )),
+                    None => bail!("invalid history cursor"),
+                },
+                _ => bail!("invalid history cursor"),
+            }
+        };
+        let message_before = before("messages")?;
+        let event_before = before("events")?;
+        let summary = self.require(id)?;
+        let limit = limit.clamp(1, 100);
+        self.with(|c| {
+            let mut messages = Vec::new();
+            let mut events = Vec::new();
+            let mut message_cursor = None;
+            let mut event_cursor = None;
+            let mut message_offset = 0i64;
+            if let Some(before) = message_before {
+                let mut q = c.prepare("SELECT seq,role,content FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?")?;
+                let mut rows = q.query(params![id, before, (limit + 1) as i64])?;
+                let mut bytes = 0;
+                while let Some(row) = rows.next()? {
+                    let content: String = row.get(2)?;
+                    if !messages.is_empty() && (messages.len() == limit || bytes + content.len() > 2_000_000) {
+                        message_cursor = Some(message_offset);
+                        break;
+                    }
+                    bytes += content.len();
+                    message_offset = row.get(0)?;
+                    messages.push(Message { role: row.get(1)?, content: serde_json::from_str(&content)? });
+                }
+                messages.reverse();
+            }
+            if let Some(before) = event_before {
+                let mut q = c.prepare("SELECT seq,type,timestamp,data FROM events WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?")?;
+                let mut rows = q.query(params![id, before, (limit + 1) as i64])?;
+                let mut bytes = 0;
+                let mut oldest = 0;
+                while let Some(row) = rows.next()? {
+                    let data: String = row.get(3)?;
+                    if !events.is_empty() && (events.len() == limit || bytes + data.len() > 2_000_000) {
+                        event_cursor = Some(oldest);
+                        break;
+                    }
+                    bytes += data.len();
+                    oldest = row.get(0)?;
+                    events.push(Event { seq: oldest, r#type: row.get(1)?, timestamp: row.get(2)?, data: serde_json::from_str(&data)? });
+                }
+                events.reverse();
+            }
+            Ok(json!({"summary":summary,"messages":messages,"events":events,"messageOffset":message_offset,"cursor":{"messages":message_cursor,"events":event_cursor}}))
+        })
+    }
+    pub fn active_skills(&self, id: &str) -> Result<std::collections::BTreeMap<String, String>> {
+        self.with(|c| {
+            let mut q = c.prepare("SELECT type,CASE WHEN type='session_start' THEN json_object('active_skills',json_extract(data,'$.active_skills')) ELSE data END FROM events WHERE session_id=? AND type IN ('session_start','skill_activated','skill_deactivated','project_instructions_changed') ORDER BY seq")?;
+            let mut rows = q.query([id])?;
+            let mut active = std::collections::BTreeMap::new();
+            while let Some(row) = rows.next()? {
+                let kind: String = row.get(0)?;
+                let data: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+                match kind.as_str() {
+                    "session_start" => {
+                        if let Some(skills) = data["active_skills"].as_object() {
+                            active = skills.iter().map(|(name, sha)| (name.clone(), sha.as_str().unwrap_or_default().into())).collect();
+                        }
+                    }
+                    "skill_activated" => { active.insert(util::string(&data, "name")?.into(), util::string(&data, "sha256")?.into()); }
+                    "skill_deactivated" => { active.remove(data["name"].as_str().unwrap_or_default()); }
+                    _ => for change in data["changes"].as_array().into_iter().flatten().filter(|c| c["kind"] == "skill") {
+                        let name = util::string(change, "name")?;
+                        if change["status"] == "removed" { active.remove(name); }
+                        else { active.insert(name.into(), util::string(change, "sha256")?.into()); }
+                    }
+                }
+            }
+            Ok(active)
+        })
+    }
+    pub fn saved_budget(&self, id: &str) -> Result<Option<i64>> {
+        self.with(|c| Ok(c.query_row("SELECT json_extract(data,'$.budget.max_total_tokens') FROM events WHERE session_id=? AND type IN ('budget_changed','session_start') ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).optional()?.flatten()))
+    }
     pub fn replace_messages(&self, id: &str, messages: &[Message]) -> Result<()> {
         self.transaction(|c| {
             c.execute("DELETE FROM messages WHERE session_id=?", [id])?;

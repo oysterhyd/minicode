@@ -70,10 +70,14 @@ export type DesktopEvent = {
   fatal?: boolean
 }
 
+export type HistoryCursor = { messages: number | null; events: number | null }
+
 export type SessionDetail = {
   summary: { session_id: string; workspace: string; model: string }
   messages: Message[]
   events: AgentEvent[]
+  messageOffset?: number
+  cursor?: HistoryCursor
 }
 
 export type SlashResult = { action?: string; message?: string; sessionId?: string; state?: AgentState }
@@ -118,7 +122,7 @@ export function historyItems(detail: SessionDetail): FeedItem[] {
   const items: FeedItem[] = []
   detail.messages.forEach((message, index) => {
     message.content.forEach((block, blockIndex) => {
-      const id = `${index}-${blockIndex}`
+      const id = `${(detail.messageOffset || 0) + index}-${blockIndex}`
       if (block.type === 'text' && block.text) {
         items.push({ id, kind: message.role === 'assistant' ? 'assistant' : 'user', text: String(block.text) })
       }

@@ -150,7 +150,7 @@ func History(detail Detail) []*FeedItem {
 			items = append(items, &FeedItem{ID: fmt.Sprintf("reasoning-%d", event.Seq), Kind: "reasoning", Text: String(event.Data["reasoning"]), EndedAt: Time(event.Timestamp)})
 		}
 		for j, block := range message.Content {
-			id := fmt.Sprintf("%d-%d", i, j)
+			id := fmt.Sprintf("%d-%d", detail.MessageOffset+i, j)
 			switch String(block["type"]) {
 			case "text":
 				text := String(block["text"])
@@ -197,7 +197,7 @@ func History(detail Detail) []*FeedItem {
 			}
 		}
 		if len(attachments) > 0 {
-			items = append(items, &FeedItem{ID: fmt.Sprintf("%d-media", i), Kind: "user", Attachments: attachments})
+			items = append(items, &FeedItem{ID: fmt.Sprintf("%d-media", detail.MessageOffset+i), Kind: "user", Attachments: attachments})
 		}
 	}
 	return items

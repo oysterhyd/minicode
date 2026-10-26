@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -37,6 +38,9 @@ type queuedPrompt struct {
 }
 
 type conversation struct {
+	History                       *model.Detail
+	HistoryCount                  int
+	HistoryLoading                bool
 	Key, SessionID, Workspace     string
 	State                         model.State
 	Items                         []*model.FeedItem
@@ -444,7 +448,7 @@ func (d *desktop) openSession(session model.Session) {
 	}
 	v.Loading = true
 	var state model.State
-	d.request(v, "selectSession", map[string]any{"sourceClientKey": source}, &state, func(err error) {
+	d.request(v, "selectSession", map[string]any{"sourceClientKey": source, "deferRuntime": true}, &state, func(err error) {
 		if err != nil {
 			v.Loading = false
 			d.error(v, err)
@@ -458,7 +462,9 @@ func (d *desktop) openSession(session model.Session) {
 				d.error(v, err)
 				return
 			}
+			v.History = &detail
 			v.Items = model.History(detail)
+			v.HistoryCount = len(v.Items)
 			v.rebuildRows()
 			v.Trace = recentTrace(detail.Events)
 			v.Loaded = true
@@ -466,6 +472,53 @@ func (d *desktop) openSession(session model.Session) {
 			d.rememberWorkspace(v.Workspace)
 			d.refresh(v, true)
 		})
+	})
+}
+
+func (d *desktop) loadEarlierHistory(v *conversation) {
+	if v.HistoryLoading || v.History == nil || !v.History.Cursor.HasMore() {
+		return
+	}
+	history := v.History
+	v.HistoryLoading = true
+	var page model.Detail
+	d.request(v, "getSessionPage", map[string]any{"cursor": history.Cursor}, &page, func(err error) {
+		v.HistoryLoading = false
+		if err != nil {
+			d.error(v, err)
+			return
+		}
+		if v.History != history {
+			return
+		}
+		merged := *history
+		merged.Messages = append(page.Messages, history.Messages...)
+		merged.Events = append(page.Events, history.Events...)
+		if len(page.Messages) > 0 {
+			merged.MessageOffset = page.MessageOffset
+		}
+		merged.Cursor = page.Cursor
+		items := model.History(merged)
+		baseline := map[string]*model.FeedItem{}
+		for _, item := range model.History(*history) {
+			baseline[item.ID] = item
+		}
+		changed := map[string]*model.FeedItem{}
+		for _, item := range v.Items[:v.HistoryCount] {
+			if !reflect.DeepEqual(item, baseline[item.ID]) {
+				changed[item.ID] = item
+			}
+		}
+		for i, item := range items {
+			if live := changed[item.ID]; live != nil {
+				items[i] = live
+			}
+		}
+		v.Items = append(items, v.Items[v.HistoryCount:]...)
+		v.HistoryCount = len(items)
+		v.History = &merged
+		v.rebuildRows()
+		v.List.ScrollTo(0, ui.Start)
 	})
 }
 
@@ -656,6 +709,8 @@ func (d *desktop) slash(text string, v *conversation) {
 	switch command[0] {
 	case "/clear":
 		v.Items = nil
+		v.History = nil
+		v.HistoryCount = 0
 		v.rebuildRows()
 		return
 	case "/new":
@@ -726,6 +781,8 @@ func (d *desktop) slash(text string, v *conversation) {
 			d.newSession(v.Workspace)
 		case "clear":
 			v.Items = nil
+			v.History = nil
+			v.HistoryCount = 0
 			v.rebuildRows()
 		case "continue":
 			if result.SessionID != "" {

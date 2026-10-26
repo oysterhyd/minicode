@@ -31,7 +31,11 @@ pub const PROTOCOL_VERSION: u64 = 2;
 /// The oldest client protocol this agent still serves correctly.
 pub const MIN_CLIENT_PROTOCOL: u64 = 2;
 /// Optional features a client may rely on when listed here.
-pub const CAPABILITIES: &[&str] = &["workspaceTrust", "projectInstructionsChanged"];
+pub const CAPABILITIES: &[&str] = &[
+    "workspaceTrust",
+    "projectInstructionsChanged",
+    "sessionPaging",
+];
 pub struct Conversation {
     pub settings: Arc<Mutex<Settings>>,
     pub snapshot: Arc<Mutex<Snapshot>>,
@@ -628,11 +632,23 @@ impl Router {
             } else {
                 vec![]
             })),
-            "getSession" => {
-                let id = util::string(p, "sessionId")?;
-                Ok(
-                    json!({"summary":store.require(id)?,"messages":store.messages(id)?,"events":store.events(id,-1)?}),
-                )
+            "getSession" | "getSessionPage" => {
+                let cursor = if method == "getSessionPage" {
+                    Some(p.get("cursor").context("history cursor required")?)
+                } else {
+                    None
+                };
+                let limit = p
+                    .get("limit")
+                    .map(|v| {
+                        v.as_u64()
+                            .filter(|n| *n > 0)
+                            .context("limit must be a positive integer")
+                    })
+                    .transpose()?
+                    .unwrap_or(100)
+                    .min(100) as usize;
+                store.history_page(util::string(p, "sessionId")?, cursor, limit)
             }
             "readArtifact" => store.artifact_page(
                 util::string(p, "sessionId")?,
@@ -640,6 +656,36 @@ impl Router {
                 p["offset"].as_u64().unwrap_or(0) as usize,
                 20_000,
             ),
+            "selectSession" if p["deferRuntime"] == true => {
+                let id = util::string(p, "sessionId")?;
+                if c.snapshot.lock().unwrap().session.as_deref() != Some(id) {
+                    if c.busy() {
+                        bail!("当前任务仍在运行，不能替换会话或工作区")
+                    }
+                    let summary = store.require(id)?;
+                    let mut settings = c.settings.lock().unwrap();
+                    settings.model = util::string(&summary, "model")?.into();
+                    settings.always_allow.clear();
+                    if settings.budget.max_total_tokens == 0 {
+                        settings.budget.max_total_tokens = store.saved_budget(id)?.unwrap_or(0);
+                    }
+                    *c.snapshot.lock().unwrap() = Snapshot {
+                        session: Some(id.into()),
+                        pending: summary["status"] != "completed",
+                        rounds: summary["rounds"].as_u64().unwrap_or(0),
+                        usage: Some(serde_json::from_value({
+                            let mut usage = summary.clone();
+                            usage["available"] = summary["usage_available"].clone();
+                            usage
+                        })?),
+                        ..Snapshot::default()
+                    };
+                    c.runtime = None;
+                    c.catalog = None;
+                    c.workspace = Some(PathBuf::from(util::string(&summary, "workspace")?));
+                }
+                c.state(store)
+            }
             "selectSession" | "getState" => {
                 if let Some(id) = p["sessionId"].as_str()
                     && c.snapshot.lock().unwrap().session.as_deref() != Some(id)
@@ -1029,6 +1075,8 @@ impl Router {
         let catalog = Catalog::scan(workspace, self.configuration.clone(), false)?;
         let active = if let Some(catalog) = &c.catalog {
             catalog.lock().await.active.clone()
+        } else if let Some(id) = c.snapshot.lock().unwrap().session.as_deref() {
+            self.store.active_skills(id)?
         } else {
             BTreeActive::default()
         };

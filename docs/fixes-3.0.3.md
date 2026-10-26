@@ -86,3 +86,10 @@
 - 问题与根因：serve 对完整 handle 加锁，会话锁外又套全局锁；cancelTurn / resolveApproval 还等待会话锁。
 - 修复：Router 的读写锁只保护映射与 LRU；每个 Owner 独立串行化会话请求。取消 token、审批 oneshot 和共享 settings/snapshot 独立持有，控制请求不获取会话锁。加载前预留 session 映射，避免两个客户端同时构造同一会话；更新映射时仍持有会话锁，避免旧请求覆盖新映射。配置写请求独立串行化，保留原来的读改写顺序；缓存不驱逐正在处理请求的 Owner。关闭时先取消所有 run，再等待收尾。
 - 测试：`controls_do_not_wait_for_the_conversation_lock` 修复前在 100ms 超时，修复后在会话锁被占用时取消和审批均完成；`one_locked_conversation_does_not_block_another` 验证另一会话仍可响应。
+
+## B14：大会话按需分页
+
+- 问题与根因：getSession 同时反序列化全部 messages/events，再序列化成一行；selectSession 为显示首屏也先构造完整 Runtime。
+- 修复：getSession 默认每类最多 100 条，按 seq 倒序查询再按时间返回；每类原始 JSON 预算 2MB。新增可选 `cursor: {messages, events}`、`messageOffset` 和 capability `sessionPaging`；getSessionPage 接受两个独立的排他游标，null 表示该类已读完，可单独拉取消息或事件。保留 summary/messages/events 结构，旧数据库无需迁移。两端在 selectSession 传可选 deferRuntime，只加载摘要、统计和预算，Runtime 延迟到执行请求时创建；未传该参数保持原有行为。激活 skill 使用事件投影恢复，无需全量历史。TUI `/history` 和 Desktop「加载更早历史」显式拉取一页，合并时保留现场新增的消息；历史消息 ID 使用持久化 seq 偏移，避免分页重号；与原始快照比较后保留已显示工具的实时更新，避免迟到分页把结果改回旧值。
+- 测试：`tests/agent/history.test.mjs` 写入 242 条消息、70MiB 事件，修复前首屏全量加载的断言失败；修复后验证首屏小于 4MiB、逐页完整且无重复、非法游标被拒绝、选择会话不加载完整 Runtime。TUI `history.test.tsx`、Desktop `TestHistoryLoadsEarlierPagesOnDemand` 均先复现无历史入口，再验证按需加载。`TestClearWhileHistoryPageLoadsDoesNotRestoreOrPanic` 先复现 /clear 与迟到分页响应导致越界，再验证清屏后忽略旧响应。两端另有迟到分页期间工具结果更新的回归测试。Desktop 新按钮补充英文翻译，沿用现有本地化检查。
+- 取舍：每页最多 100 条，可用可选 limit 调小。单条记录超过字节预算时仍完整返回一条，保证历史不被静默截断；D-BR1 负责接受超大单行。要硬性限制单条消息体积，需要后续加入内容级分块。选择历史会话时 contextTokens 暂为 0，开始运行后刷新为完整上下文估算。
