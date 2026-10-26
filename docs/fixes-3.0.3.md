@@ -320,3 +320,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：先复现失败后成功、混合有无 usage、空对象、零 token 旧会话恢复和旧空会话错误标记；另覆盖子代理旧摘要恢复、旧 JSON、全部缺失和持久化结果。
 - 取舍：可用表示至少有一条实际用量，并不表示缺失响应的费用已经补估；本批不新增占比字段。
 - 验证：`2A-P15-final3-*` 全部通过，协议 103 通过、1 个既有慢测跳过；首次全量协议测试遇到既有 SQLite 并发启动锁（`2A-P15-final2-protocol.log`），单独复测及完整重跑通过。
+
+## P3：Anthropic 提示缓存断点
+
+- 问题与根因：Anthropic payload 没有缓存断点，服务端无法复用工具、系统指令和对话前缀。
+- 修复：默认在最后一个工具、非空 system 和最近两条规范化后的消息末尾标记 `ephemeral`，每次最多四个断点；不改变持久化消息或 OpenAI 兼容 payload。设置 `MINICODE_ANTHROPIC_PROMPT_CACHE=off`（也接受 `0`、`false`、`no`）可为不支持该参数的网关关闭。
+- 测试：协议测试先复现缺失断点，再验证跨轮 system/tools 字节相同、断点数量和位置、模拟 cache read/write 用量、关闭开关及 OpenAI payload；Rust 用例验证消息规范化与原始历史不受影响。
+- 取舍：默认开启以满足降本目标，兼容网关可关闭；缓存是否命中还取决于服务端支持、最小长度及缓存有效期。首写计费可能高于普通输入，参见 [Anthropic 定价](https://platform.claude.com/docs/en/about-claude/pricing)。会话中动态指令导致的前缀变化由 X7 处理。
+- 验证：`2A-P3-final2-*` 全部通过；早期全量协议测试遇到两项既有 Windows 后台进程时序失败（`2A-P3-final-protocol.log`），两项单独复测及完整重跑通过。

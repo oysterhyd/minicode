@@ -821,15 +821,34 @@ impl Provider {
                     + 1024,
             )
             .max(1);
+        let cache = self.style == "anthropic" && anthropic_prompt_cache_enabled();
         if self.style == "anthropic" {
             chat = normalize_anthropic(chat);
+            if cache {
+                for message in chat.iter_mut().rev().take(2) {
+                    if let Some(block) = message["content"]
+                        .as_array_mut()
+                        .and_then(|content| content.last_mut())
+                    {
+                        block["cache_control"] = json!({"type":"ephemeral"});
+                    }
+                }
+            }
         }
         let mut body = json!({"model":self.model,"messages":null,"stream":true,"max_tokens":self.max_output.min(available)});
         body["messages"] = Value::Array(chat);
         if self.style == "anthropic" {
-            body["system"] = json!(system);
+            body["system"] = if cache && !system.is_empty() {
+                json!([{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}])
+            } else {
+                json!(system)
+            };
             if !tools.is_empty() {
-                body["tools"]=json!(tools.iter().map(|s|json!({"name":s.name,"description":s.description,"input_schema":s.input_schema})).collect::<Vec<_>>());
+                let mut definitions = tools.iter().map(|s|json!({"name":s.name,"description":s.description,"input_schema":s.input_schema})).collect::<Vec<_>>();
+                if cache {
+                    definitions.last_mut().unwrap()["cache_control"] = json!({"type":"ephemeral"});
+                }
+                body["tools"] = Value::Array(definitions);
             }
         } else {
             body["stream_options"] = json!({"include_usage":true});
@@ -842,6 +861,16 @@ impl Provider {
         }
         Ok(body)
     }
+}
+fn anthropic_prompt_cache_enabled() -> bool {
+    !std::env::var("MINICODE_ANTHROPIC_PROMPT_CACHE")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
 }
 fn parse_retry_after(value: &str) -> Option<Duration> {
     let value = value.trim();

@@ -805,9 +805,17 @@ fn provider_payload_ownership_keeps_both_wire_formats_exact() {
         json!({"model":"fake","messages":[{"role":"system","content":"system"},{"role":"user","content":"hello 中文"},{"role":"assistant","content":"answer","tool_calls":[{"id":"one","type":"function","function":{"name":"read","arguments":"{\"path\":\"file\"}"}}]},{"role":"tool","tool_call_id":"one","content":"result"}],"stream":true,"max_tokens":32,"stream_options":{"include_usage":true}})
     );
     provider.style = "anthropic".into();
-    let anthropic = provider
+    let mut anthropic = provider
         .payload("system", &messages, &[], &ctx.attachments)
         .unwrap();
+    if anthropic["system"].is_array() {
+        anthropic["system"] = anthropic["system"][0]["text"].clone();
+    }
+    for message in anthropic["messages"].as_array_mut().unwrap() {
+        for block in message["content"].as_array_mut().unwrap() {
+            block.as_object_mut().unwrap().remove("cache_control");
+        }
+    }
     assert_eq!(
         anthropic,
         json!({"model":"fake","messages":[{"role":"user","content":[{"type":"text","text":"hello 中文"}]},{"role":"assistant","content":[{"type":"text","text":"answer"},{"type":"tool_use","id":"one","name":"read","input":{"path":"file"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"one","content":"result","is_error":false}]}],"stream":true,"max_tokens":32,"system":"system"})
@@ -1459,8 +1467,14 @@ fn anthropic_normalization_merges_and_orders_blocks_without_touching_history() {
         .payload("system", &messages, &[], &ctx.attachments)
         .unwrap();
     assert_eq!(messages, original);
+    let mut normalized = payload["messages"].clone();
+    for message in normalized.as_array_mut().unwrap() {
+        for block in message["content"].as_array_mut().unwrap() {
+            block.as_object_mut().unwrap().remove("cache_control");
+        }
+    }
     assert_eq!(
-        payload["messages"],
+        normalized,
         json!([
             {"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]},
             {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{}},{"type":"tool_use","id":"b","name":"read","input":{}}]},

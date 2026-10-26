@@ -49,6 +49,27 @@ test('empty usage objects do not count as measured usage',async t=>{
     assert.equal(r.result.exit_reason,'completed');assert.equal(r.result.total_usage.available,false,style);assert.equal(r.detail.summary.usage_available,false)
   }
 })
+test('Anthropic cache breakpoints preserve stable prefixes and cache usage',async t=>{
+  const f=await fixture(t,[],{MINICODE_ANTHROPIC_PROMPT_CACHE:'on'});const first=anthropicFrames({tools:[{id:'read-cache',name:'read',arguments:{path:'README.md'}}]})
+  const second=anthropicFrames({text:'cached',input:12,output:4});second[0].message.usage.cache_read_input_tokens=7;second[0].message.usage.cache_creation_input_tokens=2
+  const mock=await sseMock(t,[{frames:first},{frames:second}]);const r=await f.run({model:await configureService(f,mock.url)})
+  assert.equal(r.result.exit_reason,'completed');assert.equal(mock.payloads.length,2)
+  const [a,b]=mock.payloads;assert.equal(JSON.stringify(a.system),JSON.stringify(b.system));assert.equal(JSON.stringify(a.tools),JSON.stringify(b.tools))
+  assert.equal(b.system.at(-1).cache_control.type,'ephemeral');assert.equal(b.tools.at(-1).cache_control.type,'ephemeral')
+  for(const message of b.messages.slice(-2))assert.equal(message.content.at(-1).cache_control.type,'ephemeral')
+  const markers=[...b.system,...b.tools,...b.messages.flatMap(m=>m.content)].filter(block=>block.cache_control)
+  assert.equal(markers.length,4);assert.equal(r.result.total_usage.cache_read_tokens,7);assert.equal(r.result.total_usage.cache_write_tokens,2);assert.equal(r.detail.summary.cache_read_tokens,7)
+})
+test('Anthropic cache markers can be disabled for incompatible gateways',async t=>{
+  const f=await fixture(t,[],{MINICODE_ANTHROPIC_PROMPT_CACHE:'off'});const mock=await sseMock(t,[{frames:anthropicFrames({text:'without cache'})}])
+  const r=await f.run({model:await configureService(f,mock.url)});assert.equal(r.result.exit_reason,'completed')
+  assert.equal(typeof mock.payloads[0].system,'string');assert.ok(!JSON.stringify(mock.payloads[0]).includes('"cache_control"'))
+})
+test('OpenAI-compatible payloads do not receive Anthropic cache fields',async t=>{
+  const f=await fixture(t);const mock=await sseMock(t,[{frames:openaiFrames({text:'openai'}),done:true}])
+  const r=await f.run({model:await configureService(f,mock.url,'openai')});assert.equal(r.result.exit_reason,'completed')
+  assert.ok(!JSON.stringify(mock.payloads[0]).includes('"cache_control"'))
+})
 test('connection failures include the underlying socket error without credentials',async t=>{
   const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve))
   const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve))
