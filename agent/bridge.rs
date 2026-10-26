@@ -38,6 +38,7 @@ pub const CAPABILITIES: &[&str] = &[
     "diagnosticEvents",
     "runIdentity",
     "asyncStart",
+    "sessionSubscriptions",
 ];
 pub struct Conversation {
     pub settings: Arc<Mutex<Settings>>,
@@ -47,6 +48,7 @@ pub struct Conversation {
     pub runtime: Option<Arc<tokio::sync::Mutex<Runtime>>>,
     pub cancel: Arc<Mutex<CancellationToken>>,
     pub client_key: String,
+    listeners: Arc<RwLock<HashSet<String>>>,
     pub running: Option<tokio::task::JoinHandle<()>>,
     pub statistics: Arc<Mutex<Statistics>>,
     preparing: bool,
@@ -65,6 +67,7 @@ impl Conversation {
             runtime: None,
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
             client_key: "default".into(),
+            listeners: Arc::new(RwLock::new(HashSet::new())),
             running: None,
             statistics: Arc::new(Mutex::new(Statistics::default())),
             preparing: false,
@@ -120,6 +123,7 @@ fn snapshot_state(
 }
 // Controls never acquire the async conversation lock.
 struct Owner {
+    listeners: Arc<RwLock<HashSet<String>>>,
     preparation: Mutex<Option<tokio::task::JoinHandle<()>>>,
     statistics: Arc<Mutex<Statistics>>,
     conversation: tokio::sync::Mutex<Conversation>,
@@ -131,6 +135,7 @@ struct Owner {
 impl Owner {
     fn new(c: Conversation) -> Self {
         Self {
+            listeners: c.listeners.clone(),
             preparation: Mutex::new(None),
             statistics: c.statistics.clone(),
             settings: c.settings.clone(),
@@ -149,6 +154,14 @@ struct Routes {
     saved_settings: HashMap<String, Settings>,
 }
 impl Routes {
+    fn bind(&mut self, owner: &Arc<Owner>, key: &str, listen: bool) -> bool {
+        if let Some(previous) = self.clients.insert(key.into(), owner.clone())
+            && !Arc::ptr_eq(&previous, owner)
+        {
+            previous.listeners.write().unwrap().remove(key);
+        }
+        listen && owner.listeners.write().unwrap().insert(key.into())
+    }
     fn trim(&mut self) {
         let mut attempts = self.recent.len();
         while self.sessions.len() > 6 && attempts > 0 {
@@ -328,7 +341,7 @@ impl Router {
             if !c.preparing && c.snapshot.lock().unwrap().running {
                 bail!("当前任务仍在运行")
             }
-            let hooks = c.hooks(self.event_sink(&c.client_key));
+            let hooks = c.hooks(self.event_sink(&c.listeners));
             r.refresh_snapshot(&hooks).await?;
             self.commit_settings(c, &r.session, settings);
             c.catalog = Some(r.catalog.clone());
@@ -346,13 +359,36 @@ impl Router {
         }
         Ok(())
     }
-    fn event_sink(&self, key: &str) -> Sink {
+    fn event_sink(&self, listeners: &Arc<RwLock<HashSet<String>>>) -> Sink {
         let sink = self.sink.clone();
-        let key = key.to_string();
-        Arc::new(move |mut value| {
-            value["clientKey"] = json!(key);
-            sink(value);
+        let listeners = listeners.clone();
+        Arc::new(move |value| {
+            let keys = listeners
+                .read()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in keys {
+                let mut event = value.clone();
+                event["clientKey"] = json!(key);
+                sink(event);
+            }
         })
+    }
+    fn observed_state(&self, owner: &Owner, key: &str, joined: bool) -> Result<Value> {
+        let state = snapshot_state(
+            &owner.settings,
+            &owner.snapshot,
+            &owner.statistics,
+            &self.store,
+        )?;
+        if joined && state["running"] == true {
+            (self.sink)(
+                json!({"event":"run_started","clientKey":key,"sessionId":state["sessionId"],"runId":state["runId"],"state":state}),
+            );
+        }
+        Ok(state)
     }
     async fn start(
         &self,
@@ -368,7 +404,7 @@ impl Router {
         if !c.preparing {
             *c.cancel.lock().unwrap() = CancellationToken::new();
         }
-        let sink = self.event_sink(&c.client_key);
+        let sink = self.event_sink(&c.listeners);
         let returned_session = session.clone();
         let run_id = if c.preparing {
             c.snapshot
@@ -496,7 +532,7 @@ impl Router {
             routes.recent.push_back(session.clone());
             routes.trim();
         }
-        let sink = self.event_sink(key);
+        let sink = self.event_sink(&owner.listeners);
         sink(json!({"event":"run_started","sessionId":session,"runId":run_id,"phase":"preparing"}));
         let mut params = params.clone();
         params["sessionId"] = json!(session);
@@ -616,7 +652,7 @@ impl Router {
                 .cloned()
                 .or_else(|| routes.clients.get(&key).cloned())
         };
-        let owner = { lookup(&self.routes.read().unwrap()) };
+        let mut owner = { lookup(&self.routes.read().unwrap()) };
         if ["cancelTurn", "resolveApproval"].contains(&method) {
             let Some(owner) = owner else {
                 return Ok(json!(false));
@@ -649,13 +685,39 @@ impl Router {
             }
             drop(snapshot);
             if running {
-                return snapshot_state(
-                    &owner.settings,
-                    &owner.snapshot,
-                    &owner.statistics,
-                    &self.store,
-                );
+                let joined = self.routes.write().unwrap().bind(owner, &key, true);
+                return self.observed_state(owner, &key, joined);
             }
+        }
+        // /new detaches this view; other subscribers keep their old session.
+        let detach = method == "resetSession"
+            || (method == "runSlash"
+                && params["text"]
+                    .as_str()
+                    .and_then(|s| s.split_whitespace().next())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("/new")));
+        if detach && let Some(previous) = &owner {
+            let mut previous = previous.conversation.lock().await;
+            if previous.busy() {
+                bail!("当前任务仍在运行")
+            }
+            let mut next = Conversation::new(&self.configuration)?;
+            let mut settings = previous.settings.lock().unwrap().clone();
+            settings.always_allow.clear();
+            settings.pending_model = false;
+            *next.settings.lock().unwrap() = settings;
+            if method == "runSlash" {
+                next.catalog = previous.catalog.clone();
+                next.workspace = previous.workspace.clone();
+            } else {
+                // resetSession also invalidates the old runtime so a later
+                // explicit resume re-pins changed instructions (R1).
+                previous.runtime = None;
+                previous.catalog = None;
+                previous.workspace = None;
+            }
+            drop(previous);
+            owner = Some(Arc::new(Owner::new(next)));
         }
         let candidate = if owner.is_none() {
             let c = Conversation::new(&self.configuration)?;
@@ -677,16 +739,33 @@ impl Router {
         } else {
             None
         };
-        let owner = {
+        let (owner, joined) = {
             let mut routes = self.routes.write().unwrap();
-            let owner = lookup(&routes).or(owner).or(candidate).unwrap();
-            routes.clients.insert(key.clone(), owner.clone());
+            let owner = if detach {
+                owner.or(candidate).unwrap()
+            } else {
+                lookup(&routes).or(owner).or(candidate).unwrap()
+            };
+            // Raw history reads do not subscribe an unrelated default view.
+            let listen = ![
+                "getSession",
+                "getSessionPage",
+                "readArtifact",
+                "listSessions",
+                "listTasks",
+                "attachmentPath",
+            ]
+            .contains(&method);
+            let joined = routes.bind(&owner, &key, listen);
             // Reserve before loading: concurrent clients share one runtime.
-            if let Some(id) = session {
+            if !detach && let Some(id) = session {
                 routes.sessions.insert(id.into(), owner.clone());
             }
-            owner
+            (owner, joined)
         };
+        if joined && owner.snapshot.lock().unwrap().running {
+            self.observed_state(&owner, &key, true)?;
+        }
         if method == "sendPrompt" && params["asyncStart"] == true {
             return self.accept_prompt(owner, &key, params);
         }
@@ -1012,7 +1091,7 @@ impl Router {
                         &r.session,
                         &json!({"model":model,"provider":r.provider.name}),
                     )?;
-                    r.refresh_snapshot(&c.hooks(self.event_sink(&c.client_key)))
+                    r.refresh_snapshot(&c.hooks(self.event_sink(&c.listeners)))
                         .await?;
                 }
                 c.state(store)
@@ -1177,7 +1256,7 @@ impl Router {
                 };
                 if let Some(session) = session {
                     let event = store.event(&session, kind, &data)?;
-                    (self.event_sink(&c.client_key))(
+                    (self.event_sink(&c.listeners))(
                         json!({"event":"agent_event","sessionId":session,"item":event}),
                     );
                 }
@@ -1412,7 +1491,7 @@ impl Router {
                     let changed = runtime
                         .lock()
                         .await
-                        .compact(&c.hooks(self.event_sink(&c.client_key)))
+                        .compact(&c.hooks(self.event_sink(&c.listeners)))
                         .await?;
                     Ok(
                         json!({"message":if changed{"上下文已压缩。"}else{"当前没有可压缩的历史。"},"state":c.state(&self.store)?}),

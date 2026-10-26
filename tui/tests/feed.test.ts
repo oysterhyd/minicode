@@ -126,3 +126,10 @@ test('B20: a terminal arriving while the next send is awaiting its identity stay
   assert.equal(applyDesktopEvent(state,{event:'run_done',sessionId:'session',runId:'old'}),state)
   assert.equal(applyDesktopEvent(state,{event:'run_done',sessionId:'session',runId:'new'}).busy,false)
 })
+
+test('B22: a loaded interrupted tool is repaired when its live result arrives',()=>{
+ const state={...emptyFeed(),items:[{id:'call',kind:'tool' as const,name:'read',interrupted:true}]}
+ const next=applyDesktopEvent(state,{event:'agent_event',item:{seq:2,type:'tool_call_result',timestamp:new Date().toISOString(),data:{call_id:'call',success:true,output_preview:'result'}}})
+ assert.equal(next.items[0].interrupted,false)
+ assert.equal(next.items[0].success,true)
+})

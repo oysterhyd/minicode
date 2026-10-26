@@ -204,4 +204,21 @@
 - 核查：第七个空闲会话触发 LRU 后删除 Owner，权限模式、effort 和本会话授权随内存运行时丢失；协议回归先复现 bypass 退回 default。
 - 修复：淘汰前将轻量 Settings 按 sessionId 留在进程内映射；选择和 Runtime 重载时恢复对应设置，仅跨会话创建时清理继承授权，避免 ensure 再次清空已恢复授权。设置只在成功加载后绑定，失败选择不把另一会话的权限带入当前会话。异步受理路径也执行同一 LRU 清理；删除会话删除其缓存设置。
 - 测试：session-cache.test.mjs 创建八个会话，确认首个 Owner 已被淘汰，验证延迟选择与完整 Runtime 重载均保留 bypass/high/write 授权。
-- 待确认决策：设置仅在当前 bridge 进程内保留，重启不恢复授权；显式 resetSession、/new 和 clearAlwaysAllow 仍清理当前授权。没有存储迁移或新增依赖。
+- 待确认决策：设置仅在当前 bridge 进程内保留，重启不恢复授权；显式 clearAlwaysAllow 撤销当前会话授权；resetSession、/new 清理新视图的继承授权，其他视图仍保留其原会话设置。没有存储迁移或新增依赖。
+
+
+## B22：运行中会话支持多视图订阅
+
+- 核查：busy 时不更新 client_key，而 Sink 已捕获旧 key；协议失败测试确认第二个视图收不到当前 run 快照或后续输出。
+- 修复：事件 Sink 动态读取会话订阅者，同一 run 的输出、审批和终止事件各向每个视图发送一次。新增订阅立即收到带 runId 和 state 的 run_started 快照；重复查询不重复订阅。视图切换时从旧订阅解绑，/new/resetSession 单独创建该视图的新 Owner，避免重置其他订阅者的会话。原会话继续遵守 B21 的设置保存。历史只读请求不自动订阅无关默认视图。
+- 两端：恢复运行中会话时绑定当前 runId 与 busy；历史工具等待实时结果时，结果到达会清除旧 interrupted 标记。
+- 测试：subscriptions.test.mjs 验证第二视图即时快照、两个视图均继续收到流/终止，以及 /new 互不干扰；TUI/Go 先复现恢复时的身份/假空闲及旧工具标记，再修复。
+- 待确认决策：采用多订阅者而非独占接管；协议只补当前状态，已产生的完整历史仍走 B14 分页，不重复推送历史正文。
+- 兼容性验证：resetSession 在分离请求视图时仍使原 Runtime 失效，后续恢复继续重载并重新固定变更后的项目指令（R1 回归通过）。
+- 验证：完整 CI 命令最终通过；协议 86 通过、1 个既有慢测默认跳过，TUI 110 通过，Desktop 测试/vet/vendor 与两组评测验证均通过。日志见 output/checks/1B-B22-final-*。
+
+## 批次 1B 暂停点
+
+按用户要求，在完成 B22 后暂停。已完成并分别提交 B20、D3、B19、B21、B22；剩余 TU1、TU2、D1、D2、D4、D5 尚未修复。
+
+TU1、TU2 已有本地失败复现，分别保存在 output/1B-TU1.test.mjs、output/1B-TU2.test.mjs（日志在 output/checks/1B-TU1-before.log、1B-TU2-before.log）；它们是未提交的本地测试草稿，不属于 B22。后续继续时先将相应用例纳入 TUI 正式测试，再实现修复。D1/D2/D4/D5 的当前处理分支已核对，仍需各自补失败测试。

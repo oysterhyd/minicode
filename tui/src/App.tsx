@@ -377,7 +377,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         })
         const items = historyItems(detail)
         historyRef.current = { detail, count: items.length }
-        updateFeed({ items, busy: Boolean(state.running), error: '', startedAt: null, sessionId: result.sessionId })
+        updateFeed({ items, busy: Boolean(state.running), runId: state.runId, awaitingRun: false, error: '', startedAt: null, sessionId: result.sessionId })
         if (detail.cursor && (detail.cursor.messages !== null || detail.cursor.events !== null)) addNotice('已加载最近历史；/history 加载更早记录')
         try {
           const capabilities = await client.request<Capabilities>('getCapabilities', { workspace: workspaceRef.current })

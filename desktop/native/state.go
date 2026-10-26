@@ -458,6 +458,7 @@ func (d *desktop) openSession(session model.Session) {
 			return
 		}
 		v.State = state
+		v.Busy = state.Running
 		var detail model.Detail
 		d.request(v, "getSession", nil, &detail, func(err error) {
 			v.Loading = false
@@ -1079,6 +1080,7 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 		if item := v.toolItems[model.String(data["call_id"])]; item != nil {
 			item.Pending = false
 			item.Success = model.Bool(data["success"])
+			item.Interrupted = false
 			item.EndedAt = stamp
 			item.Output = model.String(data["output_detail"])
 			if item.Output == "" {

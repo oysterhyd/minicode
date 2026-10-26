@@ -176,6 +176,7 @@ function applyAgentEvent(
         ...item,
         pending: false,
         success: Boolean(data.success),
+        interrupted: false,
         endedAt: eventTime(timestamp),
         output: [output, error].filter(Boolean).join('\n'),
         artifactId: data.artifact_id ? String(data.artifact_id) : undefined,
