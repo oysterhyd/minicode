@@ -35,6 +35,7 @@ pub const CAPABILITIES: &[&str] = &[
     "workspaceTrust",
     "projectInstructionsChanged",
     "sessionPaging",
+    "diagnosticEvents",
 ];
 pub struct Conversation {
     pub settings: Arc<Mutex<Settings>>,

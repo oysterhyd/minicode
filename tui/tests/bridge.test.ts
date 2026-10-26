@@ -89,3 +89,29 @@ test('protocol versions are compared with an upgrade hint instead of a crash', (
   assert.equal(protocolProblem({ protocolVersion: 3 })!.level, 'warning')
   assert.match(protocolProblem({ protocolVersion: 2, minClientProtocol: 3 })!.message, /升级 TUI/)
 })
+
+// B-STDERR: diagnostic text, even text containing "Error", is not a protocol error.
+test('stderr and protocol logs go to disk while warnings stay nonfatal', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minicode-stderr-'))
+  const log = path.join(root, 'agent.log')
+  const script = `require('node:readline').createInterface({input:process.stdin}).on('line', line=>{
+    const {id}=JSON.parse(line)
+    process.stderr.write('ordinary startup log: Error count=0 中文\\n')
+    for (const message of [{event:'log',text:'protocol diagnostic'},{event:'warning',text:'optional extension unavailable'},{id,result:true}]) process.stdout.write(JSON.stringify(message)+'\\n')
+  })`
+  const child=spawn(process.execPath,['-e',script],{stdio:['pipe','pipe','pipe']})
+  const client=new BridgeClient(child,35000,log)
+  const events: Array<{event:string;text?:string}> = []
+  client.onEvent(event=>events.push(event))
+  try {
+    assert.equal(await client.request('initialize'),true)
+    await new Promise(resolve=>setTimeout(resolve,50))
+    assert.equal(events.some(e=>e.event==='bridge_error'),false)
+    assert.equal(events.some(e=>e.event==='log'),false)
+    assert.ok(events.some(e=>e.event==='warning' && e.text==='optional extension unavailable'))
+  } finally { await client.close() }
+  try {
+    assert.match(fs.readFileSync(log,'utf8'),/ordinary startup log: Error count=0 中文/)
+    assert.match(fs.readFileSync(log,'utf8'),/protocol diagnostic/)
+  } finally { fs.rmSync(root,{recursive:true,force:true}) }
+})

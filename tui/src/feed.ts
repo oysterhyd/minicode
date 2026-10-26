@@ -82,6 +82,7 @@ function finishRun(state: FeedState, event: DesktopEvent): FeedState {
 }
 
 export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedState {
+  if (event.event === 'log') return state
   if (event.event === 'bridge_error') {
     const fatal = event.fatal ?? /exited|不可用|无效消息/.test(event.error || '')
     if (!fatal && !/Traceback|Error|错误/.test(event.error || '')) return state
@@ -90,6 +91,7 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
   }
   if (event.sessionId && state.sessionId && event.sessionId !== state.sessionId) return state
   if (event.sessionId && !state.sessionId) state = { ...state, sessionId: event.sessionId }
+  if (event.event === 'warning') return { ...state, items: [...state.items, { id: `warning-${state.items.length}`, kind: 'notice', tone: 'warning', text: event.text }] }
   if (event.event === 'run_done' || event.event === 'run_error') return finishRun(state, event)
   if (event.event === 'text_delta' && event.text) {
     return { ...state, items: upsertAssistant(state.items, event.text) }

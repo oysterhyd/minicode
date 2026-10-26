@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events'
 import { execFile, type ChildProcess } from 'node:child_process'
 import readline from 'node:readline'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import type { DesktopEvent } from './types.js'
 
 export type BridgeApi = {
@@ -9,7 +12,7 @@ export type BridgeApi = {
   close: () => void | Promise<void>
 }
 
-const EVENTS = new Set(['agent_event', 'text_delta', 'reasoning_delta', 'approval', 'approval_auto', 'run_done', 'run_error', 'bridge_error'])
+const EVENTS = new Set(['agent_event', 'text_delta', 'reasoning_delta', 'approval', 'approval_auto', 'run_done', 'run_error', 'bridge_error', 'log', 'warning'])
 // Bridge protocol versions this TUI understands.
 export const PROTOCOL = { min: 2, max: 2 }
 
@@ -40,17 +43,19 @@ export class BridgeClient implements BridgeApi {
   private failure: Error | null = null
   private closePromise?: Promise<void>
   private reader: readline.Interface
+  private diagnostics?: fs.WriteStream
+  private diagnosticsClosed = false
   /** Event types from a newer agent that this TUI ignored. */
   readonly ignoredEvents = new Set<string>()
 
-  constructor(private readonly child: ChildProcess, private readonly requestTimeoutMs = 35000) {
+  constructor(private readonly child: ChildProcess, private readonly requestTimeoutMs = 35000, private readonly logPath = process.env.MINICODE_BRIDGE_LOG || path.join(os.homedir(), '.minicode', 'logs', 'agent-stderr.log')) {
     if (!child.stdout || !child.stdin) throw new Error('Agent bridge requires piped stdio')
     this.reader = readline.createInterface({ input: child.stdout })
     this.reader.on('line', line => this.onLine(line))
     this.reader.on('close', () => this.fail(new Error('Agent bridge 输出通道已关闭')))
     child.stdout.on('error', error => this.fail(error))
     child.stderr?.on('data', chunk => {
-      if (!this.closed) this.events.emit('event', { event: 'bridge_error', error: String(chunk), fatal: false })
+      this.logDiagnostic(String(chunk))
     })
     child.on('exit', (code, signal) => this.fail(new Error(`Agent bridge exited (${signal || code})`)))
     child.on('error', error => this.fail(error))
@@ -99,8 +104,31 @@ export class BridgeClient implements BridgeApi {
     if (this.closePromise) return this.closePromise
     this.closed = true
     this.rejectAll(new Error('Agent bridge 已关闭'))
-    this.closePromise = this.stop()
+    this.closePromise = this.stop().finally(() => this.closeDiagnostics())
     return this.closePromise
+  }
+
+  private logDiagnostic(text: string): void {
+    if (this.diagnosticsClosed) return
+    if (!this.diagnostics) {
+      try {
+        fs.mkdirSync(path.dirname(this.logPath), { recursive: true })
+        this.diagnostics = fs.createWriteStream(this.logPath, { flags: 'a', mode: 0o600 })
+        // Diagnostics must never break the bridge, including unwritable logs.
+        this.diagnostics.on('error', () => {})
+      } catch { return }
+    }
+    if (!this.diagnostics.destroyed) this.diagnostics.write(text)
+  }
+
+  private async closeDiagnostics(): Promise<void> {
+    this.diagnosticsClosed = true
+    const stream = this.diagnostics
+    if (!stream || stream.closed) return
+    await new Promise<void>(resolve => {
+      stream.once('close', resolve)
+      stream.end()
+    })
   }
 
   private async stop(): Promise<void> {
@@ -143,6 +171,7 @@ export class BridgeClient implements BridgeApi {
       if (!message || typeof message !== 'object' || Array.isArray(message)) throw new Error('消息不是对象')
       if ('event' in message) {
         if (typeof message.event !== 'string') throw new Error('事件类型无效')
+        if (['log', 'warning'].includes(message.event) && typeof message.text !== 'string') throw new Error('日志消息无效')
         if (message.event === 'agent_event' && (!message.item || typeof message.item !== 'object')) throw new Error('缺少 agent event')
       } else if (!Number.isSafeInteger(message.id) || (!('result' in message) && !('error' in message))) {
         throw new Error('缺少请求 ID 或结果')
@@ -160,6 +189,7 @@ export class BridgeClient implements BridgeApi {
         this.ignoredEvents.add(message.event as string)
         return
       }
+      if (message.event === 'log') { this.logDiagnostic(`[log] ${message.text}\n`); return }
       this.events.emit('event', message)
       return
     }

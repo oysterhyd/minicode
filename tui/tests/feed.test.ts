@@ -96,3 +96,14 @@ test('streaming assistant and pending tools stay live', () => {
   })
   assert.equal(isLive(state.items.at(-1)!), true)
 })
+
+// Protocol warnings must not end the run or populate its error channel.
+test('protocol warnings are notices and log events do not change feed state', () => {
+  const state = {...emptyFeed(),busy:true,sessionId:'active'}
+  const logged = applyDesktopEvent(state,{event:'log',text:'diagnostic'})
+  assert.equal(logged,state)
+  const warned = applyDesktopEvent(state,{event:'warning',sessionId:'active',text:'optional feature unavailable'})
+  assert.equal(warned.busy,true)
+  assert.equal(warned.error,'')
+  assert.equal(warned.items[0].tone,'warning')
+})
