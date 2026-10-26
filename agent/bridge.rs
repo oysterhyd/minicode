@@ -51,6 +51,7 @@ pub struct Conversation {
     pub statistics: Arc<Mutex<Statistics>>,
     preparing: bool,
     preparing_new: bool,
+    settings_session: Option<String>,
     pub catalog: Option<Arc<tokio::sync::Mutex<Catalog>>>,
     pub workspace: Option<PathBuf>,
 }
@@ -68,6 +69,7 @@ impl Conversation {
             statistics: Arc::new(Mutex::new(Statistics::default())),
             preparing: false,
             preparing_new: false,
+            settings_session: None,
             catalog: None,
             workspace: None,
         })
@@ -144,6 +146,43 @@ struct Routes {
     clients: HashMap<String, Arc<Owner>>,
     sessions: HashMap<String, Arc<Owner>>,
     recent: VecDeque<String>,
+    saved_settings: HashMap<String, Settings>,
+}
+impl Routes {
+    fn trim(&mut self) {
+        let mut attempts = self.recent.len();
+        while self.sessions.len() > 6 && attempts > 0 {
+            attempts -= 1;
+            let Some(id) = self.recent.pop_front() else {
+                break;
+            };
+            let Some(candidate) = self.sessions.get(&id).cloned() else {
+                continue;
+            };
+            let references = self
+                .clients
+                .values()
+                .chain(self.sessions.values())
+                .filter(|c| Arc::ptr_eq(c, &candidate))
+                .count();
+            // Do not evict runs or owners held by in-flight requests.
+            if Arc::strong_count(&candidate) == references + 1
+                && candidate.conversation.try_lock().is_ok_and(|c| {
+                    if c.busy() {
+                        return false;
+                    }
+                    self.saved_settings
+                        .insert(id.clone(), c.settings.lock().unwrap().clone());
+                    true
+                })
+            {
+                self.sessions.remove(&id);
+                self.clients.retain(|_, c| !Arc::ptr_eq(c, &candidate));
+            } else {
+                self.recent.push_back(id);
+            }
+        }
+    }
 }
 #[derive(Clone)]
 pub struct Router {
@@ -169,6 +208,42 @@ impl Router {
                 .as_str()
                 .unwrap_or(&util::home().to_string_lossy()),
         ))
+    }
+    fn session_settings(&self, c: &Conversation, session: Option<&str>) -> Settings {
+        if session.is_some() && c.settings_session.as_deref() == session {
+            return c.settings.lock().unwrap().clone();
+        }
+        if let Some(saved) =
+            session.and_then(|id| self.routes.read().unwrap().saved_settings.get(id).cloned())
+        {
+            return saved;
+        }
+        let mut settings = c.settings.lock().unwrap().clone();
+        settings.always_allow.clear();
+        settings
+    }
+    fn commit_settings(&self, c: &mut Conversation, session: &str, settings: Settings) {
+        if let Some(previous) = &c.settings_session
+            && previous != session
+        {
+            self.routes
+                .write()
+                .unwrap()
+                .saved_settings
+                .insert(previous.clone(), c.settings.lock().unwrap().clone());
+        }
+        *c.settings.lock().unwrap() = settings;
+        c.settings_session = Some(session.into());
+    }
+    fn reset_settings(&self, c: &mut Conversation) {
+        c.settings.lock().unwrap().always_allow.clear();
+        if let Some(previous) = c.settings_session.take() {
+            self.routes
+                .write()
+                .unwrap()
+                .saved_settings
+                .insert(previous, c.settings.lock().unwrap().clone());
+        }
     }
     async fn ensure(
         &self,
@@ -202,7 +277,7 @@ impl Router {
         };
         let session = session.or(reload_session.as_deref());
         if different {
-            let settings = c.settings.lock().unwrap().clone();
+            let mut settings = self.session_settings(c, session);
             let summary = session.map(|id| self.store.require(id)).transpose()?;
             let model = model
                 .map(str::to_string)
@@ -245,16 +320,17 @@ impl Router {
                     .as_i64()
                     .unwrap_or(0);
                 if cap != 0 {
-                    c.settings.lock().unwrap().budget.max_total_tokens = cap;
+                    settings.budget.max_total_tokens = cap;
                 }
             }
-            c.settings.lock().unwrap().model = model;
-            c.settings.lock().unwrap().always_allow.clear();
+            settings.model = model;
+            settings.pending_model = false;
             if !c.preparing && c.snapshot.lock().unwrap().running {
                 bail!("当前任务仍在运行")
             }
             let hooks = c.hooks(self.event_sink(&c.client_key));
             r.refresh_snapshot(&hooks).await?;
+            self.commit_settings(c, &r.session, settings);
             c.catalog = Some(r.catalog.clone());
             c.workspace = Some(workspace.into());
             c.runtime = Some(Arc::new(tokio::sync::Mutex::new(r)));
@@ -413,11 +489,13 @@ impl Router {
             snapshot.run_id = Some(run_id.clone());
             snapshot.session = Some(session.clone());
         }
-        self.routes
-            .write()
-            .unwrap()
-            .sessions
-            .insert(session.clone(), owner.clone());
+        {
+            let mut routes = self.routes.write().unwrap();
+            routes.sessions.insert(session.clone(), owner.clone());
+            routes.recent.retain(|id| id != &session);
+            routes.recent.push_back(session.clone());
+            routes.trim();
+        }
         let sink = self.event_sink(key);
         sink(json!({"event":"run_started","sessionId":session,"runId":run_id,"phase":"preparing"}));
         let mut params = params.clone();
@@ -521,6 +599,7 @@ impl Router {
                         routes.clients.retain(|_, c| !Arc::ptr_eq(c, &owner));
                     }
                     routes.recent.retain(|s| s != id);
+                    routes.saved_settings.remove(id);
                 }
             }
             return Ok(json!(self.store.sessions()?));
@@ -628,31 +707,7 @@ impl Router {
                 routes.recent.retain(|s| s != &id);
                 routes.recent.push_back(id);
             }
-            let mut attempts = routes.recent.len();
-            while routes.sessions.len() > 6 && attempts > 0 {
-                attempts -= 1;
-                let Some(id) = routes.recent.pop_front() else {
-                    break;
-                };
-                let Some(candidate) = routes.sessions.get(&id).cloned() else {
-                    continue;
-                };
-                let references = routes
-                    .clients
-                    .values()
-                    .chain(routes.sessions.values())
-                    .filter(|c| Arc::ptr_eq(c, &candidate))
-                    .count();
-                // Do not evict runs or owners held by in-flight requests.
-                if Arc::strong_count(&candidate) == references + 1
-                    && candidate.conversation.try_lock().is_ok_and(|c| !c.busy())
-                {
-                    routes.sessions.remove(&id);
-                    routes.clients.retain(|_, c| !Arc::ptr_eq(c, &candidate));
-                } else {
-                    routes.recent.push_back(id);
-                }
-            }
+            routes.trim();
         }
         drop(c);
         let result = result?;
@@ -835,9 +890,8 @@ impl Router {
                         bail!("当前任务仍在运行，不能替换会话或工作区")
                     }
                     let summary = store.require(id)?;
-                    let mut settings = c.settings.lock().unwrap();
+                    let mut settings = self.session_settings(c, Some(id));
                     settings.model = util::string(&summary, "model")?.into();
-                    settings.always_allow.clear();
                     if settings.budget.max_total_tokens == 0 {
                         settings.budget.max_total_tokens = store.saved_budget(id)?.unwrap_or(0);
                     }
@@ -852,6 +906,7 @@ impl Router {
                         })?),
                         ..Snapshot::default()
                     };
+                    self.commit_settings(c, id, settings);
                     c.runtime = None;
                     c.catalog = None;
                     c.workspace = Some(PathBuf::from(util::string(&summary, "workspace")?));
@@ -881,7 +936,7 @@ impl Router {
                 c.catalog = None;
                 c.workspace = None;
                 *c.snapshot.lock().unwrap() = Snapshot::default();
-                c.settings.lock().unwrap().always_allow.clear();
+                self.reset_settings(c);
                 c.state(store)
             }
             "setModel" | "setTuiProvider" => {
@@ -1281,7 +1336,7 @@ impl Router {
             "/new" => {
                 c.runtime = None;
                 *c.snapshot.lock().unwrap() = Snapshot::default();
-                c.settings.lock().unwrap().always_allow.clear();
+                self.reset_settings(c);
                 Ok(json!({"action":"new","message":"已开启新会话。"}))
             }
             "/sessions" => {
