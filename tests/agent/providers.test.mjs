@@ -112,3 +112,30 @@ test('C4: Anthropic effort can be enabled and signed thinking survives the enabl
   const thinking=payloads[2].messages.find(m=>m.role==='assistant'&&m.content.some(b=>b.type==='thinking')).content[0]
   assert.deepEqual(thinking,{type:'thinking',thinking:'enabled thought',signature:'enabled-signature'})
 })
+
+test('P8: switching OpenAI history to Anthropic remaps tool ids and hands off reasoning',async t=>{
+  const f=await fixture(t),anthropicPayloads=[];let openaiCount=0
+  const openaiUrl=await server(t,(_req,res)=>{
+    if(openaiCount++===0)write(res,[{choices:[{delta:{reasoning_content:'inspect the file'},finish_reason:null}]},{choices:[{delta:{tool_calls:[{index:0,id:'functions.read:0',function:{name:'read',arguments:'{"path":"README.md"}'}}]},finish_reason:'tool_calls'}]}])
+    else write(res,[{choices:[{delta:{content:'first done'},finish_reason:'stop'}]}])
+  })
+  const anthropicUrl=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    anthropicPayloads.push(JSON.parse(body))
+    write(res,[{type:'content_block_start',index:0,content_block:{type:'text',text:'switched'}},{type:'message_delta',delta:{stop_reason:'end_turn'}},{type:'message_stop'}],false)
+  })})
+  let config=await f.request('saveService',{service:{name:'openai source',baseUrl:openaiUrl+'/v1',apiStyle:'openai',apiKey:'key',enabled:true,models:[{modelId:'deepseek-reasoner',contextWindow:128000,maxOutputTokens:8192,supportsEffort:true}]}})
+  const source=config.defaultModel
+  config=await f.request('saveService',{service:{name:'anthropic destination',baseUrl:anthropicUrl,apiStyle:'anthropic',apiKey:'key',enabled:true,models:[{modelId:'claude-test',contextWindow:128000,maxOutputTokens:8192,supportsEffort:false}]}})
+  const destination=config.services.find(s=>s.name==='anthropic destination').id+'::claude-test'
+  const first=await f.run({model:source})
+  assert.equal(first.result.exit_reason,'completed')
+  await f.request('setModel',{sessionId:first.id,model:destination})
+  const second=await f.run({sessionId:first.id,model:destination,text:'continue'})
+  assert.equal(second.result.exit_reason,'completed')
+  const blocks=anthropicPayloads[0].messages.flatMap(m=>m.content)
+  const call=blocks.find(b=>b.type==='tool_use'),result=blocks.find(b=>b.type==='tool_result')
+  assert.match(call.id,/^[a-zA-Z0-9_-]{1,64}$/)
+  assert.equal(result.tool_use_id,call.id)
+  assert.ok(blocks.some(b=>b.type==='text'&&b.text.includes('inspect the file')))
+  assert.equal(second.detail.messages.find(m=>m.role==='assistant').content.find(b=>b.type==='tool_use').id,'functions.read:0')
+})

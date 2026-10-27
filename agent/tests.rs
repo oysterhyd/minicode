@@ -2297,3 +2297,122 @@ fn anthropic_adaptive_models_use_supported_thinking_parameters() {
     assert!(body["thinking"].get("budget_tokens").is_none());
     assert_eq!(body["output_config"]["effort"], "high");
 }
+
+#[test]
+fn anthropic_handoff_maps_ids_uniquely_and_preserves_history() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    provider.style = "anthropic".into();
+    let invalid = "functions.read:0";
+    let hash = crate::util::hash(invalid.as_bytes());
+    let reserved = format!("mc_{}", &hash[..61]);
+    let ids = [
+        invalid.to_string(),
+        reserved.clone(),
+        "call_x.y".to_string(),
+        "z".repeat(80),
+    ];
+    let messages = vec![
+        Message::user("question"),
+        Message {
+            role: "assistant".into(),
+            content: ids
+                .iter()
+                .map(|id| Block::ToolUse {
+                    id: id.clone(),
+                    name: "read".into(),
+                    input: json!({}),
+                })
+                .collect(),
+        },
+        Message {
+            role: "user".into(),
+            content: ids
+                .iter()
+                .map(|id| Block::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: "result".into(),
+                    is_error: false,
+                    images: vec![],
+                })
+                .collect(),
+        },
+    ];
+    let before = messages.clone();
+    let first = provider
+        .payload("", &messages, &[], &ctx.attachments)
+        .unwrap();
+    let second = provider
+        .payload("", &messages, &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(messages, before);
+    let calls = first["messages"][1]["content"].as_array().unwrap();
+    let results = first["messages"][2]["content"].as_array().unwrap();
+    let mapped = calls
+        .iter()
+        .map(|b| b["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(mapped[1], reserved);
+    assert_eq!(
+        mapped
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        ids.len()
+    );
+    for (id, result) in mapped.iter().zip(results) {
+        assert!(
+            id.len() <= 64
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        );
+        assert_eq!(result["tool_use_id"], *id);
+    }
+}
+
+#[test]
+fn openai_handoff_downgrades_foreign_thinking_without_opaque_data() {
+    let (_dir, ctx) = fixture();
+    let provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    let messages = vec![
+        Message::user("hi"),
+        Message {
+            role: "assistant".into(),
+            content: vec![
+                Block::Thinking {
+                    thinking: "previous thought".into(),
+                    signature: Some("secret-signature".into()),
+                    source: "anthropic:other".into(),
+                },
+                Block::RedactedThinking {
+                    data: "opaque-ciphertext".into(),
+                    source: "anthropic:other".into(),
+                },
+                Block::text("answer"),
+            ],
+        },
+    ];
+    let body = provider
+        .payload("", &messages, &[], &ctx.attachments)
+        .unwrap();
+    let text = body["messages"][1]["content"].as_str().unwrap();
+    assert!(text.contains("previous thought") && text.contains("answer"));
+    assert!(!body.to_string().contains("secret-signature"));
+    assert!(!body.to_string().contains("opaque-ciphertext"));
+}

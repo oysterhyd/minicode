@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt, fs,
     time::{Duration, Instant},
 };
@@ -789,6 +789,11 @@ impl Provider {
         if self.style == "openai" && !system.is_empty() {
             chat.push(json!({"role":"system","content":system}));
         }
+        let tool_ids = if self.style == "anthropic" {
+            anthropic_tool_ids(messages)
+        } else {
+            HashMap::new()
+        };
         for message in messages {
             let media = message
                 .content
@@ -813,18 +818,22 @@ impl Provider {
                                 } else if !thinking.is_empty() {
                                     content.push(json!({"type":"text","text":thinking}));
                                 }
+                            } else if !thinking.is_empty() {
+                                content.push(json!({"type":"text","text":format!("[Previous reasoning]\n{thinking}")}));
                             }
                         }
                         Block::RedactedThinking { data, source } => {
                             if source == &self.thinking_source() {
                                 content.push(json!({"type":"redacted_thinking","data":data}));
+                            } else {
+                                content.push(json!({"type":"text","text":"[Previous redacted reasoning is unavailable.]"}));
                             }
                         }
                         Block::Media { .. } => {
                             content.push(media_part(b, attachments, &self.style)?)
                         }
                         Block::ToolUse { id, name, input } => content
-                            .push(json!({"type":"tool_use","id":id,"name":name,"input":input})),
+                            .push(json!({"type":"tool_use","id":tool_ids.get(id).unwrap_or(id),"name":name,"input":input})),
                         Block::ToolResult {
                             tool_use_id,
                             content: text,
@@ -841,7 +850,7 @@ impl Provider {
                                 }
                                 Value::Array(parts)
                             };
-                            let mut entry = json!({"type":"tool_result","tool_use_id":tool_use_id,"content":null,"is_error":is_error});
+                            let mut entry = json!({"type":"tool_result","tool_use_id":tool_ids.get(tool_use_id).unwrap_or(tool_use_id),"content":null,"is_error":is_error});
                             entry["content"] = result;
                             content.push(entry);
                         }
@@ -853,10 +862,28 @@ impl Provider {
                 continue;
             }
             if message.role == "assistant" {
-                let text = message.text();
+                let replay = self.replays_reasoning_content();
+                let text = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::Text { text } => Some(text.clone()),
+                        Block::Thinking {
+                            thinking, source, ..
+                        } if (!replay || source != &self.thinking_source())
+                            && !thinking.is_empty() =>
+                        {
+                            Some(format!("[Previous reasoning]\n{thinking}\n"))
+                        }
+                        Block::RedactedThinking { .. } => {
+                            Some("[Previous redacted reasoning is unavailable.]\n".into())
+                        }
+                        _ => None,
+                    })
+                    .collect::<String>();
                 let calls=message.content.iter().filter_map(|b|if let Block::ToolUse{id,name,input}=b{Some(json!({"id":id,"type":"function","function":{"name":name,"arguments":input.to_string()}}))}else{None}).collect::<Vec<_>>();
                 let mut entry = json!({"role":"assistant","content":if text.is_empty(){Value::Null}else{json!(text)}});
-                if self.replays_reasoning_content() {
+                if replay {
                     let reasoning = message
                         .content
                         .iter()
@@ -1081,6 +1108,52 @@ fn openai_reasoning_family(model: &str) -> Option<bool> {
         return None;
     }
     Some(false)
+}
+
+fn anthropic_tool_ids(messages: &[Message]) -> HashMap<String, String> {
+    let ids = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            Block::ToolUse { id, .. } => Some(id),
+            Block::ToolResult { tool_use_id, .. } => Some(tool_use_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let valid = |id: &str| {
+        !id.is_empty()
+            && id.len() <= 64
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    };
+    let mut used = ids
+        .iter()
+        .filter(|id| valid(id))
+        .map(|id| (*id).clone())
+        .collect::<HashSet<_>>();
+    let mut mapped = HashMap::new();
+    for id in ids {
+        if valid(id) || mapped.contains_key(id) {
+            continue;
+        }
+        let hash = util::hash(id.as_bytes());
+        let mut counter = 0u64;
+        let replacement = loop {
+            let suffix = if counter == 0 {
+                String::new()
+            } else {
+                format!("_{counter}")
+            };
+            let candidate = format!("mc_{}{}", &hash[..61 - suffix.len()], suffix);
+            if used.insert(candidate.clone()) {
+                break candidate;
+            }
+            counter += 1;
+        };
+        mapped.insert(id.clone(), replacement);
+    }
+    mapped
 }
 fn anthropic_prompt_cache_enabled() -> bool {
     !std::env::var("MINICODE_ANTHROPIC_PROMPT_CACHE")
