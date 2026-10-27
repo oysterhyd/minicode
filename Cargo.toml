@@ -15,6 +15,7 @@ fs2 = "0.4"
 fancy-regex = "0.16"
 futures-util = "0.3"
 globset = "0.4"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 jsonschema = { version = "0.37", default-features = false }
 memmap2 = "0.9"
 regex = "1"

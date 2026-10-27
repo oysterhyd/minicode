@@ -466,3 +466,58 @@ test('R17: text-only truncation requests a concise answer without inventing a to
   assert.match(followup,/输出长度截断/);assert.doesNotMatch(followup,/工具调用/)
   assert.ok(result.detail.messages.flatMap(m=>m.content).some(b=>b.type==='text'&&b.text==='partial'))
 })
+
+test('ATT: a 20 MB image is resized within provider limits while the original remains intact',async t=>{
+  const f=await fixture(t,[],{MINICODE_IMAGE_MAX_EDGE:'512'}),payloads=[]
+  const input=path.join(f.root,'large.png'),icon=fs.readFileSync(path.join(process.cwd(),'desktop/native/resources/icon.png'))
+  const {crc32}=await import('node:zlib'),chunk=Buffer.alloc(20_000_000-icon.length)
+  chunk.writeUInt32BE(chunk.length-12,0);chunk.write('miCa',4,'ascii');chunk.writeUInt32BE(crc32(chunk.subarray(4,-4)),chunk.length-4)
+  const original=Buffer.concat([icon.subarray(0,-12),chunk,icon.subarray(-12)])
+  fs.writeFileSync(input,original)
+  const [attachment]=await f.request('importAttachments',{paths:[input]})
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    payloads.push(JSON.parse(body))
+    if(payloads.length===1)write(res,[{type:'message_start',message:{usage:{input_tokens:10}}},{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'read-image',name:'read',input:{path:'README.md'}}},{type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:1}},{type:'message_stop'}],false)
+    else write(res,[{type:'message_start',message:{usage:{input_tokens:1,cache_read_input_tokens:50}}},{type:'content_block_start',index:0,content_block:{type:'text',text:'done'}},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:1}},{type:'message_stop'}],false)
+  })})
+  const result=await f.run({model:await configure(f,url,'anthropic',{images:true}),attachments:[attachment]})
+  assert.equal(result.result.exit_reason,'completed');assert.equal(payloads.length,2);assert.equal(result.result.total_usage.cache_read_tokens,50)
+  const images=payloads.map(p=>p.messages.flatMap(m=>m.content).filter(b=>b.type==='image').map(b=>b.source))
+  assert.equal(images[0].length,1);assert.equal(images[1].length,1);assert.deepEqual(images[0],images[1])
+  const source=images[0][0];assert.equal(source.media_type,'image/png');assert.ok(source.data.length<=4_900_000)
+  const resized=Buffer.from(source.data,'base64');assert.ok(resized.readUInt32BE(16)<=512);assert.ok(resized.readUInt32BE(20)<=512)
+  assert.equal(payloads[0].messages.find(m=>m.content.some(b=>b.type==='image')).content.at(-1).cache_control.type,'ephemeral')
+  assert.equal(payloads[1].messages.find(m=>m.role==='assistant').content.at(-1).cache_control.type,'ephemeral')
+  const saved=await f.request('attachmentPath',{assetId:attachment.asset_id})
+  assert.equal(attachment.size,20_000_000);assert.deepEqual(fs.readFileSync(saved.path),original)
+})
+
+
+test('ATT: OpenAI-compatible image requests respect configured byte and dimension limits',async t=>{
+  const f=await fixture(t,[],{MINICODE_IMAGE_MAX_EDGE:'256',MINICODE_IMAGE_MAX_BASE64_BYTES:'4096'});let payload
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{payload=JSON.parse(body);write(res,[{choices:[{delta:{content:'done'},finish_reason:'stop'}]}])})})
+  const image=path.join(f.root,'icon.png');fs.copyFileSync(path.join(process.cwd(),'desktop/native/resources/icon.png'),image)
+  const attachments=await f.request('importAttachments',{paths:[image]})
+  const result=await f.run({model:await configure(f,url,'openai',{images:true}),attachments})
+  assert.equal(result.result.exit_reason,'completed')
+  const uri=payload.messages.flatMap(m=>Array.isArray(m.content)?m.content:[]).find(b=>b.type==='image_url').image_url.url
+  assert.ok(uri.startsWith('data:image/png;base64,'));const encoded=uri.split(',')[1];assert.ok(encoded.length<=4096)
+  const bytes=Buffer.from(encoded,'base64');assert.ok(bytes.readUInt32BE(16)<=256);assert.ok(bytes.readUInt32BE(20)<=256)
+})
+
+test('ATT: cancelling a turn remains responsive while a large image is prepared',async t=>{
+  const {crc32,deflateSync}=await import('node:zlib')
+  const chunk=(type,data)=>{const out=Buffer.alloc(data.length+12);out.writeUInt32BE(data.length);out.write(type,4,'ascii');data.copy(out,8);out.writeUInt32BE(crc32(out.subarray(4,-4)),out.length-4);return out}
+  const width=5000,height=3000,header=Buffer.alloc(13);header.writeUInt32BE(width);header.writeUInt32BE(height,4);header[8]=8;header[9]=2
+  const png=Buffer.concat([Buffer.from('89504e470d0a1a0a','hex'),chunk('IHDR',header),chunk('IDAT',deflateSync(Buffer.alloc((width*3+1)*height),{level:1})),chunk('IEND',Buffer.alloc(0))])
+  const f=await fixture(t),image=path.join(f.root,'large-pixels.png');fs.writeFileSync(image,png)
+  const attachments=await f.request('importAttachments',{paths:[image]});let active
+  const url=await server(t,(_req,res)=>{active=res});t.after(()=>active?.end())
+  const model=await configure(f,url,'anthropic',{images:true}),from=f.events.length
+  const started=await f.request('sendPrompt',{model,workspace:f.workspace,text:'cancel image',attachments})
+  await f.wait(e=>e.event==='agent_event'&&e.sessionId===started.sessionId&&e.item.type==='round_start',from)
+  await new Promise(resolve=>setTimeout(resolve,100))
+  const before=Date.now();await f.request('cancelTurn',{sessionId:started.sessionId})
+  const done=await f.wait(e=>e.event==='run_done'&&e.sessionId===started.sessionId,from)
+  assert.equal(done.result.exit_reason,'cancelled');assert.ok(Date.now()-before<2000,`cancellation took ${Date.now()-before} ms`)
+})

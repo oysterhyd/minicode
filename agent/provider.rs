@@ -540,7 +540,27 @@ impl Provider {
                 metrics,
             ));
         }
-        let body = self.payload(system, messages, specs, attachments)?;
+        let has_images = messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| {
+                matches!(block, Block::Media { kind, .. } if kind == "image")
+                    || matches!(block, Block::ToolResult { images, .. } if !images.is_empty())
+            });
+        let body = if has_images {
+            let provider = self.clone();
+            let system = system.to_owned();
+            let messages = messages.to_vec();
+            let specs = specs.to_vec();
+            let attachments = attachments.clone();
+            tokio::task::spawn_blocking(move || {
+                provider.payload(&system, &messages, &specs, &attachments)
+            })
+            .await
+            .context("图片请求准备失败")??
+        } else {
+            self.payload(system, messages, specs, attachments)?
+        };
         let endpoint = if self.style == "anthropic" {
             if self.url.trim_end_matches('/').ends_with("/v1") {
                 format!("{}/messages", self.url.trim_end_matches('/'))
@@ -1494,7 +1514,11 @@ fn media_part(b: &Block, store: &Attachments, style: &str) -> Result<Value> {
     else {
         bail!("not media")
     };
-    let data = store.encoded(b)?;
+    let (mime_type, data) = if kind == "image" {
+        store.encoded_image(b)?
+    } else {
+        (mime_type.clone(), store.encoded(b)?)
+    };
     if style == "anthropic" {
         return Ok(
             json!({"type":if kind=="image"{"image"}else{"document"},"source":{"type":"base64","media_type":mime_type,"data":data}}),
