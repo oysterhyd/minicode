@@ -8,12 +8,161 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use std::{collections::HashMap, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    process::Stdio,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::Mutex,
 };
+
+const STDERR_TAIL_BYTES: usize = 60_000;
+const STDERR_LOG_BYTES: u64 = 1_000_000;
+
+#[derive(Default)]
+struct Diagnostics {
+    tail: VecDeque<u8>,
+    log_path: Option<PathBuf>,
+}
+impl Diagnostics {
+    fn append(&mut self, bytes: &[u8]) {
+        self.tail.extend(bytes);
+        let excess = self.tail.len().saturating_sub(STDERR_TAIL_BYTES);
+        self.tail.drain(..excess);
+    }
+    fn tail(&self) -> String {
+        let bytes = self.tail.iter().copied().collect::<Vec<_>>();
+        util::tail(
+            &util::terminal_text(&String::from_utf8_lossy(&bytes)),
+            200,
+            STDERR_TAIL_BYTES,
+        )
+    }
+}
+
+fn sensitive_environment(config: &Server) -> Vec<Vec<u8>> {
+    let sensitive = |name: &str| {
+        let name = name.to_ascii_uppercase();
+        [
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
+            "CREDENTIAL",
+            "PRIVATE_KEY",
+            "_KEY",
+            "AUTH",
+        ]
+        .iter()
+        .any(|part| name.contains(part))
+    };
+    let mut values = std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .chain(config.env.iter().map(|(k, v)| (k.clone(), v.clone())))
+        .filter(|(key, value)| sensitive(key) && value.len() >= 4)
+        .map(|(_, value)| value.into_bytes())
+        .collect::<Vec<_>>();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    values
+}
+
+fn diagnostic_log() -> (Option<PathBuf>, Option<tokio::fs::File>) {
+    let dir = util::data_dir().join("logs").join("mcp");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return (None, None);
+    }
+    let path = dir.join(format!("{}.log", util::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&path) {
+        Ok(file) => (Some(path), Some(tokio::fs::File::from_std(file))),
+        Err(_) => (None, None),
+    }
+}
+
+// Preserve possible partial matches across reads so secrets split at pipe
+// boundaries cannot reach either the diagnostic file or the status event.
+fn redact_stderr(pending: &mut Vec<u8>, secrets: &[Vec<u8>], eof: bool) -> Vec<u8> {
+    let mut output = Vec::with_capacity(pending.len());
+    let mut position = 0;
+    while position < pending.len() {
+        let remaining = &pending[position..];
+        if !eof
+            && secrets
+                .iter()
+                .any(|s| s.len() > remaining.len() && s.starts_with(remaining))
+        {
+            break;
+        }
+        if let Some(secret) = secrets.iter().find(|s| remaining.starts_with(s)) {
+            output.extend_from_slice(b"[redacted]");
+            position += secret.len();
+        } else {
+            output.push(remaining[0]);
+            position += 1;
+        }
+    }
+    pending.drain(..position);
+    output
+}
+
+async fn capture_stderr(
+    mut stderr: ChildStderr,
+    diagnostics: Arc<StdMutex<Diagnostics>>,
+    secrets: Vec<Vec<u8>>,
+    mut log: Option<tokio::fs::File>,
+) {
+    let mut pending = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let mut written = 0u64;
+    loop {
+        let n = stderr.read(&mut buffer).await.unwrap_or(0);
+        pending.extend_from_slice(&buffer[..n]);
+        let output = redact_stderr(&mut pending, &secrets, n == 0);
+        let tail = {
+            let mut state = diagnostics.lock().unwrap();
+            state.append(&output);
+            state.tail.iter().copied().collect::<Vec<_>>()
+        };
+        if let Some(file) = log.as_mut() {
+            if written + output.len() as u64 > STDERR_LOG_BYTES {
+                if file.set_len(0).await.is_err()
+                    || file.seek(std::io::SeekFrom::Start(0)).await.is_err()
+                    || file.write_all(&tail).await.is_err()
+                {
+                    log = None;
+                } else {
+                    written = tail.len() as u64;
+                }
+            } else if file.write_all(&output).await.is_err() {
+                log = None;
+            } else {
+                written += output.len() as u64;
+            }
+        }
+        if n == 0 {
+            break;
+        }
+    }
+    if let Some(file) = log.as_mut() {
+        let _ = file.flush().await;
+    }
+}
 
 #[cfg(windows)]
 fn windows_command(config: &Server) -> std::path::PathBuf {
@@ -89,10 +238,15 @@ pub struct Connector {
     legacy_receiver: Option<tokio::sync::mpsc::Receiver<Value>>,
     legacy_task: Option<tokio::task::JoinHandle<()>>,
     endpoint: Option<String>,
+    diagnostics: Arc<StdMutex<Diagnostics>>,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
 impl Drop for Connector {
     fn drop(&mut self) {
         if let Some(task) = self.legacy_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.stderr_task.take() {
             task.abort();
         }
     }
@@ -119,6 +273,8 @@ impl Connector {
             legacy_receiver: None,
             legacy_task: None,
             endpoint: None,
+            diagnostics: Arc::new(StdMutex::new(Diagnostics::default())),
+            stderr_task: None,
         })
     }
     fn request(&self, url: &str) -> reqwest::RequestBuilder {
@@ -154,12 +310,22 @@ impl Connector {
                 .envs(&self.config.env)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .kill_on_drop(true);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
             let mut child = cmd.spawn().context("failed to start MCP server")?;
             self.tree = Some(crate::command_process::ProcessTree::attach(&child)?);
+            if let Some(stderr) = child.stderr.take() {
+                let (path, log) = diagnostic_log();
+                self.diagnostics.lock().unwrap().log_path = path;
+                self.stderr_task = Some(tokio::spawn(capture_stderr(
+                    stderr,
+                    self.diagnostics.clone(),
+                    sensitive_environment(&self.config),
+                    log,
+                )));
+            }
             self.input = child.stdin.take();
             self.output = child.stdout.take().map(BufReader::new);
             self.child = Some(child);
@@ -443,9 +609,21 @@ impl Connector {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
+        if let Some(mut task) = self.stderr_task.take()
+            && tokio::time::timeout(Duration::from_secs(2), &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
+        }
         self.tree = None;
         self.input = None;
         self.output = None;
+    }
+
+    fn diagnostics(&self) -> (String, Option<PathBuf>) {
+        let state = self.diagnostics.lock().unwrap();
+        (state.tail(), state.log_path.clone())
     }
 }
 fn rpc_result(v: Value) -> Result<Value> {
@@ -481,18 +659,24 @@ impl McpRegistry {
             let discovery = tokio::time::timeout(Duration::from_secs_f64(server.timeout), c.discover()).await.context("MCP discovery timed out").and_then(|r| r);
             match discovery {
                 Ok(tools) => {
-                    (json!({"server":server.name,"plugin":server.plugin,"protocol":c.protocol,"server_version":c.server_version,"error":null}), Some(c), tools)
+                    let (stderr_tail, log_path) = c.diagnostics();
+                    (json!({"server":server.name,"plugin":server.plugin,"protocol":c.protocol,"server_version":c.server_version,"error":null,"stderr_tail":stderr_tail,"log_path":log_path}), Some(c), tools)
                 }
                 Err(e) => {
                     c.close().await;
-                    let error = if !server.configuration_error.is_empty() {
+                    let (stderr_tail, log_path) = c.diagnostics();
+                    let mut error = if !server.configuration_error.is_empty() {
                         server.configuration_error.clone()
                     } else if server.local {
                         "MCP connection failed".to_string()
                     } else {
                         e.to_string()
                     };
-                    (json!({"server":server.name,"plugin":server.plugin,"protocol":null,"server_version":null,"error":error}), None, vec![])
+                    if !stderr_tail.is_empty() {
+                        error.push_str("\nMCP stderr:\n");
+                        error.push_str(&stderr_tail);
+                    }
+                    (json!({"server":server.name,"plugin":server.plugin,"protocol":null,"server_version":null,"error":error,"stderr_tail":stderr_tail,"log_path":log_path}), None, vec![])
                 }
             }
         }).buffered(4);
@@ -514,5 +698,39 @@ impl McpRegistry {
         for c in &self.connectors {
             c.lock().await.close().await;
         }
+    }
+    pub async fn statuses_with_diagnostics(&self) -> Vec<Value> {
+        let mut statuses = self.statuses.clone();
+        for connector in &self.connectors {
+            let connector = connector.lock().await;
+            let (stderr_tail, log_path) = connector.diagnostics();
+            if let Some(status) = statuses
+                .iter_mut()
+                .find(|s| s["server"] == connector.config.name)
+            {
+                status["stderr_tail"] = json!(stderr_tail);
+                status["log_path"] = json!(log_path);
+            }
+        }
+        statuses
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::redact_stderr;
+
+    #[test]
+    fn secrets_are_redacted_across_stderr_read_boundaries() {
+        let secrets = vec![b"token-long".to_vec(), b"token".to_vec()];
+        let mut pending = b"before tok".to_vec();
+        let mut output = redact_stderr(&mut pending, &secrets, false);
+        pending.extend_from_slice(b"en-");
+        output.extend(redact_stderr(&mut pending, &secrets, false));
+        pending.extend_from_slice(b"long after token");
+        output.extend(redact_stderr(&mut pending, &secrets, false));
+        output.extend(redact_stderr(&mut pending, &secrets, true));
+        assert_eq!(output, b"before [redacted] after [redacted]");
+        assert!(pending.is_empty());
     }
 }

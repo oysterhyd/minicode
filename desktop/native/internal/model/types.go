@@ -196,10 +196,12 @@ type Capabilities struct {
 
 type Discovery struct {
 	Servers []struct {
-		Server   string  `json:"server"`
-		Protocol *string `json:"protocol"`
-		Version  *string `json:"server_version"`
-		Error    *string `json:"error"`
+		Server     string  `json:"server"`
+		Protocol   *string `json:"protocol"`
+		Version    *string `json:"server_version"`
+		Error      *string `json:"error"`
+		StderrTail string  `json:"stderr_tail,omitempty"`
+		LogPath    string  `json:"log_path,omitempty"`
 	} `json:"servers"`
 	Tools []string `json:"tools"`
 }

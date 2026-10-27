@@ -228,6 +228,8 @@ available|Available
 当前会话还没有加载技能正文。|No skill instructions loaded in this conversation yet.
 连接状态|Connection status
 启用的 MCP 服务在运行回合中连接，也可以手动测试连接。|Enabled MCP servers connect during a run. You can also test their connections manually.
+最近日志|Recent logs
+日志文件|Log file
 测试已启用服务|Test enabled servers
 MiniCode 项目插件|MiniCode project plugins
 项目插件沿用现有清单与内容锁定。|Project plugins use their existing manifests and content lockfile.

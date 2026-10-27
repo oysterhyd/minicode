@@ -60,6 +60,7 @@ export type AppProps = {
 }
 
 type FrozenItem = LayoutItem | ({ kind: 'banner' } & BannerProps)
+type McpDiscovery = { servers: Array<{ server: string; error?: string | null; stderr_tail?: string; log_path?: string | null }> }
 
 function cleanError(error: unknown): string {
   return String(error instanceof Error ? error.message : error).replace(/^Error: /, '')
@@ -215,7 +216,8 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         if (!active) return
         const protocol = protocolProblem(initial)
         if (protocol) addNotice(protocol.message, protocol.level)
-        setCommands([...initial.commands, { name: '/history', usage: '/history', summary: '加载更早的会话历史' }])
+        setCommands([...initial.commands, { name: '/history', usage: '/history', summary: '加载更早的会话历史' },
+          { name: '/mcp', usage: '/mcp', summary: '测试 MCP 服务并查看日志' }])
         setModels(initial.models || [])
         setSessions(initial.sessions || [])
         let state = initial.state
@@ -335,6 +337,19 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
       updateFeed(current => ({ ...current, busy: true, awaitingRun: true, startedAt: Date.now(), error: '' }))
     }
     try {
+      if (text === '/mcp') {
+        addNotice('正在测试 MCP 服务…')
+        const discovery = await client.request<McpDiscovery>('refreshMcp', { workspace: workspaceRef.current })
+        if (!activeRef.current) return
+        const lines = (discovery.servers || []).map(server => {
+          const status = server.error?.split('\nMCP stderr:\n', 1)[0] || '已连接'
+          const tail = server.stderr_tail?.split('\n').slice(-20).join('\n')
+          return [server.server + ' · ' + status, tail, server.log_path ? '日志文件: ' + server.log_path : ''].filter(Boolean).join('\n')
+        })
+        addNotice(terminalText(lines.length ? 'MCP 连接状态\n' + lines.join('\n\n') : '当前没有已启用的 MCP 服务'))
+        succeeded = true
+        return
+      }
       const result = await client.request<SlashResult>('runSlash', {
         text,
         workspace: workspaceRef.current,

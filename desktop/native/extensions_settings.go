@@ -189,8 +189,24 @@ func (d *desktop) extensionSettings(c *ui.Context, p palette, s *settingsState, 
 				label := "已连接"
 				if status.Error != nil {
 					label = strings.ReplaceAll(*status.Error, status.Server, name)
+					if status.StderrTail != "" {
+						label = strings.SplitN(label, "\nMCP stderr:\n", 2)[0]
+					}
 				}
 				settingsRow(c, p, name, label, func() {})
+				if status.StderrTail != "" || status.LogPath != "" {
+					ui.Column(c).FillWidth().Gap(5).Children(func() {
+						ui.Text(c, tr("最近日志")).FontSize(p.font(11.2)).TextColor(p.Text2)
+						if status.StderrTail != "" {
+							ui.Scroll(c).FillWidth().MaxHeight(160).Children(func() {
+								ui.Text(c, status.StderrTail).FillWidth().Font(monoFont).FontSize(p.font(11)).TextColor(p.Text2).Selectable()
+							})
+						}
+						if status.LogPath != "" {
+							ui.Text(c, tr("日志文件")+": "+status.LogPath).FontSize(p.font(10.92)).TextColor(p.Text3).Selectable()
+						}
+					})
+				}
 			}
 		})
 	case "plugin":

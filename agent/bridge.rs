@@ -1687,10 +1687,10 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
         let workspace = Router::workspace(p)?;
         let catalog = Catalog::scan(&workspace, configuration.clone(), true)?;
         let registry = McpRegistry::prepare(catalog.servers).await;
-        let response =
-            json!({"servers":registry.statuses,"tools":registry.tools.keys().collect::<Vec<_>>()});
         registry.close().await;
-        return Ok(response);
+        return Ok(
+            json!({"servers":registry.statuses_with_diagnostics().await,"tools":registry.tools.keys().collect::<Vec<_>>() }),
+        );
     }
     let draft = &p["service"];
     let existing = configuration.read()?["services"]
