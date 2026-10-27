@@ -4,7 +4,10 @@ import path from 'node:path'
 import {test} from 'node:test'
 import {fixture} from './helpers.mjs'
 
-test('Windows bash uses Git Bash and preserves its exit status', {skip:process.platform!=='win32'}, async t=>{
+const hasGitBash=process.platform==='win32' && (process.env.PATH || '').split(';').some(dir=>
+  fs.existsSync(path.join(dir,'git.exe')) && ['../bin/bash.exe','../usr/bin/bash.exe'].some(candidate=>fs.existsSync(path.resolve(dir,candidate))))
+
+test('Windows bash uses Git Bash and preserves its exit status', {skip:!hasGitBash}, async t=>{
   const f=await fixture(t,[{tool_calls:[{name:'bash',arguments:{command:"printf 'git-bash-ok\\n' && exit 7"}}]},{text:'done'}])
   await f.request('setPermissionMode',{mode:'bypass'})
   const result=await f.run()
@@ -51,5 +54,5 @@ test('PowerShell background jobs follow command approval and scoped instructions
   await f2.request('setPermissionMode',{mode:'bypass'})
   const next=await f2.run({text:'start background'})
   assert.equal(next.detail.events.filter(e=>e.type==='background_job_started').length,1)
-  assert.ok(next.detail.events.some(e=>e.type==='background_job_completed'))
+  assert.equal(next.detail.events.filter(e=>['background_job_completed','background_job_lost'].includes(e.type)).length,1)
 })

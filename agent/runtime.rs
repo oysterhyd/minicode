@@ -643,6 +643,17 @@ impl Runtime {
             }
             (entries, active)
         };
+        #[cfg(windows)]
+        let entries = {
+            let mut entries = entries;
+            if let Some(frozen) = &self.frozen_system {
+                let shell = tools::windows_shell_guidance();
+                if !frozen.contains(&shell) {
+                    entries.push(format!("当前命令环境（取代冻结提示中的旧说明）：{shell}"));
+                }
+            }
+            entries
+        };
         if entries.is_empty() && active.is_empty() && self.dynamic_hash.is_none() {
             return Ok(());
         }

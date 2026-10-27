@@ -477,3 +477,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：先复现 bash 语法和退出码错误及未知 `powershell`；协议测试覆盖 Git Bash、缺少 Git Bash 时回退、PowerShell 兼容别名、后台任务与嵌套指令；Rust 在本机分别运行 Windows PowerShell 5.1 与 PowerShell 7，检查原生命令、cmdlet 失败和显式退出；TUI / Desktop 测试覆盖命令展示。
 - 待确认决策：已安装 Git Bash 的 Windows 默认让 `bash` 使用真正的 Bash，会改变旧会话中同名工具原来的 PowerShell 语义；设置 `MINICODE_WINDOWS_SHELL=powershell` 可以恢复旧行为，并继续通过 `powershell` 明确选择 PowerShell。
 - 验证：Rust、协议、两组离线评测、TUI 和 Windows Desktop 全套检查通过；评测使用独立临时输出目录。
+
+## A1：提示词与实际 Shell 一致
+
+- 问题与根因：旧 Windows 提示词只笼统写 PowerShell，不区分 Git Bash、PowerShell 5.1 和 7，也没有说明 5.1 不支持 `&&`；旧会话还会保留冻结的历史提示词。
+- 修复：根据实际启动的可执行文件写明 `bash` 和 `powershell` 的类型与版本，并说明对应的链式语法。恢复旧会话时保留原冻结提示，通过动态 system reminder 更新命令环境；环境未变化时不重复追加。PowerShell 7 从可执行文件版本信息读取版本；必要时执行有两秒上限的版本探测，并避开 Windows 应用执行别名。
+- 测试：协议测试先复现缺少版本和恢复时缺少更新；覆盖真实 PowerShell 5.1、PowerShell 7 / Git Bash、旧冻结提示恢复和重复恢复不产生重复提醒。
+- 验证：Rust、协议、两组离线评测和 TUI 全套检查通过；评测使用独立临时输出目录。

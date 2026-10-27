@@ -1149,6 +1149,10 @@ impl Catalog {
         let mut text = template
             .replace("{{workspace}}", &self.workspace.to_string_lossy())
             .replace("{{tools}}", &tools.join("、"));
+        #[cfg(windows)]
+        {
+            text = text.replace("{{shell_info}}", &crate::tools::windows_shell_guidance());
+        }
         let global = self
             .configuration
             .path

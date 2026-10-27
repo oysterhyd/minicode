@@ -1009,6 +1009,152 @@ fn powershell_command(command: &str, program: &std::ffi::OsStr) -> Command {
     cmd
 }
 
+#[cfg(windows)]
+fn pwsh_file_version(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+    };
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // The returned version structure points into `data`, which stays alive
+    // until the unaligned copy is complete.
+    unsafe {
+        let size = GetFileVersionInfoSizeW(path.as_ptr(), std::ptr::null_mut());
+        if size == 0 || size > 1_000_000 {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        if GetFileVersionInfoW(path.as_ptr(), 0, size, data.as_mut_ptr().cast()) == 0 {
+            return None;
+        }
+        let mut value = std::ptr::null_mut();
+        let mut length = 0;
+        if VerQueryValueW(
+            data.as_ptr().cast(),
+            [b'\\' as u16, 0].as_ptr(),
+            &mut value,
+            &mut length,
+        ) == 0
+            || value.is_null()
+            || (length as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>()
+        {
+            return None;
+        }
+        let info = value.cast::<VS_FIXEDFILEINFO>().read_unaligned();
+        if info.dwSignature != 0xfeef04bd {
+            return None;
+        }
+        Some(format!(
+            "{}.{}.{}",
+            info.dwProductVersionMS >> 16,
+            info.dwProductVersionMS & 0xffff,
+            info.dwProductVersionLS >> 16
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn powershell_info() -> &'static (PathBuf, String) {
+    use std::os::windows::{fs::MetadataExt, process::CommandExt};
+    static INFO: OnceLock<(PathBuf, String)> = OnceLock::new();
+    INFO.get_or_init(|| {
+        let path = util::bundled_path().or_else(|| std::env::var_os("PATH"));
+        let program = path
+            .as_ref()
+            .into_iter()
+            .flat_map(std::env::split_paths)
+            .map(|dir| dir.join("pwsh.exe"))
+            .find(|path| {
+                let app_alias = path.parent().and_then(Path::file_name).is_some_and(|name| {
+                    name.eq_ignore_ascii_case("WindowsApps")
+                        && std::fs::symlink_metadata(path)
+                            .is_ok_and(|metadata| metadata.file_attributes() & 0x400 != 0)
+                });
+                path.is_file() && !app_alias
+            })
+            .unwrap_or_else(|| {
+                std::env::var_os("SystemRoot")
+                    .map(PathBuf::from)
+                    .map(|root| root.join("System32/WindowsPowerShell/v1.0/powershell.exe"))
+                    .unwrap_or_else(|| PathBuf::from("powershell.exe"))
+            });
+        let version = if program
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("pwsh.exe"))
+        {
+            pwsh_file_version(&program)
+        } else {
+            None
+        }
+        .or_else(|| {
+            (|| -> Option<String> {
+                let mut output = tempfile::tempfile().ok()?;
+                let mut child = std::process::Command::new(&program)
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "[Console]::Out.Write($PSVersionTable.PSVersion.ToString())",
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::from(output.try_clone().ok()?))
+                    .stderr(Stdio::null())
+                    .creation_flags(0x08000000)
+                    .spawn()
+                    .ok()?;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) if status.success() => {
+                            let mut version = String::new();
+                            output.seek(SeekFrom::Start(0)).ok()?;
+                            output.take(128).read_to_string(&mut version).ok()?;
+                            let version = version.trim();
+                            if version.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+                                && version.contains('.')
+                            {
+                                return Some(version.into());
+                            }
+                            return None;
+                        }
+                        Ok(Some(_)) => return None,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        _ => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return None;
+                        }
+                    }
+                }
+            })()
+        })
+        .unwrap_or_else(|| "版本未知".into());
+        (program, version)
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_shell_guidance() -> String {
+    let version = &powershell_info().1;
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u32>().ok());
+    let chains = if major.is_some_and(|major| major >= 7) {
+        "PowerShell 7 支持 && 和 ||；仍应按 PowerShell 语法编写命令。"
+    } else {
+        "PowerShell 5.1 或版本未知时不支持 && 和 ||；请使用 if ($?) 或分步执行。"
+    };
+    let bash = if git_bash().is_some() {
+        "bash 工具使用 Git Bash，按 bash 语法编写命令。"
+    } else {
+        "bash 工具是 PowerShell 的兼容别名，按 PowerShell 语法编写命令。"
+    };
+    format!("{bash} powershell 工具使用 PowerShell {version}。{chains}")
+}
+
 pub fn shell(command: &str, cwd: &Path) -> Command {
     shell_for("bash", command, cwd)
 }
@@ -1022,15 +1168,7 @@ fn shell_for(name: &str, command: &str, cwd: &Path) -> Command {
             c.args(["-c", command]);
             c
         } else {
-            let shell = if util::bundled_path()
-                .or_else(|| std::env::var_os("PATH"))
-                .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("pwsh.exe").is_file()))
-            {
-                "pwsh"
-            } else {
-                "powershell"
-            };
-            powershell_command(command, std::ffi::OsStr::new(shell))
+            powershell_command(command, powershell_info().0.as_os_str())
         };
         c.creation_flags(0x08000000);
         c
