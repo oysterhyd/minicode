@@ -127,6 +127,67 @@ struct CallBuffer {
     initial: Value,
 }
 
+fn append_openai_tool_delta(
+    delta: &Value,
+    calls: &mut BTreeMap<usize, CallBuffer>,
+    order: &mut Vec<usize>,
+    last: &mut Option<usize>,
+    response_bytes: &mut usize,
+) {
+    let id = delta["id"].as_str().filter(|id| !id.is_empty());
+    let free_index = || {
+        (0..=calls.len())
+            .find(|index| !calls.contains_key(index))
+            .unwrap()
+    };
+    let index = delta["index"]
+        .as_u64()
+        .and_then(|index| usize::try_from(index).ok())
+        .unwrap_or_else(|| {
+            if let Some(id) = id {
+                if let Some(index) = calls
+                    .iter()
+                    .find_map(|(index, call)| (call.id == id).then_some(*index))
+                {
+                    return index;
+                }
+                if let Some(index) = *last
+                    && let Some(call) = calls.get(&index)
+                    && call.id.is_empty()
+                    && (call.name.is_empty()
+                        || delta["function"]["name"].as_str().is_none_or(str::is_empty))
+                {
+                    return index;
+                }
+                free_index()
+            } else {
+                last.unwrap_or_else(free_index)
+            }
+        });
+    calls.entry(index).or_insert_with(|| {
+        order.push(index);
+        CallBuffer::default()
+    });
+    let call = calls.get_mut(&index).unwrap();
+    if let Some(id) = id {
+        *response_bytes += id.len();
+        call.id = id.into();
+    }
+    if let Some(name) = delta["function"]["name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+    {
+        *response_bytes += name.len();
+        call.name = name.into();
+    }
+    if let Some(piece) = delta["function"]["arguments"].as_str() {
+        call.arguments_seen = true;
+        *response_bytes += piece.len();
+        call.arguments.push_str(piece);
+    }
+    *last = Some(index);
+}
+
 #[derive(Clone)]
 pub struct Provider {
     pub name: String,
@@ -496,6 +557,7 @@ impl Provider {
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut calls = BTreeMap::<usize, CallBuffer>::new();
+        let mut last_call = None;
         let mut order = Vec::new();
         let mut texts = BTreeMap::<usize, String>::new();
         let mut thoughts = BTreeMap::<usize, Block>::new();
@@ -658,30 +720,13 @@ impl Provider {
                             .or(delta["reasoning"].as_str());
                         if let Some(deltas) = delta["tool_calls"].as_array() {
                             for d in deltas {
-                                let index = d["index"]
-                                    .as_u64()
-                                    .map(|x| x as usize)
-                                    .unwrap_or(calls.len());
-                                calls.entry(index).or_insert_with(|| {
-                                    order.push(index);
-                                    CallBuffer::default()
-                                });
-                                let c = calls.get_mut(&index).unwrap();
-                                if let Some(id) = d["id"].as_str().filter(|s| !s.is_empty()) {
-                                    response_bytes += id.len();
-                                    c.id = id.into();
-                                }
-                                if let Some(name) =
-                                    d["function"]["name"].as_str().filter(|s| !s.is_empty())
-                                {
-                                    response_bytes += name.len();
-                                    c.name = name.into();
-                                }
-                                if let Some(piece) = d["function"]["arguments"].as_str() {
-                                    c.arguments_seen = true;
-                                    response_bytes += piece.len();
-                                    c.arguments.push_str(piece);
-                                }
+                                append_openai_tool_delta(
+                                    d,
+                                    &mut calls,
+                                    &mut order,
+                                    &mut last_call,
+                                    &mut response_bytes,
+                                );
                                 first.get_or_insert(started.elapsed().as_secs_f64());
                                 last = Some(started.elapsed().as_secs_f64());
                             }
@@ -1657,6 +1702,43 @@ pub fn validate_response(response: &Response, messages: &[Message]) -> Result<()
 #[cfg(test)]
 mod error_tests {
     use super::*;
+
+    #[test]
+    fn indexless_tool_fragments_survive_every_sse_byte_split() {
+        let frames = [
+            json!({"tool_calls":[{"function":{"name":"read","arguments":"{\"path\":\"中"}}]}),
+            json!({"tool_calls":[{"id":"a","function":{"arguments":"文"}}]}),
+            json!({"tool_calls":[{"id":"b","function":{"name":"read","arguments":"{\"path\":\"R"}}]}),
+            json!({"tool_calls":[{"id":"a","function":{"arguments":"\"}"}}]}),
+            json!({"tool_calls":[{"id":"b","function":{"arguments":"EADME.md\"}"}}]}),
+        ];
+        let wire = frames
+            .iter()
+            .map(|frame| format!("data: {frame}\r\n\r\n"))
+            .collect::<String>();
+        for split in 0..=wire.len() {
+            let mut decoder = crate::sse::Decoder::default();
+            let mut calls = BTreeMap::new();
+            let mut order = vec![];
+            let mut last = None;
+            let mut bytes = 0;
+            for chunk in [&wire.as_bytes()[..split], &wire.as_bytes()[split..]] {
+                for event in decoder.push(chunk).unwrap() {
+                    let value: Value = serde_json::from_str(&event.data).unwrap();
+                    for delta in value["tool_calls"].as_array().unwrap() {
+                        append_openai_tool_delta(
+                            delta, &mut calls, &mut order, &mut last, &mut bytes,
+                        );
+                    }
+                }
+            }
+            assert_eq!(order, vec![0, 1], "split {split}");
+            assert_eq!(calls[&0].id, "a");
+            assert_eq!(calls[&0].arguments, "{\"path\":\"中文\"}");
+            assert_eq!(calls[&1].id, "b");
+            assert_eq!(calls[&1].arguments, "{\"path\":\"README.md\"}");
+        }
+    }
 
     #[test]
     fn retry_after_accepts_seconds_and_http_dates() {

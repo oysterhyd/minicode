@@ -329,3 +329,32 @@ test('P7: non-streaming missing tool id receives a generated id',async t=>{
   assert.ok(assistant.tool_calls[0].id)
   assert.equal(tool.tool_call_id,assistant.tool_calls[0].id)
 })
+
+test('P9: index-free SSE fragments remain grouped across byte boundaries',async t=>{
+  for(const size of [1,2,7,31,257]){
+    await t.test(`chunk-${size}`,async t=>{
+      const f=await fixture(t),payloads=[]
+      const delta=(tool)=>({choices:[{delta:{tool_calls:[tool]},finish_reason:null}]})
+      const frames=[
+        delta({id:'a',function:{name:'read',arguments:'{"path":"R'}}),
+        delta({function:{arguments:'EAD'}}),
+        delta({id:'b',function:{name:'read',arguments:'{"path":"READ'}}),
+        delta({id:'a',function:{arguments:'ME'}}),
+        delta({function:{arguments:'.md"}'}}),
+        delta({id:'b',function:{arguments:'ME.md"}'}}),
+        {choices:[{delta:{},finish_reason:'tool_calls'}]},
+      ]
+      const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+        payloads.push(JSON.parse(body));if(payloads.length>1){write(res,[{choices:[{delta:{content:'done'},finish_reason:'stop'}]}]);return}
+        res.writeHead(200,{'content-type':'text/event-stream'});const bytes=Buffer.from(frames.map(frame=>`data: ${JSON.stringify(frame)}\n\n`).join('')+'data: [DONE]\n\n')
+        for(let i=0;i<bytes.length;i+=size)res.write(bytes.subarray(i,i+size));res.end()
+      })})
+      const result=await f.run({model:await configure(f,url)})
+      assert.equal(result.result.exit_reason,'completed')
+      const calls=result.detail.messages.flatMap(m=>m.content).filter(b=>b.type==='tool_use')
+      assert.deepEqual(calls.map(c=>c.id),['a','b'])
+      assert.deepEqual(calls.map(c=>c.input.path),['README.md','README.md'])
+      assert.equal(payloads[1].messages.filter(m=>m.role==='tool').length,2)
+    })
+  }
+})
