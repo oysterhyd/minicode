@@ -15,6 +15,66 @@ use tokio::{
     sync::Mutex,
 };
 
+#[cfg(windows)]
+fn windows_command(config: &Server) -> std::path::PathBuf {
+    use std::path::{Path, PathBuf};
+
+    let env = |name: &str| {
+        config
+            .env
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| std::ffi::OsString::from(value))
+    };
+    let path = env("PATH")
+        .or_else(util::bundled_path)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    let extensions = env("PATHEXT")
+        .or_else(|| std::env::var_os("PATHEXT"))
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    let extensions = extensions.to_string_lossy();
+    let command = Path::new(&config.command);
+    let has_directory = command.components().count() > 1 || command.is_absolute();
+    let directories: Vec<PathBuf> = if has_directory {
+        vec![config.cwd.clone()]
+    } else {
+        std::env::split_paths(&path)
+            .map(|dir| {
+                if dir.is_absolute() {
+                    dir
+                } else {
+                    config.cwd.join(dir)
+                }
+            })
+            .collect()
+    };
+    for dir in directories {
+        let base = dir.join(command);
+        if base.extension().is_some_and(|ext| {
+            ["exe", "com", "bat", "cmd"]
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        }) && base.is_file()
+        {
+            return base;
+        }
+        for extension in extensions.split(';').filter(|ext| {
+            [".exe", ".com", ".bat", ".cmd"]
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        }) {
+            let mut candidate = base.as_os_str().to_os_string();
+            candidate.push(extension);
+            let candidate = PathBuf::from(candidate);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    command.to_path_buf()
+}
+
 pub struct Connector {
     pub config: Server,
     pub protocol: Option<String>,
@@ -80,6 +140,11 @@ impl Connector {
     pub async fn discover(&mut self) -> Result<Vec<(ToolSpec, String)>> {
         self.config.verify()?;
         if self.config.transport == "stdio" {
+            #[cfg(windows)]
+            // Rust's Windows process launcher runs .cmd/.bat via cmd with
+            // AutoRun disabled and escapes each argument for batch parsing.
+            let mut cmd = Command::new(windows_command(&self.config));
+            #[cfg(not(windows))]
             let mut cmd = Command::new(&self.config.command);
             if let Some(path) = util::bundled_path() {
                 cmd.env("PATH", path);
