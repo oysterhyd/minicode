@@ -204,6 +204,10 @@ test('B17: connection test uses chat completions without requiring a models endp
   assert.equal(requests[0].body.stream,false)
   assert.ok(requests[0].body.max_completion_tokens>0)
   assert.equal(requests[0].body.max_tokens,undefined)
+  await assert.rejects(f.request('testServiceConnection',{service:{...service,models:[{modelId:'gpt-5-pro'}]}}),/Responses API/)
+  assert.equal(requests.length,1)
+  await f.request('testServiceConnection',{service:{...service,models:[{modelId:'gpt-5-pro',parameterCompat:{chatSupported:true}}]}})
+  assert.equal(requests.length,2)
 })
 
 test('B17: Anthropic connection probe uses messages and error bodies are bounded',async t=>{
@@ -224,4 +228,44 @@ test('B17: Anthropic connection probe uses messages and error bodies are bounded
   await assert.rejects(f.request('testServiceConnection',{service}),error=>{assert.match(error.message,/server-message: invalid model/);assert.ok(!error.message.includes('probe-key'));assert.ok(error.message.length<4300);return true})
   await assert.rejects(f.request('fetchServiceModels',{service}),/server-message: invalid model/)
   await assert.rejects(f.request('testServiceConnection',{service:{...service,models:[]}}),/模型/)
+})
+
+test('A5: current catalog metadata covers Claude, OpenAI, DeepSeek and dated aliases',async t=>{
+  const f=await fixture(t),payloads=[]
+  const url=await server(t,(req,res)=>{if(req.method==='POST'){let body='';req.on('data',d=>body+=d);req.on('end',()=>{payloads.push(JSON.parse(body));write(res,[{choices:[{delta:{content:'ok'},finish_reason:'stop'}]}])});return}res.setHeader('content-type','application/json');res.end(JSON.stringify({data:['claude-sonnet-4-5','claude-sonnet-4-5-20250929','claude-sonnet-5-5','gpt-5.6-sol','deepseek-flash'].map(id=>({id}))}))})
+  const service={name:'catalog mock',baseUrl:url+'/v1',apiStyle:'openai',apiKey:'key',models:[]}
+  const discovered=await f.request('fetchServiceModels',{service})
+  const models=Object.fromEntries(discovered.models.map(m=>[m.modelId,m]))
+  assert.equal(models['claude-sonnet-4-5'].supportsEffort,true)
+  assert.equal(models['claude-sonnet-4-5-20250929'].contextWindow,200000)
+  assert.equal(models['claude-sonnet-4-5-20250929'].supportsEffort,true)
+  assert.equal(models['claude-sonnet-5-5'].contextWindow,1000000)
+  assert.equal(models['claude-sonnet-5-5'].maxOutputTokens,128000)
+  assert.equal(models['gpt-5.6-sol'].contextWindow,1050000)
+  assert.equal(models['gpt-5.6-sol'].maxOutputTokens,128000)
+  assert.equal(models['gpt-5.6-sol'].parameterCompat.reasoningEffort.max,'max')
+  assert.equal(models['deepseek-flash'].contextWindow,1048576)
+  assert.equal(models['deepseek-flash'].maxOutputTokens,393216)
+  service.models=[models['gpt-5.6-sol']];service.enabled=true
+  const saved=await f.request('saveService',{service})
+  const first=await f.run({model:saved.defaultModel})
+  assert.equal(payloads[0].reasoning_effort,'none')
+  assert.ok(payloads[0].max_completion_tokens>0)
+  await f.request('setEffort',{sessionId:first.id,effort:'max'})
+  const second=await f.run({sessionId:first.id,model:saved.defaultModel})
+  assert.equal(second.result.exit_reason,'provider_error')
+  assert.match(second.result.error,/Responses API/)
+  assert.equal(payloads.length,1)
+})
+
+test('A5: built-in Claude Sonnet 4.5 can enable extended thinking',async t=>{
+  const payloads=[]
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{payloads.push(JSON.parse(body));write(res,[{type:'content_block_start',index:0,content_block:{type:'text',text:'ok'}},{type:'message_delta',delta:{stop_reason:'end_turn'}},{type:'message_stop'}],false)})})
+  const f=await fixture(t,[],{ANTHROPIC_API_KEY:'test-key',ANTHROPIC_BASE_URL:url})
+  const first=await f.run({model:'claude-sonnet-4-5'})
+  await f.request('setEffort',{sessionId:first.id,effort:'high'})
+  const second=await f.run({sessionId:first.id,model:'claude-sonnet-4-5'})
+  assert.equal(second.result.exit_reason,'completed')
+  assert.equal(payloads[1].thinking.type,'enabled')
+  assert.equal(payloads[1].thinking.budget_tokens,4096)
 })

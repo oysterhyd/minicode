@@ -205,10 +205,15 @@ impl Provider {
             }
             .into();
             p.model = util::string(&m, "modelId")?.into();
-            p.parameter_compat = m
-                .get("parameterCompat")
-                .cloned()
-                .unwrap_or_else(|| catalog_model(&p.model)["parameter_compat"].clone());
+            p.parameter_compat = catalog_model(&p.model)["parameter_compat"].clone();
+            if let Some(overrides) = m["parameterCompat"].as_object() {
+                if !p.parameter_compat.is_object() {
+                    p.parameter_compat = json!({});
+                }
+                for (name, value) in overrides {
+                    p.parameter_compat[name] = value.clone();
+                }
+            }
             let (url, key) = configuration.credentials(&service);
             p.url = url;
             p.key = key;
@@ -788,6 +793,9 @@ impl Provider {
         tools: &[ToolSpec],
         attachments: &Attachments,
     ) -> Result<Value> {
+        if self.style == "openai" && !chat_supported(&self.model, &self.parameter_compat) {
+            bail!("该模型需要 Responses API，当前 Chat Completions 接口不支持它")
+        }
         let mut chat = vec![];
         if self.style == "openai" && !system.is_empty() {
             chat.push(json!({"role":"system","content":system}));
@@ -1026,7 +1034,17 @@ impl Provider {
             }
         } else {
             body["stream_options"] = json!({"include_usage":true});
-            if let Some(effort) = self.wire_reasoning_effort() {
+            let reasoning_with_tools = self.parameter_compat["reasoningWithTools"]
+                .as_bool()
+                .unwrap_or_else(|| !openai_chat_tools_require_none(&self.model));
+            if !tools.is_empty() && !reasoning_with_tools {
+                if self.effort != "off" {
+                    bail!(
+                        "该模型在 Chat Completions 中不能同时使用工具和推理强度；请关闭思考或使用支持此组合的 Responses API"
+                    )
+                }
+                body["reasoning_effort"] = json!("none");
+            } else if let Some(effort) = self.wire_reasoning_effort() {
                 body["reasoning_effort"] = json!(effort)
             }
             if !tools.is_empty() {
@@ -1111,6 +1129,41 @@ pub(crate) fn openai_reasoning_family(model: &str) -> Option<bool> {
         return None;
     }
     Some(false)
+}
+
+fn openai_chat_tools_require_none(model: &str) -> bool {
+    let model = model.strip_prefix("openai/").unwrap_or(model);
+    model
+        .strip_prefix("gpt-5.")
+        .and_then(|version| {
+            version
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse::<u32>()
+                .ok()
+        })
+        .is_some_and(|version| version >= 4)
+}
+
+pub(crate) fn chat_supported(model: &str, compat: &Value) -> bool {
+    compat["chatSupported"].as_bool().unwrap_or_else(|| {
+        let model = model.strip_prefix("openai/").unwrap_or(model);
+        ![
+            "gpt-5-pro",
+            "gpt-5.2-pro",
+            "gpt-5.4-pro",
+            "gpt-5.5-pro",
+            "o1-pro",
+            "o3-pro",
+        ]
+        .iter()
+        .any(|name| {
+            model == *name
+                || model
+                    .strip_prefix(name)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        })
+    })
 }
 
 fn anthropic_tool_ids(messages: &[Message]) -> HashMap<String, String> {

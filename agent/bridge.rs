@@ -1746,6 +1746,16 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
             .context("请先输入或配置模型 ID，再测试连接")?;
         let configured =
             models.and_then(|models| models.iter().find(|entry| entry["modelId"] == model));
+        if !anthropic
+            && !crate::provider::chat_supported(
+                model,
+                configured
+                    .map(|entry| &entry["parameterCompat"])
+                    .unwrap_or(&Value::Null),
+            )
+        {
+            bail!("该模型需要 Responses API，当前 Chat Completions 接口不支持它")
+        }
         let mut body =
             json!({"model":model,"messages":[{"role":"user","content":"Hi"}],"stream":false});
         let completion = !anthropic

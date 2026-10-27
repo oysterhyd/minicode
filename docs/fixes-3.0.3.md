@@ -384,3 +384,12 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：先复现两类无 /models 网关失败和桌面缺少独立入口；协议测试覆盖两个接口、模型参数、缺少模型、错误正文截断和密钥屏蔽；Go UI 测试验证两个按钮分别执行测试和发现。
 - 取舍：聊天探测需要输入或选择模型 ID，并会产生一次很小的实际模型请求及可能的费用；未选模型时给出明确提示。
 - 验证：`2B-B17-*` 全部通过；协议 116 通过、1 个既有慢测跳过；离线评测、TUI 和 Windows Desktop 测试/vet/vendor UI 检查通过。
+
+## A5：更新内置模型目录
+
+- 问题与根因：目录只有三个模型，Claude Sonnet 4.5 错误标为不支持思考，常见新模型及带日期的别名无法获得正确元数据。
+- 修复：依据官方资料更新 Claude 4.5 / 4.6 / 5.5、GPT-5 / 5.4 / 5.6、DeepSeek Flash / V4 Pro 的窗口、输出、模态和思考信息；识别官方前缀和日期快照别名。GPT-5.6 的 max 档位与 DeepSeek 的有限档位使用目录映射，已保存的用户模型字段仍优先。
+- 测试：先复现 Sonnet 4.5 能力错误和新模型回退为未知值；桥接测试覆盖新旧模型、日期别名及内置 Claude 思考请求，Rust 测试覆盖推理强度与工具的 API 限制和网关覆盖。
+- 取舍与限制：根据 [OpenAI 文档](https://developers.openai.com/api/docs/guides/migrate-to-responses?lang=javascript&tool-use=chat-completions&update-item-definitions=chat-completions&update-multiturn=responses)，GPT-5.4 及后续模型的 Chat Completions 不支持同时启用工具和非 none 推理；本实现使用工具时默认发送 none，选择更高强度时在发送前提示需要 Responses API，支持该组合的兼容网关可设置 `parameterCompat.reasoningWithTools=true`。完整 Responses API 支持仍待后续批次。目录参考 [Claude 模型](https://platform.claude.com/docs/en/models/overview)、[OpenAI 模型](https://developers.openai.com/api/docs/models/gpt-5.6-sol)、[DeepSeek 模型](https://api-docs.deepseek.com/api/list-models/)；没有后台自动更新，用户可通过服务配置覆盖。
+- 补充：已知只支持 Responses API 的 GPT/o Pro 模型，在普通请求和连接探测前明确报错；确实提供 Chat 兼容接口的网关可设置 `parameterCompat.chatSupported=true`。对应 Rust 和协议测试先复现错误发送，再验证拒绝及覆盖。
+- 验证：`2B-A5-final-*` 全部通过；Rust 93 项、协议 118 项通过（1 个既有慢测跳过），60 次离线任务和 9 个场景通过验收，TUI 115 项及 Windows Desktop 测试/vet/vendor UI 检查通过。

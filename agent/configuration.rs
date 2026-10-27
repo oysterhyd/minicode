@@ -10,9 +10,19 @@ pub struct Configuration {
 
 pub fn catalog_model(name: &str) -> Value {
     static CATALOG: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    CATALOG
-        .get_or_init(|| serde_json::from_str(include_str!("assets/models.json")).unwrap())
+    let catalog =
+        CATALOG.get_or_init(|| serde_json::from_str(include_str!("assets/models.json")).unwrap());
+    let canonical = name
+        .strip_prefix("anthropic/")
+        .or_else(|| name.strip_prefix("openai/"))
+        .unwrap_or(name);
+    let dated_alias = canonical.rsplit_once('-').and_then(|(base, date)| {
+        (date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit())).then_some(base)
+    });
+    catalog
         .get(name)
+        .or_else(|| catalog.get(canonical))
+        .or_else(|| dated_alias.and_then(|base| catalog.get(base)))
         .cloned()
         .unwrap_or(Value::Null)
 }

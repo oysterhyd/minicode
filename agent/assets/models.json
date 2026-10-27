@@ -20,10 +20,111 @@
     "provider": "anthropic",
     "context_window": 200000,
     "max_output_tokens": 64000,
-    "supports_effort": false,
+    "supports_effort": true,
     "input_modalities": [
       "image",
       "pdf"
     ]
+  },
+  "claude-haiku-4-5": {
+    "name": "Claude Haiku 4.5",
+    "provider": "anthropic",
+    "context_window": 200000,
+    "max_output_tokens": 64000,
+    "supports_effort": true,
+    "input_modalities": ["image", "pdf"]
+  },
+  "claude-sonnet-4-6": {
+    "name": "Claude Sonnet 4.6",
+    "provider": "anthropic",
+    "context_window": 1000000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image", "pdf"]
+  },
+  "claude-opus-4-6": {
+    "name": "Claude Opus 4.6",
+    "provider": "anthropic",
+    "context_window": 1000000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image", "pdf"]
+  },
+  "claude-sonnet-5-5": {
+    "name": "Claude Sonnet 5.5",
+    "provider": "anthropic",
+    "context_window": 1000000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image", "pdf"]
+  },
+  "claude-opus-5-5": {
+    "name": "Claude Opus 5.5",
+    "provider": "anthropic",
+    "context_window": 1000000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image", "pdf"]
+  },
+  "claude-haiku-5-5": {
+    "name": "Claude Haiku 5.5",
+    "provider": "anthropic",
+    "context_window": 1000000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image", "pdf"]
+  },
+  "gpt-5": {
+    "name": "GPT-5",
+    "provider": "commandcode",
+    "context_window": 400000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image"]
+  },
+  "gpt-5.4": {
+    "name": "GPT-5.4",
+    "provider": "commandcode",
+    "context_window": 1050000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image"],
+    "parameter_compat": {"reasoningWithTools": false}
+  },
+  "gpt-5.6": {
+    "name": "GPT-5.6",
+    "provider": "commandcode",
+    "context_window": 1050000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image"],
+    "parameter_compat": {"maxCompletionTokens": true, "reasoningWithTools": false, "reasoningEffort": {"max": "max"}}
+  },
+  "gpt-5.6-sol": {
+    "name": "GPT-5.6 Sol",
+    "provider": "commandcode",
+    "context_window": 1050000,
+    "max_output_tokens": 128000,
+    "supports_effort": true,
+    "input_modalities": ["image"],
+    "parameter_compat": {"maxCompletionTokens": true, "reasoningWithTools": false, "reasoningEffort": {"max": "max"}}
+  },
+  "deepseek-flash": {
+    "name": "DeepSeek Flash",
+    "provider": "commandcode",
+    "context_window": 1048576,
+    "max_output_tokens": 393216,
+    "supports_effort": true,
+    "input_modalities": ["image"],
+    "parameter_compat": {"reasoningEffort": {"medium": "low", "xhigh": "high"}}
+  },
+  "deepseek-v4-pro": {
+    "name": "DeepSeek V4 Pro",
+    "provider": "commandcode",
+    "context_window": 1048576,
+    "max_output_tokens": 393216,
+    "supports_effort": true,
+    "input_modalities": [],
+    "parameter_compat": {"reasoningEffort": {"medium": "low", "xhigh": "high"}}
   }
 }

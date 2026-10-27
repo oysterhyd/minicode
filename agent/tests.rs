@@ -2416,3 +2416,91 @@ fn openai_handoff_downgrades_foreign_thinking_without_opaque_data() {
     assert!(!body.to_string().contains("secret-signature"));
     assert!(!body.to_string().contains("opaque-ciphertext"));
 }
+
+#[test]
+fn catalog_reasoning_tool_restrictions_prevent_invalid_chat_requests() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    provider.model = "gpt-5.6-sol".into();
+    provider.parameter_compat =
+        crate::configuration::catalog_model(&provider.model)["parameter_compat"].clone();
+    let tools = [crate::models::ToolSpec {
+        name: "read".into(),
+        description: "read".into(),
+        input_schema: json!({"type":"object"}),
+        requires_approval: false,
+    }];
+    let messages = [Message::user("hello")];
+    let body = provider
+        .payload("", &messages, &tools, &ctx.attachments)
+        .unwrap();
+    assert_eq!(body["reasoning_effort"], "none");
+    provider.effort = "max".into();
+    assert!(
+        provider
+            .payload("", &messages, &tools, &ctx.attachments)
+            .unwrap_err()
+            .to_string()
+            .contains("Responses")
+    );
+    assert_eq!(
+        provider
+            .payload("", &messages, &[], &ctx.attachments)
+            .unwrap()["reasoning_effort"],
+        "max"
+    );
+    provider.parameter_compat["reasoningWithTools"] = json!(true);
+    assert_eq!(
+        provider
+            .payload("", &messages, &tools, &ctx.attachments)
+            .unwrap()["reasoning_effort"],
+        "max"
+    );
+    provider.model = "gpt-5.4-mini".into();
+    provider.parameter_compat = serde_json::Value::Null;
+    assert!(
+        provider
+            .payload("", &messages, &tools, &ctx.attachments)
+            .is_err()
+    );
+}
+
+#[test]
+fn responses_only_model_rejects_chat_unless_gateway_overrides_it() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    let messages = [Message::user("hello")];
+    for model in ["gpt-5-pro", "gpt-5.4-pro-2026-03-05", "o3-pro"] {
+        provider.model = model.into();
+        provider.effort = "low".into();
+        assert!(
+            provider
+                .payload("", &messages, &[], &ctx.attachments)
+                .unwrap_err()
+                .to_string()
+                .contains("Responses"),
+            "{model}"
+        );
+    }
+    provider.parameter_compat = json!({"chatSupported":true,"reasoningEffort":{"low":"high"}});
+    assert_eq!(
+        provider
+            .payload("", &messages, &[], &ctx.attachments)
+            .unwrap()["reasoning_effort"],
+        "high"
+    );
+}
