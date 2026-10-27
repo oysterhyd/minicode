@@ -1003,7 +1003,7 @@ fn powershell_command(command: &str, program: &std::ffi::OsStr) -> Command {
         "-NonInteractive",
         "-Command",
         &format!(
-            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;$global:LASTEXITCODE=$null;\n{command}\n$__minicode_ok=$?;if ($__minicode_ok) {{ exit 0 }} elseif ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} else {{ exit 1 }}"
+            "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$OutputEncoding=[Text.UTF8Encoding]::new($false);$global:LASTEXITCODE=$null;\n{command}\n$__minicode_ok=$?;if ($__minicode_ok) {{ exit 0 }} elseif ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} else {{ exit 1 }}"
         ),
     ]);
     cmd
@@ -1184,6 +1184,12 @@ fn shell_for(name: &str, command: &str, cwd: &Path) -> Command {
     if let Some(path) = util::bundled_path() {
         cmd.env("PATH", path);
     }
+    #[cfg(windows)]
+    for (name, default) in [("PYTHONUTF8", "1"), ("PYTHONIOENCODING", "utf-8")] {
+        if std::env::var_os(name).is_none_or(|value| value.is_empty()) {
+            cmd.env(name, default);
+        }
+    }
     cmd.current_dir(cwd).stdin(Stdio::null()).kill_on_drop(true);
     cmd
 }
@@ -1347,40 +1353,27 @@ fn record_capture(
     let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
     let mut source = captured.as_file().try_clone()?;
     source.seek(SeekFrom::Start(0))?;
+    #[cfg(windows)]
+    let codepage = if capture_is_utf8(&mut source, total)? {
+        None
+    } else {
+        use windows_sys::Win32::Globalization::{GetACP, GetOEMCP};
+        source.seek(SeekFrom::Start(0))?;
+        let mut sample = vec![0; (total as usize).min(8192)];
+        let n = source.read(&mut sample)?;
+        sample.truncate(n);
+        unsafe { legacy_codepage(&sample, GetOEMCP(), GetACP()) }
+    };
+    source.seek(SeekFrom::Start(0))?;
     let mut source = source.take(total);
-    let mut buffer = vec![];
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        let n = source.read(&mut chunk)?;
-        buffer.extend_from_slice(&chunk[..n]);
-        let mut end = 0;
-        while end < buffer.len() {
-            match std::str::from_utf8(&buffer[end..]) {
-                Ok(_) => {
-                    temp.write_all(&buffer[end..])?;
-                    end = buffer.len();
-                }
-                Err(error) => {
-                    let valid = end + error.valid_up_to();
-                    temp.write_all(&buffer[end..valid])?;
-                    end = valid;
-                    if let Some(length) = error.error_len() {
-                        temp.write_all("�".as_bytes())?;
-                        end += length;
-                    } else if n == 0 {
-                        temp.write_all("�".as_bytes())?;
-                        end = buffer.len();
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        buffer.drain(..end);
-        if n == 0 {
-            break;
-        }
+    #[cfg(windows)]
+    if let Some(codepage) = codepage {
+        copy_codepage_capture(&mut source, &mut temp, codepage)?;
+    } else {
+        copy_utf8_capture(&mut source, &mut temp)?;
     }
+    #[cfg(not(windows))]
+    copy_utf8_capture(&mut source, &mut temp)?;
     temp.as_file().sync_all()?;
     temp.persist(&path).map_err(|e| e.error)?;
     ctx.store.with(|c| {
@@ -1398,8 +1391,173 @@ fn record_capture(
     })?;
     Ok(artifact)
 }
+
+fn copy_utf8_capture(source: &mut impl Read, output: &mut impl Write) -> Result<()> {
+    let mut buffer = vec![];
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = source.read(&mut chunk)?;
+        buffer.extend_from_slice(&chunk[..n]);
+        let mut end = 0;
+        while end < buffer.len() {
+            match std::str::from_utf8(&buffer[end..]) {
+                Ok(_) => {
+                    output.write_all(&buffer[end..])?;
+                    end = buffer.len();
+                }
+                Err(error) => {
+                    let valid = end + error.valid_up_to();
+                    output.write_all(&buffer[end..valid])?;
+                    end = valid;
+                    if let Some(length) = error.error_len() {
+                        output.write_all("�".as_bytes())?;
+                        end += length;
+                    } else if n == 0 {
+                        output.write_all("�".as_bytes())?;
+                        end = buffer.len();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        buffer.drain(..end);
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn capture_is_utf8(source: &mut File, total: u64) -> Result<bool> {
+    let mut source = source.take(total);
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = source.read(&mut chunk)?;
+        pending.extend_from_slice(&chunk[..n]);
+        match std::str::from_utf8(&pending) {
+            Ok(_) => pending.clear(),
+            Err(error) if error.error_len().is_some() => return Ok(false),
+            Err(error) => {
+                pending.drain(..error.valid_up_to());
+            }
+        }
+        if n == 0 {
+            return Ok(pending.is_empty());
+        }
+    }
+}
+
+#[cfg(windows)]
+fn copy_codepage_capture(
+    source: &mut impl Read,
+    output: &mut impl Write,
+    codepage: u32,
+) -> Result<()> {
+    use windows_sys::Win32::Globalization::IsDBCSLeadByteEx;
+    let lead: [bool; 256] =
+        std::array::from_fn(|byte| unsafe { IsDBCSLeadByteEx(codepage, byte as u8) != 0 });
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = source.read(&mut chunk)?;
+        pending.extend_from_slice(&chunk[..n]);
+        let mut end = 0;
+        while end < pending.len() {
+            if lead[pending[end] as usize] {
+                if end + 1 == pending.len() && n != 0 {
+                    break;
+                }
+                end += if end + 1 < pending.len() { 2 } else { 1 };
+            } else {
+                end += 1;
+            }
+        }
+        if end > 0 {
+            let text = decode_codepage(&pending[..end], codepage, false)
+                .unwrap_or_else(|| String::from_utf8_lossy(&pending[..end]).into_owned());
+            output.write_all(text.as_bytes())?;
+            pending.drain(..end);
+        }
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+#[cfg(windows)]
+fn decode_codepage(bytes: &[u8], codepage: u32, strict: bool) -> Option<String> {
+    use windows_sys::Win32::Globalization::{MB_ERR_INVALID_CHARS, MultiByteToWideChar};
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    let len = i32::try_from(bytes.len()).ok()?;
+    let flags = if strict { MB_ERR_INVALID_CHARS } else { 0 };
+    // MultiByteToWideChar first computes the UTF-16 length, then fills exactly
+    // that many elements in the allocated buffer.
+    unsafe {
+        let needed = MultiByteToWideChar(
+            codepage,
+            flags,
+            bytes.as_ptr(),
+            len,
+            std::ptr::null_mut(),
+            0,
+        );
+        if needed <= 0 {
+            return None;
+        }
+        let mut wide = vec![0u16; needed as usize];
+        let written = MultiByteToWideChar(
+            codepage,
+            flags,
+            bytes.as_ptr(),
+            len,
+            wide.as_mut_ptr(),
+            needed,
+        );
+        (written == needed).then(|| String::from_utf16_lossy(&wide))
+    }
+}
+
+#[cfg(windows)]
+fn legacy_codepage(bytes: &[u8], oem: u32, ansi: u32) -> Option<u32> {
+    let candidates = [oem, ansi];
+    candidates
+        .iter()
+        .copied()
+        .filter(|codepage| *codepage != 65001)
+        .find(|codepage| decode_codepage(bytes, *codepage, true).is_some())
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .filter(|codepage| *codepage != 65001)
+                .find(|codepage| decode_codepage(bytes, *codepage, false).is_some())
+        })
+}
+
+#[cfg(windows)]
+fn decode_windows(bytes: &[u8], oem: u32, ansi: u32) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    legacy_codepage(bytes, oem, ansi)
+        .and_then(|codepage| decode_codepage(bytes, codepage, false))
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
+}
+
 fn decode(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+    #[cfg(windows)]
+    let text = unsafe {
+        use windows_sys::Win32::Globalization::{GetACP, GetOEMCP};
+        decode_windows(bytes, GetOEMCP(), GetACP())
+    };
+    #[cfg(not(windows))]
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    let text = text.replace("\r\n", "\n");
     static ANSI: OnceLock<regex::Regex> = OnceLock::new();
     ANSI.get_or_init(|| regex::Regex::new("\u{1b}\\[[0-9;]*m").unwrap())
         .replace_all(&text, "")
@@ -1440,5 +1598,56 @@ mod windows_shell_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_encoding_tests {
+    use super::{capture_is_utf8, copy_codepage_capture, decode_windows};
+    use std::io::{Seek, SeekFrom, Write};
+
+    // This machine may use a non-Chinese system locale; the production
+    // decoder will be exercised with CP936 explicitly after the fix.
+    fn cp936(bytes: &[u8]) -> String {
+        decode_windows(bytes, 936, 936)
+    }
+
+    #[test]
+    fn gbk_cp936_and_utf8_are_decoded_without_mojibake() {
+        assert_eq!(cp936(&[0xd6, 0xd0, 0xce, 0xc4]), "中文");
+        assert_eq!(
+            decode_windows(&[0xd6, 0xd0, 0xce, 0xc4], 65001, 936),
+            "中文"
+        );
+        assert_eq!(cp936("中文".as_bytes()), "中文");
+        if unsafe { windows_sys::Win32::Globalization::GetOEMCP() } == 936 {
+            assert_eq!(super::decode(&[0xd6, 0xd0, 0xce, 0xc4]), "中文");
+        }
+    }
+
+    #[test]
+    fn gbk_capture_keeps_characters_at_chunk_boundaries() {
+        for padding in [65_534, 65_535] {
+            let mut bytes = vec![b'a'; padding];
+            bytes.extend_from_slice(&[0xd6, 0xd0, 0xce, 0xc4]);
+            let mut decoded = Vec::new();
+            copy_codepage_capture(&mut bytes.as_slice(), &mut decoded, 936).unwrap();
+            assert_eq!(decoded.len(), padding + "中文".len());
+            assert!(decoded.ends_with("中文".as_bytes()));
+        }
+    }
+
+    #[test]
+    fn utf8_capture_detection_handles_split_characters() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&vec![b'a'; 65_535]).unwrap();
+        file.write_all("中文".as_bytes()).unwrap();
+        let total = file.metadata().unwrap().len();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        assert!(capture_is_utf8(&mut file, total).unwrap());
+        file.seek(SeekFrom::Start(total)).unwrap();
+        file.write_all(&[0xd6, 0xd0]).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        assert!(!capture_is_utf8(&mut file, total + 2).unwrap());
     }
 }
