@@ -1542,7 +1542,12 @@ fn parse_anthropic(v: &Value, source: &str) -> Result<Response> {
         .context("missing provider content")?
     {
         match b["type"].as_str() {
-            Some("text") => blocks.push(Block::text(util::string(b, "text")?)),
+            Some("text") => {
+                let text = util::string(b, "text")?;
+                if !text.is_empty() {
+                    blocks.push(Block::text(text));
+                }
+            }
             Some("thinking") => blocks.push(Block::Thinking {
                 thinking: util::string(b, "thinking")?.into(),
                 signature: b["signature"].as_str().map(str::to_string),
@@ -1659,7 +1664,9 @@ pub fn normalize_tool_ids(response: &mut Response, previous: &HashSet<String>) -
 }
 
 pub fn validate_response(response: &Response, messages: &[Message]) -> Result<()> {
-    if response.blocks.is_empty() {
+    if response.blocks.is_empty()
+        && !matches!(response.stop_reason.as_str(), "end_turn" | "stop_sequence")
+    {
         bail!("provider returned an empty assistant response")
     }
     let mut known = HashSet::new();
@@ -1702,6 +1709,20 @@ pub fn validate_response(response: &Response, messages: &[Message]) -> Result<()
 #[cfg(test)]
 mod error_tests {
     use super::*;
+
+    #[test]
+    fn empty_completed_response_is_valid_but_empty_tool_use_is_not() {
+        let mut response = Response {
+            blocks: vec![],
+            stop_reason: "end_turn".into(),
+            usage: Usage::default(),
+        };
+        assert!(validate_response(&response, &[]).is_ok());
+        response.stop_reason = "stop_sequence".into();
+        assert!(validate_response(&response, &[]).is_ok());
+        response.stop_reason = "tool_use".into();
+        assert!(validate_response(&response, &[]).is_err());
+    }
 
     #[test]
     fn indexless_tool_fragments_survive_every_sse_byte_split() {

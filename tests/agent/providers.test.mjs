@@ -358,3 +358,33 @@ test('P9: index-free SSE fragments remain grouped across byte boundaries',async 
     })
   }
 })
+
+test('P11: empty completed responses after tools end normally without polluting future history',async t=>{
+  for(const style of ['openai','anthropic']) for(const transport of ['stream','json']) for(const emptyText of [false,true]) for(const finish of (style==='anthropic'?['end_turn','stop_sequence']:['end_turn'])){
+    await t.test(`${style}-${transport}-${emptyText?'empty-text':'no-content'}-${finish}`,async t=>{
+      const f=await fixture(t),payloads=[]
+      const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+        payloads.push(JSON.parse(body));const n=payloads.length
+        if(transport==='json'){
+          res.setHeader('content-type','application/json')
+          if(style==='openai')res.end(JSON.stringify(n===1?{choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'empty-test',function:{name:'read',arguments:'{"path":"README.md"}'}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:2,completion_tokens:1}}:{choices:[{message:{role:'assistant',content:n===2?(emptyText?'':null):'later'},finish_reason:'stop'}],usage:{prompt_tokens:7,completion_tokens:1}}))
+          else res.end(JSON.stringify(n===1?{content:[{type:'tool_use',id:'empty-test',name:'read',input:{path:'README.md'}}],stop_reason:'tool_use',usage:{input_tokens:2,output_tokens:1}}:{content:n===2?(emptyText?[{type:'text',text:''}]:[]):[{type:'text',text:'later'}],stop_reason:finish,usage:{input_tokens:7,output_tokens:1}}))
+        }else if(style==='openai'){
+          write(res,n===1?[{choices:[{delta:{tool_calls:[{index:0,id:'empty-test',function:{name:'read',arguments:'{"path":"README.md"}'}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:2,completion_tokens:1}}]:[{choices:[{delta:n===2?(emptyText?{content:''}:{}):{content:'later'},finish_reason:'stop'}],usage:{prompt_tokens:7,completion_tokens:1}}])
+        }else{
+          write(res,n===1?[{type:'message_start',message:{usage:{input_tokens:2}}},{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'empty-test',name:'read',input:{path:'README.md'}}},{type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:1}},{type:'message_stop'}]:[{type:'message_start',message:{usage:{input_tokens:7}}},...(n===2?(emptyText?[{type:'content_block_start',index:0,content_block:{type:'text',text:''}}]:[]):[{type:'content_block_start',index:0,content_block:{type:'text',text:'later'}}]),{type:'message_delta',delta:{stop_reason:finish},usage:{output_tokens:1}},{type:'message_stop'}],false)
+        }
+      })})
+      const model=await configure(f,url,style),first=await f.run({model})
+      assert.equal(first.result.exit_reason,'completed')
+      assert.equal(first.result.total_usage.input_tokens,9)
+      assert.ok(first.detail.events.some(e=>e.type==='assistant_message'&&e.data.stop_reason===finish))
+      assert.ok(first.detail.messages.filter(m=>m.role==='assistant').every(m=>m.content.some(b=>b.type!=='text'||b.text.length>0)))
+      const next=await f.run({sessionId:first.id,model,text:'continue'})
+      assert.equal(next.result.exit_reason,'completed')
+      assert.equal(payloads.length,3)
+      assert.ok(payloads[2].messages.filter(m=>m.role==='assistant').every(m=>m.tool_calls?.length||(typeof m.content==='string'?m.content.length>0:Array.isArray(m.content)&&m.content.some(b=>b.type!=='text'||b.text.length>0))))
+    })
+  }
+})
+

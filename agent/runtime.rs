@@ -1351,11 +1351,13 @@ impl Runtime {
                 &self.session,
                 "assistant_message",
                 &metrics,
-                Some(&assistant),
+                (!assistant.content.is_empty()).then_some(&assistant),
                 None,
                 Some(&store::counters(self.rounds, &self.usage)),
             )?;
-            self.messages.push(assistant);
+            if !assistant.content.is_empty() {
+                self.messages.push(assistant);
+            }
             self.message_revision = Some(self.store.message_revision(&self.session)?);
             self.used_call_ids.extend(calls.iter().filter_map(|b| {
                 if let Block::ToolUse { id, .. } = b {
