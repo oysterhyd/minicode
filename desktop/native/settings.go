@@ -770,7 +770,7 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 				if button(c, p, tr("添加"), "Plus", false).Disabled(strings.TrimSpace(s.CustomModel) == "").Clicked() {
 					id := strings.TrimSpace(s.CustomModel)
 					if !slices.ContainsFunc(service.Models, func(m model.ServiceModel) bool { return m.ModelID == id }) {
-						service.Models = append(service.Models, model.ServiceModel{ModelID: id, Name: id, ContextWindow: 200000, MaxOutput: 8192})
+						service.Models = append(service.Models, model.ServiceModel{ModelID: id, Name: id, ContextWindow: 128000, MaxOutput: 8192})
 						s.OpenModels[len(service.Models)-1] = true
 					}
 					s.CustomModel = ""

@@ -1599,6 +1599,89 @@ impl Statistics {
         )
     }
 }
+fn discovered_model(model: &Value) -> Value {
+    let id = model["id"].as_str().unwrap_or_default();
+    let catalog = crate::configuration::catalog_model(id);
+    let window = [
+        &model["context_window"],
+        &model["context_length"],
+        &model["contextWindow"],
+        &catalog["context_window"],
+    ]
+    .iter()
+    .find_map(|value| value.as_u64().filter(|value| *value > 1))
+    .unwrap_or(128_000);
+    let output = [
+        &model["max_output_tokens"],
+        &model["max_completion_tokens"],
+        &model["maxOutputTokens"],
+        &model["top_provider"]["max_completion_tokens"],
+        &catalog["max_output_tokens"],
+    ]
+    .iter()
+    .find_map(|value| value.as_u64().filter(|value| *value > 0))
+    .unwrap_or(8192)
+    .min(window - 1);
+    let levels = model["effort"]["supported_levels"].as_array();
+    let supports = model["supportsEffort"]
+        .as_bool()
+        .or_else(|| model["supports_effort"].as_bool())
+        .or_else(|| levels.map(|levels| !levels.is_empty()))
+        .or_else(|| catalog["supports_effort"].as_bool())
+        .unwrap_or(false);
+    let modalities = model["input_modalities"]
+        .as_array()
+        .or_else(|| model["architecture"]["input_modalities"].as_array())
+        .or_else(|| catalog["input_modalities"].as_array());
+    let has = |name: &str, capability: &str| {
+        model["capabilities"][capability]
+            .as_bool()
+            .unwrap_or_else(|| {
+                modalities.is_some_and(|values| values.iter().any(|value| value == name))
+            })
+    };
+    let mut result = json!({
+        "modelId":id,
+        "name":model["display_name"].as_str().or_else(|| model["name"].as_str()).unwrap_or(id),
+        "contextWindow":window,
+        "maxOutputTokens":output,
+        "supportsEffort":supports,
+        "capabilities":{"images":has("image", "images"),"pdf":has("pdf", "pdf"),"audio":has("audio", "audio"),"video":has("video", "video")}
+    });
+    let mut compat = model
+        .get("parameterCompat")
+        .or_else(|| catalog.get("parameter_compat"))
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if let Some(levels) = levels {
+        let order = ["minimal", "low", "medium", "high", "xhigh", "max"];
+        let supported = order
+            .iter()
+            .enumerate()
+            .filter(|(_, level)| levels.iter().any(|value| value == **level))
+            .collect::<Vec<_>>();
+        if !supported.is_empty() {
+            let mut mappings = serde_json::Map::new();
+            for (index, effort) in order.iter().enumerate().skip(1) {
+                let selected = supported
+                    .iter()
+                    .rev()
+                    .find(|(rank, _)| *rank <= index)
+                    .or_else(|| supported.first())
+                    .unwrap()
+                    .1;
+                mappings.insert((*effort).into(), json!(selected));
+            }
+            compat["reasoningEffort"] = Value::Object(mappings);
+        }
+    }
+    if !compat.as_object().unwrap().is_empty() {
+        result["parameterCompat"] = compat;
+    }
+    result
+}
+
 pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> Result<Value> {
     if method == "refreshMcp" {
         let workspace = Router::workspace(p)?;
@@ -1662,7 +1745,13 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
         bail!("连接失败（HTTP {}）", response.status().as_u16())
     }
     let data: Value = response.json().await?;
-    let models=data["data"].as_array().unwrap_or(&vec![]).iter().filter(|m|m["id"].is_string()).map(|m|json!({"modelId":m["id"],"name":m.get("display_name").unwrap_or(&m["id"]),"contextWindow":200000,"maxOutputTokens":8192,"supportsEffort":false})).collect::<Vec<_>>();
+    let models = data["data"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter(|model| model["id"].is_string())
+        .map(discovered_model)
+        .collect::<Vec<_>>();
     Ok(json!({"message":format!("已连接，发现 {} 个模型",models.len()),"models":models}))
 }
 // The producer only enqueues values. Serialization, stdout writes and flushes

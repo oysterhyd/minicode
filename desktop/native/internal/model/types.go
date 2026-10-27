@@ -37,6 +37,7 @@ type ServiceModel struct {
 	ContextWindow     int               `json:"contextWindow"`
 	MaxOutput         int               `json:"maxOutputTokens"`
 	SupportsEffort    bool              `json:"supportsEffort"`
+	ParameterCompat   map[string]any    `json:"parameterCompat,omitempty"`
 	InputCapabilities ModelCapabilities `json:"capabilities"`
 }
 

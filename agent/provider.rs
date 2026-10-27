@@ -1,6 +1,6 @@
 use crate::{
     attachments::Attachments,
-    configuration::{Configuration, discover_commandcode},
+    configuration::{Configuration, catalog_model, discover_commandcode},
     context,
     models::{Block, Message, Response, ToolSpec, Usage},
     tools::Sink,
@@ -192,7 +192,7 @@ impl Provider {
             );
             return Ok(p);
         }
-        let catalog: Value = serde_json::from_str(include_str!("assets/models.json"))?;
+        p.window = 128_000;
         if let Some((service, m)) = configuration.find_model(model)? {
             if service["enabled"] != true {
                 bail!("model service is disabled")
@@ -205,7 +205,10 @@ impl Provider {
             }
             .into();
             p.model = util::string(&m, "modelId")?.into();
-            p.parameter_compat = m["parameterCompat"].clone();
+            p.parameter_compat = m
+                .get("parameterCompat")
+                .cloned()
+                .unwrap_or_else(|| catalog_model(&p.model)["parameter_compat"].clone());
             let (url, key) = configuration.credentials(&service);
             p.url = url;
             p.key = key;
@@ -229,10 +232,10 @@ impl Provider {
                 p.effort = "off".into();
             }
         } else {
-            let info = &catalog[model];
+            let info = &catalog_model(model);
             if info.is_object() {
                 p.parameter_compat = info["parameter_compat"].clone();
-                p.window = info["context_window"].as_u64().unwrap_or(200_000);
+                p.window = info["context_window"].as_u64().unwrap_or(128_000);
                 p.max_output = info["max_output_tokens"].as_u64().unwrap_or(8192);
                 p.modalities =
                     serde_json::from_value(info["input_modalities"].clone()).unwrap_or_default();

@@ -139,3 +139,49 @@ test('P8: switching OpenAI history to Anthropic remaps tool ids and hands off re
   assert.ok(blocks.some(b=>b.type==='text'&&b.text.includes('inspect the file')))
   assert.equal(second.detail.messages.find(m=>m.role==='assistant').content.find(b=>b.type==='tool_use').id,'functions.read:0')
 })
+
+test('X8: discovery prefers server metadata, then catalog, then conservative defaults',async t=>{
+  const f=await fixture(t),payloads=[]
+  const url=await server(t,(req,res)=>{if(req.method==='POST'){let body='';req.on('data',d=>body+=d);req.on('end',()=>{payloads.push(JSON.parse(body));write(res,[{choices:[{delta:{content:'ok'},finish_reason:'stop'}]}])});return}res.setHeader('content-type','application/json');res.end(JSON.stringify({data:[
+    {id:'remote-model',name:'Remote',context_window:65536,max_output_tokens:16384,input_modalities:['text','image'],effort:{supported_levels:['low','high']}},
+    {id:'deepseek/deepseek-v4.1-flash'},
+    {id:'unknown-model'},
+    {id:'tiny-model',context_length:4096,architecture:{input_modalities:['image']}}
+  ]}))})
+  const service={name:'discovery',baseUrl:url+'/v1',apiStyle:'openai',apiKey:'key',models:[]}
+  const discovered=await f.request('fetchServiceModels',{service})
+  const [remote,known,unknown,tiny]=discovered.models
+  assert.equal(remote.contextWindow,65536)
+  assert.equal(remote.maxOutputTokens,16384)
+  assert.equal(remote.supportsEffort,true)
+  assert.equal(remote.capabilities.images,true)
+  assert.equal(remote.parameterCompat.reasoningEffort.medium,'low')
+  assert.equal(known.contextWindow,1000000)
+  assert.equal(known.maxOutputTokens,384000)
+  assert.equal(known.supportsEffort,true)
+  assert.equal(unknown.contextWindow,128000)
+  assert.equal(unknown.maxOutputTokens,8192)
+  assert.equal(tiny.contextWindow,4096)
+  assert.equal(tiny.maxOutputTokens,4095)
+  assert.equal(tiny.capabilities.images,true)
+  remote.contextWindow=32000;remote.maxOutputTokens=4000
+  service.models=[remote];service.enabled=true
+  const saved=await f.request('saveService',{service})
+  assert.equal(saved.services[0].models[0].contextWindow,32000)
+  assert.equal(saved.services[0].models[0].maxOutputTokens,4000)
+  assert.equal(saved.services[0].models[0].parameterCompat.reasoningEffort.medium,'low')
+  const first=await f.run({model:saved.defaultModel})
+  assert.equal((await f.request('getState',{sessionId:first.id})).contextWindow,32000)
+  assert.equal(payloads[0].max_tokens,4000)
+  await f.request('setEffort',{sessionId:first.id,effort:'medium'})
+  await f.run({sessionId:first.id,model:saved.defaultModel})
+  assert.equal(payloads[1].reasoning_effort,'low')
+})
+
+test('X8: unconfigured unknown model uses a 128k context window',async t=>{
+  const url=await server(t,(_req,res)=>write(res,[{choices:[{delta:{content:'ok'},finish_reason:'stop'}]}]))
+  const f=await fixture(t,[],{COMMANDCODE_API_KEY:'key',COMMANDCODE_BASE_URL:url+'/v1'})
+  const run=await f.run({model:'unknown-model'})
+  const state=await f.request('getState',{sessionId:run.id})
+  assert.equal(state.contextWindow,128000)
+})

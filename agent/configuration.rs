@@ -7,6 +7,16 @@ use std::{fs, path::PathBuf};
 pub struct Configuration {
     pub path: PathBuf,
 }
+
+pub fn catalog_model(name: &str) -> Value {
+    static CATALOG: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    CATALOG
+        .get_or_init(|| serde_json::from_str(include_str!("assets/models.json")).unwrap())
+        .get(name)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 impl Default for Configuration {
     fn default() -> Self {
         Self {
@@ -53,10 +63,7 @@ impl Configuration {
     }
     pub fn model_key(service: &Value, model: &Value) -> String {
         let name = model["modelId"].as_str().unwrap_or_default();
-        static CATALOG: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-        let catalog = CATALOG
-            .get_or_init(|| serde_json::from_str(include_str!("assets/models.json")).unwrap());
-        if service["builtin"] == true && catalog[name]["provider"] == service["id"] {
+        if service["builtin"] == true && catalog_model(name)["provider"] == service["id"] {
             name.into()
         } else {
             format!("{}::{name}", service["id"].as_str().unwrap_or_default())
