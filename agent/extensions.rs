@@ -1149,7 +1149,18 @@ impl Catalog {
         let mut text = template
             .replace("{{workspace}}", &self.workspace.to_string_lossy())
             .replace("{{tools}}", &tools.join("、"));
-        for source in self.instructions.values() {
+        let global = self
+            .configuration
+            .path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("AGENTS.md");
+        let root = self.workspace.join("AGENTS.md");
+        for source in self
+            .instructions
+            .values()
+            .filter(|source| source.path == global || source.path == root)
+        {
             text.push_str(&format!(
                 "\n指令来源：{} (sha256:{})\n{}\n",
                 source.path.display(),
@@ -1161,15 +1172,7 @@ impl Catalog {
             "\n可用 Skills（按需用 skill_load 加载）：\n{}\n",
             util::prefix(&self.listing(), 8000)
         ));
-        for (name, digest) in &self.active {
-            if let Some(skill) = self.skills.get(name) {
-                let source = Source::read(&skill.path, 64_000)?;
-                if source.digest != *digest {
-                    bail!("activated skill changed since session start: {name}")
-                }
-                text.push_str(&format!("\nSkill {name}：\n{}\n", source.content));
-            }
-        }
+        text.push_str("\n运行时会通过 <system-reminder> 更新动态项目指令和 Skills；同一来源以最新有效版本为准。\n");
         Ok(text)
     }
 }

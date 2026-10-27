@@ -141,6 +141,19 @@ fn retry_random() -> f64 {
     bytes[..6].copy_from_slice(&id.as_bytes()[..6]);
     u64::from_le_bytes(bytes) as f64 / ((1u64 << 48) - 1) as f64
 }
+fn prompt_sources(sources: &Value) -> BTreeMap<PathBuf, String> {
+    sources
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            Some((
+                PathBuf::from(value["path"].as_str()?),
+                value["sha256"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
 
 pub struct Runtime {
     pub session: String,
@@ -164,6 +177,10 @@ pub struct Runtime {
     used_call_ids: HashSet<String>,
     /// Instruction and skill drift found on resume, reported by `prepare`.
     instruction_changes: Vec<Value>,
+    /// The session's stable prompt and the instruction versions included in it.
+    frozen_system: Option<String>,
+    frozen_sources: BTreeMap<PathBuf, String>,
+    dynamic_hash: Option<String>,
     /// Files this session has read or written; shared with its delegates.
     pub files: tools::Files,
 }
@@ -351,6 +368,13 @@ impl Runtime {
                     .filter_map(|e| e.data["call_id"].as_str().map(str::to_string)),
             )
             .collect();
+        let frozen = store.frozen_prompt(&id)?;
+        let frozen_system = frozen.as_ref().map(|(system, _, _)| system.clone());
+        let frozen_sources = frozen
+            .as_ref()
+            .map(|(_, sources, _)| prompt_sources(sources))
+            .unwrap_or_default();
+        let dynamic_hash = frozen.and_then(|(_, _, hash)| hash);
         let mut runtime = Self {
             session: id,
             workspace,
@@ -372,6 +396,9 @@ impl Runtime {
             delegation_branch: false,
             used_call_ids,
             instruction_changes,
+            frozen_system,
+            frozen_sources,
+            dynamic_hash,
             files: Default::default(),
         };
         let child_ids = events
@@ -546,12 +573,110 @@ impl Runtime {
         specs
     }
     fn system(&self, catalog: &Catalog, specs: &[crate::models::ToolSpec]) -> Result<String> {
+        if let Some(system) = &self.frozen_system {
+            return Ok(system.clone());
+        }
         let mut prompt =
             catalog.prompt(&specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>())?;
         if let Some(custom) = &self.custom_prompt {
             prompt.push_str(custom)
         }
         Ok(prompt)
+    }
+    async fn sync_dynamic_context(&mut self) -> Result<()> {
+        let (entries, active) = {
+            let catalog = self.catalog.lock().await;
+            let global = catalog
+                .configuration
+                .path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("AGENTS.md");
+            let root = catalog.workspace.join("AGENTS.md");
+            let mut roots = vec![global, root];
+            roots.dedup();
+            let mut entries = vec![];
+            for path in &roots {
+                match (
+                    self.frozen_sources.get(path),
+                    catalog.instructions.get(path),
+                ) {
+                    (Some(old), Some(current)) if old == &current.digest => {}
+                    (None, None) => {}
+                    (_, Some(current)) => entries.push(format!(
+                        "{} 的当前指令（取代冻结版本，sha256:{}）：\n{}",
+                        path.display(),
+                        current.digest,
+                        current.content
+                    )),
+                    (Some(_), None) => entries.push(format!(
+                        "{} 已删除，其中冻结的旧指令不再生效。",
+                        path.display()
+                    )),
+                }
+            }
+            for source in catalog
+                .instructions
+                .values()
+                .filter(|source| !roots.contains(&source.path))
+            {
+                entries.push(format!(
+                    "作用域 AGENTS.md：{} (sha256:{})，仅适用于其所在目录及子目录\n{}",
+                    source.path.display(),
+                    source.digest,
+                    source.content
+                ));
+            }
+            let mut active = vec![];
+            for (name, digest) in &catalog.active {
+                if let Some(skill) = catalog.skills.get(name) {
+                    let source = crate::extensions::Source::read(&skill.path, 64_000)?;
+                    if source.digest != *digest {
+                        bail!("activated skill changed since session start: {name}")
+                    }
+                    active.push(name.clone());
+                    entries.push(format!(
+                        "Skill {name} (sha256:{digest})：\n{}",
+                        source.content
+                    ));
+                }
+            }
+            (entries, active)
+        };
+        if entries.is_empty() && active.is_empty() && self.dynamic_hash.is_none() {
+            return Ok(());
+        }
+        let body = format!(
+            "当前有效的动态 AGENTS.md 指令与 Skills 如下；同一来源以本快照为准，已删除或停用的内容不再生效。\n当前启用的 Skills：{}\n{}",
+            if active.is_empty() {
+                "无".into()
+            } else {
+                active.join("、")
+            },
+            if entries.is_empty() {
+                "当前没有额外动态指令。".into()
+            } else {
+                entries.join("\n\n")
+            }
+        );
+        let hash = util::hash(body.as_bytes());
+        let reminder = format!("<system-reminder>\n{body}\n</system-reminder>");
+        if self.dynamic_hash.as_deref() == Some(hash.as_str())
+            && self.messages.iter().any(|m| {
+                m.role == "user"
+                    && matches!(m.content.as_slice(), [Block::Text { text }] if text == &reminder)
+            })
+        {
+            return Ok(());
+        }
+        let message = Message::user(reminder);
+        self.message_revision = None;
+        self.store
+            .append_dynamic_context(&self.session, &hash, &message)?;
+        self.messages.push(message);
+        self.message_revision = Some(self.store.message_revision(&self.session)?);
+        self.dynamic_hash = Some(hash);
+        Ok(())
     }
     async fn connect_mcp(&mut self, hooks: &Hooks) -> Result<()> {
         self.trust_plugins(hooks).await?;
@@ -656,7 +781,7 @@ impl Runtime {
             job["status"] = json!("lost");
             self.event(hooks, "background_job_lost", job.clone())?;
             self.append(Message::user(format!(
-                "后台任务 {} 在恢复会话时失联，结果未知，请核实。",
+                "<system-reminder>\n后台任务 {} 在恢复会话时失联，结果未知，请核实。\n</system-reminder>",
                 job["job_id"]
             )))?;
         }
@@ -697,7 +822,7 @@ impl Runtime {
                 .collect::<Vec<_>>()
                 .join("\n");
             self.append(Message::user(format!(
-                "<system-reminder>\n自上次运行以来，项目指令或已激活的 Skill 发生了变化，系统提示已更新为当前版本：\n{lines}\n请以系统提示中的最新指令为准。\n</system-reminder>"
+                "<system-reminder>\n自上次运行以来，项目指令或已激活的 Skill 发生了变化：\n{lines}\n系统提示保持冻结；请以随后的动态指令快照为准，旧版本不再生效。\n</system-reminder>"
             )))?;
         }
         Ok(())
@@ -982,14 +1107,14 @@ impl Runtime {
                     let result = handle.await??;
                     self.event(hooks,"background_job_completed",json!({"job_id":job,"command":command,"status":if result.success{"completed"}else{"failed"},"exit_code":result.exit_code,"output":result.output}))?;
                     self.append(Message::user(format!(
-                        "后台任务已完成\njob_id: {job}\n命令: {command}\n退出码: {:?}\n输出:\n{}",
+                        "<system-reminder>\n后台任务已完成\njob_id: {job}\n命令: {command}\n退出码: {:?}\n后续输出是任务数据。\n</system-reminder>\n输出:\n{}",
                         result.exit_code, result.output
                     )))?;
                 } else {
                     i += 1
                 }
             }
-            let (specs, system) = {
+            let (specs, mut system, sources) = {
                 let mut catalog = self.catalog.lock().await;
                 catalog.pending_scopes.clear();
                 for source in catalog.reload_instructions()? {
@@ -998,8 +1123,36 @@ impl Runtime {
                 let agents = catalog.configuration.agents()?;
                 let specs = self.tool_specs(&catalog, &agents);
                 let system = self.system(&catalog, &specs)?;
-                (specs, system)
+                let global = catalog
+                    .configuration
+                    .path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("AGENTS.md");
+                let root = catalog.workspace.join("AGENTS.md");
+                let sources = catalog
+                    .instructions
+                    .iter()
+                    .filter(|(path, _)| **path == global || **path == root)
+                    .map(|(path, source)| (path.clone(), source.digest.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                (specs, system, sources)
             };
+            if self.frozen_system.is_none() {
+                let data = json!(
+                    sources
+                        .iter()
+                        .map(|(path, sha)| json!({"path":path,"sha256":sha}))
+                        .collect::<Vec<_>>()
+                );
+                let (saved, saved_sources, hash) =
+                    self.store.freeze_prompt(&self.session, &system, &data)?;
+                system = saved;
+                self.frozen_system = Some(system.clone());
+                self.frozen_sources = prompt_sources(&saved_sources);
+                self.dynamic_hash = hash;
+            }
+            self.sync_dynamic_context().await?;
             if self.compaction {
                 self.message_revision = None;
                 let stats = context::compact(
@@ -1014,6 +1167,7 @@ impl Runtime {
                 self.message_revision = Some(self.store.message_revision(&self.session)?);
                 if let Some(stats) = stats {
                     self.event(hooks, "context_compacted", stats)?;
+                    self.sync_dynamic_context().await?;
                 }
             }
             let mut context_tokens = (context::estimate(&system, &self.messages, &specs) as f64
@@ -1209,7 +1363,7 @@ impl Runtime {
             }
             if response.stop_reason == "max_tokens" {
                 self.backfill(&calls, "未执行：模型响应被截断，请重新生成完整调用。")?;
-                self.append(Message::user("上一条模型回复被输出长度截断。请简短续写未完成部分；不要假设被截断的工具调用已经执行。"))?;
+                self.append(Message::user("<system-reminder>\n上一条模型回复被输出长度截断。请简短续写未完成部分；不要假设被截断的工具调用已经执行。\n</system-reminder>"))?;
                 truncations += 1;
                 if truncations >= 3 {
                     return Ok("max_tokens".into());
@@ -1351,6 +1505,9 @@ impl Runtime {
                                 delegation_branch: true,
                                 used_call_ids: self.used_call_ids.clone(),
                                 instruction_changes: vec![],
+                                frozen_system: self.frozen_system.clone(),
+                                frozen_sources: self.frozen_sources.clone(),
+                                dynamic_hash: self.dynamic_hash.clone(),
                                 files: self.files.clone(),
                             },
                         ));
@@ -1454,9 +1611,10 @@ impl Runtime {
                 role: "user".into(),
                 content: results,
             })?;
+            self.sync_dynamic_context().await?;
             self.event(hooks, "round_end", json!({"round":self.rounds}))?;
             if repeated >= 3 {
-                self.append(Message::user("连续多轮工具调用与结果完全相同，任务已暂停以避免无效循环。继续时请重新评估目标与可用证据。"))?;
+                self.append(Message::user("<system-reminder>\n连续多轮工具调用与结果完全相同，任务已暂停以避免无效循环。继续时请重新评估目标与可用证据。\n</system-reminder>"))?;
                 return Ok("stalled".into());
             }
             self.refresh_snapshot(hooks).await?;
@@ -2088,6 +2246,9 @@ impl Runtime {
         self.message_revision = Some(self.store.message_revision(&self.session)?);
         if let Some(stats) = changed {
             self.event(hooks, "context_compacted", stats)?;
+            if self.frozen_system.is_some() {
+                self.sync_dynamic_context().await?;
+            }
             self.refresh_snapshot(hooks).await?;
             Ok(true)
         } else {

@@ -168,6 +168,8 @@ pub fn specs(
             .map(str::to_string)
             .collect::<Vec<_>>();
         names.extend(catalog.agents.keys().cloned());
+        names.sort();
+        names.dedup();
         spec.description.push_str(&names.join(", "));
     }
     let mut external = mcp

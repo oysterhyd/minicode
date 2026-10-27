@@ -1209,6 +1209,172 @@ async fn provider_error_with_deadline_text_is_not_a_turn_deadline() {
 }
 
 #[tokio::test]
+async fn dynamic_instruction_reminder_survives_manual_compaction() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[{"name":"skill_load","arguments":{"name":"compact-helper"}}]},
+        {"text":"ready"}
+    ]}))
+    .await;
+    let skill = h.runtime.workspace.join(".minicode/skills/compact-helper");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("SKILL.md"), "---\nname: compact-helper\ndescription: compact helper\n---\nfull-skill-context-must-survive").unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(
+        h.run(Some("original task")).await.unwrap().exit_reason,
+        "completed"
+    );
+    let session = h.runtime.session.clone();
+    let before = h.runtime.store.frozen_prompt(&session).unwrap().unwrap();
+    for i in 0..8 {
+        let message = Message::user(format!("history {i}: {}", "filler ".repeat(400)));
+        h.runtime.store.append(&session, &message).unwrap();
+        h.runtime.messages.push(message);
+    }
+    h.runtime.message_revision = Some(h.runtime.store.message_revision(&session).unwrap());
+    assert!(h.runtime.compact(&h.hooks).await.unwrap());
+    assert!(
+        h.runtime
+            .messages
+            .last()
+            .unwrap()
+            .text()
+            .contains("full-skill-context-must-survive")
+    );
+    let after = h.runtime.store.frozen_prompt(&session).unwrap().unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn frozen_system_is_not_exposed_as_a_session_event() {
+    let mut h = Harness::new(json!({"turns":[{"text":"done"}]})).await;
+    fs::write(
+        h.runtime.workspace.join("AGENTS.md"),
+        "private-root-instruction-fixture",
+    )
+    .unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(Some("start")).await.unwrap().exit_reason, "completed");
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("private-root-instruction-fixture")
+    );
+}
+
+#[test]
+fn frozen_prompt_is_immutable_and_deleted_with_its_session() {
+    let (_dir, ctx) = fixture();
+    let sources = json!([{"path":"AGENTS.md","sha256":"first"}]);
+    let first = ctx
+        .store
+        .freeze_prompt(&ctx.session, "original", &sources)
+        .unwrap();
+    let second = ctx
+        .store
+        .freeze_prompt(&ctx.session, "replacement", &json!([]))
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(second.0, "original");
+    ctx.store.delete(&ctx.session).unwrap();
+    assert!(ctx.store.frozen_prompt(&ctx.session).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn legacy_active_skill_is_restored_as_a_reminder() {
+    let mut h = Harness::new(json!({"turns":[{"text":"done"}]})).await;
+    let skill = h.runtime.workspace.join(".minicode/skills/legacy-helper");
+    fs::create_dir_all(&skill).unwrap();
+    let path = skill.join("SKILL.md");
+    fs::write(
+        &path,
+        "---\nname: legacy-helper\ndescription: helper\n---\nlegacy-skill-content",
+    )
+    .unwrap();
+    let source = crate::extensions::Source::read(&path, 64_000).unwrap();
+    let session = h.runtime.session.clone();
+    h.runtime
+        .store
+        .event(
+            &session,
+            "session_start",
+            &json!({"project_instructions":[],"active_skills":{}}),
+        )
+        .unwrap();
+    h.runtime
+        .store
+        .event(
+            &session,
+            "skill_activated",
+            &json!({"name":"legacy-helper","path":path,"sha256":source.digest}),
+        )
+        .unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(
+        h.run(Some("continue")).await.unwrap().exit_reason,
+        "completed"
+    );
+    assert!(h.runtime.messages.iter().any(
+        |m| m.text().contains("legacy-skill-content") && m.text().contains("<system-reminder>")
+    ));
+    let frozen = h.runtime.store.frozen_prompt(&session).unwrap().unwrap();
+    assert!(!frozen.0.contains("legacy-skill-content"));
+}
+
+#[tokio::test]
+async fn discovered_instructions_recover_after_interruption_before_reminder() {
+    let mut h = Harness::new(json!({"turns":[{"text":"first"},{"text":"continued"}]})).await;
+    assert_eq!(h.run(Some("start")).await.unwrap().exit_reason, "completed");
+    let nested = h.runtime.workspace.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("AGENTS.md"), "recovered-nested-rules").unwrap();
+    fs::write(nested.join("file.txt"), "data").unwrap();
+    let sources = h
+        .runtime
+        .catalog
+        .lock()
+        .await
+        .discover_instructions("nested/file.txt")
+        .unwrap();
+    for source in sources {
+        h.runtime
+            .store
+            .event(&h.runtime.session, "project_instructions", &source)
+            .unwrap();
+    }
+    h.reopen().await.unwrap();
+    assert_eq!(
+        h.run(Some("continue")).await.unwrap().exit_reason,
+        "completed"
+    );
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.text().contains("recovered-nested-rules")
+                && m.text().contains("<system-reminder>"))
+    );
+}
+
+#[tokio::test]
+async fn delegate_tool_description_has_stable_agent_order() {
+    let (_dir, ctx) = fixture();
+    let catalog = ctx.catalog.lock().await;
+    let agents = vec![
+        json!({"name":"zeta","enabled":true}),
+        json!({"name":"alpha","enabled":true}),
+    ];
+    let mut reversed = agents.clone();
+    reversed.reverse();
+    let first = tools::specs(&catalog, &ctx.mcp, &agents, true);
+    let second = tools::specs(&catalog, &ctx.mcp, &reversed, true);
+    assert_eq!(
+        serde_json::to_value(first).unwrap(),
+        serde_json::to_value(second).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn resumed_legacy_session_recovers_available_usage_from_events() {
     let mut h =
         Harness::new(json!({"turns":[{"text":"done","input_tokens":0,"output_tokens":0}]})).await;
@@ -1374,7 +1540,7 @@ async fn anthropic_roles_alternate_after_background_completion_notice() {
         h.runtime
             .messages
             .iter()
-            .any(|m| m.role == "user" && m.text().starts_with("后台任务已完成"))
+            .any(|m| m.role == "user" && m.text().contains("后台任务已完成"))
     );
     assert_strict_anthropic_roles(&h.anthropic_messages());
 }
@@ -1613,6 +1779,12 @@ async fn resume_repins_changed_instructions_and_skills() {
         .find(|t| t.contains("<system-reminder>"))
         .expect("the model is told about the change");
     assert!(reminder.contains("AGENTS.md") && reminder.contains("helper"));
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.text().contains("<system-reminder>") && m.text().contains("changed rules"))
+    );
     {
         let catalog = h.runtime.catalog.lock().await;
         assert!(catalog.active.is_empty());

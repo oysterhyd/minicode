@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import net from 'node:net'
+import path from 'node:path'
 import {test} from 'node:test'
 import {fixture,expectSequence,until} from './helpers.mjs'
 import {sseMock,anthropicFrames,openaiFrames,configureService} from './sse-mock.mjs'
@@ -69,6 +71,35 @@ test('OpenAI-compatible payloads do not receive Anthropic cache fields',async t=
   const f=await fixture(t);const mock=await sseMock(t,[{frames:openaiFrames({text:'openai'}),done:true}])
   const r=await f.run({model:await configureService(f,mock.url,'openai')});assert.equal(r.result.exit_reason,'completed')
   assert.ok(!JSON.stringify(mock.payloads[0]).includes('"cache_control"'))
+})
+test('dynamic skills and nested instructions leave session prefixes frozen across resume',async t=>{
+  for(const style of ['anthropic','openai']){
+    const f=await fixture(t);const root=f.workspace,skill=path.join(root,'.minicode','skills','helper'),nested=path.join(root,'nested')
+    fs.mkdirSync(skill,{recursive:true});fs.mkdirSync(nested,{recursive:true})
+    fs.writeFileSync(path.join(root,'AGENTS.md'),'initial-root-rule');fs.writeFileSync(path.join(nested,'AGENTS.md'),'nested-guard-rule');fs.writeFileSync(path.join(nested,'file.txt'),'nested data')
+    fs.writeFileSync(path.join(skill,'SKILL.md'),'---\nname: helper\ndescription: helper skill\n---\nunique-skill-directions')
+    const call=(id,name,args)=>style==='anthropic'
+      ?{frames:anthropicFrames({tools:[{id,name,arguments:args}]})}
+      :{frames:[{choices:[{delta:{tool_calls:[{index:0,id,function:{name,arguments:JSON.stringify(args)}}]},finish_reason:'tool_calls'}]}],done:true}
+    const final=style==='anthropic'?{frames:anthropicFrames({text:'done'})}:{frames:openaiFrames({text:'done'}),done:true}
+    const mock=await sseMock(t,[call('load','skill_load',{name:'helper'}),call('unload','skill_unload',{name:'helper'}),call('discover','read',{path:'nested/file.txt'}),call('read','read',{path:'nested/file.txt'}),final,final])
+    const model=await configureService(f,mock.url,style);const first=await f.run({model});assert.equal(first.result.exit_reason,'completed');assert.equal(mock.payloads.length,5)
+    const system=p=>JSON.stringify(style==='anthropic'?p.system:p.messages.find(m=>m.role==='system')?.content)
+    const initial=system(mock.payloads[0]),tools=JSON.stringify(mock.payloads[0].tools)
+    assert.match(initial,/initial-root-rule/);assert.doesNotMatch(initial,/nested-guard-rule|unique-skill-directions/)
+    for(const payload of mock.payloads){assert.equal(system(payload),initial,style);assert.equal(JSON.stringify(payload.tools),tools,style)}
+    const lastUser=p=>{const content=p.messages.filter(m=>m.role==='user').at(-1).content;return typeof content==='string'?content:content.filter(b=>b.type==='text').map(b=>b.text).join('\n')}
+    assert.match(lastUser(mock.payloads[1]),/<system-reminder>/);assert.match(lastUser(mock.payloads[1]),/unique-skill-directions/)
+    assert.match(lastUser(mock.payloads[2]),/<system-reminder>/);assert.match(lastUser(mock.payloads[2]),/Skills[^\n]*无/)
+    assert.match(lastUser(mock.payloads[3]),/<system-reminder>/);assert.match(lastUser(mock.payloads[3]),/nested-guard-rule/)
+    fs.writeFileSync(path.join(root,'AGENTS.md'),'updated-root-rule');await f.request('resetSession');await f.request('getState',{sessionId:first.id})
+    const resumed=await f.run({sessionId:first.id,model,text:'continue'});assert.equal(resumed.result.exit_reason,'completed');assert.equal(mock.payloads.length,6)
+    assert.equal(system(mock.payloads[5]),initial);assert.equal(JSON.stringify(mock.payloads[5].tools),tools)
+    assert.match(lastUser(mock.payloads[5]),/<system-reminder>/);assert.match(lastUser(mock.payloads[5]),/updated-root-rule/)
+    fs.unlinkSync(path.join(root,'AGENTS.md'));await f.request('resetSession');await f.request('getState',{sessionId:first.id})
+    const deleted=await f.run({sessionId:first.id,model,text:'continue again'});assert.equal(deleted.result.exit_reason,'completed');assert.equal(mock.payloads.length,7)
+    assert.equal(system(mock.payloads[6]),initial);assert.match(lastUser(mock.payloads[6]),/AGENTS\.md 已删除/)
+  }
 })
 test('connection failures include the underlying socket error without credentials',async t=>{
   const reservation=net.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve))

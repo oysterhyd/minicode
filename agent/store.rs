@@ -61,6 +61,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS artifacts(session_id TEXT NOT NULL,artifact_id TEXT NOT NULL,kind TEXT NOT NULL,relpath TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(session_id,artifact_id));
             CREATE TABLE IF NOT EXISTS session_goals(session_id TEXT PRIMARY KEY,state TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS session_meta(session_id TEXT PRIMARY KEY,title TEXT,pinned INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS session_prompts(session_id TEXT PRIMARY KEY,system TEXT NOT NULL,sources TEXT NOT NULL,dynamic_hash TEXT);
             CREATE TABLE IF NOT EXISTS tool_results(session_id TEXT NOT NULL,call_id TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(session_id,call_id));
             CREATE TABLE IF NOT EXISTS tasks(session_id TEXT NOT NULL,task_id TEXT NOT NULL,title TEXT NOT NULL,depends_on TEXT NOT NULL,status TEXT NOT NULL,owner TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(session_id,task_id));
             CREATE TABLE IF NOT EXISTS project_memory(id TEXT PRIMARY KEY,workspace TEXT NOT NULL,scope TEXT NOT NULL,fact TEXT NOT NULL,source TEXT NOT NULL,updated_at TEXT NOT NULL);")?;
@@ -133,6 +134,46 @@ impl Store {
     }
     pub fn require(&self, id: &str) -> Result<Value> {
         self.session(id)?.context("找不到会话")
+    }
+    pub fn frozen_prompt(&self, id: &str) -> Result<Option<(String, Value, Option<String>)>> {
+        self.with(|c| {
+            let row: Option<(String, String, Option<String>)> = c
+                .query_row(
+                    "SELECT system,sources,dynamic_hash FROM session_prompts WHERE session_id=?",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            row.map(|(system, sources, hash)| Ok((system, serde_json::from_str(&sources)?, hash)))
+                .transpose()
+        })
+    }
+    pub fn freeze_prompt(
+        &self,
+        id: &str,
+        system: &str,
+        sources: &Value,
+    ) -> Result<(String, Value, Option<String>)> {
+        self.transaction(|c| {
+            c.execute("INSERT INTO session_prompts(session_id,system,sources) VALUES(?,?,?) ON CONFLICT(session_id) DO NOTHING", params![id,system,serde_json::to_string(sources)?])?;
+            let (system, sources, hash): (String, String, Option<String>) = c.query_row(
+                "SELECT system,sources,dynamic_hash FROM session_prompts WHERE session_id=?", [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            Ok((system, serde_json::from_str(&sources)?, hash))
+        })
+    }
+    pub fn append_dynamic_context(&self, id: &str, hash: &str, message: &Message) -> Result<()> {
+        self.transaction(|c| {
+            if c.execute(
+                "UPDATE session_prompts SET dynamic_hash=? WHERE session_id=?",
+                params![hash, id],
+            )? != 1
+            {
+                bail!("session prompt is not frozen")
+            }
+            append_message(c, id, message)
+        })
     }
     pub fn sessions(&self) -> Result<Vec<Value>> {
         self.with(|c|{
@@ -397,6 +438,7 @@ impl Store {
                 "artifacts",
                 "session_goals",
                 "session_meta",
+                "session_prompts",
                 "tool_results",
                 "tasks",
                 "message_revisions",
