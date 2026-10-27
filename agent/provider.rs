@@ -240,6 +240,9 @@ impl Provider {
             if model.starts_with("claude") {
                 p.style = "anthropic".into();
                 p.name = "anthropic".into();
+                if info["supports_effort"] != true {
+                    p.effort = "off".into();
+                }
                 p.url = std::env::var("ANTHROPIC_BASE_URL")
                     .unwrap_or("https://api.anthropic.com".into());
                 p.key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
@@ -250,9 +253,6 @@ impl Provider {
         }
         p.key = p.key.trim().to_string();
         p.url = p.url.trim().trim_end_matches('/').to_string();
-        if p.style == "anthropic" {
-            p.effort = "off".into();
-        }
         if p.key.is_empty() || p.url.is_empty() {
             bail!("请在设置中配置、启用并选择一个可用的 AI 模型")
         }
@@ -959,18 +959,28 @@ impl Provider {
         body["messages"] = Value::Array(chat);
         if self.style == "anthropic" {
             if self.effort != "off" {
-                let max = body["max_tokens"].as_u64().unwrap_or(0);
-                if max <= 1024 {
-                    bail!("Anthropic thinking requires an output limit above 1024 tokens");
+                if self.anthropic_adaptive() {
+                    body["thinking"] = json!({"type":"adaptive"});
+                    let effort = match self.effort.as_str() {
+                        "low" | "medium" => self.effort.as_str(),
+                        _ => "high",
+                    };
+                    body["output_config"] = json!({"effort":effort});
+                } else {
+                    let max = body["max_tokens"].as_u64().unwrap_or(0);
+                    if max <= 1024 {
+                        bail!("Anthropic thinking requires an output limit above 1024 tokens");
+                    }
+                    let budget = match self.effort.as_str() {
+                        "low" => 1024,
+                        "medium" => 2048,
+                        "high" => 4096,
+                        "xhigh" => 8192,
+                        _ => 16384,
+                    };
+                    body["thinking"] =
+                        json!({"type":"enabled","budget_tokens":budget.min(max - 1)});
                 }
-                let budget = match self.effort.as_str() {
-                    "low" => 1024,
-                    "medium" => 2048,
-                    "high" => 4096,
-                    "xhigh" => 8192,
-                    _ => 16384,
-                };
-                body["thinking"] = json!({"type":"enabled","budget_tokens":budget.min(max - 1)});
             }
             body["system"] = if cache && !system.is_empty() {
                 json!([{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}])
@@ -1014,6 +1024,27 @@ impl Provider {
 
     fn thinking_source(&self) -> String {
         format!("{}:{}", self.style, self.configuration_id)
+    }
+
+    fn anthropic_adaptive(&self) -> bool {
+        match self.parameter_compat["thinkingMode"].as_str() {
+            Some("adaptive") => return true,
+            Some("enabled") => return false,
+            _ => {}
+        }
+        let model = self.model.strip_prefix("anthropic/").unwrap_or(&self.model);
+        for family in ["sonnet", "opus", "haiku", "fable", "mythos"] {
+            if let Some(version) = model.strip_prefix(&format!("claude-{family}-")) {
+                let mut parts = version.split('-');
+                let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+                let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+                return major.is_some_and(|major| major >= 5)
+                    || (major == Some(4)
+                        && minor.is_some_and(|minor| minor >= 6)
+                        && matches!(family, "sonnet" | "opus"));
+            }
+        }
+        false
     }
 
     fn replays_reasoning_content(&self) -> bool {

@@ -86,3 +86,29 @@ test('P5: non-streaming Anthropic thinking blocks round-trip through saved histo
   assert.deepEqual(assistant.content.slice(0,2),[{type:'thinking',thinking:'nonstream thought',signature:'sig'},{type:'redacted_thinking',data:'opaque'}])
   assert.ok(result.events.some(e=>e.event==='reasoning_delta'&&e.text==='nonstream thought'))
 })
+
+test('C4: Anthropic effort can be enabled and signed thinking survives the enabled tool loop',async t=>{
+  const f=await fixture(t),payloads=[]
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    payloads.push(JSON.parse(body))
+    if(payloads.length===2)write(res,[
+      {type:'content_block_start',index:0,content_block:{type:'thinking',thinking:''}},
+      {type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'enabled thought'}},
+      {type:'content_block_delta',index:0,delta:{type:'signature_delta',signature:'enabled-signature'}},
+      {type:'content_block_start',index:1,content_block:{type:'tool_use',id:'enabled_call',name:'read',input:{path:'README.md'}}},
+      {type:'message_delta',delta:{stop_reason:'tool_use'}},{type:'message_stop'}
+    ],false)
+    else write(res,[{type:'content_block_start',index:0,content_block:{type:'text',text:'done'}},{type:'message_delta',delta:{stop_reason:'end_turn'}},{type:'message_stop'}],false)
+  })})
+  const model=await configure(f,url,'anthropic')
+  const config=await f.request('getConfiguration')
+  assert.equal(config.services[0].models[0].supportsEffort,true)
+  const first=await f.run({model})
+  await f.request('setEffort',{sessionId:first.id,effort:'high'})
+  const second=await f.run({sessionId:first.id,model,text:'continue'})
+  assert.equal(second.result.exit_reason,'completed')
+  assert.equal(payloads[1].thinking.type,'enabled')
+  assert.equal(payloads[1].thinking.budget_tokens,4096)
+  const thinking=payloads[2].messages.find(m=>m.role==='assistant'&&m.content.some(b=>b.type==='thinking')).content[0]
+  assert.deepEqual(thinking,{type:'thinking',thinking:'enabled thought',signature:'enabled-signature'})
+})

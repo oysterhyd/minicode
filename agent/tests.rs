@@ -2275,3 +2275,25 @@ fn anthropic_thinking_budget_respects_output_limit() {
             .is_none()
     );
 }
+
+#[test]
+fn anthropic_adaptive_models_use_supported_thinking_parameters() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    provider.style = "anthropic".into();
+    provider.model = "claude-sonnet-4-6".into();
+    provider.effort = "max".into();
+    let body = provider
+        .payload("", &[Message::user("hi")], &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert!(body["thinking"].get("budget_tokens").is_none());
+    assert_eq!(body["output_config"]["effort"], "high");
+}

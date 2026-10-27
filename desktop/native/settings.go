@@ -826,8 +826,8 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 							ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() { numericField(c, p, tr("上下文窗口"), &m.ContextWindow, 2) })
 							ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() { numericField(c, p, tr("输出上限"), &m.MaxOutput, 1) })
 						})
-						ui.Checkbox(c, &m.SupportsEffort, tr("支持思考强度")).Disabled(service.APIStyle != "openai").FontSize(p.font(11.48))
-						muted(c, p, tr("仅适用于支持 reasoning_effort 的 OpenAI 兼容模型。")).FontSize(p.font(10.36))
+						ui.Checkbox(c, &m.SupportsEffort, tr("支持思考强度")).FontSize(p.font(11.48))
+						muted(c, p, tr("仅在模型支持思考时启用。")).FontSize(p.font(10.36))
 						ui.Column(c).FillWidth().Gap(6).Children(func() {
 							muted(c, p, tr("输入能力"))
 							ui.Row(c).Wrap().Gap(16).Children(func() {

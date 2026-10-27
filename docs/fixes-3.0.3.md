@@ -352,3 +352,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：先复现 Anthropic 流式签名和脱敏数据丢失、DeepSeek reasoning_content 丢失及空 content 不兼容；新增工具循环持久化/重放、非流式响应与预算边界测试。
 - 取舍：默认 effort 仍为 off；thinking 至少需要 1024 token，输出预算不足时明确报错，不发送无效请求。来源不同的内容交接由 P8 处理；仅用本地 mock 验证，未调用真实服务。
 - 验证：`2B-P5-final-*` 全部通过；协议测试 110 通过、1 项既有慢测跳过。首次全量及隔离复测出现既有 Windows 后台进程/通知时序问题，失败记录保留在 `2B-P5-protocol.log`，完整重跑通过。
+
+## C4：允许 Anthropic 模型启用思考
+
+- 问题与根因：保存服务时按接口格式强制清除 supportsEffort，provider 又对 Anthropic 无条件关闭 effort；桌面设置也禁用了开关。
+- 修复：保留用户为模型声明的思考能力，允许在桌面设置中启用；Claude 4.6 及已知较新模型使用 adaptive 模式，旧模型使用 P5 的手动预算；兼容网关可通过 `parameterCompat.thinkingMode` 覆盖。未知未配置 Anthropic 模型仍默认关闭。
+- 测试：先复现配置被改写、桌面复选框不可用以及新模型错误使用手动 thinking；桥接测试验证启用 high 后带签名的 thinking 在工具循环回放，Rust 测试验证 adaptive 参数，Go UI 测试验证开关可操作。
+- 取舍：adaptive 的 xhigh/max 暂时映射到各已识别模型普遍支持的 high；effort=off 保持不额外发送 thinking 参数，服务端本身的默认行为可能仍会启用 thinking。
+- 验证：`2B-C4-*` 全部通过；协议 111 通过、1 个既有慢测跳过；Windows Desktop 全量测试、vet 与 vendor UI 检查通过。

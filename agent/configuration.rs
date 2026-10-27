@@ -194,7 +194,7 @@ impl Configuration {
             if output == 0 || output >= window {
                 bail!("输出上限必须大于 0 且小于上下文窗口")
             }
-            m["supportsEffort"] = json!(style == "openai" && m["supportsEffort"] == true);
+            m["supportsEffort"] = json!(m["supportsEffort"] == true);
             m["capabilities"] = capabilities(&m["capabilities"])?;
             if style == "anthropic"
                 && (m["capabilities"]["audio"] == true || m["capabilities"]["video"] == true)
