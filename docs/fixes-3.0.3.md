@@ -336,3 +336,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：协议测试先复现 system 随 skill 加载而变化，并验证 Anthropic/OpenAI 下加载、卸载、嵌套规则发现、根规则修改/删除后恢复时 system 和 tools 字节不变；Rust 测试覆盖旧会话迁移、中断后找回嵌套规则、压缩后恢复完整 skill、代理顺序、冻结快照不可覆盖且随会话删除，以及系统全文不出现在会话事件中。
 - 兼容与取舍：旧数据库自动创建可选内部表；旧会话没有冻结快照时，以升级后首次请求时的基础内容建立前缀，已有动态指令从历史和当前目录重建。冻结的 system 文本保存在本地数据库并随会话删除；根规则变更时旧文本仍在 system，提醒要求采用新版本。实际工具集合被用户修改时仍会改变工具前缀，排序只能保证同一集合的顺序。
 - 验证：`2A-X7-final-*` 全部通过；Rust 86 项、协议 107 项通过（1 个既有慢测跳过）、TUI 115 项通过；60 个离线任务和 9 个场景结果通过验收。最终代码另通过 Windows Desktop 全量测试、vet 和 vendor UI 测试。
+
+## P4：推理模型参数兼容
+
+- 问题与根因：所有 OpenAI 风格请求都发送 `max_tokens`，且将内部 effort 原样发送；GPT-5 / o 系列会拒绝部分参数和档位。
+- 修复：识别 GPT-5 与 o 系列后发送 `max_completion_tokens`；GPT-5.2 起将 `max` 限制为 `xhigh`，较早的 GPT-5 / o 系列将 `xhigh` 和 `max` 映射为 `high`。其他网关保持原参数。模型配置可选 `parameterCompat.maxCompletionTokens` 与 `parameterCompat.reasoningEffort` 覆盖推断，旧配置无需迁移。
+- 测试：`reasoning_models_use_compatible_output_and_effort_parameters` 先复现 gpt-5 的错误参数，覆盖 GPT-5、GPT-5.1、GPT-5.4、o3、o4-mini、未知网关及用户覆盖。
+- 取舍：未识别模型维持现有网关行为；可通过配置显式指定兼容参数。参考 [OpenAI 推理文档](https://developers.openai.com/api/docs/guides/reasoning?api-mode=chat)。
+- 验证：`2B-P4-final-*` 中的全部 Rust、协议、生成器、两组评测和 TUI 检查通过。

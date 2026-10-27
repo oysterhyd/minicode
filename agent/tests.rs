@@ -2183,3 +2183,65 @@ fn message_revision_detects_same_length_changes_and_rolls_back_atomically() {
         .unwrap();
     assert!(store.message_revision(&id).unwrap() > version);
 }
+
+#[test]
+fn reasoning_models_use_compatible_output_and_effort_parameters() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    for (model, effort, expected) in [
+        ("gpt-5", "max", "high"),
+        ("gpt-5.1", "xhigh", "high"),
+        ("gpt-5.4", "max", "xhigh"),
+        ("o3", "max", "high"),
+        ("o4-mini", "xhigh", "high"),
+    ] {
+        provider.model = model.into();
+        provider.effort = effort.into();
+        let body = provider
+            .payload("", &[Message::user("hi")], &[], &ctx.attachments)
+            .unwrap();
+        assert!(body.get("max_tokens").is_none(), "{model}: {body}");
+        assert!(body["max_completion_tokens"].as_u64().is_some());
+        assert_eq!(body["reasoning_effort"], expected);
+    }
+    provider.model = "gateway/custom".into();
+    provider.effort = "max".into();
+    let body = provider
+        .payload("", &[Message::user("hi")], &[], &ctx.attachments)
+        .unwrap();
+    assert!(body["max_tokens"].as_u64().is_some());
+    assert_eq!(body["reasoning_effort"], "max");
+
+    let configuration = Configuration {
+        path: ctx.workspace.join("compat.json"),
+    };
+    let saved = configuration
+        .save_service(&json!({
+            "name":"custom", "baseUrl":"https://example.test/v1", "apiStyle":"openai",
+            "apiKey":"test-key", "models":[{
+                "modelId":"custom", "contextWindow":128000, "maxOutputTokens":8192,
+                "supportsEffort":true,
+                "parameterCompat":{"maxCompletionTokens":true,"reasoningEffort":{"max":"high"}}
+            }]
+        }))
+        .unwrap();
+    let provider = crate::provider::Provider::new(
+        saved["defaultModel"].as_str().unwrap(),
+        "max",
+        &configuration,
+    )
+    .unwrap();
+    let body = provider
+        .payload("", &[Message::user("hi")], &[], &ctx.attachments)
+        .unwrap();
+    assert!(body.get("max_tokens").is_none());
+    assert!(body["max_completion_tokens"].as_u64().is_some());
+    assert_eq!(body["reasoning_effort"], "high");
+}

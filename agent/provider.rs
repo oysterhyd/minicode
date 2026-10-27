@@ -138,6 +138,7 @@ pub struct Provider {
     pub max_output: u64,
     pub modalities: Vec<String>,
     pub effort: String,
+    pub parameter_compat: Value,
     pub prompt_scale: f64,
     pub fake: Option<Value>,
     pub index: usize,
@@ -157,6 +158,7 @@ impl Provider {
             max_output: 8192,
             modalities: vec![],
             effort: effort.into(),
+            parameter_compat: Value::Null,
             prompt_scale: 1.0,
             fake: None,
             index: 0,
@@ -203,6 +205,7 @@ impl Provider {
             }
             .into();
             p.model = util::string(&m, "modelId")?.into();
+            p.parameter_compat = m["parameterCompat"].clone();
             let (url, key) = configuration.credentials(&service);
             p.url = url;
             p.key = key;
@@ -228,6 +231,7 @@ impl Provider {
         } else {
             let info = &catalog[model];
             if info.is_object() {
+                p.parameter_compat = info["parameter_compat"].clone();
                 p.window = info["context_window"].as_u64().unwrap_or(200_000);
                 p.max_output = info["max_output_tokens"].as_u64().unwrap_or(8192);
                 p.modalities =
@@ -835,7 +839,16 @@ impl Provider {
                 }
             }
         }
-        let mut body = json!({"model":self.model,"messages":null,"stream":true,"max_tokens":self.max_output.min(available)});
+        let completion_tokens = self.style == "openai"
+            && self.parameter_compat["maxCompletionTokens"]
+                .as_bool()
+                .unwrap_or_else(|| openai_reasoning_family(&self.model).is_some());
+        let mut body = json!({"model":self.model,"messages":null,"stream":true});
+        body[if completion_tokens {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        }] = json!(self.max_output.min(available));
         body["messages"] = Value::Array(chat);
         if self.style == "anthropic" {
             body["system"] = if cache && !system.is_empty() {
@@ -852,8 +865,8 @@ impl Provider {
             }
         } else {
             body["stream_options"] = json!({"include_usage":true});
-            if self.effort != "off" {
-                body["reasoning_effort"] = json!(self.effort)
+            if let Some(effort) = self.wire_reasoning_effort() {
+                body["reasoning_effort"] = json!(effort)
             }
             if !tools.is_empty() {
                 body["tools"]=json!(tools.iter().map(|s|json!({"type":"function","function":{"name":s.name,"description":s.description,"parameters":s.input_schema}})).collect::<Vec<_>>());
@@ -861,6 +874,46 @@ impl Provider {
         }
         Ok(body)
     }
+
+    fn wire_reasoning_effort(&self) -> Option<&str> {
+        if self.effort == "off" {
+            return None;
+        }
+        if let Some(map) = self.parameter_compat["reasoningEffort"].as_object()
+            && let Some(value) = map.get(&self.effort)
+        {
+            return value.as_str().filter(|value| !value.is_empty());
+        }
+        match openai_reasoning_family(&self.model) {
+            Some(false) if matches!(self.effort.as_str(), "xhigh" | "max") => Some("high"),
+            Some(true) if self.effort == "max" => Some("xhigh"),
+            _ => Some(&self.effort),
+        }
+    }
+}
+
+// false: low/medium/high; true: low/medium/high/xhigh.
+fn openai_reasoning_family(model: &str) -> Option<bool> {
+    let model = model.strip_prefix("openai/").unwrap_or(model);
+    if let Some(rest) = model.strip_prefix("gpt-5") {
+        if !rest.is_empty() && !rest.starts_with(['-', '.']) {
+            return None;
+        }
+        let version = rest.strip_prefix('.').and_then(|version| {
+            version
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse::<u32>()
+                .ok()
+        });
+        return Some(version.is_some_and(|version| version >= 2));
+    }
+    let suffix = model.strip_prefix('o')?;
+    let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 || (suffix.len() > digits && !suffix[digits..].starts_with('-')) {
+        return None;
+    }
+    Some(false)
 }
 fn anthropic_prompt_cache_enabled() -> bool {
     !std::env::var("MINICODE_ANTHROPIC_PROMPT_CACHE")
