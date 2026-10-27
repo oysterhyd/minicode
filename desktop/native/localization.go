@@ -339,6 +339,9 @@ AI 服务 · %d|AI services · %d
 API 密钥|API key
 已保存密钥，留空保留|Key saved; leave empty to keep it
 测试连接 / 获取列表|Test connection / fetch models
+测试连接|Test connection
+获取模型列表|Fetch models
+连接成功|Connected
 仅在模型支持思考时启用。|Enable only for models that support thinking.
 添加模型|Add model
 获取服务列表或输入模型 ID。|Fetch the model list or enter a model ID.

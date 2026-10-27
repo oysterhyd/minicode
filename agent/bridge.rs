@@ -1720,29 +1720,89 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
     if !["http", "https"].contains(&parsed.scheme()) {
         bail!("接口地址必须是 HTTP(S) URL")
     }
-    let endpoint =
-        if service["apiStyle"] == "anthropic" && !url.trim_end_matches('/').ends_with("/v1") {
-            format!("{}/v1/models", url.trim_end_matches('/'))
-        } else {
-            format!("{}/models", url.trim_end_matches('/'))
-        };
+    let anthropic = service["apiStyle"] == "anthropic";
+    let base = if anthropic && !url.trim_end_matches('/').ends_with("/v1") {
+        format!("{}/v1", url.trim_end_matches('/'))
+    } else {
+        url.trim_end_matches('/').to_string()
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()?;
-    let request = client.get(endpoint);
-    let request = if service["apiStyle"] == "anthropic" {
+    let probe = method == "testServiceConnection";
+    let request = if probe {
+        let models = service["models"].as_array();
+        let model = p["modelId"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .or_else(|| p["model"].as_str().filter(|id| !id.trim().is_empty()))
+            .or_else(|| {
+                models
+                    .and_then(|models| models.first())
+                    .and_then(|model| model["modelId"].as_str())
+            })
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .context("请先输入或配置模型 ID，再测试连接")?;
+        let configured =
+            models.and_then(|models| models.iter().find(|entry| entry["modelId"] == model));
+        let mut body =
+            json!({"model":model,"messages":[{"role":"user","content":"Hi"}],"stream":false});
+        let completion = !anthropic
+            && configured
+                .and_then(|entry| entry["parameterCompat"]["maxCompletionTokens"].as_bool())
+                .unwrap_or_else(|| crate::provider::openai_reasoning_family(model).is_some());
+        body[if completion {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        }] = json!(16);
+        client
+            .post(format!(
+                "{base}/{}",
+                if anthropic {
+                    "messages"
+                } else {
+                    "chat/completions"
+                }
+            ))
+            .json(&body)
+    } else {
+        client.get(format!("{base}/models"))
+    };
+    let request = if anthropic {
         request
-            .header("x-api-key", key)
+            .header("x-api-key", &key)
             .header("anthropic-version", "2023-06-01")
     } else {
-        request.bearer_auth(key)
+        request.bearer_auth(&key)
     };
-    let response = request
-        .send()
-        .await
-        .map_err(|_| anyhow::anyhow!("连接失败，请检查地址、网络和接口格式"))?;
+    let mut response = request.send().await.map_err(|error| {
+        anyhow::anyhow!(
+            "连接失败，请检查地址、网络和接口格式: {:#}",
+            error.without_url()
+        )
+    })?;
     if !response.status().is_success() {
-        bail!("连接失败（HTTP {}）", response.status().as_u16())
+        let status = response.status().as_u16();
+        let mut bytes = Vec::new();
+        while bytes.len() <= 4096 {
+            let Ok(Some(chunk)) = response.chunk().await else {
+                break;
+            };
+            let remaining = 4097usize.saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+        let truncated = bytes.len() > 4096;
+        bytes.truncate(4096);
+        let mut body = String::from_utf8_lossy(&bytes).replace(&key, "[redacted]");
+        if truncated {
+            body.push_str("…[truncated]");
+        }
+        bail!("连接失败（HTTP {status}）：{body}")
+    }
+    if probe {
+        return Ok(json!({"message":"连接成功","models":[]}));
     }
     let data: Value = response.json().await?;
     let models = data["data"]

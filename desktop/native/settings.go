@@ -741,7 +741,22 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 			key.Placeholder(tr("已保存密钥，留空保留"))
 		}
 		ui.Row(c).Gap(8).Children(func() {
-			if button(c, p, tr("测试连接 / 获取列表"), "RefreshCw", false).Disabled(s.Working).Clicked() {
+			if button(c, p, tr("测试连接"), "RefreshCw", false).Disabled(s.Working).Clicked() {
+				s.Working = true
+				s.Error = ""
+				var result struct {
+					Message string `json:"message"`
+				}
+				d.request(d.current(), "testServiceConnection", map[string]any{"service": *service, "modelId": strings.TrimSpace(s.CustomModel)}, &result, func(err error) {
+					s.Working = false
+					if err != nil {
+						s.Error = err.Error()
+					} else {
+						s.Status = result.Message
+					}
+				})
+			}
+			if button(c, p, tr("获取模型列表"), "RefreshCw", false).Disabled(s.Working).Clicked() {
 				s.Working = true
 				s.Error = ""
 				var result struct {

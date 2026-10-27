@@ -1090,7 +1090,7 @@ impl Provider {
 }
 
 // false: low/medium/high; true: low/medium/high/xhigh.
-fn openai_reasoning_family(model: &str) -> Option<bool> {
+pub(crate) fn openai_reasoning_family(model: &str) -> Option<bool> {
     let model = model.strip_prefix("openai/").unwrap_or(model);
     if let Some(rest) = model.strip_prefix("gpt-5") {
         if !rest.is_empty() && !rest.starts_with(['-', '.']) {

@@ -185,3 +185,43 @@ test('X8: unconfigured unknown model uses a 128k context window',async t=>{
   const state=await f.request('getState',{sessionId:run.id})
   assert.equal(state.contextWindow,128000)
 })
+
+test('B17: connection test uses chat completions without requiring a models endpoint',async t=>{
+  const f=await fixture(t),requests=[]
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    requests.push({method:req.method,url:req.url,headers:req.headers,body:body?JSON.parse(body):null})
+    if(req.url.endsWith('/models')){res.writeHead(404);res.end('no models endpoint');return}
+    res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'ok'},finish_reason:'stop'}]}))
+  })})
+  const service={name:'gateway',baseUrl:url+'/v1',apiStyle:'openai',apiKey:'probe-key',models:[{modelId:'gpt-5'}]}
+  const result=await f.request('testServiceConnection',{service})
+  assert.ok(result.message)
+  assert.equal(requests.length,1)
+  assert.equal(requests[0].method,'POST')
+  assert.equal(requests[0].url,'/v1/chat/completions')
+  assert.equal(requests[0].headers.authorization,'Bearer probe-key')
+  assert.equal(requests[0].body.model,'gpt-5')
+  assert.equal(requests[0].body.stream,false)
+  assert.ok(requests[0].body.max_completion_tokens>0)
+  assert.equal(requests[0].body.max_tokens,undefined)
+})
+
+test('B17: Anthropic connection probe uses messages and error bodies are bounded',async t=>{
+  const f=await fixture(t),requests=[];let failure=false
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    requests.push({url:req.url,headers:req.headers,body:body?JSON.parse(body):null})
+    if(failure){res.writeHead(400);res.end('server-message: invalid model probe-key '+ 'x'.repeat(6000));return}
+    if(req.url.endsWith('/models')){res.writeHead(404);res.end('missing models');return}
+    res.setHeader('content-type','application/json');res.end(JSON.stringify({content:[{type:'text',text:'ok'}]}))
+  })})
+  const service={name:'anthropic gateway',baseUrl:url,apiStyle:'anthropic',apiKey:'probe-key',models:[{modelId:'claude-test'}]}
+  await f.request('testServiceConnection',{service})
+  assert.equal(requests[0].url,'/v1/messages')
+  assert.equal(requests[0].headers['x-api-key'],'probe-key')
+  assert.equal(requests[0].body.model,'claude-test')
+  assert.ok(requests[0].body.max_tokens>0)
+  failure=true
+  await assert.rejects(f.request('testServiceConnection',{service}),error=>{assert.match(error.message,/server-message: invalid model/);assert.ok(!error.message.includes('probe-key'));assert.ok(error.message.length<4300);return true})
+  await assert.rejects(f.request('fetchServiceModels',{service}),/server-message: invalid model/)
+  await assert.rejects(f.request('testServiceConnection',{service:{...service,models:[]}}),/模型/)
+})

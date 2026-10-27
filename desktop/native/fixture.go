@@ -152,7 +152,9 @@ func (f *fixtureClient) Request(_ context.Context, method string, params any, ta
 			}
 		}
 		result = f.Config
-	case "fetchServiceModels", "testServiceConnection":
+	case "testServiceConnection":
+		result = map[string]any{"message": "连接成功", "models": []model.ServiceModel{}}
+	case "fetchServiceModels":
 		result = map[string]any{"models": []model.ServiceModel{{ModelID: "test-model", Name: "Test model", ContextWindow: 200000, MaxOutput: 8192}}, "message": "已连接，发现 1 个模型"}
 	case "refreshMcp":
 		result = model.Discovery{}
