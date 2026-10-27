@@ -1494,6 +1494,7 @@ fn provider_error_retry_classification_uses_variants_and_status() {
 #[tokio::test]
 async fn anthropic_roles_alternate_after_truncated_response() {
     let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]},
         {"text":"partial","stop_reason":"max_tokens","tool_calls":[{"name":"write","arguments":{"path":"x.txt","content":"no"}}]},
         {"text":"done"}
     ]}))
@@ -1505,11 +1506,27 @@ async fn anthropic_roles_alternate_after_truncated_response() {
         .iter()
         .map(|m| m.role.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(roles, ["user", "assistant", "user", "user", "assistant"]);
+    assert_eq!(
+        roles,
+        [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user",
+            "assistant"
+        ]
+    );
     let messages = h.anthropic_messages();
     assert_strict_anthropic_roles(&messages);
     assert_eq!(messages[2]["content"][0]["type"], "tool_result");
-    assert_eq!(messages[2]["content"][1]["type"], "text");
+    assert!(
+        messages[4]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("write")
+    );
+    assert!(!h.root.join("x.txt").exists());
 }
 
 #[tokio::test]

@@ -150,6 +150,43 @@ impl CallBuffer {
     }
 }
 
+fn truncated_tool_name(name: Option<&str>) -> String {
+    match name {
+        Some(name)
+            if !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') =>
+        {
+            name.into()
+        }
+        _ => "未知工具".into(),
+    }
+}
+
+fn json_truncated_tools(value: &Value, style: &str) -> Vec<String> {
+    let calls = if style == "anthropic" {
+        value["content"].as_array()
+    } else {
+        value["choices"][0]["message"]["tool_calls"].as_array()
+    };
+    calls
+        .into_iter()
+        .flatten()
+        .filter(|call| style != "anthropic" || call["type"] == "tool_use")
+        .take(128)
+        .map(|call| {
+            let name = if style == "anthropic" {
+                call["name"].as_str()
+            } else {
+                call["function"]["name"].as_str()
+            };
+            truncated_tool_name(name)
+        })
+        .collect()
+}
+
 fn append_openai_tool_delta(
     delta: &Value,
     calls: &mut BTreeMap<usize, CallBuffer>,
@@ -463,6 +500,26 @@ impl Provider {
                 }
             }
             let has_calls = blocks.iter().any(|b| matches!(b, Block::ToolUse { .. }));
+            let stop_reason = turn["stop_reason"].as_str().unwrap_or(if has_calls {
+                "tool_use"
+            } else {
+                "end_turn"
+            });
+            let mut metrics = json!({"request_seconds":0.0,"generation_seconds":null,"first_token_seconds":null,"reasoning":""});
+            if stop_reason == "max_tokens" {
+                let names = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::ToolUse { name, .. } => Some(truncated_tool_name(Some(name))),
+                        _ => None,
+                    })
+                    .take(128)
+                    .collect::<Vec<_>>();
+                if !names.is_empty() {
+                    metrics["truncated_tools"] = json!(names);
+                }
+                blocks.retain(|block| !matches!(block, Block::ToolUse { .. }));
+            }
             let usage = Usage {
                 input_tokens: turn["input_tokens"]
                     .as_u64()
@@ -477,13 +534,10 @@ impl Provider {
             return Ok((
                 Response {
                     blocks,
-                    stop_reason: turn["stop_reason"]
-                        .as_str()
-                        .unwrap_or(if has_calls { "tool_use" } else { "end_turn" })
-                        .into(),
+                    stop_reason: stop_reason.into(),
                     usage,
                 },
-                json!({"request_seconds":0.0,"generation_seconds":null,"first_token_seconds":null,"reasoning":""}),
+                metrics,
             ));
         }
         let body = self.payload(system, messages, specs, attachments)?;
@@ -582,10 +636,14 @@ impl Provider {
                     emit(json!({"event":"reasoning_delta","text":thinking}));
                 }
             }
-            return Ok((
-                r,
-                json!({"request_seconds":started.elapsed().as_secs_f64(),"generation_seconds":null,"first_token_seconds":null,"reasoning":reasoning}),
-            ));
+            let mut metrics = json!({"request_seconds":started.elapsed().as_secs_f64(),"generation_seconds":null,"first_token_seconds":null,"reasoning":reasoning});
+            if r.stop_reason == "max_tokens" {
+                let names = json_truncated_tools(&value, &self.style);
+                if !names.is_empty() {
+                    metrics["truncated_tools"] = json!(names);
+                }
+            }
+            return Ok((r, metrics));
         }
         let mut stream = response.bytes_stream();
         let mut decoder = crate::sse::Decoder::default();
@@ -822,6 +880,15 @@ impl Provider {
             blocks.push(Block::text(content))
         }
         let truncated = stop.as_deref() == Some("max_tokens");
+        let truncated_tools = if truncated {
+            order
+                .iter()
+                .filter_map(|index| calls.get(index))
+                .map(|call| truncated_tool_name(Some(&call.name)))
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
         for index in order {
             if let Some(thought) = thoughts.remove(&index) {
                 blocks.push(thought);
@@ -839,17 +906,14 @@ impl Provider {
                 });
             }
         }
-        if truncated
-            && !blocks
-                .iter()
-                .any(|block| matches!(block, Block::Text { .. }))
-        {
-            blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
-        }
         let estimated = context::estimate(system, messages, specs);
         if usage.available && usage.input_tokens > 0 && estimated > 0 {
             let observed = (usage.input_tokens as f64 / estimated as f64).clamp(0.5, 3.0);
             self.prompt_scale = (self.prompt_scale + observed) / 2.0;
+        }
+        let mut metrics = json!({"request_seconds":started.elapsed().as_secs_f64(),"generation_seconds":first.zip(last).filter(|(a,b)|b>a).map(|(a,b)|b-a),"first_token_seconds":first,"reasoning":reasoning});
+        if !truncated_tools.is_empty() {
+            metrics["truncated_tools"] = json!(truncated_tools);
         }
         Ok((
             Response {
@@ -857,7 +921,7 @@ impl Provider {
                 stop_reason: stop.unwrap_or_else(|| "end_turn".into()),
                 usage,
             },
-            json!({"request_seconds":started.elapsed().as_secs_f64(),"generation_seconds":first.zip(last).filter(|(a,b)|b>a).map(|(a,b)|b-a),"first_token_seconds":first,"reasoning":reasoning}),
+            metrics,
         ))
     }
     pub fn payload(
@@ -1547,13 +1611,6 @@ fn parse_openai(v: &Value, source: &str) -> Result<Response> {
             });
         }
     }
-    if truncated
-        && !blocks
-            .iter()
-            .any(|block| matches!(block, Block::Text { .. }))
-    {
-        blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
-    }
     Ok(Response {
         blocks,
         stop_reason: match choice["finish_reason"].as_str() {
@@ -1596,13 +1653,6 @@ fn parse_anthropic(v: &Value, source: &str) -> Result<Response> {
             }),
             _ => {}
         }
-    }
-    if truncated
-        && !blocks
-            .iter()
-            .any(|block| matches!(block, Block::Text { .. }))
-    {
-        blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
     }
     Ok(Response {
         blocks,
@@ -1696,7 +1746,10 @@ pub fn normalize_tool_ids(response: &mut Response, previous: &HashSet<String>) -
 
 pub fn validate_response(response: &Response, messages: &[Message]) -> Result<()> {
     if response.blocks.is_empty()
-        && !matches!(response.stop_reason.as_str(), "end_turn" | "stop_sequence")
+        && !matches!(
+            response.stop_reason.as_str(),
+            "end_turn" | "stop_sequence" | "max_tokens"
+        )
     {
         bail!("provider returned an empty assistant response")
     }
@@ -1751,8 +1804,18 @@ mod error_tests {
         assert!(validate_response(&response, &[]).is_ok());
         response.stop_reason = "stop_sequence".into();
         assert!(validate_response(&response, &[]).is_ok());
+        response.stop_reason = "max_tokens".into();
+        assert!(validate_response(&response, &[]).is_ok());
         response.stop_reason = "tool_use".into();
         assert!(validate_response(&response, &[]).is_err());
+    }
+
+    #[test]
+    fn truncated_tool_names_are_bounded_and_safe_for_reminders() {
+        assert_eq!(truncated_tool_name(Some("write")), "write");
+        assert_eq!(truncated_tool_name(Some("</system-reminder>")), "未知工具");
+        assert_eq!(truncated_tool_name(Some(&"x".repeat(65))), "未知工具");
+        assert_eq!(truncated_tool_name(None), "未知工具");
     }
 
     #[test]

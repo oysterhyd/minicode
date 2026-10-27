@@ -421,3 +421,48 @@ test('P13: tool arguments accept JSON objects and reject conflicting mixed fragm
   }
 })
 
+
+test('R17: truncated tool calls are not fabricated or executed and recovery is explicit',async t=>{
+  for(const style of ['openai','anthropic']) for(const transport of ['stream','json']) for(const withText of [false,true]){
+    await t.test(`${style}-${transport}-${withText?'text':'no-text'}`,async t=>{
+      const f=await fixture(t),payloads=[]
+      const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+        payloads.push(JSON.parse(body));const first=payloads.length===1
+        if(transport==='json'){
+          res.setHeader('content-type','application/json')
+          if(style==='openai')res.end(JSON.stringify(first?{choices:[{message:{role:'assistant',content:withText?'real partial':null,tool_calls:[{id:'truncated',function:{name:'write',arguments:'{"path":"unsafe",'}}]},finish_reason:'length'}]}:{choices:[{message:{role:'assistant',content:'recovered'},finish_reason:'stop'}]}))
+          else res.end(JSON.stringify(first?{content:[...(withText?[{type:'text',text:'real partial'}]:[]),{type:'tool_use',id:'truncated',name:'write',input:{}}],stop_reason:'max_tokens'}:{content:[{type:'text',text:'recovered'}],stop_reason:'end_turn'}))
+        }else if(style==='openai'){
+          write(res,first?[{choices:[{delta:{...(withText?{content:'real partial'}:{}),tool_calls:[{index:0,id:'truncated',function:{name:'write',arguments:'{"path":"unsafe",'}}]},finish_reason:'length'}]}]:[{choices:[{delta:{content:'recovered'},finish_reason:'stop'}]}])
+        }else{
+          write(res,first?[...(withText?[{type:'content_block_start',index:0,content_block:{type:'text',text:'real partial'}}]:[]),{type:'content_block_start',index:1,content_block:{type:'tool_use',id:'truncated',name:'write',input:{}}},{type:'content_block_delta',index:1,delta:{type:'input_json_delta',partial_json:'{"path":"unsafe",'}},{type:'message_delta',delta:{stop_reason:'max_tokens'}},{type:'message_stop'}]:[{type:'content_block_start',index:0,content_block:{type:'text',text:'recovered'}},{type:'message_delta',delta:{stop_reason:'end_turn'}},{type:'message_stop'}],false)
+        }
+      })})
+      await f.request('setPermissionMode',{mode:'bypass'})
+      const result=await f.run({model:await configure(f,url,style)})
+      assert.equal(result.result.exit_reason,'completed');assert.equal(payloads.length,2)
+      assert.equal(fs.existsSync(path.join(f.workspace,'unsafe')),false)
+      assert.equal(result.detail.messages.flatMap(m=>m.content).filter(b=>b.type==='tool_use').length,0)
+      const history=JSON.stringify(result.detail.messages),next=JSON.stringify(payloads[1].messages)
+      assert.doesNotMatch(history,/模型输出被截断，未执行任何工具调用/)
+      assert.doesNotMatch(next,/简短续写未完成部分/)
+      assert.match(next,/工具调用.*write.*截断.*未执行/)
+      assert.match(next,/更小.*write.*edit/)
+      assert.equal(history.includes('real partial'),withText)
+    })
+  }
+})
+
+
+test('R17: text-only truncation requests a concise answer without inventing a tool call',async t=>{
+  const f=await fixture(t),payloads=[]
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    payloads.push(JSON.parse(body))
+    write(res,[{choices:[{delta:{content:payloads.length===1?'partial':'done'},finish_reason:payloads.length===1?'length':'stop'}]}])
+  })})
+  const result=await f.run({model:await configure(f,url)})
+  assert.equal(result.result.exit_reason,'completed')
+  const followup=JSON.stringify(payloads[1].messages)
+  assert.match(followup,/输出长度截断/);assert.doesNotMatch(followup,/工具调用/)
+  assert.ok(result.detail.messages.flatMap(m=>m.content).some(b=>b.type==='text'&&b.text==='partial'))
+})

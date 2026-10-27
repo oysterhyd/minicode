@@ -1376,7 +1376,23 @@ impl Runtime {
             }
             if response.stop_reason == "max_tokens" {
                 self.backfill(&calls, "未执行：模型响应被截断，请重新生成完整调用。")?;
-                self.append(Message::user("<system-reminder>\n上一条模型回复被输出长度截断。请简短续写未完成部分；不要假设被截断的工具调用已经执行。\n</system-reminder>"))?;
+                let names = metrics["truncated_tools"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|name| name.as_str())
+                    .collect::<Vec<_>>();
+                let reminder = if names.is_empty() {
+                    "上一条模型回复因输出长度截断。请重新组织并简洁完成任务。".to_string()
+                } else {
+                    format!(
+                        "工具调用 {} 因输出长度截断未执行，请拆成更小的 write / edit 操作后重新发出完整调用。",
+                        names.join("、")
+                    )
+                };
+                self.append(Message::user(format!(
+                    "<system-reminder>\n{reminder}\n</system-reminder>"
+                )))?;
                 truncations += 1;
                 if truncations >= 3 {
                     return Ok("max_tokens".into());
