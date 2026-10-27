@@ -526,6 +526,7 @@ fn complete_call_pairing() {
         Message {
             role: "assistant".into(),
             content: vec![Block::ToolUse {
+                input_error: None,
                 id: "a".into(),
                 name: "read".into(),
                 input: json!({}),
@@ -552,11 +553,13 @@ fn duplicate_or_orphan_pairing_is_rejected() {
             role: "assistant".into(),
             content: vec![
                 Block::ToolUse {
+                    input_error: None,
                     id: "a".into(),
                     name: "read".into(),
                     input: json!({}),
                 },
                 Block::ToolUse {
+                    input_error: None,
                     id: "a".into(),
                     name: "read".into(),
                     input: json!({}),
@@ -646,6 +649,7 @@ fn context_estimate_matches_serialized_unicode_and_escapes() {
     let messages = vec![Message {
         role: "assistant".into(),
         content: vec![Block::ToolUse {
+            input_error: None,
             id: "one".into(),
             name: "test".into(),
             input: input.clone(),
@@ -781,6 +785,7 @@ fn provider_payload_ownership_keeps_both_wire_formats_exact() {
             content: vec![
                 Block::text("answer"),
                 Block::ToolUse {
+                    input_error: None,
                     id: "one".into(),
                     name: "read".into(),
                     input: json!({"path":"file"}),
@@ -1554,6 +1559,7 @@ async fn anthropic_roles_alternate_after_recovery_backfill_and_lost_job() {
         Message {
             role: "assistant".into(),
             content: vec![Block::ToolUse {
+                input_error: None,
                 id: "interrupted".into(),
                 name: "write".into(),
                 input: json!({"path":"x.txt","content":"?"}),
@@ -1608,11 +1614,13 @@ fn anthropic_normalization_merges_and_orders_blocks_without_touching_history() {
             role: "assistant".into(),
             content: vec![
                 Block::ToolUse {
+                    input_error: None,
                     id: "a".into(),
                     name: "read".into(),
                     input: json!({}),
                 },
                 Block::ToolUse {
+                    input_error: None,
                     id: "b".into(),
                     name: "read".into(),
                     input: json!({}),
@@ -2326,6 +2334,7 @@ fn anthropic_handoff_maps_ids_uniquely_and_preserves_history() {
             content: ids
                 .iter()
                 .map(|id| Block::ToolUse {
+                    input_error: None,
                     id: id.clone(),
                     name: "read".into(),
                     input: json!({}),
@@ -2502,5 +2511,28 @@ fn responses_only_model_rejects_chat_unless_gateway_overrides_it() {
             .payload("", &messages, &[], &ctx.attachments)
             .unwrap()["reasoning_effort"],
         "high"
+    );
+}
+
+#[tokio::test]
+async fn invalid_pending_write_recovers_as_failed_tool_result() {
+    let mut h = Harness::new(json!({"turns":[]})).await;
+    h.runtime.messages.push(Message {
+        role: "assistant".into(),
+        content: vec![Block::ToolUse {
+            id: "invalid-pending".into(),
+            name: "write".into(),
+            input: json!("{\"path\":\"unsafe\","),
+            input_error: Some("工具参数不是合法 JSON：unexpected end".into()),
+        }],
+    });
+    h.runtime.prepare(&h.hooks).await.unwrap();
+    assert!(!h.runtime.workspace.join("unsafe").exists());
+    assert!(h.runtime.messages.iter().flat_map(|m| &m.content).any(|block|
+        matches!(block, Block::ToolResult { tool_use_id, is_error: true, content, .. } if tool_use_id == "invalid-pending" && content.contains("合法 JSON"))));
+    assert!(
+        !h.event_types()
+            .iter()
+            .any(|kind| kind == "side_effect_unknown")
     );
 }

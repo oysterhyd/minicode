@@ -734,7 +734,14 @@ impl Runtime {
             };
             let result = if let Some(result) = journal.get(id) {
                 result.clone()
-            } else if tools::replay_safe(name) {
+            } else if matches!(
+                &call,
+                Block::ToolUse {
+                    input_error: Some(_),
+                    ..
+                }
+            ) || tools::replay_safe(name)
+            {
                 self.invoke(call.clone(), hooks, true).await?
             } else {
                 self.event(
@@ -1650,7 +1657,13 @@ impl Runtime {
         hooks: &Hooks,
         recovered: bool,
     ) -> Result<Option<Outcome>> {
-        let Block::ToolUse { id, name, input } = call else {
+        let Block::ToolUse {
+            id,
+            name,
+            input,
+            input_error,
+        } = call
+        else {
             bail!("invalid tool call")
         };
         Self::check(hooks)?;
@@ -1659,6 +1672,9 @@ impl Runtime {
             "tool_call_start",
             json!({"call_id":id,"name":name,"arguments":input,"recovered":recovered}),
         )?;
+        if let Some(error) = input_error {
+            return Ok(Some(Outcome::failure(error.clone())));
+        }
         if self
             .allowed
             .as_ref()
@@ -1697,7 +1713,10 @@ impl Runtime {
         Ok(None)
     }
     async fn authorize(&self, call: &Block, hooks: &Hooks) -> Result<bool> {
-        let Block::ToolUse { id, name, input } = call else {
+        let Block::ToolUse {
+            id, name, input, ..
+        } = call
+        else {
             bail!("invalid tool call")
         };
         Self::check(hooks)?;
@@ -1846,7 +1865,10 @@ impl Runtime {
             );
         }
         let granted = self.authorize(&call, hooks).await?;
-        let Block::ToolUse { name, input, id } = &call else {
+        let Block::ToolUse {
+            name, input, id, ..
+        } = &call
+        else {
             unreachable!()
         };
         let outcome = if !granted {

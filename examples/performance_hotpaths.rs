@@ -72,6 +72,7 @@ fn main() {
     let context_messages = vec![Message {
         role: "assistant".into(),
         content: vec![Block::ToolUse {
+            input_error: None,
             id: "call".into(),
             name: "write".into(),
             input,

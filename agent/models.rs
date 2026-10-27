@@ -31,6 +31,8 @@ pub enum Block {
         name: String,
         #[serde(default)]
         input: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_error: Option<String>,
     },
     ToolResult {
         tool_use_id: String,

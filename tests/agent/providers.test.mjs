@@ -22,7 +22,7 @@ test('OpenAI SSE preserves Unicode, reasoning, cache usage and payload schemas',
 test('finish reason alone safely terminates an OpenAI stream',async t=>{const f=await fixture(t);const url=await server(t,(_req,res)=>write(res,[{choices:[{delta:{content:'completed without DONE'},finish_reason:'stop'}]}],false));const r=await f.run({model:await configure(f,url)});assert.equal(r.result.exit_reason,'completed');assert.equal(r.result.total_usage.available,false);})
 test('429 retries before visible output but never repeats a partial response',async t=>{const f=await fixture(t);let count=0;const url=await server(t,(_req,res)=>{count++;if(count===1){res.writeHead(429);res.end('{}');return}write(res,[{choices:[{delta:{content:'after retry'},finish_reason:'stop'}]}])});const r=await f.run({model:await configure(f,url)});assert.equal(count,2);assert.equal(r.result.exit_reason,'completed');assert.ok(r.detail.events.some(e=>e.type==='provider_retry'));assert.equal(r.result.total_usage.available,false);})
 test('OpenAI function argument fragments form one exact tool call',async t=>{const f=await fixture(t);let count=0;let payloads=[];const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{payloads.push(JSON.parse(body));count++;if(count===1)write(res,[{choices:[{delta:{tool_calls:[{index:0,id:'call-one',function:{name:'read',arguments:'{"path":'}}]},finish_reason:null}]},{choices:[{delta:{tool_calls:[{index:0,function:{arguments:'"README.md"}'}}]},finish_reason:'tool_calls'}]}]);else write(res,[{choices:[{delta:{content:'read verified'},finish_reason:'stop'}]}])})});const r=await f.run({model:await configure(f,url)});assert.equal(r.result.exit_reason,'completed');assert.equal(count,2);const tool=payloads[1].messages.find(m=>m.role==='tool');assert.equal(tool.tool_call_id,'call-one');assert.ok(tool.content.includes('repository'));})
-test('malformed provider arguments and reused tool ids cannot execute writes',async t=>{const f=await fixture(t);const url=await server(t,(_req,res)=>write(res,[{choices:[{delta:{tool_calls:[{index:0,id:'bad',function:{name:'write',arguments:'{"path":"unsafe",'}}]},finish_reason:'tool_calls'}]}]));await f.request('setPermissionMode',{mode:'bypass'});const r=await f.run({model:await configure(f,url)});assert.equal(r.result.exit_reason,'provider_error');assert.equal(fs.existsSync(path.join(f.workspace,'unsafe')),false);})
+test('malformed provider arguments cannot execute writes',async t=>{const f=await fixture(t);let count=0;const url=await server(t,(_req,res)=>{if(count++===0)write(res,[{choices:[{delta:{tool_calls:[{index:0,id:'bad',function:{name:'write',arguments:'{"path":"unsafe",'}}]},finish_reason:'tool_calls'}]}]);else write(res,[{choices:[{delta:{content:'recovered'},finish_reason:'stop'}]}])});await f.request('setPermissionMode',{mode:'bypass'});const r=await f.run({model:await configure(f,url)});assert.equal(r.result.exit_reason,'completed');assert.equal(fs.existsSync(path.join(f.workspace,'unsafe')),false);})
 test('model list connection test redacts keys and preserves service metadata',async t=>{const f=await fixture(t);const url=await server(t,(_req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({data:[{id:'model-one',display_name:'Model one'}]}))});const service={name:'Fixture',baseUrl:url+'/v1',apiStyle:'openai',apiKey:'fixture-only-key',models:[]};const result=await f.request('fetchServiceModels',{service});assert.equal(result.models[0].modelId,'model-one');assert.equal(result.models[0].name,'Model one');assert.ok(!JSON.stringify(result).includes('fixture-only-key'));})
 test('Anthropic SSE keeps usage, tool schemas and image payloads',async t=>{const f=await fixture(t);let payload;const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{payload=JSON.parse(body);assert.equal(req.url,'/v1/messages');assert.equal(req.headers['anthropic-version'],'2023-06-01');write(res,[{type:'message_start',message:{usage:{input_tokens:20,cache_read_input_tokens:6,cache_creation_input_tokens:2}}},{type:'content_block_start',index:0,content_block:{type:'text',text:''}},{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'图片分析完成'}},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:8}},{type:'message_stop'}],false)})});const image=path.join(f.root,'one.png');fs.writeFileSync(image,Buffer.from('89504e470d0a1a0a','hex'));const attachments=await f.request('importAttachments',{paths:[image]});const r=await f.run({model:await configure(f,url,'anthropic',{images:true,pdf:true}),attachments});assert.equal(r.result.exit_reason,'completed');assert.equal(r.result.total_usage.input_tokens,28);assert.equal(r.result.total_usage.cache_write_tokens,2);assert.equal(payload.messages[0].content[0].type,'image');assert.equal(payload.messages[0].content[0].source.type,'base64');assert.ok(payload.tools.some(t=>t.name==='read'&&t.input_schema.type==='object'));})
 test('cancellation of a waiting HTTP stream does not block getState',async t=>{const f=await fixture(t);let response;const url=await server(t,(_req,res)=>{response=res;res.writeHead(200,{'content-type':'text/event-stream'});res.write(': keepalive\n\n')});t.after(()=>response?.end());const model=await configure(f,url);const started=await f.request('sendPrompt',{model,workspace:f.workspace,text:'wait'});await new Promise(resolve=>setTimeout(resolve,80));const before=Date.now();await f.request('cancelTurn',{sessionId:started.sessionId});const done=await f.wait(e=>e.event==='run_done');assert.equal(done.result.exit_reason,'cancelled');assert.ok(Date.now()-before<2000);assert.equal((await f.request('getState',{sessionId:started.sessionId})).running,false);})
@@ -268,4 +268,30 @@ test('A5: built-in Claude Sonnet 4.5 can enable extended thinking',async t=>{
   assert.equal(second.result.exit_reason,'completed')
   assert.equal(payloads[1].thinking.type,'enabled')
   assert.equal(payloads[1].thinking.budget_tokens,4096)
+})
+
+test('P6: invalid tool arguments produce a recoverable failure without executing writes',async t=>{
+  for(const scenario of ['stream-invalid','stream-nonobject','stream-empty','json-invalid','json-nonobject','json-empty']){
+    await t.test(scenario,async t=>{
+      const f=await fixture(t),payloads=[]
+      const argument=scenario.endsWith('invalid')?'{"path":"unsafe",':scenario.endsWith('empty')?'':'[1,2]'
+      const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+        payloads.push(JSON.parse(body))
+        if(payloads.length>1){write(res,[{choices:[{delta:{content:'recovered'},finish_reason:'stop'}]}]);return}
+        const call={id:'bad_args',function:{name:'write',arguments:argument}}
+        if(scenario.startsWith('stream'))write(res,[{choices:[{delta:{tool_calls:[{index:0,...call}]},finish_reason:'tool_calls'}]}])
+        else{res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[call]},finish_reason:'tool_calls'}]}))}
+      })})
+      await f.request('setPermissionMode',{mode:'bypass'})
+      const result=await f.run({model:await configure(f,url)})
+      assert.equal(result.result.exit_reason,'completed')
+      assert.equal(fs.existsSync(path.join(f.workspace,'unsafe')),false)
+      const tool=payloads[1].messages.find(m=>m.role==='tool')
+      assert.equal(tool.tool_call_id,'bad_args')
+      assert.match(tool.content,/参数.*(JSON|对象)/i)
+      const saved=result.detail.messages.find(m=>m.role==='assistant').content.find(b=>b.type==='tool_use')
+      assert.ok(saved.input_error)
+      assert.ok(result.detail.events.some(e=>e.type==='tool_call_result'&&e.data.success===false))
+    })
+  }
 })

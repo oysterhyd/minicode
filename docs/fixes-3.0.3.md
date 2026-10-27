@@ -393,3 +393,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 取舍与限制：根据 [OpenAI 文档](https://developers.openai.com/api/docs/guides/migrate-to-responses?lang=javascript&tool-use=chat-completions&update-item-definitions=chat-completions&update-multiturn=responses)，GPT-5.4 及后续模型的 Chat Completions 不支持同时启用工具和非 none 推理；本实现使用工具时默认发送 none，选择更高强度时在发送前提示需要 Responses API，支持该组合的兼容网关可设置 `parameterCompat.reasoningWithTools=true`。完整 Responses API 支持仍待后续批次。目录参考 [Claude 模型](https://platform.claude.com/docs/en/models/overview)、[OpenAI 模型](https://developers.openai.com/api/docs/models/gpt-5.6-sol)、[DeepSeek 模型](https://api-docs.deepseek.com/api/list-models/)；没有后台自动更新，用户可通过服务配置覆盖。
 - 补充：已知只支持 Responses API 的 GPT/o Pro 模型，在普通请求和连接探测前明确报错；确实提供 Chat 兼容接口的网关可设置 `parameterCompat.chatSupported=true`。对应 Rust 和协议测试先复现错误发送，再验证拒绝及覆盖。
 - 验证：`2B-A5-final-*` 全部通过；Rust 93 项、协议 118 项通过（1 个既有慢测跳过），60 次离线任务和 9 个场景通过验收，TUI 115 项及 Windows Desktop 测试/vet/vendor UI 检查通过。
+
+## P6：非法工具参数返回可恢复结果
+
+- 问题与根因：流式或非流式工具参数不是合法 JSON 对象时，provider 直接终止整个回合，模型无法修正。
+- 修复：工具调用新增可选 `input_error`，保存原始非法参数与错误；执行前返回失败 tool_result，并在恢复未完成调用时同样先识别参数错误，不执行工具。回传 payload 使用空对象占位，错误详情通过 tool_result 提供；旧会话缺少新字段仍可读取。
+- 测试：先复现流式和非流式非法 JSON、非对象参数直接失败；协议测试验证失败结果、后续模型恢复和文件未写入，Rust 测试验证中断后恢复不会误执行写入。
+- 取舍：不自动猜测修复 JSON，避免误执行；占位参数可能与不规范网关最初返回的原始参数不同。
+- 验证：`2C-P6-final-*` 全部通过，含空字符串参数边界；Rust、协议、生成器、两组离线评测及 TUI 检查均通过。

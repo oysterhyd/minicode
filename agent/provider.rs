@@ -123,6 +123,7 @@ struct CallBuffer {
     id: String,
     name: String,
     arguments: String,
+    arguments_seen: bool,
     initial: Value,
 }
 
@@ -360,6 +361,7 @@ impl Provider {
                         id,
                         name: util::string(call, "name")?.into(),
                         input: call.get("arguments").cloned().unwrap_or(json!({})),
+                        input_error: None,
                     });
                 }
             }
@@ -615,6 +617,7 @@ impl Provider {
                                         .get_mut(&index)
                                         .context("tool delta without start")?;
                                     let piece = delta["partial_json"].as_str().unwrap_or_default();
+                                    call.arguments_seen = true;
                                     response_bytes += piece.len();
                                     call.arguments.push_str(piece);
                                 }
@@ -675,6 +678,7 @@ impl Provider {
                                     c.name = name.into();
                                 }
                                 if let Some(piece) = d["function"]["arguments"].as_str() {
+                                    c.arguments_seen = true;
                                     response_bytes += piece.len();
                                     c.arguments.push_str(piece);
                                 }
@@ -745,23 +749,20 @@ impl Provider {
                 blocks.push(Block::text(text));
             }
             if let Some(call) = calls.remove(&index).filter(|_| !truncated) {
-                let input = if call.arguments.is_empty() {
-                    if call.initial.is_object() {
-                        call.initial
+                let (input, input_error) = if !call.arguments_seen {
+                    if call.initial.is_null() {
+                        (json!({}), None)
                     } else {
-                        json!({})
+                        tool_argument_value(call.initial)
                     }
                 } else {
-                    serde_json::from_str(&call.arguments)
-                        .context("provider returned malformed tool arguments JSON")?
+                    parse_tool_arguments(&call.arguments)
                 };
-                if !input.is_object() {
-                    bail!("provider tool arguments must be an object")
-                }
                 blocks.push(Block::ToolUse {
                     id: call.id,
                     name: call.name,
                     input,
+                    input_error,
                 });
             }
         }
@@ -843,8 +844,8 @@ impl Provider {
                         Block::Media { .. } => {
                             content.push(media_part(b, attachments, &self.style)?)
                         }
-                        Block::ToolUse { id, name, input } => content
-                            .push(json!({"type":"tool_use","id":tool_ids.get(id).unwrap_or(id),"name":name,"input":input})),
+                        Block::ToolUse { id, name, input, input_error } => content
+                            .push(json!({"type":"tool_use","id":tool_ids.get(id).unwrap_or(id),"name":name,"input":if input_error.is_some(){json!({})}else{input.clone()}})),
                         Block::ToolResult {
                             tool_use_id,
                             content: text,
@@ -892,7 +893,7 @@ impl Provider {
                         _ => None,
                     })
                     .collect::<String>();
-                let calls=message.content.iter().filter_map(|b|if let Block::ToolUse{id,name,input}=b{Some(json!({"id":id,"type":"function","function":{"name":name,"arguments":input.to_string()}}))}else{None}).collect::<Vec<_>>();
+                let calls=message.content.iter().filter_map(|b|if let Block::ToolUse{id,name,input,input_error}=b{Some(json!({"id":id,"type":"function","function":{"name":name,"arguments":if input_error.is_some(){"{}".to_string()}else{input.to_string()}}}))}else{None}).collect::<Vec<_>>();
                 let mut entry = json!({"role":"assistant","content":if text.is_empty(){Value::Null}else{json!(text)}});
                 if replay {
                     let reasoning = message
@@ -1418,6 +1419,19 @@ fn parse_usage(v: &Value, style: &str) -> Usage {
         }
     }
 }
+fn tool_argument_value(value: Value) -> (Value, Option<String>) {
+    if value.is_object() {
+        (value, None)
+    } else {
+        (value, Some("工具参数必须是 JSON 对象".into()))
+    }
+}
+fn parse_tool_arguments(raw: &str) -> (Value, Option<String>) {
+    match serde_json::from_str(raw) {
+        Ok(value) => tool_argument_value(value),
+        Err(error) => (json!(raw), Some(format!("工具参数不是合法 JSON：{error}"))),
+    }
+}
 fn parse_openai(v: &Value, source: &str) -> Result<Response> {
     let choice = v["choices"]
         .as_array()
@@ -1447,14 +1461,13 @@ fn parse_openai(v: &Value, source: &str) -> Result<Response> {
     let truncated = choice["finish_reason"] == "length";
     if let Some(calls) = message["tool_calls"].as_array().filter(|_| !truncated) {
         for call in calls {
-            let input: Value = serde_json::from_str(util::string(&call["function"], "arguments")?)?;
-            if !input.is_object() {
-                bail!("tool arguments must be an object")
-            };
+            let (input, input_error) =
+                parse_tool_arguments(util::string(&call["function"], "arguments")?);
             blocks.push(Block::ToolUse {
                 id: util::string(call, "id")?.into(),
                 name: util::string(&call["function"], "name")?.into(),
                 input,
+                input_error,
             });
         }
     }
@@ -1498,6 +1511,7 @@ fn parse_anthropic(v: &Value, source: &str) -> Result<Response> {
                 id: util::string(b, "id")?.into(),
                 name: util::string(b, "name")?.into(),
                 input: b["input"].clone(),
+                input_error: (!b["input"].is_object()).then(|| "工具参数必须是 JSON 对象".into()),
             }),
             _ => {}
         }
@@ -1589,13 +1603,18 @@ pub fn validate_response(response: &Response, messages: &[Message]) -> Result<()
     let mut count = 0;
     for b in &response.blocks {
         match b {
-            Block::ToolUse { id, name, input } => {
+            Block::ToolUse {
+                id,
+                name,
+                input,
+                input_error,
+            } => {
                 count += 1;
                 if id.trim().is_empty()
                     || id.len() > 256
                     || name.trim().is_empty()
                     || !known.insert(id.clone())
-                    || !input.is_object()
+                    || (!input.is_object() && input_error.is_none())
                 {
                     bail!("provider returned a missing or reused tool call id/name")
                 }
