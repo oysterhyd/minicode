@@ -7,6 +7,18 @@ pub enum Block {
     Text {
         text: String,
     },
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        #[serde(default)]
+        source: String,
+    },
+    RedactedThinking {
+        data: String,
+        #[serde(default)]
+        source: String,
+    },
     Media {
         asset_id: String,
         kind: String,

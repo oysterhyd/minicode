@@ -461,18 +461,23 @@ impl Provider {
             }
             let value: Value = serde_json::from_slice(&bytes)?;
             let r = if self.style == "anthropic" {
-                parse_anthropic(&value)?
+                parse_anthropic(&value, &self.thinking_source())?
             } else {
-                parse_openai(&value)?
+                parse_openai(&value, &self.thinking_source())?
             };
+            let mut reasoning = String::new();
             for block in &r.blocks {
                 if let Block::Text { text } = block {
                     emit(json!({"event":"text_delta","text":text}));
                 }
+                if let Block::Thinking { thinking, .. } = block {
+                    reasoning.push_str(thinking);
+                    emit(json!({"event":"reasoning_delta","text":thinking}));
+                }
             }
             return Ok((
                 r,
-                json!({"request_seconds":started.elapsed().as_secs_f64(),"generation_seconds":null,"first_token_seconds":null,"reasoning":""}),
+                json!({"request_seconds":started.elapsed().as_secs_f64(),"generation_seconds":null,"first_token_seconds":null,"reasoning":reasoning}),
             ));
         }
         let mut stream = response.bytes_stream();
@@ -483,6 +488,7 @@ impl Provider {
         let mut calls = BTreeMap::<usize, CallBuffer>::new();
         let mut order = Vec::new();
         let mut texts = BTreeMap::<usize, String>::new();
+        let mut thoughts = BTreeMap::<usize, Block>::new();
         let mut response_bytes = 0usize;
         let mut stop = None;
         let mut ended = false;
@@ -546,7 +552,32 @@ impl Provider {
                                     order.push(index);
                                     text = block["text"].as_str();
                                 }
-                                Some("thinking") => thought = block["thinking"].as_str(),
+                                Some("thinking") => {
+                                    order.push(index);
+                                    thoughts.insert(
+                                        index,
+                                        Block::Thinking {
+                                            thinking: String::new(),
+                                            signature: block["signature"]
+                                                .as_str()
+                                                .map(str::to_string),
+                                            source: self.thinking_source(),
+                                        },
+                                    );
+                                    thought = block["thinking"].as_str();
+                                }
+                                Some("redacted_thinking") => {
+                                    order.push(index);
+                                    let data = util::string(block, "data")?.to_string();
+                                    response_bytes += data.len();
+                                    thoughts.insert(
+                                        index,
+                                        Block::RedactedThinking {
+                                            data,
+                                            source: self.thinking_source(),
+                                        },
+                                    );
+                                }
                                 _ => {}
                             }
                         }
@@ -555,6 +586,19 @@ impl Provider {
                             match delta["type"].as_str() {
                                 Some("text_delta") => text = delta["text"].as_str(),
                                 Some("thinking_delta") => thought = delta["thinking"].as_str(),
+                                Some("signature_delta") => {
+                                    let index =
+                                        value["index"].as_u64().context("invalid thinking index")?
+                                            as usize;
+                                    let Some(Block::Thinking { signature, .. }) =
+                                        thoughts.get_mut(&index)
+                                    else {
+                                        bail!("signature delta without thinking block");
+                                    };
+                                    let piece = delta["signature"].as_str().unwrap_or_default();
+                                    response_bytes += piece.len();
+                                    signature.get_or_insert_with(String::new).push_str(piece);
+                                }
                                 Some("input_json_delta") => {
                                     let index =
                                         value["index"].as_u64().context("invalid tool index")?
@@ -651,6 +695,15 @@ impl Provider {
                     last = Some(started.elapsed().as_secs_f64());
                     response_bytes += thought.len();
                     reasoning.push_str(thought);
+                    if self.style == "anthropic" {
+                        let index =
+                            value["index"].as_u64().context("invalid thinking index")? as usize;
+                        let Some(Block::Thinking { thinking, .. }) = thoughts.get_mut(&index)
+                        else {
+                            bail!("thinking delta without thinking block");
+                        };
+                        thinking.push_str(thought);
+                    }
                     emit(json!({"event":"reasoning_delta","text":thought}));
                 }
                 if calls.len() > 128 || response_bytes > 16_000_000 {
@@ -665,11 +718,21 @@ impl Provider {
             return Err(ProviderError::Interrupted.into());
         }
         let mut blocks = vec![];
+        if self.style != "anthropic" && !reasoning.is_empty() {
+            blocks.push(Block::Thinking {
+                thinking: reasoning.clone(),
+                signature: None,
+                source: self.thinking_source(),
+            });
+        }
         if !content.is_empty() {
             blocks.push(Block::text(content))
         }
         let truncated = stop.as_deref() == Some("max_tokens");
         for index in order {
+            if let Some(thought) = thoughts.remove(&index) {
+                blocks.push(thought);
+            }
             if let Some(text) = texts.remove(&index).filter(|s| !s.is_empty()) {
                 blocks.push(Block::text(text));
             }
@@ -694,7 +757,11 @@ impl Provider {
                 });
             }
         }
-        if truncated && blocks.is_empty() {
+        if truncated
+            && !blocks
+                .iter()
+                .any(|block| matches!(block, Block::Text { .. }))
+        {
             blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
         }
         let estimated = context::estimate(system, messages, specs);
@@ -735,6 +802,24 @@ impl Provider {
                 for b in &message.content {
                     match b {
                         Block::Text { text } => content.push(json!({"type":"text","text":text})),
+                        Block::Thinking {
+                            thinking,
+                            signature,
+                            source,
+                        } => {
+                            if source == &self.thinking_source() {
+                                if let Some(signature) = signature {
+                                    content.push(json!({"type":"thinking","thinking":thinking,"signature":signature}));
+                                } else if !thinking.is_empty() {
+                                    content.push(json!({"type":"text","text":thinking}));
+                                }
+                            }
+                        }
+                        Block::RedactedThinking { data, source } => {
+                            if source == &self.thinking_source() {
+                                content.push(json!({"type":"redacted_thinking","data":data}));
+                            }
+                        }
                         Block::Media { .. } => {
                             content.push(media_part(b, attachments, &self.style)?)
                         }
@@ -771,7 +856,25 @@ impl Provider {
                 let text = message.text();
                 let calls=message.content.iter().filter_map(|b|if let Block::ToolUse{id,name,input}=b{Some(json!({"id":id,"type":"function","function":{"name":name,"arguments":input.to_string()}}))}else{None}).collect::<Vec<_>>();
                 let mut entry = json!({"role":"assistant","content":if text.is_empty(){Value::Null}else{json!(text)}});
+                if self.replays_reasoning_content() {
+                    let reasoning = message
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            Block::Thinking {
+                                thinking, source, ..
+                            } if source == &self.thinking_source() => Some(thinking.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    if !reasoning.is_empty() {
+                        entry["reasoning_content"] = json!(reasoning);
+                    }
+                }
                 if !calls.is_empty() {
+                    if self.model.to_ascii_lowercase().contains("deepseek") && text.is_empty() {
+                        entry["content"] = json!("");
+                    }
                     entry["tool_calls"] = Value::Array(calls)
                 }
                 chat.push(entry);
@@ -830,10 +933,14 @@ impl Provider {
             chat = normalize_anthropic(chat);
             if cache {
                 for message in chat.iter_mut().rev().take(2) {
-                    if let Some(block) = message["content"]
-                        .as_array_mut()
-                        .and_then(|content| content.last_mut())
-                    {
+                    if let Some(block) = message["content"].as_array_mut().and_then(|content| {
+                        content.iter_mut().rev().find(|block| {
+                            !matches!(
+                                block["type"].as_str(),
+                                Some("thinking" | "redacted_thinking")
+                            )
+                        })
+                    }) {
                         block["cache_control"] = json!({"type":"ephemeral"});
                     }
                 }
@@ -851,6 +958,20 @@ impl Provider {
         }] = json!(self.max_output.min(available));
         body["messages"] = Value::Array(chat);
         if self.style == "anthropic" {
+            if self.effort != "off" {
+                let max = body["max_tokens"].as_u64().unwrap_or(0);
+                if max <= 1024 {
+                    bail!("Anthropic thinking requires an output limit above 1024 tokens");
+                }
+                let budget = match self.effort.as_str() {
+                    "low" => 1024,
+                    "medium" => 2048,
+                    "high" => 4096,
+                    "xhigh" => 8192,
+                    _ => 16384,
+                };
+                body["thinking"] = json!({"type":"enabled","budget_tokens":budget.min(max - 1)});
+            }
             body["system"] = if cache && !system.is_empty() {
                 json!([{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}])
             } else {
@@ -889,6 +1010,21 @@ impl Provider {
             Some(true) if self.effort == "max" => Some("xhigh"),
             _ => Some(&self.effort),
         }
+    }
+
+    fn thinking_source(&self) -> String {
+        format!("{}:{}", self.style, self.configuration_id)
+    }
+
+    fn replays_reasoning_content(&self) -> bool {
+        self.parameter_compat["reasoningContent"]
+            .as_bool()
+            .unwrap_or_else(|| {
+                let model = self.model.to_ascii_lowercase();
+                ["deepseek", "kimi", "moonshot", "glm"]
+                    .iter()
+                    .any(|family| model.contains(family))
+            })
     }
 }
 
@@ -1122,7 +1258,7 @@ fn parse_usage(v: &Value, style: &str) -> Usage {
         }
     }
 }
-fn parse_openai(v: &Value) -> Result<Response> {
+fn parse_openai(v: &Value, source: &str) -> Result<Response> {
     let choice = v["choices"]
         .as_array()
         .and_then(|v| v.first())
@@ -1134,6 +1270,17 @@ fn parse_openai(v: &Value) -> Result<Response> {
         bail!("provider rejected the response")
     }
     let mut blocks = vec![];
+    if let Some(thinking) = message["reasoning_content"]
+        .as_str()
+        .or_else(|| message["reasoning"].as_str())
+        .filter(|s| !s.is_empty())
+    {
+        blocks.push(Block::Thinking {
+            thinking: thinking.into(),
+            signature: None,
+            source: source.into(),
+        });
+    }
     if let Some(text) = message["content"].as_str().filter(|s| !s.is_empty()) {
         blocks.push(Block::text(text))
     }
@@ -1151,7 +1298,11 @@ fn parse_openai(v: &Value) -> Result<Response> {
             });
         }
     }
-    if truncated && blocks.is_empty() {
+    if truncated
+        && !blocks
+            .iter()
+            .any(|block| matches!(block, Block::Text { .. }))
+    {
         blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
     }
     Ok(Response {
@@ -1165,7 +1316,7 @@ fn parse_openai(v: &Value) -> Result<Response> {
         usage: parse_usage(&v["usage"], "openai"),
     })
 }
-fn parse_anthropic(v: &Value) -> Result<Response> {
+fn parse_anthropic(v: &Value, source: &str) -> Result<Response> {
     let mut blocks = vec![];
     let truncated = v["stop_reason"] == "max_tokens";
     for b in v["content"]
@@ -1174,6 +1325,15 @@ fn parse_anthropic(v: &Value) -> Result<Response> {
     {
         match b["type"].as_str() {
             Some("text") => blocks.push(Block::text(util::string(b, "text")?)),
+            Some("thinking") => blocks.push(Block::Thinking {
+                thinking: util::string(b, "thinking")?.into(),
+                signature: b["signature"].as_str().map(str::to_string),
+                source: source.into(),
+            }),
+            Some("redacted_thinking") => blocks.push(Block::RedactedThinking {
+                data: util::string(b, "data")?.into(),
+                source: source.into(),
+            }),
             Some("tool_use") if !truncated => blocks.push(Block::ToolUse {
                 id: util::string(b, "id")?.into(),
                 name: util::string(b, "name")?.into(),
@@ -1182,7 +1342,11 @@ fn parse_anthropic(v: &Value) -> Result<Response> {
             _ => {}
         }
     }
-    if truncated && blocks.is_empty() {
+    if truncated
+        && !blocks
+            .iter()
+            .any(|block| matches!(block, Block::Text { .. }))
+    {
         blocks.push(Block::text("模型输出被截断，未执行任何工具调用。"));
     }
     Ok(Response {
@@ -1276,7 +1440,7 @@ pub fn validate_response(response: &Response, messages: &[Message]) -> Result<()
                     bail!("provider returned a missing or reused tool call id/name")
                 }
             }
-            Block::Text { .. } => {}
+            Block::Text { .. } | Block::Thinking { .. } | Block::RedactedThinking { .. } => {}
             _ => bail!("provider emitted an invalid assistant block"),
         }
     }

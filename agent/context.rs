@@ -17,6 +17,8 @@ pub fn tokens(text: &str) -> u64 {
 pub fn block_tokens(b: &Block) -> u64 {
     match b {
         Block::Text { text } => tokens(text),
+        Block::Thinking { thinking, .. } => tokens(thinking),
+        Block::RedactedThinking { data, .. } => tokens(data),
         Block::Media { kind, size, .. } => {
             if kind == "image" {
                 1536

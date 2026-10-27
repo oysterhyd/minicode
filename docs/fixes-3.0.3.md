@@ -344,3 +344,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：`reasoning_models_use_compatible_output_and_effort_parameters` 先复现 gpt-5 的错误参数，覆盖 GPT-5、GPT-5.1、GPT-5.4、o3、o4-mini、未知网关及用户覆盖。
 - 取舍：未识别模型维持现有网关行为；可通过配置显式指定兼容参数。参考 [OpenAI 推理文档](https://developers.openai.com/api/docs/guides/reasoning?api-mode=chat)。
 - 验证：`2B-P4-final-*` 中的全部 Rust、协议、生成器、两组评测和 TUI 检查通过。
+
+## P5：保存并回放推理块
+
+- 问题与根因：thinking 仅作为流式显示文本，签名和脱敏块被丢弃；工具结果返回后无法向模型回传原始推理。
+- 修复：会话消息新增向后兼容的 thinking 和 redacted_thinking 块，流式及 JSON 响应保留顺序、签名、脱敏数据和来源；同一 Anthropic 模型工具循环原样回传，DeepSeek / Kimi / Moonshot / GLM 兼容接口回传 `reasoning_content`，并可通过 `parameterCompat.reasoningContent` 覆盖。Anthropic 请求在开启 effort 时发送受输出上限约束的手动 thinking budget；配置开关由 C4 接通。缓存断点不会写入已签名的 thinking 块。
+- 测试：先复现 Anthropic 流式签名和脱敏数据丢失、DeepSeek reasoning_content 丢失及空 content 不兼容；新增工具循环持久化/重放、非流式响应与预算边界测试。
+- 取舍：默认 effort 仍为 off；thinking 至少需要 1024 token，输出预算不足时明确报错，不发送无效请求。来源不同的内容交接由 P8 处理；仅用本地 mock 验证，未调用真实服务。
+- 验证：`2B-P5-final-*` 全部通过；协议测试 110 通过、1 项既有慢测跳过。首次全量及隔离复测出现既有 Windows 后台进程/通知时序问题，失败记录保留在 `2B-P5-protocol.log`，完整重跑通过。

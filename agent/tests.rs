@@ -2245,3 +2245,33 @@ fn reasoning_models_use_compatible_output_and_effort_parameters() {
     assert!(body["max_completion_tokens"].as_u64().is_some());
     assert_eq!(body["reasoning_effort"], "high");
 }
+
+#[test]
+fn anthropic_thinking_budget_respects_output_limit() {
+    let (_dir, ctx) = fixture();
+    let mut provider = crate::provider::Provider::new(
+        "fake",
+        "off",
+        &Configuration {
+            path: ctx.workspace.join("config.json"),
+        },
+    )
+    .unwrap();
+    provider.style = "anthropic".into();
+    provider.max_output = 8192;
+    provider.effort = "high".into();
+    let body = provider
+        .payload("", &[Message::user("hi")], &[], &ctx.attachments)
+        .unwrap();
+    assert_eq!(body["thinking"]["type"], "enabled");
+    let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
+    assert!(budget >= 1024 && budget < body["max_tokens"].as_u64().unwrap());
+    provider.effort = "off".into();
+    assert!(
+        provider
+            .payload("", &[Message::user("hi")], &[], &ctx.attachments)
+            .unwrap()
+            .get("thinking")
+            .is_none()
+    );
+}
