@@ -124,7 +124,30 @@ struct CallBuffer {
     name: String,
     arguments: String,
     arguments_seen: bool,
+    argument_value: Option<Value>,
+    argument_conflict: bool,
     initial: Value,
+}
+
+impl CallBuffer {
+    fn parsed_arguments(&self) -> (Value, Option<String>) {
+        if self.argument_conflict {
+            return (
+                json!([self.argument_value, self.arguments]),
+                Some("工具参数包含相互冲突的内容或分片".into()),
+            );
+        }
+        if let Some(value) = &self.argument_value {
+            return tool_argument_value(value.clone());
+        }
+        if self.arguments_seen {
+            parse_tool_arguments(&self.arguments)
+        } else if self.initial.is_null() {
+            (json!({}), None)
+        } else {
+            tool_argument_value(self.initial.clone())
+        }
+    }
 }
 
 fn append_openai_tool_delta(
@@ -180,10 +203,23 @@ fn append_openai_tool_delta(
         *response_bytes += name.len();
         call.name = name.into();
     }
-    if let Some(piece) = delta["function"]["arguments"].as_str() {
-        call.arguments_seen = true;
-        *response_bytes += piece.len();
-        call.arguments.push_str(piece);
+    if let Some(argument) = delta["function"].get("arguments") {
+        if let Some(piece) = argument.as_str() {
+            call.arguments_seen = true;
+            *response_bytes += piece.len();
+            call.argument_conflict |= !piece.is_empty() && call.argument_value.is_some();
+            call.arguments.push_str(piece);
+        } else {
+            *response_bytes += argument.to_string().len();
+            call.argument_conflict |= !call.arguments.is_empty()
+                || call
+                    .argument_value
+                    .as_ref()
+                    .is_some_and(|old| old != argument);
+            if call.argument_value.is_none() {
+                call.argument_value = Some(argument.clone());
+            }
+        }
     }
     *last = Some(index);
 }
@@ -794,15 +830,7 @@ impl Provider {
                 blocks.push(Block::text(text));
             }
             if let Some(call) = calls.remove(&index).filter(|_| !truncated) {
-                let (input, input_error) = if !call.arguments_seen {
-                    if call.initial.is_null() {
-                        (json!({}), None)
-                    } else {
-                        tool_argument_value(call.initial)
-                    }
-                } else {
-                    parse_tool_arguments(&call.arguments)
-                };
+                let (input, input_error) = call.parsed_arguments();
                 blocks.push(Block::ToolUse {
                     id: call.id,
                     name: call.name,
@@ -1506,8 +1534,11 @@ fn parse_openai(v: &Value, source: &str) -> Result<Response> {
     let truncated = choice["finish_reason"] == "length";
     if let Some(calls) = message["tool_calls"].as_array().filter(|_| !truncated) {
         for call in calls {
-            let (input, input_error) =
-                parse_tool_arguments(util::string(&call["function"], "arguments")?);
+            let arguments = &call["function"]["arguments"];
+            let (input, input_error) = match arguments.as_str() {
+                Some(raw) => parse_tool_arguments(raw),
+                None => tool_argument_value(arguments.clone()),
+            };
             blocks.push(Block::ToolUse {
                 id: call["id"].as_str().unwrap_or_default().into(),
                 name: util::string(&call["function"], "name")?.into(),
@@ -1758,6 +1789,78 @@ mod error_tests {
             assert_eq!(calls[&0].arguments, "{\"path\":\"中文\"}");
             assert_eq!(calls[&1].id, "b");
             assert_eq!(calls[&1].arguments, "{\"path\":\"README.md\"}");
+        }
+    }
+
+    #[test]
+    fn sse_tool_argument_and_id_variants_survive_every_byte_split() {
+        let frame = json!({"tool_calls":[
+            {"index":0,"id":"","function":{"name":"read","arguments":{"path":"中文"}}},
+            {"index":1,"id":"duplicate","function":{"name":"read","arguments":"{\"path\":"}},
+            {"index":2,"id":"duplicate","function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}},
+            {"id":"distinct","function":{"name":"read","arguments":{"path":"README.md"}}}
+        ]});
+        let wire = format!("data: {frame}\r\n\r\n");
+        for split in 0..=wire.len() {
+            let mut decoder = crate::sse::Decoder::default();
+            let mut calls = BTreeMap::new();
+            let mut order = vec![];
+            let mut last = None;
+            let mut bytes = 0;
+            for chunk in [&wire.as_bytes()[..split], &wire.as_bytes()[split..]] {
+                for event in decoder.push(chunk).unwrap() {
+                    let value: Value = serde_json::from_str(&event.data).unwrap();
+                    for delta in value["tool_calls"].as_array().unwrap() {
+                        append_openai_tool_delta(
+                            delta, &mut calls, &mut order, &mut last, &mut bytes,
+                        );
+                    }
+                }
+            }
+            assert_eq!(order, vec![0, 1, 2, 3], "split {split}");
+            let mut blocks = vec![];
+            for index in order {
+                let call = calls.remove(&index).unwrap();
+                let (input, input_error) = call.parsed_arguments();
+                blocks.push(Block::ToolUse {
+                    id: call.id,
+                    name: call.name,
+                    input,
+                    input_error,
+                });
+            }
+            let mut response = Response {
+                blocks,
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            };
+            assert_eq!(normalize_tool_ids(&mut response, &HashSet::new()), 2);
+            assert!(validate_response(&response, &[]).is_ok());
+            let inputs = response
+                .blocks
+                .iter()
+                .map(|block| match block {
+                    Block::ToolUse {
+                        id,
+                        input,
+                        input_error,
+                        ..
+                    } => (id, input, input_error),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                inputs
+                    .iter()
+                    .map(|item| item.0)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                4
+            );
+            assert_eq!(inputs[0].1["path"], "中文");
+            assert!(inputs[1].2.is_some());
+            assert!(inputs[2].2.is_none());
+            assert_eq!(inputs[3].1["path"], "README.md");
         }
     }
 

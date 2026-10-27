@@ -388,3 +388,36 @@ test('P11: empty completed responses after tools end normally without polluting 
   }
 })
 
+
+test('P13: tool arguments accept JSON objects and reject conflicting mixed fragments',async t=>{
+  for(const scenario of ['stream-object','json-object','stream-conflict','stream-conflict-reverse','stream-conflict-objects','stream-repeat-object','stream-nonobject','json-nonobject']){
+    await t.test(scenario,async t=>{
+      const f=await fixture(t),payloads=[]
+      const conflict=scenario.includes('conflict'),invalid=scenario.includes('nonobject'),failed=conflict||invalid,name=failed?'write':'read'
+      const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+        payloads.push(JSON.parse(body))
+        if(payloads.length>1){write(res,[{choices:[{delta:{content:'done'},finish_reason:'stop'}]}]);return}
+        const args=invalid?[1,2]:conflict?{path:'unsafe-object.txt',content:'no'}:{path:'README.md'}
+        if(scenario.startsWith('json-')){
+          res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'object',function:{name,arguments:args}}]},finish_reason:'tool_calls'}]}))
+        }else{
+          const continuation=conflict||scenario==='stream-repeat-object'
+          const firstArg=scenario==='stream-conflict-reverse'?'{"path":"unsafe-object.txt","content":"bad"}':args
+          const frames=[{choices:[{delta:{tool_calls:[{index:0,id:'object',function:{name,arguments:firstArg}}]},finish_reason:continuation?null:'tool_calls'}]}]
+          if(continuation){
+            const nextArg=scenario==='stream-conflict'?'{"path":"unsafe-object.txt","content":"bad"}':scenario==='stream-conflict-objects'?{path:'other.txt',content:'bad'}:args
+            frames.push({choices:[{delta:{tool_calls:[{index:0,function:{arguments:nextArg}}]},finish_reason:'tool_calls'}]})
+          }
+          write(res,frames)
+        }
+      })})
+      await f.request('setPermissionMode',{mode:'bypass'})
+      const result=await f.run({model:await configure(f,url)})
+      assert.equal(result.result.exit_reason,'completed')
+      const toolResult=result.detail.events.find(e=>e.type==='tool_call_result')
+      if(failed){assert.equal(toolResult.data.success,false);assert.match(toolResult.data.error,/参数/);assert.equal(fs.existsSync(path.join(f.workspace,'unsafe-object.txt')),false);assert.equal(fs.existsSync(path.join(f.workspace,'other.txt')),false)}
+      else{assert.equal(toolResult.data.success,true);assert.match(toolResult.data.output_detail,/repository/);assert.deepEqual(result.detail.messages.flatMap(m=>m.content).find(b=>b.type==='tool_use').input,{path:'README.md'})}
+    })
+  }
+})
+
