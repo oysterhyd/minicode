@@ -297,6 +297,7 @@ impl Configuration {
                 "grep",
                 "read_artifact",
                 "bash",
+                "powershell",
                 "edit",
                 "write",
             ]

@@ -96,7 +96,31 @@ fn ensure_current(ctx: &ToolContext, path: &Path, relative: &str) -> Result<Opti
 pub fn builtins() -> &'static Vec<ToolSpec> {
     static TOOLS: OnceLock<Vec<ToolSpec>> = OnceLock::new();
     TOOLS.get_or_init(|| {
-        serde_json::from_str(include_str!("assets/tools.json")).expect("built-in tool schemas")
+        let specs: Vec<ToolSpec> =
+            serde_json::from_str(include_str!("assets/tools.json")).expect("built-in tool schemas");
+        #[cfg(windows)]
+        {
+            let mut specs = specs;
+            let bash = specs.iter_mut().find(|spec| spec.name == "bash").unwrap();
+            let mut powershell = bash.clone();
+            powershell.name = "powershell".into();
+            powershell.description = bash.description.replace(
+                "a shell command inside the workspace (PowerShell on Windows, bash elsewhere)",
+                "a PowerShell command inside the workspace",
+            );
+            bash.description = bash.description.replace(
+                "a shell command inside the workspace (PowerShell on Windows, bash elsewhere)",
+                if git_bash().is_some() {
+                    "a Git Bash command inside the workspace"
+                } else {
+                    "a PowerShell command inside the workspace (legacy bash alias)"
+                },
+            );
+            specs.push(powershell);
+            specs
+        }
+        #[cfg(not(windows))]
+        specs
     })
 }
 pub fn read_only(name: &str) -> bool {
@@ -143,7 +167,7 @@ pub fn policy(name: &str, mode: &str) -> &'static str {
         } else {
             "ask"
         }
-    } else if name == "bash" || name.starts_with("mcp__") {
+    } else if ["bash", "powershell"].contains(&name) || name.starts_with("mcp__") {
         "ask"
     } else {
         "deny"
@@ -228,13 +252,14 @@ async fn execute_inner(name: &str, args: &Value, ctx: &ToolContext) -> Result<Ou
         return tokio::select! {_ = ctx.cancel.cancelled()=>Err(anyhow::anyhow!("tool cancelled")),value=connector.call(original,args.clone(),&ctx.attachments)=>value};
     }
     match name {
-        "bash" => {
+        "bash" | "powershell" => {
             let command = util::string(args, "command")?;
             let cwd = util::in_workspace(&ctx.workspace, args["cwd"].as_str().unwrap_or("."))?;
             if !cwd.is_dir() {
                 bail!("path is not a directory")
             }
-            run_command(
+            run_command_for(
+                name,
                 command,
                 &cwd,
                 args["timeout_s"]
@@ -942,23 +967,77 @@ fn edit_large(
         path.metadata()?.len()
     )))
 }
+#[cfg(windows)]
+pub(crate) fn git_bash() -> Option<PathBuf> {
+    if std::env::var("MINICODE_WINDOWS_SHELL")
+        .is_ok_and(|value| value.eq_ignore_ascii_case("powershell"))
+    {
+        return None;
+    }
+    let path = util::bundled_path().or_else(|| std::env::var_os("PATH"))?;
+    for dir in std::env::split_paths(&path) {
+        if !dir.join("git.exe").is_file() {
+            continue;
+        }
+        let root = if dir.file_name().is_some_and(|name| {
+            name.eq_ignore_ascii_case("cmd") || name.eq_ignore_ascii_case("bin")
+        }) {
+            dir.parent().unwrap_or(&dir)
+        } else {
+            &dir
+        };
+        for candidate in [root.join("bin/bash.exe"), root.join("usr/bin/bash.exe")] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn powershell_command(command: &str, program: &std::ffi::OsStr) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &format!(
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;$global:LASTEXITCODE=$null;\n{command}\n$__minicode_ok=$?;if ($__minicode_ok) {{ exit 0 }} elseif ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }} else {{ exit 1 }}"
+        ),
+    ]);
+    cmd
+}
+
 pub fn shell(command: &str, cwd: &Path) -> Command {
+    shell_for("bash", command, cwd)
+}
+
+fn shell_for(name: &str, command: &str, cwd: &Path) -> Command {
     #[cfg(windows)]
     let mut cmd = {
-        let shell = if std::env::var_os("PATH")
-            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("pwsh.exe").exists()))
-        {
-            "pwsh"
+        let bash = if name == "bash" { git_bash() } else { None };
+        let mut c = if let Some(bash) = bash {
+            let mut c = Command::new(bash);
+            c.args(["-c", command]);
+            c
         } else {
-            "powershell"
+            let shell = if util::bundled_path()
+                .or_else(|| std::env::var_os("PATH"))
+                .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("pwsh.exe").is_file()))
+            {
+                "pwsh"
+            } else {
+                "powershell"
+            };
+            powershell_command(command, std::ffi::OsStr::new(shell))
         };
-        let mut c = Command::new(shell);
-        c.args(["-NoProfile","-NonInteractive","-Command",&format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;{command}")]);
         c.creation_flags(0x08000000);
         c
     };
     #[cfg(not(windows))]
     let mut cmd = {
+        let _ = name;
         let mut c = Command::new("bash");
         c.args(["-c", command]);
         c.process_group(0);
@@ -995,12 +1074,21 @@ pub async fn run_command(
     timeout: f64,
     ctx: &ToolContext,
 ) -> Result<Outcome> {
+    run_command_for("bash", command, cwd, timeout, ctx).await
+}
+pub async fn run_command_for(
+    name: &str,
+    command: &str,
+    cwd: &Path,
+    timeout: f64,
+    ctx: &ToolContext,
+) -> Result<Outcome> {
     // Both handles share the same append-only disk capture. Child output cannot
     // consume unbounded agent heap, and descendants cannot keep a pipe open.
     let mut captured = tempfile::NamedTempFile::new()?;
     let out = captured.as_file().try_clone()?;
     let err = captured.as_file().try_clone()?;
-    let mut cmd = shell(command, cwd);
+    let mut cmd = shell_for(name, command, cwd);
     cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
     let mut child = cmd.spawn().context("failed to start command")?;
     let tree = match crate::command_process::ProcessTree::attach(&child) {
@@ -1178,4 +1266,41 @@ fn decode(bytes: &[u8]) -> String {
     ANSI.get_or_init(|| regex::Regex::new("\u{1b}\\[[0-9;]*m").unwrap())
         .replace_all(&text, "")
         .into_owned()
+}
+
+#[cfg(all(test, windows))]
+mod windows_shell_tests {
+    use super::powershell_command;
+    use std::{ffi::OsStr, path::PathBuf};
+
+    #[tokio::test]
+    async fn powershell_versions_preserve_native_and_cmdlet_status() {
+        let legacy = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let modern = std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join("pwsh.exe"))
+                .find(|path| path.is_file())
+        });
+        for program in std::iter::once(legacy).chain(modern) {
+            for (command, expected) in [
+                ("node -e \"process.exit(7)\"", 7),
+                ("node -e \"process.exit(9)\"; Write-Output 'recovered'", 0),
+                ("Write-Error 'failure'", 1),
+                ("exit 23", 23),
+            ] {
+                let status = powershell_command(command, OsStr::new(&program))
+                    .output()
+                    .await
+                    .unwrap()
+                    .status;
+                assert_eq!(
+                    status.code(),
+                    Some(expected),
+                    "{}: {command}",
+                    program.display()
+                );
+            }
+        }
+    }
 }

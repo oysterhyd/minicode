@@ -99,7 +99,7 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 	case 2:
 		var items []*model.FeedItem
 		for _, item := range v.Items {
-			if item.Kind == "tool" && item.Name == "bash" {
+			if item.Kind == "tool" && (item.Name == "bash" || item.Name == "powershell") {
 				items = append(items, item)
 			}
 		}

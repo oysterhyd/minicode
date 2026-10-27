@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -881,7 +882,11 @@ func (d *desktop) agentSettings(c *ui.Context, p palette, s *settingsState) {
 			ui.TextArea(c, &a.Instructions).Label(tr("子助手指令")).Height(180)
 			ui.Checkbox(c, &a.InheritTools, tr("继承父助手全部工具"))
 			ui.Row(c).Wrap().Gap(8).Children(func() {
-				for _, name := range []string{"read", "ls", "grep", "read_artifact", "bash", "edit", "write"} {
+				tools := []string{"read", "ls", "grep", "read_artifact", "bash", "edit", "write"}
+				if runtime.GOOS == "windows" {
+					tools = append(tools, "powershell")
+				}
+				for _, name := range tools {
 					on := slices.Contains(a.Tools, name)
 					if ui.Checkbox(c, &on, name).Disabled(a.InheritTools).Changed() {
 						if on {

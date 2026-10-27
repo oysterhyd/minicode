@@ -15,7 +15,7 @@ import (
 var toolNames = map[string]struct{ Label, Done, Icon string }{
 	"read": {"读取", "已读取", "FileText"}, "ls": {"浏览", "已浏览", "FolderOpen"},
 	"grep": {"搜索", "已搜索", "Search"}, "edit": {"编辑", "已编辑", "PencilLine"},
-	"write": {"写入", "已写入", "FilePlus2"}, "bash": {"运行", "已运行", "Terminal"},
+	"write": {"写入", "已写入", "FilePlus2"}, "bash": {"运行", "已运行", "Terminal"}, "powershell": {"运行", "已运行", "Terminal"},
 	"delegate": {"子助手", "已委派", "Users"}, "read_artifact": {"读取归档", "已读取归档", "Archive"},
 }
 
@@ -298,7 +298,7 @@ func (d *desktop) toolMeta(c *ui.Context, p palette, item *model.FeedItem) {
 		if add+del > 0 {
 			d.diffStat(c, p, add, del)
 		}
-	case "bash":
+	case "bash", "powershell":
 		if item.Success {
 			ui.Row(c).Gap(4).Shrink(0).Children(func() {
 				icon(c, "Check", 12, p.Success)
@@ -323,7 +323,11 @@ func (d *desktop) toolGroup(c *ui.Context, p palette, row model.FeedRow) {
 		if item.Pending {
 			running = true
 		}
-		counts[item.Name]++
+		if item.Name == "powershell" {
+			counts["bash"]++
+		} else {
+			counts[item.Name]++
+		}
 		if !item.Success && !item.Pending && !item.Interrupted {
 			failed++
 		}
@@ -428,7 +432,7 @@ func (d *desktop) stepWith(c *ui.Context, p palette, item *model.FeedItem, more,
 	}
 	open, stored := v.Open["tool-"+item.ID]
 	if !stored {
-		open = force || d.preferences.ExpandTools || (item.Pending && item.Name == "bash" && !waiting) || ((item.Name == "edit" || item.Name == "write") && item.Success)
+		open = force || d.preferences.ExpandTools || (item.Pending && (item.Name == "bash" || item.Name == "powershell") && !waiting) || ((item.Name == "edit" || item.Name == "write") && item.Success)
 	}
 	ui.Row(c).AlignItems(ui.Stretch).Gap(10).Children(func() {
 		ui.Column(c).Width(20).AlignItems(ui.Center).Shrink(0).Children(func() {
@@ -492,7 +496,7 @@ func (d *desktop) stepWith(c *ui.Context, p palette, item *model.FeedItem, more,
 
 func (d *desktop) toolDetail(c *ui.Context, p palette, v *conversation, item *model.FeedItem) {
 	switch item.Name {
-	case "bash":
+	case "bash", "powershell":
 		d.terminal(c, p, model.String(item.Args["command"]), item.Output)
 	case "edit", "write":
 		if item.Success || item.Pending {
@@ -582,7 +586,7 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 	card.Shadow(0, 10, 30, -10, ui.RGBA(0, 0, 0, 0.16))
 	question, iconName := tr("允许 MiniCode 编辑这个文件吗？"), "PencilLine"
 	switch item.Name {
-	case "bash":
+	case "bash", "powershell":
 		question, iconName = tr("允许 MiniCode 运行这条命令吗？"), "Terminal"
 	case "write":
 		question, iconName = tr("允许 MiniCode 写入这个文件吗？"), "FilePlus2"
@@ -601,7 +605,7 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 			})
 		})
 		ui.Column(c).Padding(0, 18, 14, 18).Children(func() {
-			if item.Name == "bash" {
+			if item.Name == "bash" || item.Name == "powershell" {
 				d.terminal(c, p, model.String(item.Args["command"]), "")
 			} else {
 				ui.Text(c, model.String(item.Args["path"])).Font(monoFont).FontSize(p.font(11.48)).TextColor(p.Text2).Margin(0, 0, 8, 0)

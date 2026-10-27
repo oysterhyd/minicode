@@ -29,6 +29,7 @@ export function ApprovalBlock({ item }: { item: FeedItem }) {
 function title(item: FeedItem): string {
   if (item.name === 'workspace_trust') return '信任工作区插件'
   if (item.name === 'bash') return 'Bash 命令'
+  if (item.name === 'powershell') return 'PowerShell 命令'
   if (item.name === 'edit') return '编辑文件'
   if (item.name === 'write') return '写入文件'
   return `工具调用 · ${toolMeta(item.name).done}`
@@ -47,7 +48,7 @@ export function approvalOptions(item: FeedItem): string[] {
 function previewLines(item: FeedItem): { text: string[]; diff: DiffLine[] } {
   const args = item.args || {}
   if (item.name === 'workspace_trust') return { text: terminalText(item.text || '').split('\n').slice(1), diff: [] }
-  if (item.name === 'bash') return { text: terminalText(String(args.command || '')).split('\n'), diff: [] }
+  if (item.name === 'bash' || item.name === 'powershell') return { text: terminalText(String(args.command || '')).split('\n'), diff: [] }
   if (item.name === 'edit') {
     return { text: [String(args.path || '')], diff: previewDiff(String(args.old_text ?? ''), String(args.new_text ?? '')) }
   }

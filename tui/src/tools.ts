@@ -10,6 +10,7 @@ const meta: Record<string, ToolMeta> = {
   edit: { verb: '编辑', done: 'Edit' },
   write: { verb: '写入', done: 'Write' },
   bash: { verb: '运行', done: 'Bash' },
+  powershell: { verb: '运行', done: 'PowerShell' },
   delegate: { verb: '子助手', done: 'Delegate' },
   skills_list: { verb: '查看技能', done: 'Skills' },
   skill_load: { verb: '加载技能', done: 'Skill' },

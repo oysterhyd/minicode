@@ -469,3 +469,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：协议测试先复现失败信息缺少 stderr；覆盖连接失败、成功、2 MB stderr 不阻塞、日志大小和尾部、凭据遮盖；Rust 测试覆盖跨块及前缀重叠的凭据遮盖；Desktop 测试验证新旧状态结构；TUI 测试验证 `/mcp` 结果显示。
 - 取舍：每次连接产生一个限长日志，目前没有跨文件的自动清理；遮盖只识别常见凭据环境变量名且值至少 4 字节，服务可能输出其他敏感内容，日志目录应由用户控制访问权限。
 - 验证：Rust、协议、两组离线评测、TUI 和 Windows Desktop 全套检查通过；评测使用独立临时输出目录。
+
+## SH1：Windows Shell 类型和退出码
+
+- 问题与根因：Windows 的 `bash` 实际调用 PowerShell；PowerShell 默认把失败的原生命令退出码归一为 1，Windows PowerShell 5.1 也不支持 bash 的 `&&` 语法。
+- 修复：从实际子进程 PATH 中的 Git 安装查找 Git Bash，找到时 `bash` 使用真正的 bash；否则 `bash` 继续作为 PowerShell 兼容别名。Windows 新增 `powershell` 工具，保留同样的审批、后台任务、cwd 指令预检和子助手工具限制。PowerShell 保留成功命令、cmdlet 错误、显式 `exit` 和失败原生命令的退出状态；命令原文不做语法翻译。已有 Windows 验收配置继续使用 PowerShell 执行。TUI 与 Desktop 使用命令审批和终端输出界面显示新工具。
+- 测试：先复现 bash 语法和退出码错误及未知 `powershell`；协议测试覆盖 Git Bash、缺少 Git Bash 时回退、PowerShell 兼容别名、后台任务与嵌套指令；Rust 在本机分别运行 Windows PowerShell 5.1 与 PowerShell 7，检查原生命令、cmdlet 失败和显式退出；TUI / Desktop 测试覆盖命令展示。
+- 待确认决策：已安装 Git Bash 的 Windows 默认让 `bash` 使用真正的 Bash，会改变旧会话中同名工具原来的 PowerShell 语义；设置 `MINICODE_WINDOWS_SHELL=powershell` 可以恢复旧行为，并继续通过 `powershell` 明确选择 PowerShell。
+- 验证：Rust、协议、两组离线评测、TUI 和 Windows Desktop 全套检查通过；评测使用独立临时输出目录。

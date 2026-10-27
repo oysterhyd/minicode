@@ -199,9 +199,16 @@ impl Goal {
         let ran_at = util::now();
         for item in self.spec.items.iter().filter(|i| i.r#type != "protected") {
             let (passed, detail, exit) = if item.r#type == "command" {
-                let result =
-                    tools::run_command(item.command.as_ref().unwrap(), &ctx.workspace, 120.0, ctx)
-                        .await?;
+                // Existing Windows acceptance files contain PowerShell commands.
+                let shell = if cfg!(windows) { "powershell" } else { "bash" };
+                let result = tools::run_command_for(
+                    shell,
+                    item.command.as_ref().unwrap(),
+                    &ctx.workspace,
+                    120.0,
+                    ctx,
+                )
+                .await?;
                 (result.success, result.output, result.exit_code)
             } else {
                 let path = util::in_workspace(&ctx.workspace, item.path.as_ref().unwrap())?;

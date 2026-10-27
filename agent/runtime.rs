@@ -1429,7 +1429,7 @@ impl Runtime {
                 let Block::ToolUse { name, input, .. } = call else {
                     unreachable!()
                 };
-                if name == "bash" && input["background"] == true {
+                if ["bash", "powershell"].contains(&name.as_str()) && input["background"] == true {
                     if let Some(outcome) = self.preflight(call, hooks, false).await? {
                         results.push(self.record_result(call, outcome, hooks, false, 0.0)?);
                         index += 1;
@@ -1451,9 +1451,10 @@ impl Runtime {
                             .unwrap_or(0.0)
                             .clamp(0.0, 3600.0);
                         let c = command.clone();
+                        let tool_name = name.clone();
                         let job_cwd = cwd.clone();
                         let handle = tokio::spawn(async move {
-                            tools::run_command(&c, &job_cwd, timeout, &ctx).await
+                            tools::run_command_for(&tool_name, &c, &job_cwd, timeout, &ctx).await
                         });
                         self.event(
                             hooks,
@@ -1717,8 +1718,12 @@ impl Runtime {
             ))));
         }
         let mut catalog = self.catalog.lock().await;
-        if ["read", "ls", "grep", "edit", "write", "bash"].contains(&name.as_str()) {
-            let field = if name == "bash" { "cwd" } else { "path" };
+        if ["read", "ls", "grep", "edit", "write", "bash", "powershell"].contains(&name.as_str()) {
+            let field = if ["bash", "powershell"].contains(&name.as_str()) {
+                "cwd"
+            } else {
+                "path"
+            };
             match catalog.discover_instructions(input[field].as_str().unwrap_or(".")) {
                 Ok(sources) if !sources.is_empty() => {
                     for source in sources {
@@ -1917,7 +1922,7 @@ impl Runtime {
                         .min(Duration::from_secs(300))
                 })
                 .unwrap_or(Duration::from_secs(300));
-            let result = if name == "bash" {
+            let result = if ["bash", "powershell"].contains(&name.as_str()) {
                 tools::execute(name, input, &ctx).await
             } else {
                 tokio::time::timeout(duration, tools::execute(name, input, &ctx))

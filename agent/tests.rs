@@ -234,6 +234,7 @@ fn policies() {
     assert_eq!(tools::policy("write", "default"), "ask");
     assert_eq!(tools::policy("write", "accept_edits"), "allow");
     assert_eq!(tools::policy("bash", "accept_edits"), "ask");
+    assert_eq!(tools::policy("powershell", "accept_edits"), "ask");
     assert_eq!(tools::policy("mcp__server__read", "default"), "ask");
     assert_eq!(tools::policy("unknown", "default"), "deny");
 }
@@ -952,11 +953,7 @@ fn reimporting_identical_media_with_a_new_name_keeps_old_messages_readable() {
 #[tokio::test]
 async fn ordinary_command_newlines_do_not_create_an_artifact() {
     let (_dir, ctx) = fixture();
-    let command = if cfg!(windows) {
-        "Write-Output 'hello'"
-    } else {
-        "printf 'hello\\n'"
-    };
+    let command = "echo 'hello'";
     let result = tools::run_command(command, &ctx.workspace, 10.0, &ctx)
         .await
         .unwrap();
