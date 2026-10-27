@@ -545,7 +545,7 @@ impl Provider {
                             match block["type"].as_str() {
                                 Some("tool_use") => {
                                     order.push(index);
-                                    let id = util::string(block, "id")?.to_string();
+                                    let id = block["id"].as_str().unwrap_or_default().to_string();
                                     let name = util::string(block, "name")?.to_string();
                                     response_bytes += id.len() + name.len();
                                     calls.insert(
@@ -1464,7 +1464,7 @@ fn parse_openai(v: &Value, source: &str) -> Result<Response> {
             let (input, input_error) =
                 parse_tool_arguments(util::string(&call["function"], "arguments")?);
             blocks.push(Block::ToolUse {
-                id: util::string(call, "id")?.into(),
+                id: call["id"].as_str().unwrap_or_default().into(),
                 name: util::string(&call["function"], "name")?.into(),
                 input,
                 input_error,
@@ -1508,7 +1508,7 @@ fn parse_anthropic(v: &Value, source: &str) -> Result<Response> {
                 source: source.into(),
             }),
             Some("tool_use") if !truncated => blocks.push(Block::ToolUse {
-                id: util::string(b, "id")?.into(),
+                id: b["id"].as_str().unwrap_or_default().into(),
                 name: util::string(b, "name")?.into(),
                 input: b["input"].clone(),
                 input_error: (!b["input"].is_object()).then(|| "工具参数必须是 JSON 对象".into()),
@@ -1588,6 +1588,31 @@ fn validate_fake(v: &Value) -> Result<()> {
     }
     Ok(())
 }
+pub fn normalize_tool_ids(response: &mut Response, previous: &HashSet<String>) -> usize {
+    let mut reserved = previous.clone();
+    reserved.extend(response.blocks.iter().filter_map(|block| match block {
+        Block::ToolUse { id, .. } if !id.trim().is_empty() && id.len() <= 256 => Some(id.clone()),
+        _ => None,
+    }));
+    let mut seen = previous.clone();
+    let mut count = 0;
+    for block in &mut response.blocks {
+        if let Block::ToolUse { id, .. } = block
+            && (id.trim().is_empty() || id.len() > 256 || !seen.insert(id.clone()))
+        {
+            loop {
+                let candidate = format!("tool_{}", util::id());
+                if reserved.insert(candidate.clone()) && seen.insert(candidate.clone()) {
+                    *id = candidate;
+                    break;
+                }
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
 pub fn validate_response(response: &Response, messages: &[Message]) -> Result<()> {
     if response.blocks.is_empty() {
         bail!("provider returned an empty assistant response")

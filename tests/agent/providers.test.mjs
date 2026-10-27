@@ -295,3 +295,37 @@ test('P6: invalid tool arguments produce a recoverable failure without executing
     })
   }
 })
+
+test('P7: missing and repeated tool ids become unique across streaming rounds',async t=>{
+  const f=await fixture(t),payloads=[]
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    payloads.push(JSON.parse(body));const count=payloads.length
+    const call=(index,id)=>({index,...(id===null?{}:{id}),function:{name:'read',arguments:'{"path":"README.md"}'}})
+    if(count===1)write(res,[{choices:[{delta:{tool_calls:[call(0,null),call(1,'reused'),call(2,'reused'),call(3,'x'.repeat(300))]},finish_reason:'tool_calls'}]}])
+    else if(count===2)write(res,[{choices:[{delta:{tool_calls:[call(0,'reused')]},finish_reason:'tool_calls'}]}])
+    else write(res,[{choices:[{delta:{content:'complete'},finish_reason:'stop'}]}])
+  })})
+  const result=await f.run({model:await configure(f,url)})
+  assert.equal(result.result.exit_reason,'completed')
+  const blocks=result.detail.messages.flatMap(m=>m.content)
+  const ids=blocks.filter(b=>b.type==='tool_use').map(b=>b.id)
+  const resultIds=blocks.filter(b=>b.type==='tool_result').map(b=>b.tool_use_id)
+  assert.equal(ids.length,5);assert.equal(new Set(ids).size,5)
+  assert.ok(ids.every(id=>id&&id.length<=256))
+  assert.deepEqual(resultIds,ids)
+  assert.ok(payloads[2].messages.filter(m=>m.role==='tool').every(m=>ids.includes(m.tool_call_id)))
+})
+
+test('P7: non-streaming missing tool id receives a generated id',async t=>{
+  const f=await fixture(t),payloads=[]
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    payloads.push(JSON.parse(body));res.setHeader('content-type','application/json')
+    res.end(JSON.stringify(payloads.length===1?{choices:[{message:{role:'assistant',content:null,tool_calls:[{function:{name:'read',arguments:'{"path":"README.md"}'}}]},finish_reason:'tool_calls'}]}:{choices:[{message:{role:'assistant',content:'ok'},finish_reason:'stop'}]}))
+  })})
+  const result=await f.run({model:await configure(f,url)})
+  assert.equal(result.result.exit_reason,'completed')
+  const assistant=payloads[1].messages.find(m=>m.role==='assistant'&&m.tool_calls)
+  const tool=payloads[1].messages.find(m=>m.role==='tool')
+  assert.ok(assistant.tool_calls[0].id)
+  assert.equal(tool.tool_call_id,assistant.tool_calls[0].id)
+})

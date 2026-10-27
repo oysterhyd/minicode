@@ -6,7 +6,7 @@ use crate::{
     goals::{Goal, Spec},
     mcp::McpRegistry,
     models::{Block, Budget, Event, Message, Outcome, RunResult, Usage},
-    provider::{Provider, ProviderError, validate_response},
+    provider::{Provider, ProviderError, normalize_tool_ids, validate_response},
     store::{self, Store},
     tools::{self, Sink, ToolContext},
     util,
@@ -1227,7 +1227,7 @@ impl Runtime {
             };
             let mut attempt = 0;
             let retry_policy = RetryPolicy::from_env();
-            let (response, mut metrics) = loop {
+            let (mut response, mut metrics) = loop {
                 // Only the turn deadline bounds the whole request; silence on
                 // the wire is the provider's idle timeout, so long streams that
                 // keep producing bytes are never cut off.
@@ -1291,6 +1291,10 @@ impl Runtime {
                     }
                 }
             };
+            let normalized = normalize_tool_ids(&mut response, &self.used_call_ids);
+            if normalized > 0 {
+                metrics["tool_id_normalizations"] = json!(normalized);
+            }
             self.usage.add(&response.usage);
             hooks.shared.lock().unwrap().usage.add(&response.usage);
             let validation = validate_response(&response, &self.messages).and_then(|_| {

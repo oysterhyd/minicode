@@ -203,7 +203,7 @@ test('archived tool ids remain reserved after manual compaction', async t => {
     { tool_calls: [{ id: 'archived-call', name: 'read', arguments: { path: 'README.md' } }] },
     { text: 'Middle task findings\n'.repeat(1200) },
     { text: 'latest reply' },
-    { tool_calls: [{ id: 'archived-call', name: 'write', arguments: { path: 'reused-id.txt', content: 'unsafe' } }] },
+    { tool_calls: [{ id: 'archived-call', name: 'read', arguments: { path: 'README.md' } }] },
   ])
   await f.request('setPermissionMode', { mode: 'bypass' })
   const first = await f.run({ text: 'KEEP_ORIGINAL_REQUIREMENT' })
@@ -214,8 +214,10 @@ test('archived tool ids remain reserved after manual compaction', async t => {
   assert.equal(detail.messages[0].content[0].text, 'KEEP_ORIGINAL_REQUIREMENT')
   assert.equal(detail.messages.flatMap(m => m.content).some(b => b.type === 'tool_use' && b.id === 'archived-call'), false)
   const reused = await f.run({ sessionId: first.id })
-  assert.equal(reused.result.exit_reason, 'provider_error')
-  assert.equal(fs.existsSync(path.join(f.workspace, 'reused-id.txt')), false)
+  assert.equal(reused.result.exit_reason, 'completed')
+  const call = reused.detail.messages.flatMap(m => m.content).find(b => b.type === 'tool_use')
+  assert.ok(call.id && call.id !== 'archived-call')
+  assert.ok(reused.detail.messages.flatMap(m => m.content).some(b => b.type === 'tool_result' && b.tool_use_id === call.id))
 })
 
 test('project skills override user skills with the same name', async t => {
@@ -274,7 +276,7 @@ test('protocol-rejected responses retain usage and resume past the rejected scri
   const f = await fixture(t, [
     { input_tokens: 10, output_tokens: 5, tool_calls: [{ id: 'used', name: 'read', arguments: { path: 'README.md' } }] },
     { input_tokens: 10, output_tokens: 5, text: 'done' },
-    { input_tokens: 30, output_tokens: 20, tool_calls: [{ id: 'used', name: 'write', arguments: { path: 'rejected.txt', content: 'unsafe' } }] },
+    { input_tokens: 30, output_tokens: 20, tool_calls: [{ id: 'fresh', name: '', arguments: { path: 'rejected.txt', content: 'unsafe' } }] },
   ])
   const first = await f.run()
   const rejected = await f.run({ sessionId: first.id })
