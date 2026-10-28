@@ -131,6 +131,8 @@ pub struct Outcome {
     pub images: Vec<Block>,
     pub error: Option<String>,
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
     pub job_id: Option<String>,
     #[serde(skip)]
     pub full_output: Option<String>,
@@ -143,6 +145,7 @@ impl Outcome {
             images: vec![],
             error: None,
             exit_code: None,
+            signal: None,
             job_id: None,
             full_output: None,
         }

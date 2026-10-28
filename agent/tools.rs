@@ -1311,20 +1311,20 @@ pub async fn run_command_for(
         if ctx.cancel.is_cancelled() {
             cancelled = true;
             kill_tree(&mut child).await;
-            break None;
+            break child.try_wait()?;
         }
         if (timeout > 0.0 && started.elapsed().as_secs_f64() >= timeout)
             || ctx.deadline.is_some_and(|d| Instant::now() >= d)
         {
             timed_out = true;
             kill_tree(&mut child).await;
-            break None;
+            break child.try_wait()?;
         }
         let size = captured.as_file().metadata()?.len();
         if size > 100_000_000 {
             quota = true;
             kill_tree(&mut child).await;
-            break None;
+            break child.try_wait()?;
         }
         if size > live_position && last_emit.elapsed() >= Duration::from_millis(250) {
             if let Some(emit) = &ctx.output {
@@ -1355,9 +1355,6 @@ pub async fn run_command_for(
             }
         }
     }
-    if cancelled {
-        bail!("tool cancelled")
-    }
     let total = captured.as_file().metadata()?.len().min(100_000_000);
     captured
         .as_file_mut()
@@ -1379,8 +1376,32 @@ pub async fn run_command_for(
         );
     }
     outcome.exit_code = status.and_then(|s| s.code());
-    outcome.success = outcome.exit_code == Some(0) && !timed_out && !quota && !lingered;
-    if timed_out {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        outcome.signal = status.and_then(|s| s.signal()).map(|signal| match signal {
+            libc::SIGTERM => "SIGTERM".into(),
+            libc::SIGKILL => "SIGKILL".into(),
+            libc::SIGINT => "SIGINT".into(),
+            libc::SIGHUP => "SIGHUP".into(),
+            libc::SIGQUIT => "SIGQUIT".into(),
+            libc::SIGABRT => "SIGABRT".into(),
+            libc::SIGSEGV => "SIGSEGV".into(),
+            libc::SIGPIPE => "SIGPIPE".into(),
+            libc::SIGILL => "SIGILL".into(),
+            libc::SIGBUS => "SIGBUS".into(),
+            libc::SIGFPE => "SIGFPE".into(),
+            libc::SIGUSR1 => "SIGUSR1".into(),
+            libc::SIGUSR2 => "SIGUSR2".into(),
+            libc::SIGALRM => "SIGALRM".into(),
+            _ => format!("signal {signal}"),
+        });
+    }
+    outcome.success =
+        outcome.exit_code == Some(0) && !cancelled && !timed_out && !quota && !lingered;
+    if cancelled {
+        outcome.error = Some("tool cancelled; command tree was killed".into());
+    } else if timed_out {
         outcome.error = Some(format!("command timed out after {timeout}s and was killed"));
     } else if lingered {
         outcome.error = Some("shell exited but a descendant kept output open; capture was stopped and the command tree was killed".into());
@@ -1390,10 +1411,16 @@ pub async fn run_command_for(
                 .into(),
         );
     } else if !outcome.success {
-        outcome.error = Some(format!(
-            "command exited with code {}",
-            outcome.exit_code.unwrap_or(-1)
-        ));
+        outcome.error = Some(match (&outcome.signal, outcome.exit_code) {
+            (Some(signal), _) => format!("command terminated by {signal}"),
+            (_, Some(code)) => format!("command exited with code {code}"),
+            _ => "command terminated without an exit code".into(),
+        });
+    }
+    if let (Some(signal), Some(error)) = (&outcome.signal, &mut outcome.error)
+        && !error.contains(signal)
+    {
+        error.push_str(&format!(" ({signal})"));
     }
     Ok(outcome)
 }

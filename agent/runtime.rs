@@ -1933,23 +1933,23 @@ impl Runtime {
                         .min(Duration::from_secs(300))
                 })
                 .unwrap_or(Duration::from_secs(300));
-            let result = if ["bash", "powershell"].contains(&name.as_str()) {
+            if ["bash", "powershell"].contains(&name.as_str()) {
                 tools::execute(name, input, &ctx).await
             } else {
                 tokio::time::timeout(duration, tools::execute(name, input, &ctx))
                     .await
                     .unwrap_or_else(|_| Outcome::failure("tool timed out"))
-            };
-            Self::check(hooks)?;
-            result
+            }
         };
-        self.record_result(
+        let result = self.record_result(
             &call,
             outcome,
             hooks,
             recovered,
             started.elapsed().as_secs_f64(),
-        )
+        )?;
+        Self::check(hooks)?;
+        Ok(result)
     }
     async fn invoke(&mut self, call: Block, hooks: &Hooks, recovered: bool) -> Result<Block> {
         if let Block::ToolUse { name, input, .. } = &call
@@ -2029,7 +2029,7 @@ impl Runtime {
             .get_or_init(|| regex::Regex::new(r"\[artifact:([A-Za-z0-9_-]+)\]").unwrap())
             .captures(&outcome.output)
             .map(|c| c[1].to_string());
-        let event=self.store.checkpoint(&self.session,"tool_call_result",&json!({"call_id":id,"name":name,"success":outcome.success,"exit_code":outcome.exit_code,"error":outcome.error,"output_preview":util::prefix(&outcome.output,1000),"output_detail":outcome.output,"artifact_id":artifact,"truncated":artifact.is_some()||outcome.output.contains("truncated"),"duration_s":duration,"images":outcome.images,"recovered":recovered}),None,Some(&result),None)?;
+        let event=self.store.checkpoint(&self.session,"tool_call_result",&json!({"call_id":id,"name":name,"success":outcome.success,"exit_code":outcome.exit_code,"signal":outcome.signal,"error":outcome.error,"output_preview":util::prefix(&outcome.output,1000),"output_detail":outcome.output,"artifact_id":artifact,"truncated":artifact.is_some()||outcome.output.contains("truncated"),"duration_s":duration,"images":outcome.images,"recovered":recovered}),None,Some(&result),None)?;
         (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
         Ok(result)
     }

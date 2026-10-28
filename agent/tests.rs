@@ -1078,8 +1078,53 @@ async fn cancelling_a_live_descendant_releases_its_working_directory() {
     }
     assert!(cwd.join("child.pid").exists(), "command did not start");
     ctx.cancel.cancel();
-    assert!(task.await.unwrap().is_err());
+    let result = task
+        .await
+        .unwrap()
+        .expect("cancelled commands return partial output");
+    assert!(!result.success);
+    assert!(result.error.unwrap().contains("cancelled"));
     fs::remove_dir_all(&cwd).unwrap();
+}
+
+#[tokio::test]
+async fn sh6_cancel_preserves_partial_command_output() {
+    let (_dir, ctx) = fixture();
+    let child_ctx = ctx.clone();
+    let command = "node -e \"console.log('first error');require('fs').writeFileSync('ready','1');setInterval(()=>{},1000)\"";
+    let task = tokio::spawn(async move {
+        tools::run_command(command, &child_ctx.workspace, 10.0, &child_ctx).await
+    });
+    for _ in 0..500 {
+        if ctx.workspace.join("ready").exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(ctx.workspace.join("ready").exists());
+    ctx.cancel.cancel();
+    let outcome = task.await.unwrap().unwrap();
+    assert!(!outcome.success);
+    assert!(outcome.output.contains("first error"));
+    assert!(outcome.error.unwrap().contains("cancelled"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sh6_signal_has_a_name_instead_of_exit_minus_one() {
+    let (_dir, ctx) = fixture();
+    let outcome = tools::run_command(
+        "printf 'before signal\\n'; kill -TERM $$",
+        &ctx.workspace,
+        10.0,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(!outcome.success);
+    assert!(outcome.output.contains("before signal"));
+    assert_eq!(outcome.signal.as_deref(), Some("SIGTERM"));
+    assert!(outcome.error.unwrap().contains("SIGTERM"));
 }
 
 #[test]
