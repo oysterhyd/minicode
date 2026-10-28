@@ -654,6 +654,21 @@ fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     }
     Ok(bounded(text))
 }
+fn grep_files(base: &Path, include_ignored: bool) -> impl Iterator<Item = ignore::DirEntry> {
+    ignore::WalkBuilder::new(base)
+        .require_git(false)
+        .standard_filters(!include_ignored)
+        .hidden(false)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(move |e| {
+            e.depth() == 0
+                || !e.file_type().is_some_and(|t| t.is_dir())
+                || !util::SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref())
+        })
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+}
 fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let pattern = util::string(args, "pattern")?;
     let pattern = if args.get("case_sensitive").is_some_and(|v| v == false) {
@@ -661,10 +676,9 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     } else {
         pattern.into()
     };
-    let regex = fancy_regex::RegexBuilder::new(&pattern)
-        .backtrack_limit(1_000_000)
+    let regex = regex::RegexBuilder::new(&pattern)
         .build()
-        .context("invalid regex")?;
+        .map_err(|error| anyhow::anyhow!("invalid regex: {error}"))?;
     let raw = args["path"].as_str().unwrap_or(".");
     let base = util::in_workspace(&ctx.workspace, raw)?;
     if !base.is_dir() && !base.is_file() {
@@ -691,7 +705,7 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             bail!("search timed out; narrow path or glob and retry")
         }
         *number += 1;
-        if regex.is_match(line)? {
+        if regex.is_match(line) {
             let mut chars = line.chars();
             let snippet = chars.by_ref().take(500).collect::<String>();
             lines.push(format!(
@@ -709,7 +723,7 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         }
         Ok(false)
     };
-    let files = util::walk(&base).filter(|e| e.file_type().is_file());
+    let files = grep_files(&base, args["include_ignored"] == true);
     'files: for entry in files {
         if ctx.cancel.is_cancelled() {
             bail!("tool cancelled")
@@ -1730,6 +1744,44 @@ fn decode_capture_sample(bytes: &[u8], utf8: bool) -> String {
 
 #[cfg(test)]
 mod output_tests {
+    #[test]
+    #[ignore = "manual ignored-tree traversal benchmark"]
+    fn t2_ignored_tree_benchmark() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "target/\ndist/\nbuild/\n.next/\n",
+        )
+        .unwrap();
+        for folder in ["target", "dist", "build", ".next"] {
+            let path = dir.path().join(folder);
+            std::fs::create_dir(&path).unwrap();
+            for i in 0..500 {
+                std::fs::write(path.join(format!("{i}.txt")), "noise").unwrap();
+            }
+        }
+        std::fs::write(dir.path().join("source.txt"), "needle").unwrap();
+        let start = std::time::Instant::now();
+        let baseline = crate::util::walk(dir.path())
+            .filter(|e| e.file_type().is_file())
+            .inspect(|e| {
+                std::fs::read(e.path()).unwrap();
+            })
+            .count();
+        let baseline_time = start.elapsed();
+        let start = std::time::Instant::now();
+        let filtered = super::grep_files(dir.path(), false)
+            .inspect(|e| {
+                std::fs::read(e.path()).unwrap();
+            })
+            .count();
+        let filtered_time = start.elapsed();
+        assert_eq!(baseline, 2002);
+        assert_eq!(filtered, 2);
+        println!(
+            "T2 traversal + file reads: {baseline} files {baseline_time:?}; filtered {filtered} files {filtered_time:?}"
+        );
+    }
     #[test]
     fn sh3_strips_terminal_sequences_and_overwritten_progress() {
         assert_eq!(super::decode(b"\x1b[31merror\x1b[0m\x1b[K\n\x1b[2J\x1b[?25l\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x07\n10%\r20%\r100%\r\n"), "error\nlink\n100%\n");

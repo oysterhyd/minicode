@@ -13,10 +13,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive"] }
 encoding_rs = "0.8"
 fs2 = "0.4"
-fancy-regex = "0.16"
 futures-util = "0.3"
 globset = "0.4"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+ignore = "0.4"
 jsonschema = { version = "0.37", default-features = false }
 memmap2 = "0.9"
 pdf-extract = "0.12"

@@ -21,3 +21,21 @@ test('read/edit preserve Chinese legacy encodings and UTF-8 BOM through the brid
     assert.deepEqual(fs.readFileSync(path.join(f.workspace,'encoded.txt')),encode('世界\n'))
   }
 })
+
+test('grep honors ignore files and exposes an explicit override',async t=>{
+  const f=await fixture(t,[{tool_calls:[
+    {name:'grep',arguments:{pattern:'needle'}},
+    {name:'grep',arguments:{pattern:'needle',include_ignored:true}},
+    {name:'grep',arguments:{pattern:'needle(?=$)'}}
+  ]},{text:'done'}])
+  fs.writeFileSync(path.join(f.workspace,'.gitignore'),'target/\n')
+  fs.writeFileSync(path.join(f.workspace,'.ignore'),'private.txt\n')
+  fs.mkdirSync(path.join(f.workspace,'target'))
+  for(const file of ['source.txt','private.txt','target/noise.txt']) fs.writeFileSync(path.join(f.workspace,file),'needle\n')
+  const result=await f.run()
+  const calls=result.detail.events.filter(e=>e.type==='tool_call_result').sort((a,b)=>a.data.call_id.localeCompare(b.data.call_id))
+  assert.equal(calls[0].data.output_detail,'source.txt:1: needle',JSON.stringify(calls))
+  assert.match(calls[1].data.output_detail,/target\/noise.txt/)
+  assert.equal(calls[2].data.success,false)
+  assert.match(calls[2].data.error,/not supported|look-around/)
+})

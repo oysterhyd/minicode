@@ -69,6 +69,82 @@ fn utf8_bounds() {
 }
 
 #[tokio::test]
+async fn t2_grep_respects_ignore_rules_negation_and_subdirectory_searches() {
+    let (_dir, ctx) = fixture();
+    fs::write(
+        ctx.workspace.join(".gitignore"),
+        "target/\ndist/\nbuild/\n.next/\n*.log\n!keep.log\n",
+    )
+    .unwrap();
+    fs::write(ctx.workspace.join(".ignore"), "private.txt\n").unwrap();
+    for folder in ["target", "dist", "build", ".next", "node_modules", "src"] {
+        fs::create_dir(ctx.workspace.join(folder)).unwrap();
+    }
+    for file in [
+        "target/generated.txt",
+        "dist/bundle.txt",
+        "build/object.txt",
+        ".next/cache.txt",
+        "node_modules/pkg.txt",
+        "private.txt",
+        "src/hidden.log",
+        "src/keep.log",
+        "src/main.txt",
+    ] {
+        fs::write(ctx.workspace.join(file), "needle\n").unwrap();
+    }
+    fs::write(ctx.workspace.join("src/.gitignore"), "nested.txt\n").unwrap();
+    fs::write(ctx.workspace.join("src/nested.txt"), "needle\n").unwrap();
+    for path in [".", "src"] {
+        let out = tools::execute("grep", &json!({"pattern":"needle","path":path}), &ctx).await;
+        assert!(out.success, "{:?}", out.error);
+        assert_eq!(out.output, "src/keep.log:1: needle\nsrc/main.txt:1: needle");
+    }
+    let explicit = tools::execute(
+        "grep",
+        &json!({"pattern":"needle","path":"src/hidden.log"}),
+        &ctx,
+    )
+    .await;
+    assert!(explicit.success);
+    assert!(explicit.output.contains("src/hidden.log:1"));
+    let all = tools::execute(
+        "grep",
+        &json!({"pattern":"needle","include_ignored":true}),
+        &ctx,
+    )
+    .await;
+    assert!(all.success);
+    assert!(all.output.contains("target/generated.txt"));
+    assert!(all.output.contains("private.txt"));
+}
+
+#[tokio::test]
+async fn t2_grep_uses_a_non_backtracking_regex_engine() {
+    let (_dir, ctx) = fixture();
+    fs::write(
+        ctx.workspace.join("input.txt"),
+        format!("{}!\nneedle\n", "a".repeat(200_000)),
+    )
+    .unwrap();
+    let out = tools::execute(
+        "grep",
+        &json!({"pattern":"^(a+)+$","path":"input.txt"}),
+        &ctx,
+    )
+    .await;
+    assert!(out.success, "{:?}", out.error);
+    assert_eq!(out.output, "(no matches)");
+    let unsupported = tools::execute(
+        "grep",
+        &json!({"pattern":"needle(?=$)","path":"input.txt"}),
+        &ctx,
+    )
+    .await;
+    assert!(!unsupported.success, "lookaround must fail explicitly");
+}
+
+#[tokio::test]
 async fn t1_read_edit_write_preserve_encoding_and_bom() {
     let (_dir, ctx) = fixture();
     let utf16 = |text: &str, le: bool| -> Vec<u8> {

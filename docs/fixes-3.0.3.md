@@ -589,3 +589,12 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 已定位待处理项：T2 tools.rs 的 fancy_regex/固定目录遍历；T4 replacement_texts/edit 的精确匹配；T5 read_artifact 默认 20000 与 schema 4000；T6 validate 的外部 schema 每次编译分支；T8 Seen::of 与 edit_large 的长度/mtime 复用；T9 tools.rs/store.rs 的无列名 artifacts INSERT；U5 util.rs 的逐组件 canonical。
 - T1 全量检查曾暴露路径类型检查位于同文件写锁外的竞态；现已纳入锁内，既有 concurrent_edits_of_one_file_are_serialized 回归通过。两个原有 .pending 测试文件保留不动。
 
+### T2：忽略规则与无回溯搜索
+
+- 核查：grep 已使用缓冲读取，mmap 崩溃子问题不再存在；但仍通过 util::walk 固定排除目录，并用 fancy_regex，两个失败回归复现忽略规则无效及 lookaround 被接受。
+- 修复：仅 grep 使用 ignore crate 遍历，尊重 .gitignore/.ignore、父目录与嵌套规则、否定规则，保留稳定排序、隐藏文件和原固定目录排除；显式文件仍可搜索，新增可选 include_ignored 关闭 ignore 文件规则。util::walk 保持原语义，避免改变插件指纹、信任和验收范围。匹配改用已有 regex 的无回溯引擎，不依赖宿主 rg 的版本/可用性。
+- 依赖：新增 ignore 及三个 crossbeam 传递包；删除只用于该搜索路径的 fancy-regex 直接依赖（JSON Schema 所需的传递依赖仍保留）。这是实现标准忽略规则所需的专用依赖。
+- 测试：Rust 覆盖 target/dist/build/.next、node_modules、.ignore、嵌套/父级/否定规则、显式文件与 include_ignored、嵌套量词及不支持语法；bridge 验证默认过滤、覆盖及可恢复语法错误；手动 t2_ignored_tree_benchmark 对比 2002 个候选与过滤后的 2 个文件，记录耗时而不设置易抖动的时间断言。
+- 待确认决策：lookaround/backreferences 明确返回错误；不静默降级到回溯引擎。生成目录依赖仓库的 ignore 规则，不硬编码排除所有 build/ 等可能存放源码的目录；include_ignored 不解除原固定目录排除。
+- 验证：output/check-3c.ps1 T2 全套检查，日志 output/3C-T2-*.log；基准日志 output/3C-T2-bench.log。
+
