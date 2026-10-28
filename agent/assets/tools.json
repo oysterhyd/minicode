@@ -92,7 +92,7 @@
   },
   {
     "name": "edit",
-    "description": "Replace exact text in an existing file and return a unified diff. Refuses missing matches and (unless replace_all) ambiguous matches instead of guessing.",
+    "description": "Edit one file atomically. Use old_text/new_text or edits[] (1–100 operations against the original snapshot). Exact matching is preferred, then unique normalized matches for trailing whitespace, typographic quotes, Unicode compatibility variants and common indentation. Ambiguity or overlapping edits fail without writes. Failed matches return candidate lines without applying them. Set match_mode=exact to disable normalization. Existing encoding/BOM are preserved.",
     "input_schema": {
       "properties": {
         "path": {
@@ -115,14 +115,64 @@
           "description": "replace every occurrence instead of failing on ambiguous matches",
           "title": "Replace All",
           "type": "boolean"
+        },
+        "edits": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "properties": {
+              "old_text": {
+                "description": "exact text to replace; must match the file exactly",
+                "minLength": 1,
+                "title": "Old Text",
+                "type": "string"
+              },
+              "new_text": {
+                "description": "replacement text",
+                "title": "New Text",
+                "type": "string"
+              },
+              "replace_all": {
+                "default": false,
+                "description": "replace every occurrence instead of failing on ambiguous matches",
+                "title": "Replace All",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "old_text",
+              "new_text"
+            ]
+          }
+        },
+        "match_mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "exact"
+          ],
+          "default": "auto"
         }
       },
       "required": [
-        "path",
-        "old_text",
-        "new_text"
+        "path"
       ],
-      "type": "object"
+      "type": "object",
+      "oneOf": [
+        {
+          "required": [
+            "old_text",
+            "new_text"
+          ]
+        },
+        {
+          "required": [
+            "edits"
+          ]
+        }
+      ]
     },
     "requires_approval": true
   },

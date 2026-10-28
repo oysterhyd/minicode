@@ -69,6 +69,128 @@ fn utf8_bounds() {
 }
 
 #[tokio::test]
+async fn t4_edits_normalize_unicode_whitespace_and_relative_indentation() {
+    let (_dir, ctx) = fixture();
+    let path = ctx.workspace.join("normalize.txt");
+    fs::write(&path, "    if (ok) {\r\n      log(“café”);  \r\n    }\r\n").unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"normalize.txt"}), &ctx)
+            .await
+            .success
+    );
+    let out=tools::execute("edit",&json!({"path":"normalize.txt","old_text":"if (ok) {\n  log(\"cafe\u{301}\");\n}","new_text":"if (ok) {\n  log(\"changed\");\n}"}),&ctx).await;
+    assert!(out.success, "{:?}", out.error);
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "    if (ok) {\r\n      log(\"changed\");\r\n    }\r\n"
+    );
+}
+
+#[tokio::test]
+async fn t4_batch_edits_are_atomic_and_use_original_offsets() {
+    let (_dir, ctx) = fixture();
+    let path = ctx.workspace.join("batch.txt");
+    for (edits, expected, success) in [
+        (
+            json!([{"old_text":"one","new_text":"two"},{"old_text":"two","new_text":"three"}]),
+            "two three",
+            true,
+        ),
+        (
+            json!([{"old_text":"one","new_text":"changed"},{"old_text":"missing","new_text":"no"}]),
+            "one two",
+            false,
+        ),
+        (
+            json!([{"old_text":"one two","new_text":"all"},{"old_text":"two","new_text":"overlap"}]),
+            "one two",
+            false,
+        ),
+    ] {
+        fs::write(&path, "one two").unwrap();
+        assert!(
+            tools::execute("read", &json!({"path":"batch.txt"}), &ctx)
+                .await
+                .success
+        );
+        let out = tools::execute("edit", &json!({"path":"batch.txt","edits":edits}), &ctx).await;
+        assert_eq!(out.success, success, "{:?}", out.error);
+        assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    }
+}
+
+#[tokio::test]
+async fn t4_failed_edits_report_nearest_lines_and_reject_ambiguity() {
+    let (_dir, ctx) = fixture();
+    let path = ctx.workspace.join("candidate.txt");
+    fs::write(&path, "heading\nconst amount = total + 1;\nfooter\n").unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"candidate.txt"}), &ctx)
+            .await
+            .success
+    );
+    let out = tools::execute(
+        "edit",
+        &json!({"path":"candidate.txt","old_text":"const amunt = total + 1;","new_text":"no"}),
+        &ctx,
+    )
+    .await;
+    assert!(!out.success);
+    assert!(out.error.unwrap().contains("2\tconst amount = total + 1;"));
+    fs::write(&path, "log(“x”);\nlog(\"x\");\n").unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"candidate.txt"}), &ctx)
+            .await
+            .success
+    );
+    let out = tools::execute(
+        "edit",
+        &json!({"path":"candidate.txt","old_text":"log(”x“);","new_text":"no"}),
+        &ctx,
+    )
+    .await;
+    assert!(!out.success);
+    assert!(out.error.unwrap().contains("2 locations"));
+}
+
+#[tokio::test]
+async fn t4_large_batch_and_exact_mode_keep_safety_boundaries() {
+    let (_dir, ctx) = fixture();
+    let path = ctx.workspace.join("large-normalized.txt");
+    let before = format!("{}log(“café”);\ntail\n", "filler\n".repeat(40000));
+    fs::write(&path, &before).unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"large-normalized.txt"}), &ctx)
+            .await
+            .success
+    );
+    let exact=tools::execute("edit",&json!({"path":"large-normalized.txt","old_text":"log(\"café\");","new_text":"changed","match_mode":"exact"}),&ctx).await;
+    assert!(!exact.success);
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    let out=tools::execute("edit",&json!({"path":"large-normalized.txt","edits":[{"old_text":"log(\"cafe\u{301}\");","new_text":"changed"},{"old_text":"tail","new_text":"end"}]}),&ctx).await;
+    assert!(out.success, "{:?}", out.error);
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .ends_with("changed\nend\n")
+    );
+    fs::write(&path, "é").unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"large-normalized.txt"}), &ctx)
+            .await
+            .success
+    );
+    let partial = tools::execute(
+        "edit",
+        &json!({"path":"large-normalized.txt","old_text":"e","new_text":"wrong"}),
+        &ctx,
+    )
+    .await;
+    assert!(!partial.success);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "é");
+}
+
+#[tokio::test]
 async fn t2_grep_respects_ignore_rules_negation_and_subdirectory_searches() {
     let (_dir, ctx) = fixture();
     fs::write(

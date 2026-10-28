@@ -39,3 +39,19 @@ test('grep honors ignore files and exposes an explicit override',async t=>{
   assert.equal(calls[2].data.success,false)
   assert.match(calls[2].data.error,/not supported|look-around/)
 })
+
+test('normalized batch edits reach the bridge and failures preserve the file',async t=>{
+  const f=await fixture(t,[{tool_calls:[
+    {name:'read',arguments:{path:'edit.txt'}},
+    {name:'edit',arguments:{path:'edit.txt',edits:[{old_text:'log("café");',new_text:'updated'},{old_text:'tail',new_text:'end'}]}},
+    {name:'edit',arguments:{path:'edit.txt',edits:[{old_text:'updated',new_text:'partial'},{old_text:'missing',new_text:'bad'}]}}
+  ]},{text:'done'}])
+  fs.writeFileSync(path.join(f.workspace,'edit.txt'),'log(“café”);\ntail\n')
+  await f.request('setPermissionMode',{mode:'bypass'})
+  const result=await f.run()
+  const calls=result.detail.events.filter(e=>e.type==='tool_call_result')
+  assert.equal(calls[1].data.success,true,JSON.stringify(calls))
+  assert.equal(calls[2].data.success,false)
+  assert.match(calls[2].data.error,/Nearest candidate lines/)
+  assert.equal(fs.readFileSync(path.join(f.workspace,'edit.txt'),'utf8'),'updated\nend\n')
+})

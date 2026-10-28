@@ -4,6 +4,7 @@ pub mod cli;
 mod command_process;
 pub mod configuration;
 pub mod context;
+mod editing;
 pub mod eval;
 pub mod extensions;
 pub mod goals;

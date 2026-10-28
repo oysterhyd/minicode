@@ -1,5 +1,6 @@
 use crate::{
     attachments::Attachments,
+    editing,
     extensions::Catalog,
     mcp::McpRegistry,
     models::{Outcome, ToolSpec},
@@ -10,7 +11,6 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
-    borrow::Cow,
     collections::HashMap,
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -816,29 +816,6 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     }
     Ok(bounded(lines.join("\n")))
 }
-fn replacement_texts<'a>(text: &str, args: &'a Value) -> Result<(Cow<'a, str>, Cow<'a, str>)> {
-    let old = util::string(args, "old_text")?;
-    let new = util::string(args, "new_text")?;
-    if old.is_empty() {
-        bail!("old_text must be nonempty")
-    }
-    // Reads expose logical lines. Keep a consistently CRLF file in its native
-    // format when a model supplies the same text using LF line endings.
-    let crlf = text.contains("\r\n")
-        && !text
-            .as_bytes()
-            .iter()
-            .enumerate()
-            .any(|(i, b)| *b == b'\n' && (i == 0 || text.as_bytes()[i - 1] != b'\r'));
-    let convert = |value: &'a str| {
-        if crlf && !value.contains('\r') {
-            Cow::Owned(value.replace('\n', "\r\n"))
-        } else {
-            Cow::Borrowed(value)
-        }
-    };
-    Ok((convert(old), convert(new)))
-}
 fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let raw = util::string(args, "path")?;
     let path = util::in_workspace(&ctx.workspace, raw)?;
@@ -889,21 +866,7 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let after = if name == "write" {
         util::string(args, "content")?.to_string()
     } else {
-        let (old, new) = replacement_texts(&before, args)?;
-        let count = before.matches(old.as_ref()).count();
-        if count == 0 {
-            bail!("old_text not found in {relative}: file may have changed; re-read the file first")
-        }
-        if count > 1 && args["replace_all"] != true {
-            bail!(
-                "old_text matches {count} locations in {relative}; include more surrounding context to make it unique, or pass replace_all=true"
-            )
-        }
-        if args["replace_all"] == true {
-            before.replace(old.as_ref(), new.as_ref())
-        } else {
-            before.replacen(old.as_ref(), new.as_ref(), 1)
-        }
+        editing::apply(&before, &editing::plan(&before, args, &relative)?)
     };
     if ctx.cancel.is_cancelled() {
         bail!("tool cancelled")
@@ -979,31 +942,18 @@ fn edit_large(
     // The mapped source is borrowed; no second heap copy of a large file.
     let mapped = unsafe { memmap2::MmapOptions::new().map(&input)? };
     let text = std::str::from_utf8(&mapped).context("binary or non-UTF-8 file")?;
-    let (old, new) = replacement_texts(text, args)?;
-    let count = text.matches(old.as_ref()).count();
-    if count == 0 {
-        bail!("old_text not found in {relative}: file may have changed; re-read the file first")
-    }
-    if count > 1 && args["replace_all"] != true {
-        bail!(
-            "old_text matches {count} locations in {relative}; include more surrounding context to make it unique, or pass replace_all=true"
-        )
-    }
+    let changes = editing::plan(text, args, relative)?;
     let parent = path.parent().context("invalid file path")?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     let mut position = 0;
-    let mut replacements = 0;
-    for (index, _) in text.match_indices(old.as_ref()) {
+    let replacements = changes.len();
+    for change in changes {
         if ctx.cancel.is_cancelled() {
             bail!("tool cancelled")
         }
-        temp.write_all(&mapped[position..index])?;
-        temp.write_all(new.as_bytes())?;
-        position = index + old.len();
-        replacements += 1;
-        if args["replace_all"] != true {
-            break;
-        }
+        temp.write_all(&mapped[position..change.start])?;
+        temp.write_all(change.replacement.as_bytes())?;
+        position = change.end;
     }
     temp.write_all(&mapped[position..])?;
     temp.as_file().sync_all()?;

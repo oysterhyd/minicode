@@ -598,3 +598,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 待确认决策：lookaround/backreferences 明确返回错误；不静默降级到回溯引擎。生成目录依赖仓库的 ignore 规则，不硬编码排除所有 build/ 等可能存放源码的目录；include_ignored 不解除原固定目录排除。
 - 验证：output/check-3c.ps1 T2 全套检查，日志 output/3C-T2-*.log；基准日志 output/3C-T2-bench.log。
 
+### T4：可控归一化与原子批量编辑
+
+- 核查与复现：旧 edit 在空白、智能引号、Unicode 组合形式或缩进不同的情况下只报 not found；edits[] 缺 old_text 直接失败，错误不含候选。三项先失败的 Rust 回归覆盖这些路径。
+- 修复：保留精确匹配优先，缺失时尝试行尾空白、智能引号与 Unicode 兼容分解的映射匹配，再尝试保持相对缩进的整行窗口；使用原文 byte range，避免拆开一个 Unicode 字符。默认仍拒绝歧义，match_mode=exact 可恢复严格匹配。edits[] 的 1–100 项基于同一原始快照规划，重叠、任一失败均不写入；普通/大文件使用同一编辑计划，保持 CRLF、原编码与 BOM。
+- 候选：只返回最相近的三行及真实行号，不自动应用模糊猜测。候选扫描前 20,000 行、每行比较前 500 字符，限制错误路径成本。
+- 依赖与取舍：unicode-normalization 已由 T1 PDF 依赖引入，本项将其声明为直接依赖，不新增包。自动归一化默认限 2 MiB，MINICODE_EDIT_NORMALIZE_MAX_BYTES 可设置到 20 MiB；更大文件仍支持精确编辑并给出明确提示。缩进仅允许一致的基准变化（tab 按 4 列比较），不自动改变相对缩进，也不把单双引号或拼写错误视为等价。
+- 测试：归一化匹配、CRLF 与缩进保持、规范等价字符、批量偏移/失败/重叠、歧义拒绝、严格模式、大文件编辑、Unicode 局部匹配拒绝，以及 bridge 的批量与失败不落盘。检查日志 output/3C-T4-*.log。
+
