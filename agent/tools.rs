@@ -1188,6 +1188,12 @@ fn shell_for(name: &str, command: &str, cwd: &Path) -> Command {
         ("NO_COLOR", "1"),
         ("TERM", "dumb"),
         ("CARGO_TERM_COLOR", "never"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GIT_EDITOR", "true"),
+        ("GIT_SEQUENCE_EDITOR", "true"),
+        ("PAGER", "cat"),
+        ("GIT_PAGER", "cat"),
+        ("CI", "1"),
     ] {
         if std::env::var_os(key).is_none_or(|value| value.is_empty()) {
             cmd.env(key, value);

@@ -494,6 +494,13 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 验证：Rust、协议、两组离线评测和 TUI 全套检查通过；评测使用独立临时输出目录。
 ## 批次 3B：命令输出与进程治理
 
+### SH4：避免命令交互提示
+
+- 问题与根因：stdin 已关闭，但 Git 凭据、编辑器、分页器仍可通过终端或外部程序等待用户。
+- 修复：补齐 GIT_TERMINAL_PROMPT=0、GIT_EDITOR=true、GIT_SEQUENCE_EDITOR=true、PAGER=cat、GIT_PAGER=cat、CI=1 默认值；保留显式环境配置。调用者仍可在命令中覆盖。
+- 测试：真实 bridge 回归先失败（输出 `,,,,,`），修复后验证六个默认值；已有 stdin=null 与 PowerShell NonInteractive 保留。没有使用真实远程 git push，避免网络凭据和远程副作用。
+- 验证：`output/check-3b.ps1 SH4` 全套检查，日志 output/3B-SH4-*.log。
+
 ### SH3：清理命令终端序列与进度行
 
 - 问题与根因：`decode()` 只匹配 SGR，其他 CSI、OSC 链接和 CR 覆盖行进入模型上下文。
