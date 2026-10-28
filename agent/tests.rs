@@ -3599,3 +3599,88 @@ fn x2_large_completed_tool_inputs_and_old_assistant_text_have_artifact_refs() {
         0
     );
 }
+
+#[test]
+fn x3_force_compacts_one_or_two_prompt_tasks_below_the_trigger() {
+    for prompts in [1, 2] {
+        let (_dir, ctx) = fixture();
+        let mut messages = x2_long_turn();
+        if prompts == 2 {
+            messages.push(Message::user("latest request"));
+        }
+        let before = context::estimate("", &messages, &[]);
+        assert!(before < 200_000);
+        let stats = context::compact(
+            &ctx.store,
+            &ctx.session,
+            "",
+            &[],
+            &mut messages,
+            200_000,
+            true,
+        )
+        .unwrap()
+        .expect("force must work with fewer than three prompts");
+        assert!(stats["tokens_after"].as_u64().unwrap() < before);
+        assert_eq!(messages[0].text(), "original request and constraints");
+        assert_eq!(
+            context::paired_prefix(&messages, &[messages.len()]),
+            Some(messages.len())
+        );
+    }
+}
+
+#[test]
+fn x3_force_can_offload_a_single_large_answer_but_keeps_the_original_request() {
+    let (_dir, ctx) = fixture();
+    let original = "完整用户约束".repeat(4000);
+    let mut messages = vec![
+        Message::user(&original),
+        Message {
+            role: "assistant".into(),
+            content: vec![Block::text("长任务进度".repeat(6000))],
+        },
+    ];
+    assert!(
+        context::compact(
+            &ctx.store,
+            &ctx.session,
+            "",
+            &[],
+            &mut messages,
+            200_000,
+            true
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(messages[0].text(), original);
+    assert!(messages[1].text().contains("[artifact:"));
+    assert!(
+        context::compact(
+            &ctx.store,
+            &ctx.session,
+            "",
+            &[],
+            &mut messages,
+            200_000,
+            true
+        )
+        .unwrap()
+        .is_none()
+    );
+    let mut only_request = vec![Message::user(original)];
+    assert!(
+        context::compact(
+            &ctx.store,
+            &ctx.session,
+            "",
+            &[],
+            &mut only_request,
+            200_000,
+            true
+        )
+        .unwrap()
+        .is_none()
+    );
+}

@@ -159,42 +159,29 @@ pub fn archive_range(
         })
         .map(|(i, _)| i)
         .collect::<Vec<_>>();
-    if !force {
-        let head = units.first()? + 1;
-        let keep = 20_000.min(window / 3).max(1);
-        let mut tail = 0;
-        let mut keep_start = messages.len();
-        for (i, message) in messages.iter().enumerate().rev() {
-            tail += estimate("", std::slice::from_ref(message), &[]);
-            keep_start = i;
-            if tail >= keep {
-                break;
-            }
-        }
-        let candidates = (head + 1..=keep_start).collect::<Vec<_>>();
-        let end = paired_prefix(messages, &candidates)?;
-        return Some(head..end);
-    }
+    let head = units.first()? + 1;
+    let keep = 20_000.min(window / 3).max(1);
+    let keep = if force {
+        keep.min((estimate("", messages, &[]) / 2).max(1))
+    } else {
+        keep
+    };
+    let mut tail = 0;
     let mut keep_start = messages.len();
-    let mut kept_tokens = 0;
-    let mut kept_units = 0;
-    for &start in units.iter().rev() {
-        kept_tokens += estimate("", &messages[start..keep_start], &[]);
-        kept_units += 1;
-        keep_start = start;
-        if (force || kept_tokens >= 20_000) && kept_units >= 1 {
+    for (i, message) in messages.iter().enumerate().rev() {
+        tail += estimate("", std::slice::from_ref(message), &[]);
+        keep_start = i;
+        if tail >= keep {
             break;
         }
     }
-    let candidates = units
-        .iter()
-        .copied()
-        .skip(2)
-        .filter(|b| *b <= keep_start)
-        .collect::<Vec<_>>();
+    // Manual compaction keeps the latest request verbatim whenever possible.
+    if force && let Some(&latest) = units.last().filter(|&&i| i > head) {
+        keep_start = latest;
+    }
+    let candidates = (head + 1..=keep_start).collect::<Vec<_>>();
     let end = paired_prefix(messages, &candidates)?;
-    let head = units.get(1).copied().unwrap_or(0);
-    (end > head).then_some(head..end)
+    Some(head..end)
 }
 
 pub fn compact_summarized(
@@ -305,7 +292,7 @@ pub fn compact_summarized(
             messages.splice(head..end, [summary(&artifact)]);
         }
     }
-    if estimate(system, messages, specs) > trigger {
+    if estimate(system, messages, specs) > trigger || (force && archived == 0) {
         let total = messages
             .iter()
             .flat_map(|m| &m.content)
@@ -331,17 +318,32 @@ pub fn compact_summarized(
             }
         }
     }
-    if archived == 0 && shrunk == 0 {
+    let offloaded = if force && archived == 0 && shrunk == 0 {
+        offload_large_inner(store, id, messages, true)?
+    } else {
+        0
+    };
+    if archived == 0 && shrunk == 0 && offloaded == 0 {
         return Ok(None);
     }
     let after = estimate(system, messages, specs);
     store.replace_messages(id, messages)?;
     Ok(Some(
-        json!({"tokens_before":before,"tokens_after":after,"archived_units":archived,"shrunk_results":shrunk,"summarized_units":if generated.is_some(){archived}else{0},"split_turn":split_turn}),
+        json!({"tokens_before":before,"tokens_after":after,"archived_units":archived,"shrunk_results":shrunk,"summarized_units":if generated.is_some(){archived}else{0},"split_turn":split_turn,"offloaded_blocks":offloaded}),
     ))
 }
 pub fn offload_large(store: &Store, id: &str, messages: &mut [Message]) -> Result<usize> {
+    offload_large_inner(store, id, messages, false)
+}
+fn offload_large_inner(
+    store: &Store,
+    id: &str,
+    messages: &mut [Message],
+    force: bool,
+) -> Result<usize> {
     let mut count = 0;
+    let threshold = if force { 1024 } else { 16_000 };
+    let preview = if force { 400 } else { 4000 };
     let completed = messages
         .iter()
         .flat_map(|m| &m.content)
@@ -373,24 +375,24 @@ pub fn offload_large(store: &Store, id: &str, messages: &mut [Message]) -> Resul
                 }
                 Block::Text { text }
                     if message.role == "assistant"
-                        && index < last
-                        && text.len() > 16_000
+                        && (index < last || force)
+                        && text.len() > threshold
                         && !text.contains("[artifact:") =>
                 {
                     let artifact = store.spill(id, "assistant_text", text)?;
                     *text = format!(
                         "{}\n...[已压缩；完整内容见 [artifact:{artifact}]]",
-                        util::prefix(text, 4000)
+                        util::prefix(text, preview)
                     );
                     count += 1;
                 }
                 Block::ToolResult { content, .. }
-                    if content.len() > 16_000 && !content.contains("[artifact:") =>
+                    if content.len() > threshold && !content.contains("[artifact:") =>
                 {
                     let artifact = store.spill(id, "tool_output", content)?;
                     *content = format!(
                         "{}\n...[output truncated; 完整输出见 [artifact:{artifact}]]",
-                        util::prefix(content, 4000)
+                        util::prefix(content, preview)
                     );
                     count += 1;
                 }

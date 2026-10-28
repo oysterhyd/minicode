@@ -680,3 +680,21 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：单个十轮工具回合触发归档、上下文下降超过一半、首尾内容保留；原文 artifact 和保留工作集分别验证配对；大块参数/assistant 归档、原 JSON 回读、待执行参数保持原文、重复 offload 不再改写。
 - 验证：提交前完整检查 output/check-4a.ps1 X2，日志 output/4A-X2-*.log。
 - 取舍：工具历史参数仅用于重放给模型，归档后须通过 read_artifact 回查完整正文；不改变已执行工具的实际输入或持久执行报告。初始要求和固定 system/tool schema 仍不可压缩。
+
+### X3：少量用户提示也可手动压缩
+
+- 问题与复现：force 仍要求三个用户单元，且 shrink 必须超过自动阈值。新增 Rust 一/二提示长任务、单个长回答测试均先失败；真实 /compact 契约返回“当前没有可压缩的历史”，见 output/4A-X3-*-red.log。
+- 修复：手动模式允许完整工具组内的消息切分，目标保留最多一半历史、20k token 与窗口三分之一中的较小值，并尽可能保留最新请求。force 在自动阈值以下也能 shrink；没有可归档前缀时，对超过 1 KiB 的 assistant 文本/工具结果保留 400 字节预览和完整 artifact。最初用户要求始终原样保留。
+- 已有能力核查：CLI 与 Bridge 已经分别在 cli.rs 的 /compact 分支、bridge.rs 的 runSlash 分支报告“当前没有可压缩的历史。”，保留原反馈，不重复修改协议或界面。
+- 测试：一/二提示、低于自动阈值、回合内配对、单回答归档、初始约束完整、再次压缩返回无变化；真实 bridge 单次长回复 /compact 成功，再次调用明确报告没有可压缩内容。
+- 验证：完整检查 output/check-4a.ps1 X3，日志 output/4A-X3-*.log。
+- 范围外观察：首次全协议运行中，windows-prompt 的 PowerShell 7 探测短暂返回“版本未知”；相同二进制单独重跑该文件 3/3 通过，随后完整协议 200 项通过、2 项既有跳过。失败原始日志 output/4A-X3-protocol-flake.log，未修改 Shell 探测逻辑。
+
+### 4A 当前交付范围与验证
+
+- 已完成并分别提交：X1 结构化增量摘要、X2 自动回合内切分与大块输入归档、X3 少量提示下的手动压缩。修改仅涉及 agent/context.rs、provider.rs、runtime.rs、tests.rs，tests/agent/context.test.mjs 与本修复记录；没有新增依赖或修改 Desktop。
+- 每项提交前均完成 fmt、Clippy -D warnings、Rust test/build --locked、全协议、任务/trace 一致性、两组 B0/B1/B2 离线评测及结果验证、npm ci/build 和真实 bridge TUI 测试。最新 X3：Rust 147 通过、2 个既有手动基准跳过；协议 200 通过、2 个既有跳过；TUI 118 通过。主任务 60/60；9 个场景保持 7 个预期通过、2 个预期失败。原始日志 output/4A-X1-submit-*.log、output/4A-X2-*.log、output/4A-X3-*.log。
+- 尚未实现：X4 的 CJK 估算、usage 基准加增量及 ContextOverflow 后压缩重试；X5 的渐进 shrink 与 bash/grep 文件引用提取；P12 的模型校准持久化。这些条目的失败测试草稿仅在忽略的 output/ 目录中，未并入交付或宣称通过。当前 tokens 仍按字符数 / 3；prompt_scale 仍初始化为 1.0；运行时仅保留原有通用重试语义。
+- 因而整批 4A 尚未达到“超过两倍窗口的中文会话持续运行”及“provider 溢出恢复成功”验收，下一次应从 X4 开始，再处理 X5 和 P12，随后验证整批长会话行为。
+- 风险与待确认：默认摘要使用当前模型，增加调用成本与最多 30 秒等待；可选 compactionModel 可选便宜模型。摘要事实准确性依赖模型，原文 artifact 提供回查。最初用户要求与固定提示仍不可压缩；未完成 X5 前旧工具结果仍沿用一次性 shrink 策略。
+- 保持原有两个 .pending 文件不变；未推送或发布。

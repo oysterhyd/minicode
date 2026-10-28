@@ -49,3 +49,11 @@ test('X1: structured summary requests are tool-free and update the previous summ
   assert.ok(events.every(e => e.data.summarized_units > 0))
   assert.ok(detail.events.filter(e => e.type === 'context_summary').every(e => e.data.usage.input_tokens === 50))
 })
+
+test('X3: /compact handles a single long reply and explicitly reports no further work', async t => {
+  const f = await fixture(t,[{text:'已完成修改，下一步验证。'.repeat(4000)}])
+  const first = await f.run({text:'原始任务要求必须保留'})
+  const compact = () => f.request('runSlash',{workspace:f.workspace,sessionId:first.id,text:'/compact'})
+  assert.match((await compact()).message,/已压缩/)
+  assert.match((await compact()).message,/没有可压缩/)
+})
