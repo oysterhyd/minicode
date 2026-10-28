@@ -146,9 +146,7 @@ pub fn prefix(text: &str, max: usize) -> &str {
     &text[..end]
 }
 pub fn terminal_text(text: &str) -> String {
-    text.chars()
-        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
-        .collect()
+    command_text(text)
 }
 /// Plain command transcript: discard terminal controls and replace progress lines.
 pub fn command_text(text: &str) -> String {

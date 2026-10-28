@@ -69,6 +69,22 @@ fn utf8_bounds() {
 }
 
 #[test]
+fn u3_terminal_text_removes_sequences_without_fragments() {
+    for (raw, expected) in [
+        ("\u{1b}[31m中文\u{1b}[0m\u{1b}[K\n", "中文\n"),
+        (
+            "\u{1b}]8;;https://example.com\u{1b}\\label\u{1b}]8;;\u{7}",
+            "label",
+        ),
+        ("start\u{1b}[?25l\u{1b}[2Jend\u{1b}[31", "startend"),
+        ("10%\r100%\r\nnext\tline", "100%\nnext\tline"),
+        ("\u{9b}31mred\u{9b}0m\u{1b}Pignored\u{1b}\\", "red"),
+    ] {
+        assert_eq!(util::terminal_text(raw), expected);
+    }
+}
+
+#[test]
 fn r27_rejects_invalid_tool_timeout_configuration() {
     let (_dir, ctx) = fixture();
     let configuration = Configuration {
@@ -1036,7 +1052,19 @@ async fn ordinary_command_newlines_do_not_create_an_artifact() {
 async fn sh3_shell_defaults_disable_color() {
     let (_dir, ctx) = fixture();
     let result = tools::run_command("node -e \"console.log([process.env.NO_COLOR,process.env.TERM,process.env.CARGO_TERM_COLOR].join(','))\"", &ctx.workspace, 10.0, &ctx).await.unwrap();
-    assert_eq!(result.output, "1,dumb,never");
+    let expected = [
+        ("NO_COLOR", "1"),
+        ("TERM", "dumb"),
+        ("CARGO_TERM_COLOR", "never"),
+    ]
+    .map(|(key, default)| {
+        std::env::var(key)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default.into())
+    })
+    .join(",");
+    assert_eq!(result.output, expected);
 }
 
 #[tokio::test]
