@@ -68,6 +68,64 @@ fn utf8_bounds() {
     }
 }
 
+fn t9_reorder_and_extend_artifacts(store: &Store) {
+    store.with(|c| {c.execute_batch("CREATE TABLE migrated_artifacts(created_at TEXT NOT NULL,artifact_id TEXT NOT NULL,kind TEXT NOT NULL,session_id TEXT NOT NULL,relpath TEXT NOT NULL,migration_marker TEXT NOT NULL DEFAULT 'migrated',PRIMARY KEY(session_id,artifact_id));
+        INSERT INTO migrated_artifacts(created_at,artifact_id,kind,session_id,relpath) SELECT created_at,artifact_id,kind,session_id,relpath FROM artifacts;
+        DROP TABLE artifacts; ALTER TABLE migrated_artifacts RENAME TO artifacts;")?;Ok(())}).unwrap();
+}
+#[test]
+fn t9_spill_inserts_by_column_name_after_schema_migration() {
+    let (_dir, ctx) = fixture();
+    let old = ctx
+        .store
+        .spill(&ctx.session, "history", "old content")
+        .unwrap();
+    t9_reorder_and_extend_artifacts(&ctx.store);
+    let new = ctx
+        .store
+        .spill(&ctx.session, "tool_output", "new content")
+        .unwrap();
+    assert_eq!(
+        ctx.store
+            .artifact_page(&ctx.session, &old, 0, 4000)
+            .unwrap()["text"],
+        "old content"
+    );
+    assert_eq!(
+        ctx.store
+            .artifact_page(&ctx.session, &new, 0, 4000)
+            .unwrap()["text"],
+        "new content"
+    );
+    ctx.store
+        .with(|c| {
+            let marker: String = c.query_row(
+                "SELECT migration_marker FROM artifacts WHERE session_id=? AND artifact_id=?",
+                rusqlite::params![ctx.session, new],
+                |row| row.get(0),
+            )?;
+            assert_eq!(marker, "migrated");
+            Ok(())
+        })
+        .unwrap();
+}
+#[tokio::test]
+async fn t9_command_capture_inserts_by_column_name_after_schema_migration() {
+    let (_dir, ctx) = fixture();
+    t9_reorder_and_extend_artifacts(&ctx.store);
+    let result = tools::run_command(
+        "node -e \"process.stdout.write('x'.repeat(60000))\"",
+        &ctx.workspace,
+        10.0,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{:?}", result.error);
+    assert!(result.output.contains("[artifact:"));
+    ctx.store.with(|c| {let count:i64=c.query_row("SELECT COUNT(*) FROM artifacts WHERE kind='command_output' AND migration_marker='migrated'",[],|row|row.get(0))?;assert_eq!(count,1);Ok(())}).unwrap();
+}
+
 async fn t8_same_metadata_edit_case(padding: usize) {
     let (_dir, ctx) = fixture();
     let path = ctx.workspace.join("same-metadata.txt");

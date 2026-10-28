@@ -1604,7 +1604,7 @@ fn record_capture(
     temp.persist(&path).map_err(|e| e.error)?;
     ctx.store.with(|c| {
         c.execute(
-            "INSERT INTO artifacts VALUES(?,?,?,?,?)",
+            "INSERT INTO artifacts(session_id,artifact_id,kind,relpath,created_at) VALUES(?,?,?,?,?)",
             rusqlite::params![
                 ctx.session,
                 artifact,

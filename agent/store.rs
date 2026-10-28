@@ -499,7 +499,7 @@ impl Store {
         util::atomic_write(&path, text.as_bytes())?;
         if let Err(e) = self.with(|c| {
             c.execute(
-                "INSERT INTO artifacts VALUES(?,?,?,?,?)",
+                "INSERT INTO artifacts(session_id,artifact_id,kind,relpath,created_at) VALUES(?,?,?,?,?)",
                 params![id, artifact, kind, rel, util::now()],
             )?;
             Ok(())

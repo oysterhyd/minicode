@@ -628,3 +628,9 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 范围外记录：edit_large 仍使用原有 mmap，外部同时 truncate 的进程级风险没有在本项改写；大文件的 temp.persist 路径也尚未接入 U4 的 Windows 元数据保留实现。位置见 tools.rs/edit_large，不扩大本项到另一次文件写入架构修改。
 - 验证：output/check-3c.ps1 T8 全套检查，日志 output/3C-T8-*.log。
 
+### T9：归档 INSERT 显式列名
+
+- 问题与复现：store.spill 与 command capture 都使用无列名的 INSERT。两项失败回归将 artifacts 列重排并新增带默认值的列，旧代码报“6 columns but 5 values supplied”。
+- 修复：两处明确列出 session_id、artifact_id、kind、relpath、created_at，不改变现有 schema、版本号与旧记录。
+- 测试：迁移前归档仍可读取，迁移后 spill/命令截断归档成功，新增列保留默认值；覆盖两条实际落盘路径。全套日志 output/3C-T9-*.log。
+
