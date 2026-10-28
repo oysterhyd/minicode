@@ -1184,6 +1184,15 @@ fn shell_for(name: &str, command: &str, cwd: &Path) -> Command {
     if let Some(path) = util::bundled_path() {
         cmd.env("PATH", path);
     }
+    for (key, value) in [
+        ("NO_COLOR", "1"),
+        ("TERM", "dumb"),
+        ("CARGO_TERM_COLOR", "never"),
+    ] {
+        if std::env::var_os(key).is_none_or(|value| value.is_empty()) {
+            cmd.env(key, value);
+        }
+    }
     #[cfg(windows)]
     for (name, default) in [("PYTHONUTF8", "1"), ("PYTHONIOENCODING", "utf-8")] {
         if std::env::var_os(name).is_none_or(|value| value.is_empty()) {
@@ -1557,11 +1566,16 @@ fn decode(bytes: &[u8]) -> String {
     };
     #[cfg(not(windows))]
     let text = String::from_utf8_lossy(bytes).into_owned();
-    let text = text.replace("\r\n", "\n");
-    static ANSI: OnceLock<regex::Regex> = OnceLock::new();
-    ANSI.get_or_init(|| regex::Regex::new("\u{1b}\\[[0-9;]*m").unwrap())
-        .replace_all(&text, "")
-        .into_owned()
+    util::command_text(&text)
+}
+
+#[cfg(test)]
+mod output_tests {
+    #[test]
+    fn sh3_strips_terminal_sequences_and_overwritten_progress() {
+        assert_eq!(super::decode(b"\x1b[31merror\x1b[0m\x1b[K\n\x1b[2J\x1b[?25l\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x07\n10%\r20%\r100%\r\n"), "error\nlink\n100%\n");
+        assert_eq!(super::decode(b"ok\x1b[31"), "ok");
+    }
 }
 
 #[cfg(all(test, windows))]

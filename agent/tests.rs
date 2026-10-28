@@ -970,6 +970,13 @@ async fn ordinary_command_newlines_do_not_create_an_artifact() {
 }
 
 #[tokio::test]
+async fn sh3_shell_defaults_disable_color() {
+    let (_dir, ctx) = fixture();
+    let result = tools::run_command("node -e \"console.log([process.env.NO_COLOR,process.env.TERM,process.env.CARGO_TERM_COLOR].join(','))\"", &ctx.workspace, 10.0, &ctx).await.unwrap();
+    assert_eq!(result.output, "1,dumb,never");
+}
+
+#[tokio::test]
 async fn shell_preserves_quoted_command_text() {
     let (_dir, ctx) = fixture();
     let result = tools::run_command("echo '1>/dev/null'", &ctx.workspace, 10.0, &ctx)

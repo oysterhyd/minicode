@@ -150,6 +150,95 @@ pub fn terminal_text(text: &str) -> String {
         .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
         .collect()
 }
+/// Plain command transcript: discard terminal controls and replace progress lines.
+pub fn command_text(text: &str) -> String {
+    let mut chars = text.chars().peekable();
+    let mut output = String::with_capacity(text.len());
+    let mut line = 0;
+    let mut carriage = false;
+    while let Some(ch) = chars.next() {
+        let control = if ch == '\u{1b}' {
+            chars.next()
+        } else {
+            Some(ch)
+        };
+        match control {
+            Some('[') if ch == '\u{1b}' => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            Some('\u{9b}') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            Some(']' | 'P' | 'X' | '^' | '_') if ch == '\u{1b}' => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || c == '\u{9c}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+                continue;
+            }
+            Some('\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || c == '\u{9c}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+                continue;
+            }
+            _ if ch == '\u{1b}' => {
+                if control.is_some_and(|c| (' '..='/').contains(&c)) {
+                    for c in chars.by_ref() {
+                        if !(' '..='/').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        match ch {
+            '\r' => carriage = true,
+            '\n' => {
+                output.push('\n');
+                line = output.len();
+                carriage = false;
+            }
+            '\u{8}' => {
+                if output.len() > line {
+                    output.pop();
+                }
+            }
+            c if !c.is_control() || c == '\t' => {
+                if carriage {
+                    output.truncate(line);
+                    carriage = false;
+                }
+                output.push(c);
+            }
+            _ => {}
+        }
+    }
+    output
+}
 pub fn suffix(text: &str, max: usize) -> &str {
     let mut start = text.len().saturating_sub(max);
     while !text.is_char_boundary(start) {

@@ -492,3 +492,12 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：Rust 单测先复现 CP936 乱码，覆盖 CP936、UTF-8、代码页回退和 64 KiB 块边界；协议测试覆盖 Bash / PowerShell 的 Python 默认值、显式覆盖，以及 PowerShell 无 BOM 输出。
 - 依赖与取舍：复用已有 `windows-sys` 并启用 Windows 国际化 API，未引入新依赖。不同代码页的字节可能同时合法，无法可靠推断时优先 OEM；单次输出混合多种编码仍可能存在歧义。
 - 验证：Rust、协议、两组离线评测和 TUI 全套检查通过；评测使用独立临时输出目录。
+## 批次 3B：命令输出与进程治理
+
+### SH3：清理命令终端序列与进度行
+
+- 问题与根因：`decode()` 只匹配 SGR，其他 CSI、OSC 链接和 CR 覆盖行进入模型上下文。
+- 修复：使用无依赖的状态解析剥离 CSI、OSC、DCS 等终端序列（含未完成序列），折叠 CR 进度行并保留 CRLF。shell 默认设置 NO_COLOR=1、TERM=dumb、CARGO_TERM_COLOR=never；显式环境值优先。
+- 测试：先运行 `cargo test --locked sh3_`，两项失败，分别复现残留控制序列与缺少颜色环境默认值；修复后验证 CSI/OSC、CRLF、进度覆盖、未完成序列，以及真实 bridge 的默认值/显式覆盖。原始 artifact 保留原始终端记录，预览经清理。
+- 验证：提交前执行 `output/check-3b.ps1 SH3` 全套 Rust、协议、离线评测与 TUI 检查，日志位于 output/3B-SH3-*.log。
+
