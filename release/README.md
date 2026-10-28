@@ -1,8 +1,8 @@
-# MiniCode 3.0.2 Windows 发行版
+# MiniCode 3.0.3 Windows 发行版
 
 Windows 10/11 x64：Go / MyGo Desktop、Rust Agent / CLI、TypeScript + Ink TUI。内置 Git 2.56.0、Node.js 22.22.0；后端及内置评测不依赖 Python。项目自己的 SDK 和测试依赖由项目提供。
 
-下载 [v3.0.2](https://github.com/oysterhyd/minicode/releases/tag/v3.0.2) 的 MiniCode-Setup-3.0.2-win-x64.exe；摘要见 SHA256SUMS.txt。首次启动在“设置 → 模型与预算”添加自己的服务。升级保留配置、schema 7 会话、附件和记忆。
+下载 [v3.0.3](https://github.com/oysterhyd/minicode/releases/tag/v3.0.3) 的 MiniCode-Setup-3.0.3-win-x64.exe；摘要见 SHA256SUMS.txt。首次启动在“设置 → 模型与预算”添加自己的服务。升级保留配置、schema 7 会话、附件和记忆。
 
 ## 从源码打包
 
@@ -24,10 +24,10 @@ test-installer.ps1 将实际 NSIS 包安装到中文和空格路径，验证 Uni
 ## 产物
 
 ```text
-dist/MiniCode-Setup-3.0.2-win-x64.exe
+dist/MiniCode-Setup-3.0.3-win-x64.exe
 dist/SHA256SUMS.txt
 dist/update-windows-amd64.json
-dist/minicode-3.0.2-windows-amd64.tar.gz
+dist/minicode-3.0.3-windows-amd64.tar.gz
 dist/native/windows-amd64/
   MiniCode.exe, minicode.cmd, LICENSE, THIRD-PARTY-NOTICES.md, licenses/
   runtime/minicode.exe, git/, node/, tui/, evals/, licenses/

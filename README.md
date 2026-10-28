@@ -57,6 +57,8 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
 
 2.0.3 对 Agent、Desktop 和 TUI 做代码级可靠性审查，修复思考事件断线、取消与队列竞态、子助手验收、上下文约束丢失、文件编辑与 Git 范围等问题；具体触发条件和修复行为见 [2.0.3 修复说明](docs/fixes-2.0.3.md)。
 
+3.0.3 改善运行恢复、Provider / Bridge 兼容性和中文 Windows 工具链，增加多编码文件读写、PDF / Notebook 文本读取、批量编辑、忽略规则搜索与命令输出治理；修复记录及可配置边界见 [3.0.3 修复说明](docs/fixes-3.0.3.md)。
+
 发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未作 Windows 代码签名，更新归档使用 Ed25519 签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
 

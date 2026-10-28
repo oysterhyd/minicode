@@ -16,7 +16,7 @@ import (
 	"minicode.desktop/internal/workspace"
 )
 
-const appVersion = "3.0.2"
+const appVersion = "3.0.3"
 
 func projectRoot() string {
 	if override := os.Getenv("MINICODE_PROJECT_ROOT"); override != "" {
