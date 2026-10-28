@@ -3448,3 +3448,154 @@ async fn invalid_pending_write_recovers_as_failed_tool_result() {
             .any(|kind| kind == "side_effect_unknown")
     );
 }
+
+fn x2_long_turn() -> Vec<Message> {
+    let mut messages = vec![Message::user("original request and constraints")];
+    for i in 0..10 {
+        messages.push(Message {
+            role: "assistant".into(),
+            content: vec![
+                Block::text(format!(
+                    "decision {i}: {}",
+                    "investigation details ".repeat(900)
+                )),
+                Block::ToolUse {
+                    id: format!("split-{i}"),
+                    name: "read".into(),
+                    input: json!({"path":format!("src/{i}.rs")}),
+                    input_error: None,
+                },
+            ],
+        });
+        messages.push(Message {
+            role: "user".into(),
+            content: vec![Block::ToolResult {
+                tool_use_id: format!("split-{i}"),
+                content: "file contents ".repeat(300),
+                is_error: false,
+                images: vec![],
+            }],
+        });
+    }
+    messages.push(Message {
+        role: "assistant".into(),
+        content: vec![Block::text("latest progress must remain")],
+    });
+    messages
+}
+
+#[test]
+fn x2_automatic_compaction_splits_a_single_turn_at_paired_boundaries() {
+    let (_dir, ctx) = fixture();
+    let mut messages = x2_long_turn();
+    let before = context::estimate("", &messages, &[]);
+    let stats = context::compact(
+        &ctx.store,
+        &ctx.session,
+        "",
+        &[],
+        &mut messages,
+        20_000,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        stats["archived_units"].as_u64().unwrap() > 0,
+        "a single turn must be archived, not just shrink tool results"
+    );
+    assert_eq!(messages[0].text(), "original request and constraints");
+    assert_eq!(
+        messages.last().unwrap().text(),
+        "latest progress must remain"
+    );
+    assert!(context::estimate("", &messages, &[]) < before / 2);
+    assert_eq!(
+        context::paired_prefix(&messages, &[messages.len()]),
+        Some(messages.len())
+    );
+    let summary = messages
+        .iter()
+        .find(|m| m.text().contains("此前历史已归档"))
+        .unwrap()
+        .text();
+    let artifact = summary
+        .split("[artifact:")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let archived: Vec<Message> = serde_json::from_str(
+        &fs::read_to_string(ctx.store.artifact_path(&ctx.session, artifact).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        context::paired_prefix(&archived, &[archived.len()]),
+        Some(archived.len())
+    );
+}
+
+#[test]
+fn x2_large_completed_tool_inputs_and_old_assistant_text_have_artifact_refs() {
+    let (_dir, ctx) = fixture();
+    let input = json!({"path":"large.rs", "content":"代码正文".repeat(10_000)});
+    let mut messages = vec![
+        Message::user("constraints"),
+        Message {
+            role: "assistant".into(),
+            content: vec![
+                Block::text("long explanation ".repeat(3000)),
+                Block::ToolUse {
+                    id: "write-big".into(),
+                    name: "write".into(),
+                    input: input.clone(),
+                    input_error: None,
+                },
+                Block::ToolUse {
+                    id: "pending".into(),
+                    name: "write".into(),
+                    input: input.clone(),
+                    input_error: None,
+                },
+            ],
+        },
+        Message {
+            role: "user".into(),
+            content: vec![Block::ToolResult {
+                tool_use_id: "write-big".into(),
+                content: "written".into(),
+                is_error: false,
+                images: vec![],
+            }],
+        },
+        Message::user("next"),
+    ];
+    assert_eq!(
+        context::offload_large(&ctx.store, &ctx.session, &mut messages).unwrap(),
+        2
+    );
+    let Block::ToolUse {
+        input: replay, id, ..
+    } = &messages[1].content[1]
+    else {
+        panic!("missing call")
+    };
+    assert_eq!(id, "write-big");
+    assert_eq!(replay["path"], "large.rs");
+    let artifact = replay["_artifact"].as_str().unwrap();
+    let restored: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(ctx.store.artifact_path(&ctx.session, artifact).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(restored, input);
+    assert!(messages[1].text().contains("[artifact:"));
+    let Block::ToolUse { input: pending, .. } = &messages[1].content[2] else {
+        panic!("missing pending call")
+    };
+    assert_eq!(pending, &input, "unexecuted calls must never be rewritten");
+    assert_eq!(
+        context::offload_large(&ctx.store, &ctx.session, &mut messages).unwrap(),
+        0
+    );
+}

@@ -142,7 +142,11 @@ pub fn compact(
     compact_summarized(store, id, system, specs, messages, window, (force, None))
 }
 
-pub fn archive_range(messages: &[Message], force: bool) -> Option<std::ops::Range<usize>> {
+pub fn archive_range(
+    messages: &[Message],
+    force: bool,
+    window: u64,
+) -> Option<std::ops::Range<usize>> {
     let units = messages
         .iter()
         .enumerate()
@@ -155,6 +159,22 @@ pub fn archive_range(messages: &[Message], force: bool) -> Option<std::ops::Rang
         })
         .map(|(i, _)| i)
         .collect::<Vec<_>>();
+    if !force {
+        let head = units.first()? + 1;
+        let keep = 20_000.min(window / 3).max(1);
+        let mut tail = 0;
+        let mut keep_start = messages.len();
+        for (i, message) in messages.iter().enumerate().rev() {
+            tail += estimate("", std::slice::from_ref(message), &[]);
+            keep_start = i;
+            if tail >= keep {
+                break;
+            }
+        }
+        let candidates = (head + 1..=keep_start).collect::<Vec<_>>();
+        let end = paired_prefix(messages, &candidates)?;
+        return Some(head..end);
+    }
     let mut keep_start = messages.len();
     let mut kept_tokens = 0;
     let mut kept_units = 0;
@@ -194,7 +214,8 @@ pub fn compact_summarized(
     }
     let mut archived = 0;
     let mut shrunk = 0;
-    if let Some(range) = archive_range(messages, force) {
+    let mut split_turn = false;
+    if let Some(range) = archive_range(messages, force, window) {
         let head = range.start;
         let end = range.end;
         let archive = &messages[head..end];
@@ -264,7 +285,23 @@ pub fn compact_summarized(
         {
             let serialized = serde_json::to_string(archive)?;
             let artifact = store.spill(id, "history", &serialized)?;
-            archived = archive.iter().filter(|m| m.role == "user").count().max(1);
+            archived = archive
+                .iter()
+                .filter(|m| {
+                    m.role == "user"
+                        && !m
+                            .content
+                            .iter()
+                            .any(|b| matches!(b, Block::ToolResult { .. }))
+                })
+                .count()
+                .max(1);
+            split_turn = messages.get(end).is_some_and(|m| {
+                m.role != "user"
+                    || m.content
+                        .iter()
+                        .any(|b| matches!(b, Block::ToolResult { .. }))
+            });
             messages.splice(head..end, [summary(&artifact)]);
         }
     }
@@ -300,14 +337,53 @@ pub fn compact_summarized(
     let after = estimate(system, messages, specs);
     store.replace_messages(id, messages)?;
     Ok(Some(
-        json!({"tokens_before":before,"tokens_after":after,"archived_units":archived,"shrunk_results":shrunk,"summarized_units":if generated.is_some(){archived}else{0}}),
+        json!({"tokens_before":before,"tokens_after":after,"archived_units":archived,"shrunk_results":shrunk,"summarized_units":if generated.is_some(){archived}else{0},"split_turn":split_turn}),
     ))
 }
 pub fn offload_large(store: &Store, id: &str, messages: &mut [Message]) -> Result<usize> {
     let mut count = 0;
-    for message in messages {
+    let completed = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let last = messages.len().saturating_sub(1);
+    for (index, message) in messages.iter_mut().enumerate() {
         for block in &mut message.content {
             match block {
+                Block::ToolUse {
+                    id: call_id, input, ..
+                } if completed.contains(call_id)
+                    && input.get("_artifact").is_none()
+                    && json_chars(input) > 16_000 =>
+                {
+                    let serialized = serde_json::to_string(input)?;
+                    let artifact = store.spill(id, "tool_input", &serialized)?;
+                    let mut replay = json!({"_artifact":artifact, "_preview":format!("{} ...[artifact:{artifact}]", util::prefix(&serialized, 1000))});
+                    for key in ["path", "file_path"] {
+                        if let Some(value) = input.get(key) {
+                            replay[key] = value.clone();
+                        }
+                    }
+                    *input = replay;
+                    count += 1;
+                }
+                Block::Text { text }
+                    if message.role == "assistant"
+                        && index < last
+                        && text.len() > 16_000
+                        && !text.contains("[artifact:") =>
+                {
+                    let artifact = store.spill(id, "assistant_text", text)?;
+                    *text = format!(
+                        "{}\n...[已压缩；完整内容见 [artifact:{artifact}]]",
+                        util::prefix(text, 4000)
+                    );
+                    count += 1;
+                }
                 Block::ToolResult { content, .. }
                     if content.len() > 16_000 && !content.contains("[artifact:") =>
                 {

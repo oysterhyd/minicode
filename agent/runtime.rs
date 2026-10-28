@@ -2308,7 +2308,7 @@ impl Runtime {
             return Ok(false);
         }
         let mut generated = None;
-        if let Some(range) = context::archive_range(&self.messages, force) {
+        if let Some(range) = context::archive_range(&self.messages, force, window) {
             let config = self.catalog.lock().await.configuration.clone();
             let model = config.read()?["compactionModel"]
                 .as_str()
