@@ -1490,6 +1490,8 @@ fn record_capture(
         )?;
         Ok(())
     })?;
+    ctx.store
+        .prune_output_artifacts(Some((&ctx.session, &artifact)))?;
     Ok(artifact)
 }
 

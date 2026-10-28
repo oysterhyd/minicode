@@ -59,6 +59,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS messages(session_id TEXT NOT NULL,seq INTEGER NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,PRIMARY KEY(session_id,seq));
             CREATE TABLE IF NOT EXISTS events(session_id TEXT NOT NULL,seq INTEGER NOT NULL,type TEXT NOT NULL,timestamp TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session_id,seq));
             CREATE TABLE IF NOT EXISTS artifacts(session_id TEXT NOT NULL,artifact_id TEXT NOT NULL,kind TEXT NOT NULL,relpath TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(session_id,artifact_id));
+            CREATE TABLE IF NOT EXISTS artifact_access(session_id TEXT NOT NULL,artifact_id TEXT NOT NULL,accessed_at TEXT NOT NULL,PRIMARY KEY(session_id,artifact_id));
             CREATE TABLE IF NOT EXISTS session_goals(session_id TEXT PRIMARY KEY,state TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS session_meta(session_id TEXT PRIMARY KEY,title TEXT,pinned INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS session_prompts(session_id TEXT PRIMARY KEY,system TEXT NOT NULL,sources TEXT NOT NULL,dynamic_hash TEXT);
@@ -94,11 +95,13 @@ impl Store {
                 INSERT INTO message_revisions VALUES(OLD.session_id,1) ON CONFLICT(session_id) DO UPDATE SET version=version+1; END;
             PRAGMA user_version=7;")?;
         tx.commit()?;
-        Ok(Self {
+        let store = Self {
             path,
             connection: Arc::new(Mutex::new(c)),
             pages: Arc::new(crate::paging::TextPages::default()),
-        })
+        };
+        store.prune_output_artifacts(None)?;
+        Ok(store)
     }
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let connection = self
@@ -436,6 +439,7 @@ impl Store {
                 "messages",
                 "events",
                 "artifacts",
+                "artifact_access",
                 "session_goals",
                 "session_meta",
                 "session_prompts",
@@ -503,7 +507,58 @@ impl Store {
             let _ = fs::remove_file(path);
             return Err(e);
         }
+        self.prune_output_artifacts(Some((id, &artifact)))?;
         Ok(artifact)
+    }
+    /// Bound disposable output archives; compressed session history is retained.
+    pub(crate) fn prune_output_artifacts(&self, keep: Option<(&str, &str)>) -> Result<()> {
+        let setting = |name, default| {
+            std::env::var(name)
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(default)
+        };
+        let max_bytes = setting("MINICODE_ARTIFACT_MAX_BYTES", 1024 * 1024 * 1024);
+        let max_days = setting("MINICODE_ARTIFACT_MAX_AGE_DAYS", 30);
+        if max_bytes == 0 && max_days == 0 {
+            return Ok(());
+        }
+        let root = self.root().join("artifacts");
+        if !root.exists() || util::is_link(&root) {
+            return Ok(());
+        }
+        self.transaction(|c| {
+            let mut query = c.prepare("SELECT a.session_id,a.artifact_id,a.relpath,a.created_at FROM artifacts a LEFT JOIN artifact_access x USING(session_id,artifact_id) WHERE a.kind IN ('command_output','tool_output') ORDER BY COALESCE(x.accessed_at,a.created_at),a.created_at,a.artifact_id")?;
+            let rows = query.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            let mut entries = vec![];
+            let mut total = 0u64;
+            for (session, artifact, rel, created) in rows {
+                if !util::valid_id(&session) || !util::valid_id(&artifact) { continue; }
+                let Ok(path) = util::in_workspace(&root, &format!("{session}/{rel}")) else { continue; };
+                if util::is_link(&path) { continue; }
+                let size = match path.metadata() {
+                    Ok(m) if m.is_file() => m.len(),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+                    _ => continue,
+                };
+                total = total.saturating_add(size);
+                entries.push((session, artifact, path, created, size));
+            }
+            for (session, artifact, path, created, size) in entries {
+                if keep == Some((session.as_str(),artifact.as_str())) { continue; }
+                let expired = max_days > 0 && chrono::DateTime::parse_from_rfc3339(&created).is_ok_and(|created| chrono::Utc::now().signed_duration_since(created).num_seconds() > max_days.saturating_mul(86400).min(i64::MAX as u64) as i64);
+                if !expired && (max_bytes == 0 || total <= max_bytes) { continue; }
+                match fs::remove_file(&path) {
+                    Ok(()) => {},
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                    Err(_) => continue, // Locked files are retried on the next sweep.
+                }
+                c.execute("DELETE FROM artifacts WHERE session_id=? AND artifact_id=?",params![session,artifact])?;
+                c.execute("DELETE FROM artifact_access WHERE session_id=? AND artifact_id=?",params![session,artifact])?;
+                total = total.saturating_sub(size);
+            }
+            Ok(())
+        })
     }
     pub fn artifact_path(&self, id: &str, artifact: &str) -> Result<PathBuf> {
         if !util::valid_id(id) || !util::valid_id(artifact) {
@@ -519,7 +574,14 @@ impl Store {
                 .optional()?)
             })?
             .context("归档内容不可用")?;
-        util::in_workspace(&self.root().join("artifacts").join(id), &rel)
+        let path = util::in_workspace(&self.root().join("artifacts").join(id), &rel)?;
+        if path.is_file() {
+            self.with(|c| {
+                c.execute("INSERT INTO artifact_access VALUES(?,?,?) ON CONFLICT(session_id,artifact_id) DO UPDATE SET accessed_at=excluded.accessed_at",params![id,artifact,util::now()])?;
+                Ok(())
+            })?;
+        }
+        Ok(path)
     }
     pub fn artifact_page(
         &self,

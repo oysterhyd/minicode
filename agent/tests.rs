@@ -67,6 +67,38 @@ fn utf8_bounds() {
         }
     }
 }
+
+#[test]
+fn sh7_retention_preserves_old_session_history_and_unknown_files() {
+    let (_dir, ctx) = fixture();
+    let history = ctx
+        .store
+        .spill(&ctx.session, "history", "archived conversation")
+        .unwrap();
+    let output = ctx
+        .store
+        .spill(&ctx.session, "tool_output", "old output")
+        .unwrap();
+    let history_path = ctx.store.artifact_path(&ctx.session, &history).unwrap();
+    let output_path = ctx.store.artifact_path(&ctx.session, &output).unwrap();
+    let unknown = output_path.parent().unwrap().join("unknown.txt");
+    fs::write(&unknown, "unregistered").unwrap();
+    ctx.store
+        .with(|c| {
+            c.execute(
+                "UPDATE artifacts SET created_at='2000-01-01T00:00:00+00:00'",
+                [],
+            )?;
+            c.execute("DROP TABLE artifact_access", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let reopened = Store::open(&ctx.store.path).unwrap();
+    assert!(history_path.exists());
+    assert!(!output_path.exists());
+    assert!(unknown.exists());
+    assert!(reopened.require(&ctx.session).is_ok());
+}
 #[test]
 fn small_context_windows_do_not_compact_short_histories() {
     let (_dir, ctx) = fixture();

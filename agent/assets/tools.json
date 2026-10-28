@@ -53,7 +53,7 @@
   },
   {
     "name": "bash",
-    "description": "Run a shell command inside the workspace (PowerShell on Windows, bash elsewhere) and return its combined output and exit code. Foreground commands are killed after timeout_s (default 300s, capped at 3600s) so a stuck shell cannot block the turn; set timeout_s to raise the bound. Set background=true to start the command as a background job instead: it returns a job_id immediately, runs without the default bound (timeout_s still applies when given) and its result is delivered by the system once the job completes. Output shows the last 2,000 lines or 50 KiB, with complete output in an artifact. Requires approval.",
+    "description": "Run a shell command inside the workspace (PowerShell on Windows, bash elsewhere) and return its combined output and exit code. Foreground commands are killed after timeout_s (default 300s, capped at 3600s) so a stuck shell cannot block the turn; set timeout_s to raise the bound. Set background=true to start the command as a background job instead: it returns a job_id immediately, runs without the default bound (timeout_s still applies when given) and its result is delivered by the system once the job completes. Output keeps a head/tail preview within 2,000 lines or 50 KiB, with complete output in an artifact subject to the configured output retention policy. Requires approval.",
     "input_schema": {
       "properties": {
         "command": {
