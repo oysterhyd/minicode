@@ -68,6 +68,173 @@ fn utf8_bounds() {
     }
 }
 
+#[tokio::test]
+async fn t1_read_edit_write_preserve_encoding_and_bom() {
+    let (_dir, ctx) = fixture();
+    let utf16 = |text: &str, le: bool| -> Vec<u8> {
+        text.encode_utf16()
+            .flat_map(|v| if le { v.to_le_bytes() } else { v.to_be_bytes() })
+            .collect()
+    };
+    let cases = [
+        (
+            [b"\xef\xbb\xbf".as_slice(), "中文\n".as_bytes()].concat(),
+            [b"\xef\xbb\xbf".as_slice(), "世界\n".as_bytes()].concat(),
+            [b"\xef\xbb\xbf".as_slice(), "中文\n".as_bytes()].concat(),
+        ),
+        (
+            vec![0xd6, 0xd0, 0xce, 0xc4, 10],
+            vec![0xca, 0xc0, 0xbd, 0xe7, 10],
+            vec![0xd6, 0xd0, 0xce, 0xc4, 10],
+        ),
+        (
+            [vec![255, 254], utf16("中文\n", true)].concat(),
+            [vec![255, 254], utf16("世界\n", true)].concat(),
+            [vec![255, 254], utf16("中文\n", true)].concat(),
+        ),
+        (
+            [vec![254, 255], utf16("中文\n", false)].concat(),
+            [vec![254, 255], utf16("世界\n", false)].concat(),
+            [vec![254, 255], utf16("中文\n", false)].concat(),
+        ),
+    ];
+    for (i, (before, edited, written)) in cases.into_iter().enumerate() {
+        let path = format!("encoded-{i}.txt");
+        fs::write(ctx.workspace.join(&path), before).unwrap();
+        let read = tools::execute("read", &json!({"path":path}), &ctx).await;
+        assert!(read.success, "{i}: {:?}", read.error);
+        assert_eq!(read.output, "1\t中文");
+        let edit = tools::execute(
+            "edit",
+            &json!({"path":path,"old_text":"中文","new_text":"世界"}),
+            &ctx,
+        )
+        .await;
+        assert!(edit.success, "{i}: {:?}", edit.error);
+        assert_eq!(fs::read(ctx.workspace.join(&path)).unwrap(), edited);
+        let write = tools::execute("write", &json!({"path":path,"content":"中文\n"}), &ctx).await;
+        assert!(write.success, "{i}: {:?}", write.error);
+        assert_eq!(fs::read(ctx.workspace.join(&path)).unwrap(), written);
+    }
+}
+
+#[tokio::test]
+async fn t1_reads_notebook_cells_and_text_outputs() {
+    let (_dir, ctx) = fixture();
+    fs::write(ctx.workspace.join("notes.ipynb"),serde_json::to_vec(&json!({"nbformat":4,"cells":[
+        {"cell_type":"markdown","source":["# 标题\n","正文"]},
+        {"cell_type":"code","source":"print('hello')","outputs":[{"output_type":"stream","text":["hello\n"]},{"output_type":"display_data","data":{"text/plain":["result"],"text/html":["ignored-html"]}}]}
+    ]})).unwrap()).unwrap();
+    let result = tools::execute("read", &json!({"path":"notes.ipynb"}), &ctx).await;
+    assert!(result.success, "{:?}", result.error);
+    assert!(result.output.contains("Cell 1 [markdown]"));
+    assert!(result.output.contains("Cell 2 [code]"));
+    assert!(result.output.contains("# 标题"));
+    assert!(result.output.contains("hello"));
+    assert!(!result.output.contains("ignored-html"));
+}
+
+#[tokio::test]
+async fn t1_encoding_pagination_and_unrepresentable_edits_are_lossless() {
+    let (_dir, ctx) = fixture();
+    let path = ctx.workspace.join("gbk.txt");
+    let original = [
+        "ascii prefix\n".repeat(1000).into_bytes(),
+        vec![0xd6, 0xd0, 0xce, 0xc4, 10],
+    ]
+    .concat();
+    fs::write(&path, &original).unwrap();
+    let page = tools::execute("read", &json!({"path":"gbk.txt","offset":1001}), &ctx).await;
+    assert!(page.success, "{:?}", page.error);
+    assert_eq!(page.output, "1001\t中文");
+    let failed = tools::execute(
+        "edit",
+        &json!({"path":"gbk.txt","old_text":"中文","new_text":"😀"}),
+        &ctx,
+    )
+    .await;
+    assert!(!failed.success);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    for (name, bytes) in [
+        (
+            "bom.txt",
+            [b"\xef\xbb\xbf".as_slice(), "中文\nsecond\n".as_bytes()].concat(),
+        ),
+        (
+            "utf16.txt",
+            "alpha\n中文\n"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        ),
+        (
+            "gb18030.txt",
+            encoding_rs::GB18030
+                .encode("中文😀\nsecond\n")
+                .0
+                .into_owned(),
+        ),
+    ] {
+        fs::write(ctx.workspace.join(name), bytes).unwrap();
+        let first = tools::execute("read", &json!({"path":name,"limit":1,"cursor":0}), &ctx).await;
+        assert!(first.success, "{name}: {:?}", first.error);
+        assert!(!first.output.contains('\u{feff}'));
+        let cursor = first
+            .output
+            .split("next_cursor=")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(']')
+            .parse::<u64>()
+            .unwrap();
+        let next = tools::execute(
+            "read",
+            &json!({"path":name,"offset":2,"cursor":cursor}),
+            &ctx,
+        )
+        .await;
+        assert!(next.success, "{name}: {:?}", next.error);
+        assert!(next.output.starts_with("2\t"));
+    }
+}
+
+fn t1_pdf_fixture() -> Vec<u8> {
+    let stream = "BT /F1 12 Tf 72 720 Td (PDF text layer) Tj ET";
+    let objects=["<< /Type /Catalog /Pages 2 0 R >>".into(),"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".into(),"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),format!("<< /Length {} >>\nstream\n{stream}\nendstream",stream.len())];
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = vec![0];
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", i + 1));
+    }
+    let xref = pdf.len();
+    pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+    for offset in &offsets[1..] {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    pdf.into_bytes()
+}
+
+#[tokio::test]
+async fn t1_reads_pdf_text_and_keeps_existing_image_blocks() {
+    let (_dir, ctx) = fixture();
+    fs::write(ctx.workspace.join("text.pdf"), t1_pdf_fixture()).unwrap();
+    let pdf = tools::execute("read", &json!({"path":"text.pdf"}), &ctx).await;
+    assert!(pdf.success, "{:?}", pdf.error);
+    assert!(pdf.output.contains("PDF text layer"));
+    assert!(!pdf.output.contains("%PDF-1.4"));
+    image::RgbaImage::new(2, 2)
+        .save(ctx.workspace.join("one.png"))
+        .unwrap();
+    let image = tools::execute("read", &json!({"path":"one.png"}), &ctx).await;
+    assert!(image.success, "{:?}", image.error);
+    assert_eq!(image.images.len(), 1);
+    assert!(matches!(&image.images[0],Block::Media{kind,..} if kind=="image"));
+}
+
 #[test]
 fn u3_terminal_text_removes_sequences_without_fragments() {
     for (raw, expected) in [
@@ -430,7 +597,7 @@ async fn large_edit_and_unicode_cursor() {
 #[tokio::test]
 async fn non_utf8_and_path_errors() {
     let (_dir, ctx) = fixture();
-    fs::write(ctx.workspace.join("binary.txt"), b"\xff\xfe").unwrap();
+    fs::write(ctx.workspace.join("binary.txt"), b"\xff\xfe\x00").unwrap();
     assert!(
         !tools::execute("read", &json!({"path":"binary.txt"}), &ctx)
             .await

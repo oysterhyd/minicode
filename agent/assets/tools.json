@@ -1,7 +1,7 @@
 [
   {
     "name": "read",
-    "description": "Read a bounded page of any-size UTF-8 file with line numbers. Use next_offset and next_cursor from the result to continue, including through a single very long line. Also reads PNG, JPEG, GIF and WebP images and returns their actual image content when the current model supports images.",
+    "description": "Read a bounded page with line numbers. Supports UTF-8 (BOM stripped), UTF-16 and GBK/GB18030, PDF text layers, and rendered ipynb cells/text outputs. UTF-8 files can be any size; decoded documents default to a 20 MB input limit (MINICODE_TEXT_DECODE_MAX_BYTES). Use next_offset and opaque next_cursor to continue, including through a long line. Also reads PNG, JPEG, GIF and WebP as actual image content when the model supports images. Edits and writes preserve an existing text file's encoding and BOM or fail without changing it.",
     "input_schema": {
       "properties": {
         "path": {

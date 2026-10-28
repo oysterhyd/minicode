@@ -571,3 +571,21 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 测试：先运行 `cargo test --locked sh3_`，两项失败，分别复现残留控制序列与缺少颜色环境默认值；修复后验证 CSI/OSC、CRLF、进度覆盖、未完成序列，以及真实 bridge 的默认值/显式覆盖。原始 artifact 保留原始终端记录，预览经清理。
 - 验证：提交前执行 `output/check-3b.ps1 SH3` 全套 Rust、协议、离线评测与 TUI 检查，日志位于 output/3B-SH3-*.log。
 
+## 批次 3C：文件与搜索工具
+
+### T1：文本编码、PDF 与 Notebook 读取
+
+- 核查：read 的图片分支原已支持 PNG/JPEG/GIF/WebP 和 image block（原 tools.rs:399–423），该子项不重做，新增实际 PNG 回归。文本仍只接受 UTF-8、保留 BOM；PDF 会作为原始文本/二进制处理，ipynb 只显示 JSON。
+- 修复：BOM 优先、UTF-16 零字节分布识别、严格 UTF-8 与 GBK/GB18030 回退；剥离展示 BOM，edit/write 保留原编码、字节序和 BOM，无法编码时拒绝并保留原文件。编码探测读取不超过可配置解码上限的前缀；UTF-8 大文件仍走原有有界分页与大文件编辑路径。PDF 抽取文本层，无文本层明确提示，不做 OCR；ipynb 渲染单元格、代码及纯文本输出，不展开 HTML/图片数据。分页游标保持 opaque，编码文本/渲染文档按解码后的 UTF-8 字节定位。
+- 依赖理由：新增 encoding_rs（跨平台 GB18030 严格编解码）及 pdf-extract（PDF 字体/CMap/压缩流文本抽取）；不手写 PDF 解析器，不引入概率编码探测库。lock 新增 31 个传递/直接包，按 Rust 1.88 兼容版本解析。
+- 测试：先复现 UTF-8 BOM 残留、Notebook 未渲染、PDF 输出原始对象；Rust 覆盖 GBK、UTF-16 双字节序、无 BOM UTF-16、UTF-8 BOM 的 read/edit/write 与分页，GB18030 四字节字符、无法 GBK 编码时原文件不变，以及实际 image block、PDF 文本层、Notebook 文本输出；file-tools.test.mjs 验证 bridge 循环与落盘原始字节。
+- 待确认决策：非 UTF-8 文本、PDF、Notebook 默认输入上限 20 MB，MINICODE_TEXT_DECODE_MAX_BYTES 可设置为 1–100,000,000 字节。无 BOM 的编码存在固有歧义，优先 UTF-8；未启用通用西文编码猜测。空 UTF-16 BOM 视为合法空文件，旧“二进制”夹具改为不完整 UTF-16。
+- 验证：output/check-3c.ps1 T1 全套检查；日志 output/3C-T1-*.log，评测输出独立保存，避免覆盖既有 output/eval 配置。
+- 最终 Windows 全套通过：fmt、clippy、Rust 125 项、build、协议 194 项通过/1 项既有慢测跳过、生成器与生成文件无差异、60 次主任务及 9 个场景结果校验、TUI 安装/构建/117 项测试。Desktop 未修改，不触发 Go 检查条件。
+
+### 3C 暂停交接
+
+- 按用户收尾要求，本次只完成 T1；后续条目未进入实现，不将整个 3C 宣称完成。恢复时从 T2 的失败回归开始。
+- 已定位待处理项：T2 tools.rs 的 fancy_regex/固定目录遍历；T4 replacement_texts/edit 的精确匹配；T5 read_artifact 默认 20000 与 schema 4000；T6 validate 的外部 schema 每次编译分支；T8 Seen::of 与 edit_large 的长度/mtime 复用；T9 tools.rs/store.rs 的无列名 artifacts INSERT；U5 util.rs 的逐组件 canonical。
+- T1 全量检查曾暴露路径类型检查位于同文件写锁外的竞态；现已纳入锁内，既有 concurrent_edits_of_one_file_are_serialized 回归通过。两个原有 .pending 测试文件保留不动。
+

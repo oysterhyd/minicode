@@ -4,6 +4,7 @@ use crate::{
     mcp::McpRegistry,
     models::{Outcome, ToolSpec},
     store::Store,
+    textfile::{self, Encoding},
     util,
 };
 use anyhow::{Context, Result, bail};
@@ -412,18 +413,53 @@ fn read_file(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         o.images.push(image);
         return Ok(o);
     }
+    let extension = target
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    if extension == "pdf" || extension == "ipynb" {
+        let bytes = textfile::read_bounded(&target)?;
+        let text = if extension == "pdf" {
+            let text =
+                pdf_extract::extract_text_from_mem(&bytes).context("cannot extract PDF text")?;
+            if text.trim().is_empty() {
+                "(PDF has no extractable text layer; OCR is not supported)".into()
+            } else {
+                text.trim().to_string()
+            }
+        } else {
+            let encoding = Encoding::probe(&target)?;
+            textfile::notebook(encoding.decode(&bytes)?.as_bytes())?
+        };
+        return read_text_page(BufReader::new(std::io::Cursor::new(text)), args, ctx);
+    }
+    let encoding = Encoding::probe(&target)?;
+    if !matches!(encoding, Encoding::Utf8(_)) {
+        let text = encoding.decode(&textfile::read_bounded(&target)?)?;
+        return read_text_page(BufReader::new(std::io::Cursor::new(text)), args, ctx);
+    }
+    let mut reader = BufReader::new(File::open(&target)?);
+    if encoding == Encoding::Utf8(true) && args["cursor"].as_u64().unwrap_or(0) == 0 {
+        reader.seek(SeekFrom::Start(3))?;
+    }
+    read_text_page(reader, args, ctx)
+}
+
+fn read_text_page(
+    mut reader: impl BufRead + Seek,
+    args: &Value,
+    ctx: &ToolContext,
+) -> Result<Outcome> {
     let offset = args["offset"].as_u64().unwrap_or(1) as usize;
     let limit = args["limit"].as_u64().unwrap_or(2000).min(2000) as usize;
-    let mut reader = BufReader::new(File::open(&target)?);
-    if reader.get_ref().metadata()?.len() == 0
-        && offset == 1
-        && args["cursor"].as_u64().unwrap_or(0) == 0
-    {
+    if reader.fill_buf()?.is_empty() && offset == 1 && args["cursor"].as_u64().unwrap_or(0) == 0 {
         return Ok(Outcome::ok("(empty file)"));
     }
     let mut line_number = offset;
+    let initial = reader.stream_position()?;
     if let Some(cursor) = args["cursor"].as_u64() {
-        reader.seek(SeekFrom::Start(cursor))?;
+        reader.seek(SeekFrom::Start(cursor.max(initial)))?;
     } else {
         let mut skipped = 0;
         while skipped < offset.saturating_sub(1) {
@@ -796,12 +832,6 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         .strip_prefix(&ctx.workspace)?
         .to_string_lossy()
         .replace('\\', "/");
-    if name == "edit" && !path.is_file() {
-        bail!("path is not a file: {relative} (use write to create a new file)")
-    }
-    if path.exists() && !path.is_file() {
-        bail!("path exists and is not a file: {relative}")
-    }
     // Mutations of one file are serialized, so concurrent edits each apply to
     // the result of the previous one instead of racing on the same original.
     let lock = ctx
@@ -815,19 +845,30 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let _serialized = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if name == "edit" && !path.is_file() {
+        bail!("path is not a file: {relative} (use write to create a new file)")
+    }
+    if path.exists() && !path.is_file() {
+        bail!("path exists and is not a file: {relative}")
+    }
     let seen = ensure_current(ctx, &path, &relative)?;
     let size = if path.exists() {
         path.metadata()?.len()
     } else {
         0
     };
-    if name == "edit" && size > 256_000 {
+    let encoding = if path.exists() {
+        Encoding::probe(&path)?
+    } else {
+        Encoding::Utf8(false)
+    };
+    if name == "edit" && size > 256_000 && matches!(encoding, Encoding::Utf8(_)) {
         let outcome = edit_large(&path, &relative, args, ctx, seen)?;
         remember(ctx, &path);
         return Ok(outcome);
     }
-    let before = if path.exists() && size <= 256_000 {
-        fs::read_to_string(&path).context("binary or non-UTF-8 file")?
+    let before = if path.exists() && (size <= 256_000 || !matches!(encoding, Encoding::Utf8(_))) {
+        encoding.decode(&textfile::read_bounded(&path)?)?
     } else {
         String::new()
     };
@@ -853,14 +894,15 @@ fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     if ctx.cancel.is_cancelled() {
         bail!("tool cancelled")
     }
-    util::atomic_write(&path, after.as_bytes())?;
+    let encoded = encoding.encode(&after)?;
+    util::atomic_write(&path, &encoded)?;
     if let Ok(metadata) = path.metadata() {
         ctx.files.lock().unwrap().seen.insert(
             path.clone(),
             Seen {
                 size: metadata.len(),
                 modified: metadata.modified().ok(),
-                digest: util::hash(after.as_bytes()),
+                digest: util::hash(&encoded),
             },
         );
     }
