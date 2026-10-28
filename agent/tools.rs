@@ -1356,23 +1356,41 @@ pub async fn run_command_for(
         }
     }
     let total = captured.as_file().metadata()?.len().min(100_000_000);
-    captured
-        .as_file_mut()
-        .seek(SeekFrom::Start(total.saturating_sub(256_000)))?;
+    captured.as_file_mut().seek(SeekFrom::Start(0))?;
     let mut bytes = vec![];
     captured
         .as_file_mut()
         .take(256_000)
         .read_to_end(&mut bytes)?;
     let decoded = decode(&bytes);
-    let preview = util::tail(&decoded, 2000, 50 * 1024 - 200);
-    let truncated = total > 256_000 || preview != decoded.trim_end_matches(['\r', '\n']);
-    let mut outcome = Outcome::ok(preview);
+    let decoded = decoded.trim_end_matches(['\r', '\n']);
+    const PREVIEW_BYTES: usize = 50 * 1024 - 512;
+    let truncated =
+        total > 256_000 || decoded.len() > PREVIEW_BYTES || decoded.lines().count() > 2000;
+    let mut outcome = Outcome::ok(decoded);
     if truncated {
+        let head = util::prefix(decoded, PREVIEW_BYTES / 2)
+            .split_inclusive('\n')
+            .take(999)
+            .collect::<String>();
+        let tail_source = if total > 256_000 {
+            captured
+                .as_file_mut()
+                .seek(SeekFrom::Start(total.saturating_sub(128_000)))?;
+            bytes.clear();
+            captured
+                .as_file_mut()
+                .take(128_000)
+                .read_to_end(&mut bytes)?;
+            decode(&bytes)
+        } else {
+            decoded.to_string()
+        };
+        let tail = util::tail(&tail_source, 999, PREVIEW_BYTES / 2);
         let artifact = record_capture(&captured, ctx, total)?;
         outcome.output = format!(
-            "...[output truncated; 完整输出见 [artifact:{artifact}]]\n{}",
-            outcome.output
+            "{}\n...[middle output omitted; output truncated; 完整输出见 [artifact:{artifact}]]\n{tail}",
+            head.trim_end_matches(['\r', '\n'])
         );
     }
     outcome.exit_code = status.and_then(|s| s.code());

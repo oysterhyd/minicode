@@ -977,6 +977,31 @@ async fn sh3_shell_defaults_disable_color() {
 }
 
 #[tokio::test]
+async fn sh8_command_preview_keeps_first_error_and_last_line() {
+    let (_dir, ctx) = fixture();
+    fs::write(ctx.workspace.join("output.cjs"), "process.stdout.write('first compiler error\\n'+'中文line\\n'.repeat(50000)+'last line\\n')").unwrap();
+    let outcome = tools::run_command("node output.cjs", &ctx.workspace, 10.0, &ctx)
+        .await
+        .unwrap();
+    assert!(outcome.success, "{:?}", outcome.error);
+    assert!(outcome.output.starts_with("first compiler error\n"));
+    assert!(outcome.output.ends_with("last line"));
+    assert!(outcome.output.contains("[artifact:"));
+    assert!(outcome.output.len() <= 50 * 1024);
+    assert!(outcome.output.lines().count() <= 2000);
+    let id = outcome
+        .output
+        .split("[artifact:")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let full = fs::read_to_string(ctx.store.artifact_path(&ctx.session, id).unwrap()).unwrap();
+    assert_eq!(full.lines().count(), 50002);
+}
+
+#[tokio::test]
 async fn sh5_redirected_descendant_survives_shell_exit() {
     let (_dir, ctx) = fixture();
     fs::write(
