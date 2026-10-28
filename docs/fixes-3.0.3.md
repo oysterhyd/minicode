@@ -494,6 +494,20 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 验证：Rust、协议、两组离线评测和 TUI 全套检查通过；评测使用独立临时输出目录。
 ## 批次 3B：命令输出与进程治理
 
+### U4：保留 Windows 元数据并同步原子替换
+
+- 核查证据：原实现已有 PermissionDenied 的有限重试，并非完全不重试；但 persist/rename 会丢失 Windows DACL、命名流和属性，Unix 未同步父目录。
+- 修复：Windows 关闭临时文件句柄后使用 ReplaceFileW（不忽略 ACL 合并错误），复制文件标志并保留命名流/创建时间/DACL；新文件用不覆盖目标的 MoveFileExW，处理创建竞态。对 access denied、sharing/lock violation 等瞬态冲突有限退避重试，最长约 1.05 秒。ReplaceFile 的部分失败保留备份并尝试恢复；无法恢复时明确返回原文件备份路径。Unix 在已同步临时文件并 rename 后 fsync 父目录，保留原权限。
+- 测试：先复现命名流丢失和硬链接被悄悄断开，确认已有共享锁重试测试能通过；修复后验证命名流、创建时间、隐藏属性、受保护 DACL、共享锁释放重试、只读失败不改原文件且不漏临时文件、多硬链接拒绝。Unix 覆盖权限保留并通过 syscall trace 核对文件与父目录均 fsync。
+- 待确认决策：ReplaceFile 的最终文件 ID 来自替换文件，不能保证其他硬链接一起更新，因此默认拒绝多硬链接文件的原子写入，保留原文件和链接；不自动退回非原子覆盖。参考 [Microsoft ReplaceFileW 文档](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)。不增加 crate 依赖。
+- 验证：`output/check-3b.ps1 U4` 全套检查，日志 output/3B-U4-*.log；额外 Unix 验证见 output/3B-linux-final.log、output/3B-dir-fsync.log。
+
+### 批次验证补充与范围外发现
+
+- 每项的全套检查使用独立输出目录 output/3B-ID/eval 与 scenarios，避免覆盖已有 output/eval 中不同配置的结果；生成的任务与 trace.log 无变更。60 次主任务与 9 个场景保持既有验收结果（场景的 counter_retry b0/b1 为预期失败）。Desktop 源码未修改，不触发 Go 检查条件。
+- Windows 检查均按 CI 命令执行；额外 Linux 全量 Rust 与本批协议回归验证也执行。WSL 全协议曾出现既有 MCP 取消进程存活判定失败，以及 streaming Retry-After 耗时上限失败，记录为本批范围外；未改其实现。SH7 回归自身的数据库锁竞争通过 busy_timeout 与显式测试同步修正。
+- 最终 U4 检查全部通过：Windows Rust 121 项，协议 193 项通过、1 项既有慢测跳过，TUI 117 项；60 次主任务与 9 个场景通过结果校验。额外 Linux Rust 116 项、本批协议 11 项通过，strace 确认两次原子写入分别同步临时文件与父目录。Linux 全协议不宣称全部通过。
+
 ### U3：终端文本完整剥离 ANSI 序列
 
 - 问题与根因：terminal_text 只滤掉 ESC 等控制字符，留下可见的 `[31m`、OSC URL 等片段。
