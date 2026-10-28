@@ -249,6 +249,19 @@ impl Drop for Connector {
         if let Some(task) = self.stderr_task.take() {
             task.abort();
         }
+        if let Some(tree) = self.tree.take() {
+            tree.terminate();
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            // kill_on_drop signals the process but can leave an unpolled Unix
+            // child as a zombie. Own and await it even when discovery is dropped.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = child.wait().await;
+                });
+            }
+        }
     }
 }
 impl Connector {
@@ -314,6 +327,8 @@ impl Connector {
                 .kill_on_drop(true);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
+            #[cfg(unix)]
+            cmd.process_group(0);
             let mut child = cmd.spawn().context("failed to start MCP server")?;
             self.tree = Some(crate::command_process::ProcessTree::attach(&child)?);
             if let Some(stderr) = child.stderr.take() {

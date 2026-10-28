@@ -45,6 +45,21 @@ test('cancelling MCP initialization reaps its server and retains the prompt',asy
   const f=await fixture(t,[{text:'completed after cancellation'}]);const script=path.join(f.root,'hanging.mjs'),pidFile=path.join(f.root,'server.pid');fs.writeFileSync(script,`import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`);const root=path.join(f.workspace,'.minicode/plugins/hanging');fs.mkdirSync(root,{recursive:true});fs.writeFileSync(path.join(root,'plugin.json'),JSON.stringify({name:'hanging',version:'1.0.0',minicode_version:minicodeVersion,enabled:true,mcp_servers:[{name:'waiting',command:'node',args:[script],timeout_s:30}]}));await f.request('trustWorkspace',{workspace:f.workspace});
   const started=await f.request('sendPrompt',{workspace:f.workspace,model:'fake',text:'retain this prompt'});for(let i=0;i<500&&!fs.existsSync(pidFile);i++)await new Promise(r=>setTimeout(r,10));assert.ok(fs.existsSync(pidFile));const pid=Number(fs.readFileSync(pidFile));const start=Date.now();await f.request('cancelTurn',{sessionId:started.sessionId});const done=await f.wait(e=>e.event==='run_done');assert.equal(done.result.exit_reason,'cancelled');assert.ok(Date.now()-start<3000);const detail=await f.request('getSession',{sessionId:started.sessionId});assert.ok(detail.messages.some(m=>m.content.some(b=>b.text==='retain this prompt')));assert.equal((await f.request('getState',{sessionId:started.sessionId})).taskPending,true);let alive=true;for(let i=0;i<100&&alive;i++){try{process.kill(pid,0)}catch{alive=false}if(alive)await new Promise(r=>setTimeout(r,10))}assert.equal(alive,false);await f.request('setPluginEnabled',{workspace:f.workspace,name:'hanging',enabled:false});const from=f.events.length;await f.request('runSlash',{text:'/continue',workspace:f.workspace,sessionId:started.sessionId});assert.equal((await f.wait(e=>e.event==='run_done',from)).result.exit_reason,'completed');
 })
+
+test('cancelling Unix MCP discovery also terminates its descendant process group',{skip:process.platform==='win32'},async t=>{
+  const f=await fixture(t,[{text:'done'}])
+  const script=path.join(f.root,'tree.cjs'),ready=path.join(f.root,'ready'),leaked=path.join(f.root,'leaked')
+  fs.writeFileSync(script,`require('child_process').spawn(process.execPath,['-e',${JSON.stringify(`require('fs').writeFileSync(${JSON.stringify(ready)},'ready');setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(leaked)},'leaked'),1500)`)}],{stdio:'ignore'});setInterval(()=>{},1000)`)
+  fs.writeFileSync(path.join(f.workspace,'.mcp.json'),JSON.stringify({mcpServers:{tree:{command:process.execPath,args:[script]}}}))
+  const entry=(await f.request('getLocalExtensions',{workspace:f.workspace})).entries.find(e=>e.kind==='mcp')
+  await f.request('setLocalExtensionEnabled',{workspace:f.workspace,id:entry.id,enabled:true})
+  const started=await f.request('sendPrompt',{workspace:f.workspace,model:'fake',text:'start'})
+  assert.ok(await until(()=>fs.existsSync(ready)),'MCP descendant did not start')
+  await f.request('cancelTurn',{sessionId:started.sessionId})
+  await f.wait(e=>e.event==='run_done'&&e.sessionId===started.sessionId)
+  await new Promise(resolve=>setTimeout(resolve,1700))
+  assert.equal(fs.existsSync(leaked),false,'MCP descendant survived cancellation')
+})
 const mcpSource=`const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;let result;if(r.method==='initialize')result={protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1.0.0'}};else if(r.method==='tools/list')result={tools:[{name:'echo',description:'Echo',inputSchema:{type:'object',properties:{value:{type:'string'}},required:['value']}}]};else if(r.method==='tools/call')result={content:[{type:'text',text:r.params.arguments.value}],structuredContent:{ok:true}};else result={};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n')})`
 test('Windows MCP resolves a cmd shim on the server PATH and preserves arguments', {skip:process.platform!=='win32'}, async t=>{
   const f=await fixture(t), shimDir=path.join(f.root,'shim with spaces'), argsFile=path.join(f.root,'args.json')
