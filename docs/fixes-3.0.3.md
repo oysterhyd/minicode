@@ -654,3 +654,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 待确认产品取舍汇总：无 BOM 编码采用确定性顺序且解码上限可配置；搜索不再支持回溯语法，显式 include_ignored 可关闭 ignore 文件规则；归一化可通过 match_mode=exact 关闭且限制输入大小；批量编辑基于原始快照，拒绝重叠；归档行视图有可配置单行上限，保留原 UI 字符分页兼容性。
 - 下一步建议：单独处理 Linux MCP 取消回收及 edit_large 的 mmap/元数据保留路径；继续路线下一阶段，不把这些范围外问题并入本批。
 
+### 3.0.3 发行 CI 收尾
+
+- 发行时 GitHub 的 Linux agent 检查复现 MCP 初始化取消后进程仍可见；/proc 确认其已被 kill 但长期保持 Z 状态。Connector Drop 显式提交 child.wait 回收，Unix MCP 设置独立进程组使后代一并终止；现有失败契约转绿，并补后代延迟写入被阻止的回归。此项在 3C 后作为发行阻塞单独修复，不再仅列为后续建议。
+- Windows CI 的 metadata-only 回归失败源于测试把含短文件名别名的临时路径直接传入内部 ensure，而实际 dispatch 已 canonicalize。统一测试工作区输入后仍以 malformed JSON view 检查禁止正文读取，不修改正式会话恢复行为。
+
