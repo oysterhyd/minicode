@@ -659,3 +659,15 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 发行时 GitHub 的 Linux agent 检查复现 MCP 初始化取消后进程仍可见；/proc 确认其已被 kill 但长期保持 Z 状态。Connector Drop 显式提交 child.wait 回收，Unix MCP 设置独立进程组使后代一并终止；现有失败契约转绿，并补后代延迟写入被阻止的回归。此项在 3C 后作为发行阻塞单独修复，不再仅列为后续建议。
 - Windows CI 的 metadata-only 回归失败源于测试把含短文件名别名的临时路径直接传入内部 ensure，而实际 dispatch 已 canonicalize。统一测试工作区输入后仍以 malformed JSON view 检查禁止正文读取，不修改正式会话恢复行为。
 
+
+
+## 批次 4A：结构化压缩与 token 估算
+
+### X1：保留进度与决策的结构化摘要
+
+- 核查：原 context::compact 只抽取用户原话、input.path 和错误预览，summarized_units 恒为 0；assistant 结论及测试状态未进入工作集。已用原实现复跑新增测试，摘要包含关键决策的断言失败（output/4A-X1-behavior-red.log）。
+- 修复：工具禁用的独立 LLM 请求使用 Goal / Constraints & Preferences / Progress（Done / In Progress / Blocked）/ Key Decisions / Next Steps / Critical Context（Read Files / Modified Files）模板。旧摘要随下一批历史输入，增量替换而非堆叠；最初用户要求继续完整保留，原文存入 history artifact。
+- 有界与兼容：可选配置 compactionModel 指定摘要模型，缺省使用当前模型；摘要按窗口分块，累计 30 秒或剩余任务时限，输出上限 4096 token。模型不可用、无效/截断/过大摘要、请求失败回退抽取式；取消仍生效。摘要 usage（包括已完成但格式无效的响应）记入会话和共享预算，预留请求上界避免透支；FakeProvider 用独立可选 summary 字段，不推进任务回放位置。协议和 schema 7 保持兼容，无新依赖。
+- 测试：结构化摘要保留已改文件、关键决策、测试结果、下一步；两次压缩只保留一份摘要且任务回放位置不变；摘要失败仍有原文 artifact。摘要的事实正确性仍依赖模型，artifact 可用于回查。
+- 验证：提交前完整检查脚本 output/check-4a.ps1 X1，日志 output/4A-X1-*.log。
+- 待确认决策：默认当前模型生成摘要会增加少量调用成本；可配置便宜模型。无配置迁移或界面新增项。

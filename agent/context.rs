@@ -139,13 +139,10 @@ pub fn compact(
     window: u64,
     force: bool,
 ) -> Result<Option<Value>> {
-    let before = estimate(system, messages, specs);
-    let trigger = window.saturating_sub((window / 10).min(16_384));
-    if !force && before <= trigger {
-        return Ok(None);
-    }
-    let mut archived = 0;
-    let mut shrunk = 0;
+    compact_summarized(store, id, system, specs, messages, window, (force, None))
+}
+
+pub fn archive_range(messages: &[Message], force: bool) -> Option<std::ops::Range<usize>> {
     let units = messages
         .iter()
         .enumerate()
@@ -175,14 +172,51 @@ pub fn compact(
         .skip(2)
         .filter(|b| *b <= keep_start)
         .collect::<Vec<_>>();
-    if let Some(end) = paired_prefix(messages, &candidates) {
-        // Keep the original request verbatim: it contains the user's scope and
-        // constraints, which must not be replaced by a 240-character summary.
-        let head = units.get(1).copied().unwrap_or(0);
+    let end = paired_prefix(messages, &candidates)?;
+    let head = units.get(1).copied().unwrap_or(0);
+    (end > head).then_some(head..end)
+}
+
+pub fn compact_summarized(
+    store: &Store,
+    id: &str,
+    system: &str,
+    specs: &[ToolSpec],
+    messages: &mut Vec<Message>,
+    window: u64,
+    mode: (bool, Option<&str>),
+) -> Result<Option<Value>> {
+    let (force, mut generated) = mode;
+    let before = estimate(system, messages, specs);
+    let trigger = window.saturating_sub((window / 10).min(16_384));
+    if !force && before <= trigger {
+        return Ok(None);
+    }
+    let mut archived = 0;
+    let mut shrunk = 0;
+    if let Some(range) = archive_range(messages, force) {
+        let head = range.start;
+        let end = range.end;
         let archive = &messages[head..end];
+        if generated
+            .is_some_and(|text| tokens(text).saturating_add(100) >= estimate("", archive, &[]))
+        {
+            generated = None;
+        }
         let mut goals = vec![];
         let mut refs = vec![];
         let mut findings = vec![];
+        let previous = archive.iter().find_map(|m| {
+            let text = m.text();
+            text.split_once("<structured-summary>\n")
+                .and_then(|(_, summary)| {
+                    summary
+                        .split_once("\n</structured-summary>")
+                        .map(|(summary, _)| {
+                            format!("<structured-summary>\n{summary}\n</structured-summary>")
+                        })
+                })
+        });
         for m in archive {
             for b in &m.content {
                 match b {
@@ -209,8 +243,14 @@ pub fn compact(
         refs.dedup();
         refs.truncate(40);
         let summary = |artifact: &str| {
+            if let Some(text) = generated {
+                return Message::user(format!(
+                    "此前历史已归档，完整消息见 [artifact:{artifact}]。\n<structured-summary>\n{text}\n</structured-summary>"
+                ));
+            }
             Message::user(format!(
-                "此前历史已归档，完整消息见 [artifact:{artifact}]。\n目标：\n{}\n关键文件：{}\n失败与待解决问题：\n{}",
+                "此前历史已归档，完整消息见 [artifact:{artifact}]。\n{}\n目标：\n{}\n关键文件：{}\n失败与待解决问题：\n{}",
+                previous.as_deref().unwrap_or_default(),
                 goals.join("\n"),
                 refs.join(", "),
                 findings.join("\n")
@@ -224,7 +264,7 @@ pub fn compact(
         {
             let serialized = serde_json::to_string(archive)?;
             let artifact = store.spill(id, "history", &serialized)?;
-            archived = units.iter().filter(|&&b| b >= head && b < end).count();
+            archived = archive.iter().filter(|m| m.role == "user").count().max(1);
             messages.splice(head..end, [summary(&artifact)]);
         }
     }
@@ -260,7 +300,7 @@ pub fn compact(
     let after = estimate(system, messages, specs);
     store.replace_messages(id, messages)?;
     Ok(Some(
-        json!({"tokens_before":before,"tokens_after":after,"archived_units":archived,"shrunk_results":shrunk,"summarized_units":0}),
+        json!({"tokens_before":before,"tokens_after":after,"archived_units":archived,"shrunk_results":shrunk,"summarized_units":if generated.is_some(){archived}else{0}}),
     ))
 }
 pub fn offload_large(store: &Store, id: &str, messages: &mut [Message]) -> Result<usize> {

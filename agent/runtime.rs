@@ -5,7 +5,7 @@ use crate::{
     extensions::Catalog,
     goals::{Goal, Spec},
     mcp::McpRegistry,
-    models::{Block, Budget, Event, Message, Outcome, RunResult, Usage},
+    models::{Block, Budget, Event, Message, Outcome, RunResult, ToolSpec, Usage},
     provider::{Provider, ProviderError, normalize_tool_ids, validate_response},
     store::{self, Store},
     tools::{self, Sink, ToolContext},
@@ -1171,22 +1171,8 @@ impl Runtime {
                 self.dynamic_hash = hash;
             }
             self.sync_dynamic_context().await?;
-            if self.compaction {
-                self.message_revision = None;
-                let stats = context::compact(
-                    &self.store,
-                    &self.session,
-                    &system,
-                    &specs,
-                    &mut self.messages,
-                    (self.provider.window as f64 / self.provider.prompt_scale) as u64,
-                    false,
-                )?;
-                self.message_revision = Some(self.store.message_revision(&self.session)?);
-                if let Some(stats) = stats {
-                    self.event(hooks, "context_compacted", stats)?;
-                    self.sync_dynamic_context().await?;
-                }
+            if self.compaction && self.compact_context(hooks, &system, &specs, false).await? {
+                self.sync_dynamic_context().await?;
             }
             let mut context_tokens = (context::estimate(&system, &self.messages, &specs) as f64
                 * self.provider.prompt_scale) as u64;
@@ -1213,6 +1199,11 @@ impl Runtime {
             }
             {
                 let mut ledger = hooks.shared.lock().unwrap();
+                if budget.max_total_tokens > 0
+                    && ledger.usage.total() >= budget.max_total_tokens as u64
+                {
+                    return Ok("token_budget".into());
+                }
                 if budget.max_rounds > 0 && ledger.rounds >= budget.max_rounds {
                     return Ok("max_rounds".into());
                 }
@@ -2294,23 +2285,91 @@ impl Runtime {
         let specs = self.tool_specs(&catalog, &catalog.configuration.agents()?);
         let system = self.system(&catalog, &specs)?;
         drop(catalog);
-        self.message_revision = None;
-        let changed = context::compact(
-            &self.store,
-            &self.session,
-            &system,
-            &specs,
-            &mut self.messages,
-            (self.provider.window as f64 / self.provider.prompt_scale) as u64,
-            true,
-        )?;
-        self.message_revision = Some(self.store.message_revision(&self.session)?);
-        if let Some(stats) = changed {
-            self.event(hooks, "context_compacted", stats)?;
+        let changed = self.compact_context(hooks, &system, &specs, true).await?;
+        if changed {
             if self.frozen_system.is_some() {
                 self.sync_dynamic_context().await?;
             }
             self.refresh_snapshot(hooks).await?;
+        }
+        Ok(changed)
+    }
+
+    async fn compact_context(
+        &mut self,
+        hooks: &Hooks,
+        system: &str,
+        specs: &[ToolSpec],
+        force: bool,
+    ) -> Result<bool> {
+        let window = (self.provider.window as f64 / self.provider.prompt_scale) as u64;
+        let trigger = window.saturating_sub((window / 10).min(16_384));
+        if !force && context::estimate(system, &self.messages, specs) <= trigger {
+            return Ok(false);
+        }
+        let mut generated = None;
+        if let Some(range) = context::archive_range(&self.messages, force) {
+            let config = self.catalog.lock().await.configuration.clone();
+            let model = config.read()?["compactionModel"]
+                .as_str()
+                .map(str::to_string);
+            let provider = match model {
+                Some(model) => Provider::new(&model, "off", &config),
+                None => Ok(self.provider.clone()),
+            };
+            if let Ok(mut provider) = provider {
+                let attachments = Attachments {
+                    root: self.store.root().join("attachments"),
+                };
+                let deadline = hooks.shared.lock().unwrap().deadline;
+                let timeout = deadline.map_or(Duration::from_secs(30), |d| {
+                    d.saturating_duration_since(Instant::now())
+                        .min(Duration::from_secs(30))
+                });
+                let mut usage = Usage::default();
+                let limit = hooks.settings.lock().unwrap().budget.max_total_tokens;
+                let remaining = if limit > 0 {
+                    (limit as u64)
+                        .saturating_sub(hooks.shared.lock().unwrap().usage.total())
+                        .max(1)
+                } else {
+                    0
+                };
+                let result = tokio::select! {
+                    _ = hooks.cancel.cancelled() => Err(anyhow::Error::from(ProviderError::Cancelled)),
+                    result = tokio::time::timeout(timeout, provider.summarize(&self.messages[..range.end], &attachments, &mut usage, remaining)) => result.map_err(anyhow::Error::from).and_then(|r| r),
+                };
+                if usage.total() > 0 {
+                    self.usage.add(&usage);
+                    hooks.shared.lock().unwrap().usage.add(&usage);
+                    self.store.checkpoint(
+                        &self.session,
+                        "context_summary",
+                        &json!({"usage":usage,"model":provider.configuration_id}),
+                        None,
+                        None,
+                        Some(&store::counters(self.rounds, &self.usage)),
+                    )?;
+                }
+                if hooks.cancel.is_cancelled() {
+                    return Err(ProviderError::Cancelled.into());
+                }
+                generated = result.ok();
+            }
+        }
+        self.message_revision = None;
+        let changed = context::compact_summarized(
+            &self.store,
+            &self.session,
+            system,
+            specs,
+            &mut self.messages,
+            window,
+            (force, generated.as_deref()),
+        )?;
+        self.message_revision = Some(self.store.message_revision(&self.session)?);
+        if let Some(stats) = changed {
+            self.event(hooks, "context_compacted", stats)?;
             Ok(true)
         } else {
             Ok(false)

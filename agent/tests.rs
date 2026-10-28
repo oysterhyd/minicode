@@ -1595,6 +1595,88 @@ fn manual_compaction_keeps_original_constraints_and_recent_messages() {
     assert!(messages.iter().any(|m| m.text().contains("[artifact:")));
 }
 
+#[tokio::test]
+async fn x1_compaction_uses_structured_summary_without_consuming_task_turns() {
+    let summary = "## Goal\n完成修复\n## Constraints & Preferences\n保留接口\n## Progress\n### Done\n已改 agent/context.rs，cargo test 通过\n### In Progress\n文档\n### Blocked\n无\n## Key Decisions\n选择兼容方案\n## Next Steps\n提交\n## Critical Context\n### Read Files\nagent/tests.rs\n### Modified Files\nagent/context.rs";
+    let mut h = Harness::new(json!({"turns":[{"text":"task reply"}]})).await;
+    h.runtime.provider.fake.as_mut().unwrap()["summary"] = json!(summary);
+    h.runtime.provider.index = 3;
+    h.runtime.messages = vec![
+        Message::user("original constraints"),
+        Message::user("older task"),
+        Message {
+            role: "assistant".into(),
+            content: vec![Block::text(
+                "已改 agent/context.rs，选择兼容方案，cargo test 通过；下一步提交。".repeat(300),
+            )],
+        },
+        Message::user("latest task"),
+    ];
+    h.runtime
+        .store
+        .replace_messages(&h.runtime.session, &h.runtime.messages)
+        .unwrap();
+    assert!(h.runtime.compact(&h.hooks).await.unwrap());
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.text().contains(summary))
+    );
+    assert_eq!(h.runtime.provider.index, 3);
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    assert!(
+        events.iter().any(|e| e.r#type == "context_compacted"
+            && e.data["summarized_units"].as_u64().unwrap_or(0) > 0)
+    );
+    // Repeated compaction updates the previous summary rather than stacking it.
+    h.runtime
+        .messages
+        .push(Message::user("new history ".repeat(1000)));
+    h.runtime.messages.push(Message::user("next task"));
+    assert!(h.runtime.compact(&h.hooks).await.unwrap());
+    assert_eq!(
+        h.runtime
+            .messages
+            .iter()
+            .filter(|m| m.text().contains("## Goal"))
+            .count(),
+        1
+    );
+    h.runtime.provider.fake.as_mut().unwrap()["summary_error"] = json!("offline");
+    h.runtime
+        .messages
+        .push(Message::user("another history ".repeat(2000)));
+    h.runtime.messages.push(Message::user("latest"));
+    assert!(h.runtime.compact(&h.hooks).await.unwrap());
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.text().contains(summary))
+    );
+}
+
+#[tokio::test]
+async fn x1_summary_failure_falls_back_to_archived_history() {
+    let mut h = Harness::new(json!({"turns":[]})).await;
+    h.runtime.provider.fake.as_mut().unwrap()["summary_error"] = json!("unavailable");
+    h.runtime.messages = vec![
+        Message::user("original"),
+        Message::user("old ".repeat(2000)),
+        Message::user("recent"),
+    ];
+    assert!(h.runtime.compact(&h.hooks).await.unwrap());
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.text().contains("[artifact:"))
+    );
+    assert_eq!(h.runtime.messages[0].text(), "original");
+    assert_eq!(h.runtime.provider.index, 0);
+}
+
 #[test]
 fn plugin_fingerprints_distinguish_filename_content_boundary_collisions() {
     let dir = tempfile::tempdir().unwrap();
