@@ -11,7 +11,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -206,6 +206,114 @@ pub fn specs(
     specs.extend(external);
     specs
 }
+#[cfg(test)]
+mod validator_cache_tests {
+    use super::*;
+    #[test]
+    fn t6_cache_has_lru_and_schema_byte_bounds_and_shares_concurrent_calls() {
+        let mut spec = ToolSpec {
+            name: "mcp__bounded__0".into(),
+            description: String::new(),
+            input_schema: json!({"type":"integer","$comment":"x".repeat(65536)}),
+            requires_approval: false,
+        };
+        let mut cache = ValidatorCache::default();
+        let first = cache.get(&spec).unwrap();
+        for i in 1..150 {
+            spec.name = format!("mcp__bounded__{i}");
+            cache.get(&spec).unwrap();
+        }
+        assert!(cache.bytes <= 8 * 1024 * 1024);
+        assert!(cache.entries.len() < 150);
+        spec.name = "mcp__bounded__0".into();
+        assert!(!Arc::ptr_eq(&first, &cache.get(&spec).unwrap()));
+        let spec = ToolSpec {
+            name: "mcp__concurrent_cache__tool".into(),
+            description: String::new(),
+            input_schema: json!({"type":"integer"}),
+            requires_approval: false,
+        };
+        let expected = external_validator(&spec).unwrap();
+        let tasks = (0..8)
+            .map(|_| {
+                let spec = spec.clone();
+                std::thread::spawn(move || external_validator(&spec).unwrap())
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            assert!(Arc::ptr_eq(&expected, &task.join().unwrap()));
+        }
+    }
+    #[test]
+    fn t6_external_validator_is_reused_and_changed_schemas_are_isolated() {
+        let mut spec = ToolSpec {
+            name: "mcp__cache_test__tool".into(),
+            description: String::new(),
+            input_schema: json!({"type":"string"}),
+            requires_approval: false,
+        };
+        let first = external_validator(&spec).unwrap();
+        let again = external_validator(&spec).unwrap();
+        assert!(Arc::ptr_eq(&first, &again), "MCP schema was recompiled");
+        assert!(validate(&spec, &json!("valid")).is_ok());
+        assert!(validate(&spec, &json!(7)).is_err());
+        spec.input_schema = json!({"type":"integer"});
+        let changed = external_validator(&spec).unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert!(validate(&spec, &json!(7)).is_ok());
+        assert!(validate(&spec, &json!("invalid")).is_err());
+        spec.name = "mcp__cache_test__other".into();
+        assert!(!Arc::ptr_eq(&changed, &external_validator(&spec).unwrap()));
+    }
+}
+fn external_validator(spec: &ToolSpec) -> Result<Arc<jsonschema::Validator>> {
+    static CACHE: OnceLock<std::sync::Mutex<ValidatorCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| anyhow::anyhow!("validator cache lock poisoned"))?
+        .get(spec)
+}
+
+#[derive(Default)]
+struct ValidatorCache {
+    entries: VecDeque<CachedValidator>,
+    bytes: usize,
+}
+struct CachedValidator {
+    key: (String, String),
+    schema_bytes: usize,
+    validator: Arc<jsonschema::Validator>,
+}
+impl ValidatorCache {
+    fn get(&mut self, spec: &ToolSpec) -> Result<Arc<jsonschema::Validator>> {
+        const MAX_ENTRIES: usize = 256;
+        const MAX_BYTES: usize = 8 * 1024 * 1024;
+        let bytes = serde_json::to_vec(&spec.input_schema)?;
+        let key = (spec.name.clone(), util::hash(&bytes));
+        if let Some(position) = self.entries.iter().position(|entry| entry.key == key) {
+            let entry = self.entries.remove(position).unwrap();
+            let validator = entry.validator.clone();
+            self.entries.push_back(entry);
+            return Ok(validator);
+        }
+        let validator = Arc::new(jsonschema::validator_for(&spec.input_schema)?);
+        if bytes.len() <= MAX_BYTES {
+            while self.entries.len() >= MAX_ENTRIES || self.bytes + bytes.len() > MAX_BYTES {
+                if let Some(victim) = self.entries.pop_front() {
+                    self.bytes -= victim.schema_bytes;
+                }
+            }
+            self.bytes += bytes.len();
+            self.entries.push_back(CachedValidator {
+                key,
+                schema_bytes: bytes.len(),
+                validator: validator.clone(),
+            });
+        }
+        Ok(validator)
+    }
+}
 pub fn validate(spec: &ToolSpec, input: &Value) -> Result<()> {
     static VALIDATORS: OnceLock<std::collections::HashMap<String, jsonschema::Validator>> =
         OnceLock::new();
@@ -224,8 +332,8 @@ pub fn validate(spec: &ToolSpec, input: &Value) -> Result<()> {
     let validator = if let Some(value) = cached.get(&spec.name) {
         value
     } else {
-        compiled = jsonschema::validator_for(&spec.input_schema)?;
-        &compiled
+        compiled = external_validator(spec)?;
+        compiled.as_ref()
     };
     if !validator.is_valid(input) {
         let errors = validator
