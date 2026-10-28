@@ -2079,6 +2079,9 @@ mod concurrency_tests {
     #[tokio::test]
     async fn ensure_checks_metadata_without_reading_message_bodies() {
         let root = tempfile::tempdir().unwrap();
+        // CI's Windows temp path may contain RUNNER~1; dispatch passes a
+        // canonical workspace, so exercise the same freshness-check contract.
+        let workspace = util::canonical(root.path()).unwrap();
         let store = Store::open(":memory:").unwrap();
         let session = store
             .create(&root.path().to_string_lossy(), "fake", "fake")
@@ -2092,14 +2095,14 @@ mod concurrency_tests {
         };
         let mut c = Conversation::new(&router.configuration).unwrap();
         router
-            .ensure(&mut c, root.path(), Some(&session), Some("fake"))
+            .ensure(&mut c, &workspace, Some(&session), Some("fake"))
             .await
             .unwrap();
         // The metadata is unchanged; selecting a message body now fails at
         // the SQL boundary. A freshness check must not touch that column.
         store.with(|db| { db.execute_batch("ALTER TABLE messages RENAME TO saved_messages; CREATE VIEW messages AS SELECT session_id,seq,role,json('invalid JSON') AS content FROM saved_messages;")?; Ok(()) }).unwrap();
         router
-            .ensure(&mut c, root.path(), Some(&session), Some("fake"))
+            .ensure(&mut c, &workspace, Some(&session), Some("fake"))
             .await
             .unwrap();
     }
