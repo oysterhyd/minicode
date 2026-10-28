@@ -56,6 +56,23 @@ impl ProcessTree {
             windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0.as_raw_handle(), 1);
         }
     }
+    pub fn release(&mut self) -> Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::*;
+        unsafe {
+            let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            if SetInformationJobObject(
+                self.0.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of_val(&info) as u32,
+            ) == 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        Ok(())
+    }
 }
 #[cfg(unix)]
 pub struct ProcessTree(i32);
@@ -66,13 +83,16 @@ impl ProcessTree {
             child.id().context("command process id missing")? as i32
         ))
     }
-    pub fn active(&self) -> bool {
-        unsafe { libc::kill(-self.0, 0) == 0 }
-    }
     pub fn terminate(&self) {
-        unsafe {
-            libc::kill(-self.0, libc::SIGKILL);
+        if self.0 != 0 {
+            unsafe {
+                libc::kill(-self.0, libc::SIGKILL);
+            }
         }
+    }
+    pub fn release(&mut self) -> Result<()> {
+        self.0 = 0;
+        Ok(())
     }
 }
 impl ProcessTree {

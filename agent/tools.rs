@@ -1235,6 +1235,31 @@ pub async fn run_command(
 ) -> Result<Outcome> {
     run_command_for("bash", command, cwd, timeout, ctx).await
 }
+
+struct OutputReaders(Vec<tokio::task::JoinHandle<Result<()>>>);
+impl Drop for OutputReaders {
+    fn drop(&mut self) {
+        for reader in &self.0 {
+            reader.abort();
+        }
+    }
+}
+fn capture_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    file: Arc<std::sync::Mutex<File>>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = [0u8; 16 * 1024];
+        loop {
+            let size = pipe.read(&mut buffer).await?;
+            if size == 0 {
+                return Ok(());
+            }
+            file.lock().unwrap().write_all(&buffer[..size])?;
+        }
+    })
+}
 pub async fn run_command_for(
     name: &str,
     command: &str,
@@ -1242,21 +1267,24 @@ pub async fn run_command_for(
     timeout: f64,
     ctx: &ToolContext,
 ) -> Result<Outcome> {
-    // Both handles share the same append-only disk capture. Child output cannot
-    // consume unbounded agent heap, and descendants cannot keep a pipe open.
+    // Drain bounded pipe chunks to disk; EOF tells us whether descendants still
+    // hold output, independently of redirected processes in the command tree.
     let mut captured = tempfile::NamedTempFile::new()?;
-    let out = captured.as_file().try_clone()?;
-    let err = captured.as_file().try_clone()?;
     let mut cmd = shell_for(name, command, cwd);
-    cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("failed to start command")?;
-    let tree = match crate::command_process::ProcessTree::attach(&child) {
+    let mut tree = match crate::command_process::ProcessTree::attach(&child) {
         Ok(tree) => tree,
         Err(error) => {
             kill_tree(&mut child).await;
             return Err(error.context("failed to own command process tree"));
         }
     };
+    let file = Arc::new(std::sync::Mutex::new(captured.as_file().try_clone()?));
+    let mut readers = OutputReaders(vec![
+        capture_pipe(child.stdout.take().unwrap(), file.clone()),
+        capture_pipe(child.stderr.take().unwrap(), file),
+    ]);
     let started = Instant::now();
     let mut live_position = 0u64;
     let mut timed_out = false;
@@ -1272,7 +1300,7 @@ pub async fn run_command_for(
             exited = Some((Instant::now(), status));
         }
         if let Some((time, status)) = exited {
-            if !tree.active() {
+            if readers.0.iter().all(|reader| reader.is_finished()) {
                 break Some(status);
             }
             if time.elapsed() >= Duration::from_secs(2) {
@@ -1312,8 +1340,21 @@ pub async fn run_command_for(
         }
         tokio::select! {_ = tokio::time::sleep(Duration::from_millis(50))=>{},_ = ctx.cancel.cancelled()=>{}}
     };
-    tree.shutdown().await;
+    if !timed_out && !quota && !cancelled && !lingered {
+        tree.release()?;
+    } else {
+        tree.shutdown().await;
+    }
     drop(tree);
+    for reader in &mut readers.0 {
+        match tokio::time::timeout(Duration::from_secs(1), &mut *reader).await {
+            Ok(result) => result??,
+            Err(_) => {
+                reader.abort();
+                let _ = reader.await;
+            }
+        }
+    }
     if cancelled {
         bail!("tool cancelled")
     }

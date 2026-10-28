@@ -977,6 +977,49 @@ async fn sh3_shell_defaults_disable_color() {
 }
 
 #[tokio::test]
+async fn sh5_redirected_descendant_survives_shell_exit() {
+    let (_dir, ctx) = fixture();
+    fs::write(
+        ctx.workspace.join("server.cjs"),
+        "require('fs').writeFileSync('started','yes');setTimeout(()=>require('fs').writeFileSync('survived','yes'),2800)",
+    )
+    .unwrap();
+    fs::write(
+        ctx.workspace.join("launch.cjs"),
+        "const c=require('child_process').spawn(process.execPath,['server.cjs'],{stdio:'ignore',detached:process.platform==='win32'});console.log(c.pid);c.on('error',console.error);c.unref()",
+    )
+    .unwrap();
+    let result = tools::run_command("node launch.cjs", &ctx.workspace, 10.0, &ctx)
+        .await
+        .unwrap();
+    assert!(result.success, "{:?}", result.error);
+    for _ in 0..200 {
+        if ctx.workspace.join("survived").exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "redirected descendant was killed: {result:?}; started={}",
+        ctx.workspace.join("started").exists()
+    );
+}
+
+#[tokio::test]
+async fn sh5_descendant_holding_output_is_stopped() {
+    let (_dir, ctx) = fixture();
+    fs::write(ctx.workspace.join("launch.cjs"), "require('child_process').spawn(process.execPath,['-e',\"console.log('child');setTimeout(()=>require('fs').writeFileSync('leaked','yes'),4000)\"],{stdio:['ignore','inherit','inherit'],detached:process.platform==='win32'}).unref()").unwrap();
+    let result = tools::run_command("node launch.cjs", &ctx.workspace, 10.0, &ctx)
+        .await
+        .unwrap();
+    assert!(!result.success, "{result:?}");
+    assert!(result.error.unwrap().contains("kept output open"));
+    assert!(result.output.contains("child"));
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    assert!(!ctx.workspace.join("leaked").exists());
+}
+
+#[tokio::test]
 async fn shell_preserves_quoted_command_text() {
     let (_dir, ctx) = fixture();
     let result = tools::run_command("echo '1>/dev/null'", &ctx.workspace, 10.0, &ctx)
