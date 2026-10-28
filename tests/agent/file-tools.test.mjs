@@ -80,3 +80,20 @@ test('artifact character defaults and line/search/tail views work through tool r
   assert.equal(calls.search.output_detail,'2\tneedle中')
   assert.equal(calls.tail.output_detail,'1202\ttail\n1203\ttail')
 })
+
+test('large edits reject same-length changes with a restored mtime',async t=>{
+  const f=await fixture(t,[{tool_calls:[
+    {name:'read',arguments:{path:'large.txt'}},
+    {name:'bash',arguments:{command:'node mutate.cjs'}},
+    {name:'edit',arguments:{path:'large.txt',old_text:'target',new_text:'changed'}}
+  ]},{text:'done'}])
+  const before='header old\ntarget\n'+'x'.repeat(400000)
+  fs.writeFileSync(path.join(f.workspace,'large.txt'),before)
+  fs.writeFileSync(path.join(f.workspace,'mutate.cjs'),"const fs=require('fs');const s=fs.statSync('large.txt');fs.writeFileSync('large.txt',fs.readFileSync('large.txt','utf8').replace('old','new'));fs.utimesSync('large.txt',s.atime,s.mtime)")
+  await f.request('setPermissionMode',{mode:'bypass'})
+  const result=await f.run()
+  const edit=result.detail.events.find(e=>e.type==='tool_call_result'&&e.data.name==='edit').data
+  assert.equal(edit.success,false)
+  assert.match(edit.error,/外部修改/)
+  assert.equal(fs.readFileSync(path.join(f.workspace,'large.txt'),'utf8'),before.replace('old','new'))
+})

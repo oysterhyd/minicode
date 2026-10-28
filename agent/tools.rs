@@ -56,14 +56,12 @@ impl Seen {
     fn matches(&self, metadata: &fs::Metadata) -> bool {
         self.size == metadata.len() && self.modified == metadata.modified().ok()
     }
-    /// The current state of `path`; reuses `previous` when size and mtime agree.
-    fn of(path: &Path, previous: Option<&Seen>) -> Result<Self> {
-        let metadata = path.metadata()?;
-        if let Some(previous) = previous.filter(|p| p.matches(&metadata)) {
-            return Ok(previous.clone());
-        }
+    /// Always hash the bytes: coarse or restored mtimes cannot prove identity.
+    fn of(path: &Path) -> Result<Self> {
+        let mut file = File::open(path)?;
+        let metadata = file.metadata()?;
         let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-        std::io::copy(&mut File::open(path)?, &mut hasher)?;
+        std::io::copy(&mut file, &mut hasher)?;
         Ok(Self {
             size: metadata.len(),
             modified: metadata.modified().ok(),
@@ -72,8 +70,7 @@ impl Seen {
     }
 }
 fn remember(ctx: &ToolContext, path: &Path) {
-    let previous = ctx.files.lock().unwrap().seen.get(path).cloned();
-    if let Ok(state) = Seen::of(path, previous.as_ref()) {
+    if let Ok(state) = Seen::of(path) {
         ctx.files.lock().unwrap().seen.insert(path.into(), state);
     }
 }
@@ -88,7 +85,7 @@ fn ensure_current(ctx: &ToolContext, path: &Path, relative: &str) -> Result<Opti
             "{relative} 已存在，但本会话还没有读取过它（会话恢复后也需要重新读取）；请先 read 当前内容再修改"
         )
     };
-    let current = Seen::of(path, Some(&previous))?;
+    let current = Seen::of(path)?;
     if current.digest != previous.digest {
         bail!("{relative} 在上次读取后已被外部修改；请重新 read 后再修改")
     }
@@ -1056,6 +1053,9 @@ fn edit_large(
     }
     // The mapped source is borrowed; no second heap copy of a large file.
     let mapped = unsafe { memmap2::MmapOptions::new().map(&input)? };
+    if util::hash(&mapped) != seen.digest {
+        bail!("{relative} 在上次读取后已被外部修改；请重新 read 后再修改")
+    }
     let text = std::str::from_utf8(&mapped).context("binary or non-UTF-8 file")?;
     let changes = editing::plan(text, args, relative)?;
     let parent = path.parent().context("invalid file path")?;
@@ -1075,7 +1075,7 @@ fn edit_large(
     temp.as_file().set_permissions(original.permissions())?;
     drop(mapped);
     drop(input);
-    if !seen.matches(&path.metadata()?) {
+    if Seen::of(path)?.digest != seen.digest {
         bail!("{relative} 在编辑过程中被外部修改；请重新 read 后再修改")
     }
     if ctx.cancel.is_cancelled() {

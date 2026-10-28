@@ -68,6 +68,65 @@ fn utf8_bounds() {
     }
 }
 
+async fn t8_same_metadata_edit_case(padding: usize) {
+    let (_dir, ctx) = fixture();
+    let path = ctx.workspace.join("same-metadata.txt");
+    let before = format!("header old\ntarget\n{}", "x".repeat(padding));
+    fs::write(&path, &before).unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"same-metadata.txt"}), &ctx)
+            .await
+            .success
+    );
+    let modified = path.metadata().unwrap().modified().unwrap();
+    let external = before.replacen("old", "new", 1);
+    fs::write(&path, &external).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(path.metadata().unwrap().modified().unwrap(), modified);
+    assert_eq!(before.len(), external.len());
+    let out = tools::execute(
+        "edit",
+        &json!({"path":"same-metadata.txt","old_text":"target","new_text":"changed"}),
+        &ctx,
+    )
+    .await;
+    assert!(
+        !out.success,
+        "same-size same-mtime external edit was missed"
+    );
+    assert!(out.error.unwrap().contains("外部修改"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), external);
+    assert!(
+        tools::execute("read", &json!({"path":"same-metadata.txt"}), &ctx)
+            .await
+            .success
+    );
+    let refreshed = tools::execute(
+        "edit",
+        &json!({"path":"same-metadata.txt","old_text":"target","new_text":"changed"}),
+        &ctx,
+    )
+    .await;
+    assert!(refreshed.success, "{:?}", refreshed.error);
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        external.replacen("target", "changed", 1)
+    );
+}
+#[tokio::test]
+async fn t8_small_edits_check_content_even_when_metadata_is_unchanged() {
+    t8_same_metadata_edit_case(0).await;
+}
+#[tokio::test]
+async fn t8_large_edits_check_content_even_when_metadata_is_unchanged() {
+    t8_same_metadata_edit_case(400000).await;
+}
+
 #[tokio::test]
 async fn t5_artifact_default_matches_schema_and_supports_lines_search_tail() {
     let (_dir, ctx) = fixture();
