@@ -505,8 +505,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 ### 批次验证补充与范围外发现
 
 - 每项的全套检查使用独立输出目录 output/3B-ID/eval 与 scenarios，避免覆盖已有 output/eval 中不同配置的结果；生成的任务与 trace.log 无变更。60 次主任务与 9 个场景保持既有验收结果（场景的 counter_retry b0/b1 为预期失败）。Desktop 源码未修改，不触发 Go 检查条件。
-- Windows 检查均按 CI 命令执行；额外 Linux 全量 Rust 与本批协议回归验证也执行。WSL 全协议曾出现既有 MCP 取消进程存活判定失败，以及 streaming Retry-After 耗时上限失败，记录为本批范围外；未改其实现。SH7 回归自身的数据库锁竞争通过 busy_timeout 与显式测试同步修正。
+- Windows 检查均按 CI 命令执行；额外 Linux 全量 Rust 与本批协议回归验证也执行。WSL 全协议重跑仅剩 MCP 取消进程存活判定失败，已在 c21578d 隔离基线全协议中复现；streaming Retry-After 最初的耗时阈值失败重跑通过。记录为本批范围外，未改实现。SH7 回归自身的数据库锁竞争通过 busy_timeout 与显式测试同步修正。
 - 最终 U4 检查全部通过：Windows Rust 121 项，协议 193 项通过、1 项既有慢测跳过，TUI 117 项；60 次主任务与 9 个场景通过结果校验。额外 Linux Rust 116 项、本批协议 11 项通过，strace 确认两次原子写入分别同步临时文件与父目录。Linux 全协议不宣称全部通过。
+- 另以本地 HTTP 401 Git 远端验证：禁用交互提示后 ls-remote 在 3 秒内失败并报告 terminal prompts disabled，没有访问真实远端或提交数据。
+- 修改文件：agent/tools.rs、agent/util.rs、agent/command_process.rs、agent/models.rs、agent/runtime.rs、agent/store.rs、agent/configuration.rs、agent/extensions.rs、agent/mcp.rs、agent/assets/tools.json、agent/tests.rs；协议回归 command-output.test.mjs、artifact-retention.test.mjs、tool-timeouts.test.mjs（均在 tests/agent/）；以及本记录。
 
 ### U3：终端文本完整剥离 ANSI 序列
 
@@ -537,6 +539,7 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 问题与根因：捕获只读取末尾 256KB，预览再保留尾部 2000 行/50KB，编译器首条错误会丢失。
 - 修复：读取捕获头部，长输出另读尾部；预览在 2000 行/50KB 内双端保留，中间明确说明省略并引用完整 artifact。UTF-8 截取遵守字符边界，内存读取仍有界；普通末尾换行不产生归档。
 - 测试：先复现 50,002 行中文输出缺少首条错误；修复后验证首错误、末行、字节/行数预算及完整 artifact 的所有行。
+- 边界补验：11 种中文样本偏移中 4 种会在 Windows 上因 UTF-8 窗口被截断而误选代码页。扩展 Rust 回归先复现 padding=4 失败；修复为以完整捕获确定 UTF-8 编码，样本仅剔除首尾未完成字符，避免误解码整个头尾。该补修再执行 `output/check-3b.ps1 SH8-final` 全套检查。
 - 验证：`output/check-3b.ps1 SH8` 全套检查，日志 output/3B-SH8-*.log。
 
 ### SH6：取消后保留部分输出与终止信号

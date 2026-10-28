@@ -1356,13 +1356,17 @@ pub async fn run_command_for(
         }
     }
     let total = captured.as_file().metadata()?.len().min(100_000_000);
+    #[cfg(windows)]
+    let capture_utf8 = capture_is_utf8(captured.as_file_mut(), total)?;
+    #[cfg(not(windows))]
+    let capture_utf8 = true;
     captured.as_file_mut().seek(SeekFrom::Start(0))?;
     let mut bytes = vec![];
     captured
         .as_file_mut()
         .take(256_000)
         .read_to_end(&mut bytes)?;
-    let decoded = decode(&bytes);
+    let decoded = decode_capture_sample(&bytes, capture_utf8);
     let decoded = decoded.trim_end_matches(['\r', '\n']);
     const PREVIEW_BYTES: usize = 50 * 1024 - 512;
     let truncated =
@@ -1382,7 +1386,7 @@ pub async fn run_command_for(
                 .as_file_mut()
                 .take(128_000)
                 .read_to_end(&mut bytes)?;
-            decode(&bytes)
+            decode_capture_sample(&bytes, capture_utf8)
         } else {
             decoded.to_string()
         };
@@ -1661,6 +1665,25 @@ fn decode(bytes: &[u8]) -> String {
     #[cfg(not(windows))]
     let text = String::from_utf8_lossy(bytes).into_owned();
     util::command_text(&text)
+}
+
+fn decode_capture_sample(bytes: &[u8], utf8: bool) -> String {
+    if !utf8 {
+        return decode(bytes);
+    }
+    // A window may start/end inside a UTF-8 scalar. Its boundaries must not
+    // cause Windows to reinterpret an otherwise UTF-8 capture as a code page.
+    let start = bytes
+        .iter()
+        .take(3)
+        .take_while(|b| **b & 0xc0 == 0x80)
+        .count();
+    let bytes = &bytes[start..];
+    let end = match std::str::from_utf8(bytes) {
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        _ => bytes.len(),
+    };
+    util::command_text(&String::from_utf8_lossy(&bytes[..end]))
 }
 
 #[cfg(test)]
