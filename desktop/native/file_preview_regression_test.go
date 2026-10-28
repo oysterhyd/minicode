@@ -4,11 +4,37 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
 	"minicode.desktop/internal/model"
 )
+
+func TestT4BatchEditApprovalPreviewIncludesAllOperationsAndRefreshes(t *testing.T) {
+	d := newDesktop(func(fn func()) { fn() })
+	edits := []any{map[string]any{"old_text": "before-one", "new_text": "after-one"}, map[string]any{"old_text": "before-two", "new_text": "after-two"}}
+	item := &model.FeedItem{ID: "batch-edit", Name: "edit", Args: map[string]any{"path": "batch.txt", "edits": edits}}
+	var text strings.Builder
+	for _, line := range d.itemDiff(item) {
+		text.WriteString(line.Text)
+		text.WriteByte('\n')
+	}
+	for _, want := range []string{"before-one", "after-one", "before-two", "after-two"} {
+		if !strings.Contains(text.String(), want) {
+			t.Fatalf("missing %q: %s", want, text.String())
+		}
+	}
+	edits[1].(map[string]any)["new_text"] = "updated-two"
+	text.Reset()
+	for _, line := range d.itemDiff(item) {
+		text.WriteString(line.Text)
+		text.WriteByte('\n')
+	}
+	if !strings.Contains(text.String(), "updated-two") {
+		t.Fatalf("stale batch preview: %s", text.String())
+	}
+}
 
 func TestWritePreviewUsesActualDiffAndInvalidatesOnResult(t *testing.T) {
 	d := newDesktop(func(fn func()) { fn() })

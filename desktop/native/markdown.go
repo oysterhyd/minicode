@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -456,6 +457,21 @@ func markdownChunks(source string) []string {
 func (d *desktop) itemDiff(item *model.FeedItem) []content.DiffLine {
 	key := d.current().Key + ":" + item.ID
 	before, after := model.String(item.Args["old_text"]), model.String(item.Args["new_text"])
+	if item.Name == "edit" && item.Args["edits"] != nil {
+		var edits []struct {
+			Old string `json:"old_text"`
+			New string `json:"new_text"`
+		}
+		if encoded, err := json.Marshal(item.Args["edits"]); err == nil && json.Unmarshal(encoded, &edits) == nil {
+			var oldParts, newParts []string
+			for i, edit := range edits {
+				label := fmt.Sprintf("编辑 %d\n", i+1)
+				oldParts = append(oldParts, label+edit.Old)
+				newParts = append(newParts, label+edit.New)
+			}
+			before, after = strings.Join(oldParts, "\n"), strings.Join(newParts, "\n")
+		}
+	}
 	if item.Name == "write" {
 		after = model.String(item.Args["content"])
 	}

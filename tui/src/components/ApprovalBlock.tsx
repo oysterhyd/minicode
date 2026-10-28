@@ -50,6 +50,10 @@ function previewLines(item: FeedItem): { text: string[]; diff: DiffLine[] } {
   if (item.name === 'workspace_trust') return { text: terminalText(item.text || '').split('\n').slice(1), diff: [] }
   if (item.name === 'bash' || item.name === 'powershell') return { text: terminalText(String(args.command || '')).split('\n'), diff: [] }
   if (item.name === 'edit') {
+    if (Array.isArray(args.edits)) {
+      const edits=args.edits.filter((edit): edit is Record<string,unknown> => !!edit && typeof edit==='object')
+      return {text:[String(args.path||''),`${edits.length} 处编辑`],diff:edits.flatMap(edit=>previewDiff(String(edit.old_text??''),String(edit.new_text??'')))}
+    }
     return { text: [String(args.path || '')], diff: previewDiff(String(args.old_text ?? ''), String(args.new_text ?? '')) }
   }
   if (item.name === 'write') {

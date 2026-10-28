@@ -6,6 +6,7 @@ import stripAnsi from 'strip-ansi'
 import { App } from '../src/App.js'
 import { diffPairs, parseToolDiff, previewDiff, wordDiff } from '../src/tools.js'
 import { displayWidth } from '../src/format.js'
+import { ApprovalPanel } from '../src/components/ApprovalBlock.js'
 import { delay, FakeBridge } from './fake-bridge.js'
 
 const DIFF = `Applied change to src/App.tsx (+2 -1)
@@ -39,6 +40,15 @@ test('word diff marks only the edited words and gives up on rewrites', () => {
 test('approval previews keep one line of context around the change', () => {
   assert.deepEqual(previewDiff('a\nb\nc', 'a\nB\nc').map(line => `${line.kind[0]}${line.text}`), ['ca', 'db', 'aB', 'cc'])
   assert.deepEqual(previewDiff('', 'new\nfile').map(line => line.kind), ['add', 'add'])
+})
+
+test('T4 batch edit approvals show the requested operations', () => {
+  const ui=render(<ApprovalPanel item={{id:'batch-approval',kind:'approval',name:'edit',args:{path:'batch.txt',edits:[{old_text:'before-one',new_text:'after-one'},{old_text:'before-two',new_text:'after-two'}]}}} choice={0} columns={90} />)
+  try {
+    const frame=stripAnsi(ui.lastFrame()||'')
+    assert.match(frame,/before-one/);assert.match(frame,/after-one/)
+    assert.match(frame,/before-two/);assert.match(frame,/after-two/)
+  } finally {ui.unmount()}
 })
 
 async function mount() {

@@ -605,6 +605,7 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 候选：只返回最相近的三行及真实行号，不自动应用模糊猜测。候选扫描前 20,000 行、每行比较前 500 字符，限制错误路径成本。
 - 依赖与取舍：unicode-normalization 已由 T1 PDF 依赖引入，本项将其声明为直接依赖，不新增包。自动归一化默认限 2 MiB，MINICODE_EDIT_NORMALIZE_MAX_BYTES 可设置到 20 MiB；更大文件仍支持精确编辑并给出明确提示。缩进仅允许一致的基准变化（tab 按 4 列比较），不自动改变相对缩进，也不把单双引号或拼写错误视为等价。
 - 测试：归一化匹配、CRLF 与缩进保持、规范等价字符、批量偏移/失败/重叠、歧义拒绝、严格模式、大文件编辑、Unicode 局部匹配拒绝，以及 bridge 的批量与失败不落盘。检查日志 output/3C-T4-*.log。
+- 完成审查补验：TUI/Native Desktop 原审批预览只读取 old_text/new_text，edits[] 会变成空 diff。两端先补失败测试再支持批量预览，并显示编辑数量/边界；实际成功结果继续优先使用 Rust 输出的真实 diff。日志 output/3C-T4-ui-red.log、output/3C-T4-desktop-red.log 与 output/3C-T4-UI-*.log。
 
 ### T5：一致的归档默认值与行视图
 
@@ -642,4 +643,14 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 基准：Windows 100 次调用、深度 4/16/64，旧 canonicalize 次数 1000/2200/7000，修复后均 100；64 层耗时约 500 ms 降到 12.6 ms。基准日志 output/3C-U5-bench-*.log。Linux 补充 strace 对照统计实际 readlink/readlinkat 系统调用，见 output/3C-U5-syscall-*.log。
 - 取舍：普通路径与缺失后缀避免重复解析；含 .. 的路径在必要的分段边界解析，以正确处理链接，未为追求一次调用而牺牲路径安全语义。
 - 验证：output/check-3c.ps1 U5 全套 Windows 检查；额外 Linux fmt/clippy/Rust/本批协议与 syscall 基准日志 output/3C-linux-final.log。
+
+### 批次 3C 最终验证与边界
+
+- 条目状态：T1、T2、T4、T5、T6、T8、T9、U5 均已实现并补失败回归；T1 的图片读取、T2 的非 mmap 读取属于核查后保留的已有能力。没有跳过整个条目。
+- Windows 每项提交前均执行 fmt、clippy --locked --all-targets -D warnings、test/build --locked、Node 全协议、任务/trace 生成校验、两组离线评测及结果验证、npm ci/build 与真实 Rust bridge TUI 测试。最终 Rust 141 项通过，2 个手动基准常规跳过但均已实际运行；协议 198 项通过、1 项既有慢测跳过；两组评测保持 60 次主任务与 9 场景的预期结果；生成任务和 trace.log 无变化。
+- T4 审批预览补修额外执行 Windows Desktop 的 go test -count=1 ./...、go vet ./...、vendor UI 测试；TUI 118 项（含真实 bridge）验证批量预览。日志 output/3C-T4-UI-*.log。
+- Linux fmt/clippy、Rust 136 项（另 2 个手动基准）通过；file-tools 与 artifact-retention 共 9 项通过。附加 extensions 协议中既有 MCP 初始化取消后的进程存活判定仍失败（3B 已在 c21578d 基线复现），未把 Linux 全协议宣称为全部通过。系统调用基准深度 4/16/64 的 readlink/readlinkat 从 21/171/2211 降为 6/18/66，确认普通深路径由平方增长降为线性。
+- 修改范围：Cargo.toml/lock；agent/textfile.rs、editing.rs、tools.rs、paging.rs、util.rs、store.rs、lib.rs、tests.rs、assets/tools.json；tests/agent/file-tools.test.mjs；TUI ApprovalBlock/claude-style 测试；Native markdown/file_preview_regression 测试；本修复记录。两个原有 .pending 文件不变。未推送或发布。
+- 待确认产品取舍汇总：无 BOM 编码采用确定性顺序且解码上限可配置；搜索不再支持回溯语法，显式 include_ignored 可关闭 ignore 文件规则；归一化可通过 match_mode=exact 关闭且限制输入大小；批量编辑基于原始快照，拒绝重叠；归档行视图有可配置单行上限，保留原 UI 字符分页兼容性。
+- 下一步建议：单独处理 Linux MCP 取消回收及 edit_large 的 mmap/元数据保留路径；继续路线下一阶段，不把这些范围外问题并入本批。
 
