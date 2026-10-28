@@ -360,8 +360,15 @@ fn execute_sync(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> 
         "write" | "edit" => edit(name, args, ctx),
         "read_artifact" => {
             let id = util::string(args, "artifact_id")?;
+            if crate::paging::artifact_line_mode(args) {
+                let path = ctx.store.artifact_path(&ctx.session, id)?;
+                return Ok(Outcome::ok(crate::paging::artifact_lines(&path, args)?));
+            }
             let offset = args["offset"].as_u64().unwrap_or(0) as usize;
-            let limit = args["limit"].as_u64().unwrap_or(20_000).min(20_000) as usize;
+            let limit = args["limit"]
+                .as_u64()
+                .unwrap_or(crate::paging::ARTIFACT_DEFAULT_LIMIT as u64)
+                .min(20_000) as usize;
             let page = ctx.store.artifact_page(&ctx.session, id, offset, limit)?;
             let mut text = page["text"].as_str().unwrap_or_default().to_string();
             if page["hasMore"] == true {

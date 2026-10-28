@@ -295,7 +295,7 @@
   },
   {
     "name": "read_artifact",
-    "description": "Read a page from a session artifact referenced as [artifact:<id>]. Use offset from the previous page's next_offset to continue. Artifacts from other sessions are never accessible.",
+    "description": "Read a session artifact. Character pagination defaults to limit=4000, offset=0. Optional start_line/end_line select inclusive 1-based lines; pattern searches lines using Rust regex; tail_lines selects the last 1–2000 lines before pattern filtering. Line views include line numbers and accept limit as a character budget, with next_start_line hints. Do not combine line views with a nonzero character offset or tail_lines with a line range. Other sessions remain inaccessible.",
     "input_schema": {
       "properties": {
         "artifact_id": {
@@ -318,6 +318,27 @@
           "minimum": 1,
           "title": "Limit",
           "type": "integer"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tail_lines": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "pattern": {
+          "type": "string",
+          "description": "non-backtracking regular expression, applied to each selected line"
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "default": true
         }
       },
       "required": [
@@ -327,6 +348,7 @@
     },
     "requires_approval": false
   },
+
   {
     "name": "skills_list",
     "description": "List available local skills by name and description. Skill bodies are not loaded.",

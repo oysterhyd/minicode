@@ -606,3 +606,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 依赖与取舍：unicode-normalization 已由 T1 PDF 依赖引入，本项将其声明为直接依赖，不新增包。自动归一化默认限 2 MiB，MINICODE_EDIT_NORMALIZE_MAX_BYTES 可设置到 20 MiB；更大文件仍支持精确编辑并给出明确提示。缩进仅允许一致的基准变化（tab 按 4 列比较），不自动改变相对缩进，也不把单双引号或拼写错误视为等价。
 - 测试：归一化匹配、CRLF 与缩进保持、规范等价字符、批量偏移/失败/重叠、歧义拒绝、严格模式、大文件编辑、Unicode 局部匹配拒绝，以及 bridge 的批量与失败不落盘。检查日志 output/3C-T4-*.log。
 
+### T5：一致的归档默认值与行视图
+
+- 问题与复现：工具 schema 默认 4000 字符，执行默认 20000；先失败测试得到 6024 字符，证实不一致。行相关参数此前被忽略。
+- 修复：模型 read_artifact 默认统一为 4000，保留已有字符 offset/limit；新增 start_line/end_line（1-based，含末行）、pattern/case_sensitive、tail_lines（先取最后 N 行再过滤）。结果带原始行号和 next_start_line 提示；同样通过会话 artifact_path 授权，不能读取别的会话。
+- 兼容与取舍：Bridge 的 readArtifact 是已有 UI 固定 20000 字符页协议，保持不变；本项统一的是工具 schema 与执行。行视图不接受非零字符 offset，tail 不与行范围混用。单个参与匹配的行默认最多 1 MiB，MINICODE_ARTIFACT_LINE_MAX_BYTES 可配置到 16 MiB；更长行明确引导字符分页，范围前的超长行直接跳过。尾部只缓存受输出预算限制的匹配前缀，先在完整行上判断 regex，避免截断漏匹配。
+- 测试：默认字符数、中文行范围、搜索、尾部、非法范围、长行与字符分页回退、范围跳过、尾部远端命中、跨会话拒绝；真实 bridge 四种模式与现有 UI 分页契约。全套日志 output/3C-T5-*.log。
+

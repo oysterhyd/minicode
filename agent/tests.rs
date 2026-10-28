@@ -69,6 +69,124 @@ fn utf8_bounds() {
 }
 
 #[tokio::test]
+async fn t5_artifact_default_matches_schema_and_supports_lines_search_tail() {
+    let (_dir, ctx) = fixture();
+    let artifact = ctx
+        .store
+        .spill(
+            &ctx.session,
+            "command_output",
+            &format!("one\n二\nneedle three\nfour\n{}", "tail\n".repeat(1200)),
+        )
+        .unwrap();
+    let default = tools::execute("read_artifact", &json!({"artifact_id":artifact}), &ctx).await;
+    assert!(default.success);
+    assert_eq!(
+        default
+            .output
+            .split("\n...[更多内容")
+            .next()
+            .unwrap()
+            .chars()
+            .count(),
+        4000
+    );
+    for (extra, expected) in [
+        (
+            json!({"start_line":2,"end_line":3}),
+            "2\t二\n3\tneedle three",
+        ),
+        (json!({"pattern":"needle"}), "3\tneedle three"),
+        (json!({"tail_lines":2}), "1203\ttail\n1204\ttail"),
+        (
+            json!({"pattern":"(?i)NEEDLE","start_line":2}),
+            "3\tneedle three",
+        ),
+    ] {
+        let mut args = extra;
+        args["artifact_id"] = json!(artifact);
+        let result = tools::execute("read_artifact", &args, &ctx).await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.output, expected);
+    }
+    let invalid = tools::execute(
+        "read_artifact",
+        &json!({"artifact_id":artifact,"start_line":3,"end_line":1}),
+        &ctx,
+    )
+    .await;
+    assert!(!invalid.success);
+}
+
+#[tokio::test]
+async fn t5_artifact_line_views_are_bounded_and_keep_session_isolation() {
+    let (_dir, ctx) = fixture();
+    let artifact = ctx
+        .store
+        .spill(
+            &ctx.session,
+            "command_output",
+            &format!("{}needle\nother\n", "x".repeat(1100000)),
+        )
+        .unwrap();
+    let large = tools::execute(
+        "read_artifact",
+        &json!({"artifact_id":artifact,"pattern":"needle"}),
+        &ctx,
+    )
+    .await;
+    assert!(!large.success);
+    assert!(large.error.unwrap().contains("use character pagination"));
+    let later = tools::execute(
+        "read_artifact",
+        &json!({"artifact_id":artifact,"start_line":2}),
+        &ctx,
+    )
+    .await;
+    assert!(later.success, "{:?}", later.error);
+    assert_eq!(later.output, "2\tother");
+    let chars = tools::execute(
+        "read_artifact",
+        &json!({"artifact_id":artifact,"limit":12}),
+        &ctx,
+    )
+    .await;
+    assert!(chars.success);
+    assert!(chars.output.starts_with("xxxxxxxxxxxx\n"));
+    let other = ctx
+        .store
+        .create(&ctx.workspace.to_string_lossy(), "fake", "fake")
+        .unwrap();
+    let foreign = ctx
+        .store
+        .spill(&other, "command_output", "private")
+        .unwrap();
+    let denied = tools::execute(
+        "read_artifact",
+        &json!({"artifact_id":foreign,"tail_lines":1}),
+        &ctx,
+    )
+    .await;
+    assert!(!denied.success);
+    let short = ctx
+        .store
+        .spill(
+            &ctx.session,
+            "command_output",
+            &format!("{}needle\n", "中".repeat(200)),
+        )
+        .unwrap();
+    let tail = tools::execute(
+        "read_artifact",
+        &json!({"artifact_id":short,"tail_lines":1,"pattern":"needle$","limit":20}),
+        &ctx,
+    )
+    .await;
+    assert!(tail.success);
+    assert!(tail.output.contains("行已截断"));
+}
+
+#[tokio::test]
 async fn t4_edits_normalize_unicode_whitespace_and_relative_indentation() {
     let (_dir, ctx) = fixture();
     let path = ctx.workspace.join("normalize.txt");

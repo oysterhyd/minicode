@@ -1,13 +1,165 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Mutex,
     time::SystemTime,
 };
+pub const ARTIFACT_DEFAULT_LIMIT: usize = 4000;
+
+pub fn artifact_line_mode(args: &Value) -> bool {
+    ["start_line", "end_line", "pattern", "tail_lines"]
+        .iter()
+        .any(|key| !args[*key].is_null())
+}
+
+pub fn artifact_lines(path: &Path, args: &Value) -> Result<String> {
+    let start = args["start_line"].as_u64().unwrap_or(1).max(1) as usize;
+    let end = args["end_line"].as_u64().unwrap_or(u64::MAX) as usize;
+    let tail = args["tail_lines"]
+        .as_u64()
+        .map(|n| n.clamp(1, 2000) as usize);
+    if args["offset"].as_u64().unwrap_or(0) != 0 {
+        bail!("line views cannot be combined with a character offset");
+    }
+    if end < start {
+        bail!("end_line must be at least start_line");
+    }
+    if tail.is_some() && (args.get("start_line").is_some() || args.get("end_line").is_some()) {
+        bail!("tail_lines cannot be combined with a line range");
+    }
+    let regex = args["pattern"]
+        .as_str()
+        .map(|s| {
+            regex::RegexBuilder::new(s)
+                .case_insensitive(args["case_sensitive"] == false)
+                .build()
+        })
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("invalid regex: {error}"))?;
+    let max_line = std::env::var("MINICODE_ARTIFACT_LINE_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| (1..=16 * 1024 * 1024).contains(n))
+        .unwrap_or(1024 * 1024);
+    let limit = args["limit"]
+        .as_u64()
+        .unwrap_or(ARTIFACT_DEFAULT_LIMIT as u64)
+        .clamp(1, 20000) as usize;
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut number = 0;
+    let mut queue = VecDeque::new();
+    let mut output = LineOutput {
+        remaining: limit,
+        text: String::new(),
+        regex,
+    };
+    loop {
+        let mut bytes = vec![];
+        let capture = tail.is_some() || number + 1 >= start;
+        let mut seen = false;
+        loop {
+            let buf = reader.fill_buf()?;
+            if buf.is_empty() {
+                break;
+            }
+            let count = buf
+                .iter()
+                .position(|b| *b == b'\n')
+                .map(|n| n + 1)
+                .unwrap_or(buf.len());
+            seen = true;
+            if capture && bytes.len() + count > max_line {
+                bail!(
+                    "artifact line {} exceeds {max_line} bytes (MINICODE_ARTIFACT_LINE_MAX_BYTES); use character pagination",
+                    number + 1
+                );
+            }
+            let newline = buf[count - 1] == b'\n';
+            if capture {
+                bytes.extend_from_slice(&buf[..count]);
+            }
+            reader.consume(count);
+            if newline {
+                break;
+            }
+        }
+        if !seen {
+            break;
+        }
+        number += 1;
+        if !capture {
+            continue;
+        }
+        let line = String::from_utf8(bytes)?;
+        if let Some(tail) = tail {
+            let selected = output
+                .regex
+                .as_ref()
+                .is_none_or(|r| r.is_match(line.trim_end_matches(['\r', '\n'])));
+            queue.push_back((
+                number,
+                selected.then(|| line.chars().take(limit + 1).collect::<String>()),
+            ));
+            if queue.len() > tail {
+                queue.pop_front();
+            }
+        } else if number >= start && !output.add(number, &line, false) {
+            return Ok(output.text);
+        }
+        if tail.is_none() && number >= end {
+            break;
+        }
+    }
+    for (number, line) in queue {
+        if let Some(line) = line
+            && !output.add(number, &line, true)
+        {
+            break;
+        }
+    }
+    if output.text.is_empty() {
+        Ok("(no matching lines)".into())
+    } else {
+        Ok(output.text)
+    }
+}
+
+struct LineOutput {
+    remaining: usize,
+    text: String,
+    regex: Option<regex::Regex>,
+}
+impl LineOutput {
+    fn add(&mut self, number: usize, line: &str, matched: bool) -> bool {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if !matched && self.regex.as_ref().is_some_and(|r| !r.is_match(line)) {
+            return true;
+        }
+        let rendered = format!("{number}\t{line}");
+        let needed = rendered.chars().count() + usize::from(!self.text.is_empty());
+        if needed > self.remaining {
+            if self.text.is_empty() {
+                self.text = rendered.chars().take(self.remaining).collect();
+                self.text
+                    .push_str("\n...[行已截断；请用字符分页读取完整行]");
+            } else {
+                self.text
+                    .push_str(&format!("\n...[更多内容：next_start_line={number}]"));
+            }
+            return false;
+        }
+        if !self.text.is_empty() {
+            self.text.push('\n');
+        }
+        self.text.push_str(&rendered);
+        self.remaining -= needed;
+        true
+    }
+}
 #[derive(Default)]
 pub struct TextPages {
     index: Mutex<Vec<Index>>,
