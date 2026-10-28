@@ -2,13 +2,15 @@
 
 2026-10-28，Windows x64 / PowerShell 7，MyGo 0.5.5。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.0.3，保留原更新签名公钥；包含阶段 0–3 的累计迭代，详细行为与可配置边界见 [修复记录](../docs/fixes-3.0.3.md)。
 
-本地 `pwsh -NoProfile -File release/build.ps1` 未使用 SkipTests，完整发行构建通过：Rust 141 项、协议 198 项、TUI 源码及压缩运行时各 118 项，Go 全量、fmt/Clippy、独立 go vet 与 vendor UI 命令通过；两个手动基准与一个协议慢测按常规配置跳过，未宣称执行。60 次任务和 9 次场景保持预期验收结果；生成任务和 trace.log 无变化。源码、Git 历史、runtime 与安装内容审计通过，收集 252 个 Rust 依赖许可。
+运行源码为 `1c516c29fdc5c09893961d8b5ef7063ffe05bf49`。[main CI](https://github.com/oysterhyd/minicode/actions/runs/40729838869)、[标签 CI](https://github.com/oysterhyd/minicode/actions/runs/40729847263) 各五项及[完整 Windows 发行构建](https://github.com/oysterhyd/minicode/actions/runs/40729847380) 均通过。Windows Rust 141 项、协议 198 项；Linux Rust 136 项、协议 188 项。TUI 源码及压缩运行时各 118 项，Go 全量、fmt/Clippy、go vet 与 vendor UI 命令通过。两个手动 Rust 基准按常规配置忽略；Windows 两个协议测试、Linux 十二个协议测试因平台条件或慢测配置跳过，未宣称执行。60 次任务和 9 次场景符合预期（场景 7 通过、2 个预设失败）；生成任务和 trace.log 无变化。
 
-真实包内烟测、原更新公钥验签、完整 runtime 替换、篡改拒绝、同版本忽略、更新期间旧 Rust 进程继续响应、更新后运行，以及 NSIS 中文/空格路径安装、快捷方式、登记与卸载均通过。安装验收在隔离目录执行并恢复已有用户的登记与快捷方式。
+本地 `pwsh -NoProfile -File release/build.ps1` 未使用 SkipTests，完整重建通过。源码、Git 历史、runtime 与安装内容审计通过，收集 252 个 Rust 依赖许可。包内原生窗口、CLI / Git / TUI、空白模型配置，原更新公钥验签、完整 runtime 替换、篡改拒绝、同版本忽略、更新期间旧 Rust 进程继续响应，以及中文/空格路径 NSIS 安装、快捷方式与卸载均通过；隔离验收恢复已有用户的登记与快捷方式。
 
-首轮本地安装器为 59,413,856 B，SHA256：`80a42010a3955ce7b05b19efcebc03151e17e0af77d9160e0f79b0aec32df86b`，上传草稿后逐资产下载核对通过。GitHub CI 随后发现两个发行阻塞，版本保持未公开，修复后重建；最终公开资产摘要另记，不将首轮产物视为最终发行。
+公开 [v3.0.3](https://github.com/oysterhyd/minicode/releases/tag/v3.0.3) 的七个最终资产已逐项匿名下载，大小和 SHA256 与 GitHub 摘要相符，SHA256SUMS 匹配；完整归档及来自 3.0.2、3.0.1、3.0.0 的差分包通过原 Ed25519 公钥验签，匿名 latest 清单字节一致。GitHub 下载的最终安装器、归档再次执行安装/卸载和真实 SDK 更新验收通过。最终安装器 59,417,482 B，SHA256：`b35ab9ea59ee0aa67766902802ce8d6edb845b4728ed244e52351d90f5c1a758`。原始资产与验证记录见 [release-3.0.3.json](../docs/assets/release-3.0.3.json)。
 
-CI 修复：Linux MCP 初始化取消时 kill_on_drop 仅发出信号，未继续 poll/wait 导致 zombie；Drop 显式终止所属进程树并提交异步 wait，Unix stdio 服务创建独立进程组，补充后代存活回归。既有取消回归由失败变为通过，本地 /proc 探针从“持续 Z 状态”变为“GONE”。Windows 元数据快速路径测试在 CI 的短文件名临时目录下直接向内部 ensure 传未 canonical 的路径，触发预期之外的会话重载；测试统一使用与正式 dispatch 一致的 canonical 工作区，保留禁止读取消息正文的 SQL 故障注入。
+发行阻塞修复：Linux MCP 初始化取消时 kill_on_drop 仅发出信号，未继续 poll/wait 导致 zombie；Drop 显式终止所属进程树并提交异步 wait，Unix stdio 服务创建独立进程组，补充后代存活回归。既有取消回归由失败变为通过，本地 /proc 探针从持续 Z 状态变为 GONE。Windows 元数据测试在 CI 短文件名临时目录下向内部 ensure 传未 canonical 的路径，触发额外会话重载；测试改用与正式 dispatch 一致的 canonical 工作区，保留禁止读取消息正文的 SQL 故障注入。
+
+复核中另有两次测试时序重试：本地并发 fixture 初始化曾出现一次 SQLITE_BUSY，隔离复测和完整重跑通过，未修改存储行为；标签桌面恢复测试的固定 60ms settle 窗口曾失败一次，重跑失败 job 通过，同提交 main 桌面 job 首轮通过。后续建议将该等待改为有期限的状态等待，并单独复现多进程首次建库竞争。
 
 # v3.0.2 工作台按钮布局修复与发行核验
 

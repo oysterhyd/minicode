@@ -1,0 +1,86 @@
+{
+  "source_commit": "1c516c29fdc5c09893961d8b5ef7063ffe05bf49",
+  "release_url": "https://github.com/oysterhyd/minicode/releases/tag/v3.0.3",
+  "published_at": "2026-10-28T17:13:32Z",
+  "assets": [
+    {
+      "name": "minicode-3.0.0-to-3.0.3-windows-amd64.delta",
+      "bytes": 4153665,
+      "sha256": "3d1e2c173252c91ba2091d8177d300def97876bfa4c36edef009b48bdc846b40"
+    },
+    {
+      "name": "minicode-3.0.1-to-3.0.3-windows-amd64.delta",
+      "bytes": 4154803,
+      "sha256": "d4780ce6e0725a51e6f6d8ca80580f1149598723ebe1d2a8eb981c386626985b"
+    },
+    {
+      "name": "minicode-3.0.2-to-3.0.3-windows-amd64.delta",
+      "bytes": 4147899,
+      "sha256": "1bcb0cb2617db1a95551f90367c20a977129e3ca313dbfd099c0c1b6307a8315"
+    },
+    {
+      "name": "minicode-3.0.3-windows-amd64.tar.gz",
+      "bytes": 92046786,
+      "sha256": "9eb52fab6520c45f1342302d3ac2961798fcaa94fb93309740eda65bfe9aa6d5"
+    },
+    {
+      "name": "MiniCode-Setup-3.0.3-win-x64.exe",
+      "bytes": 59417482,
+      "sha256": "b35ab9ea59ee0aa67766902802ce8d6edb845b4728ed244e52351d90f5c1a758"
+    },
+    {
+      "name": "SHA256SUMS.txt",
+      "bytes": 100,
+      "sha256": "a62e47b3dd08253f856103b7643c446608dec1b2b752c67d4fb93a78a7302208"
+    },
+    {
+      "name": "update-windows-amd64.json",
+      "bytes": 3174,
+      "sha256": "ad2cb0d1c49ed4d25c868c218a163b422da306917afeb2b19b261608edf138f3"
+    }
+  ],
+  "signature_verified": [
+    "minicode-3.0.3-windows-amd64.tar.gz",
+    "minicode-3.0.2-to-3.0.3-windows-amd64.delta",
+    "minicode-3.0.1-to-3.0.3-windows-amd64.delta",
+    "minicode-3.0.0-to-3.0.3-windows-amd64.delta"
+  ],
+  "all_public_digests_match": true,
+  "downloaded_installer_updater_passed": true,
+  "anonymous_latest_matches": true,
+  "ci": {
+    "main": "https://github.com/oysterhyd/minicode/actions/runs/40729838869",
+    "tag": "https://github.com/oysterhyd/minicode/actions/runs/40729847263",
+    "installer": "https://github.com/oysterhyd/minicode/actions/runs/40729847380"
+  },
+  "verified_at": "2026-10-28T17:14:15.471Z",
+  "validation": {
+    "windows_rust_passed": 141,
+    "windows_rust_ignored": 2,
+    "linux_rust_passed": 136,
+    "windows_protocol_passed": 198,
+    "windows_protocol_skipped": 2,
+    "linux_protocol_passed": 188,
+    "linux_protocol_skipped": 12,
+    "tui_passed": 118,
+    "packaged_tui_passed": 118,
+    "go_full_and_vendor_checks": true,
+    "go_vet": true,
+    "rust_fmt_and_clippy": true,
+    "offline_tasks_passed": 60,
+    "offline_scenarios": 9,
+    "offline_scenarios_passed": 7,
+    "offline_scenarios_expected_failures": 2,
+    "offline_scenarios_conform_to_expected": true,
+    "source_and_history_audit": true,
+    "native_window_cli_git_tui_smoke": true,
+    "unicode_nsis_install_shortcut_uninstall": true,
+    "sdk_signed_update": true,
+    "sdk_tamper_rejection": true,
+    "sdk_same_version_ignored": true
+  },
+  "retries": [
+    "Local protocol fixture startup hit SQLITE_BUSY once; isolated test and complete release build rerun passed without storage changes.",
+    "Tag native desktop TestResumeRefreshesMissingCachedSession uses a fixed 60ms settle window and failed once; failed job rerun passed, same-commit main desktop job passed initially."
+  ]
+}
