@@ -494,6 +494,14 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 验证：Rust、协议、两组离线评测和 TUI 全套检查通过；评测使用独立临时输出目录。
 ## 批次 3B：命令输出与进程治理
 
+### R27：按工具与 MCP 服务配置超时
+
+- 问题与根因：runtime 将所有非 shell 调用统一包在 300 秒限制中；插件 MCP 的 timeout_s 上限 300 秒，本地导入的 MCP 则忽略 timeout_s 并固定 30 秒。
+- 修复：desktop-config.json 新增可选 `toolTimeouts` 对象，键为完整工具名，值为秒数（>0 且 <=3600）；未配置普通工具仍为 300 秒。插件/本地 MCP 都读取 `timeout_s`，默认仍 30 秒，上限放宽至 3600 秒，runtime 同步使用服务限制。保留回合 deadline，shell 继续使用原有 timeout_s。工具限制与 MCP 服务内部请求限制同时生效，取较早到期者；工具覆盖不会绕过服务限制。
+- 配置示例：`"toolTimeouts":{"grep":60,"mcp__service__slow":120}`；MCP 服务定义中使用 `"timeout_s":600`。不增加配置 UI，既有配置与会话不变。
+- 测试：先复现本地 MCP 服务限制和工具覆盖均被忽略、非法配置被接受；修复后以真实延迟 stdio MCP 覆盖服务超时、工具更短超时、正常完成和 >300 秒服务配置；Rust 覆盖非法范围、普通工具配置读取与缺省。
+- 验证：`output/check-3b.ps1 R27` 全套检查，日志 output/3B-R27-*.log。
+
 ### SH7：输出归档保留策略
 
 - 问题与根因：command_output/tool_output 只在删会话时删除，没有跨会话容量或过期清理。

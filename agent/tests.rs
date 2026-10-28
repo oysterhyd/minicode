@@ -69,6 +69,37 @@ fn utf8_bounds() {
 }
 
 #[test]
+fn r27_rejects_invalid_tool_timeout_configuration() {
+    let (_dir, ctx) = fixture();
+    let configuration = Configuration {
+        path: ctx.workspace.join("timeouts.json"),
+    };
+    for timeouts in [
+        json!([]),
+        json!({"read":0}),
+        json!({"read":-1}),
+        json!({"read":3601}),
+        json!({"read":"30"}),
+    ] {
+        fs::write(
+            &configuration.path,
+            serde_json::to_vec(&json!({"services":[],"agents":[],"toolTimeouts":timeouts}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(configuration.read().is_err(), "{timeouts}");
+    }
+    configuration
+        .write(&json!({"services":[],"agents":[],"toolTimeouts":{"grep":600}}))
+        .unwrap();
+    assert_eq!(
+        configuration.tool_timeout("grep").unwrap(),
+        Some(std::time::Duration::from_secs(600))
+    );
+    assert_eq!(configuration.tool_timeout("read").unwrap(), None);
+}
+
+#[test]
 fn sh7_retention_preserves_old_session_history_and_unknown_files() {
     let (_dir, ctx) = fixture();
     let history = ctx

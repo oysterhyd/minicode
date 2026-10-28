@@ -253,7 +253,7 @@ impl Drop for Connector {
 }
 impl Connector {
     pub fn new(config: Server) -> Result<Self> {
-        if !config.timeout.is_finite() || !(0.0 < config.timeout && config.timeout <= 300.0) {
+        if !config.timeout.is_finite() || !(0.0 < config.timeout && config.timeout <= 3600.0) {
             bail!("invalid MCP timeout");
         }
         Ok(Self {
@@ -638,6 +638,7 @@ fn rpc_result(v: Value) -> Result<Value> {
 #[derive(Default)]
 pub struct McpRegistry {
     pub tools: HashMap<String, (ToolSpec, String, Arc<Mutex<Connector>>)>,
+    pub timeouts: HashMap<String, Duration>,
     pub statuses: Vec<Value>,
     connectors: Vec<Arc<Mutex<Connector>>>,
 }
@@ -683,8 +684,10 @@ impl McpRegistry {
         while let Some((status, connector, tools)) = prepared.next().await {
             r.statuses.push(status);
             if let Some(connector) = connector {
+                let timeout = Duration::from_secs_f64(connector.config.timeout);
                 let connector = Arc::new(Mutex::new(connector));
                 for (spec, original) in tools {
+                    r.timeouts.entry(spec.name.clone()).or_insert(timeout);
                     r.tools
                         .entry(spec.name.clone())
                         .or_insert((spec, original, connector.clone()));

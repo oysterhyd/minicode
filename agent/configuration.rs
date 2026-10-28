@@ -8,6 +8,14 @@ pub struct Configuration {
     pub path: PathBuf,
 }
 
+pub fn timeout_seconds(value: &Value) -> Result<f64> {
+    let seconds = value.as_f64().context("tool timeout must be a number")?;
+    if !seconds.is_finite() || !(0.0 < seconds && seconds <= 3600.0) {
+        bail!("tool timeout must be greater than 0 and at most 3600 seconds")
+    }
+    Ok(seconds)
+}
+
 pub fn catalog_model(name: &str) -> Value {
     static CATALOG: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
     let catalog =
@@ -62,7 +70,21 @@ impl Configuration {
         {
             bail!("invalid service or agent configuration")
         }
+        if let Some(timeouts) = value.get("toolTimeouts") {
+            for timeout in timeouts
+                .as_object()
+                .context("toolTimeouts must be an object")?
+                .values()
+            {
+                timeout_seconds(timeout)?;
+            }
+        }
         Ok(value)
+    }
+    pub fn tool_timeout(&self, name: &str) -> Result<Option<std::time::Duration>> {
+        Ok(self.read()?["toolTimeouts"][name]
+            .as_f64()
+            .map(std::time::Duration::from_secs_f64))
     }
     pub fn write(&self, data: &Value) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(data)?;

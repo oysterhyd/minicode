@@ -1,4 +1,7 @@
-use crate::{configuration::Configuration, util};
+use crate::{
+    configuration::{self, Configuration},
+    util,
+};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -353,10 +356,11 @@ impl Catalog {
                         continue;
                     }
                     let command = util::string(s, "command")?;
-                    let timeout = s["timeout_s"].as_f64().unwrap_or(30.0);
-                    if !(0.0 < timeout && timeout <= 300.0) {
-                        bail!("invalid MCP timeout")
-                    }
+                    let timeout = s
+                        .get("timeout_s")
+                        .map(configuration::timeout_seconds)
+                        .transpose()?
+                        .unwrap_or(30.0);
                     commands.push(json!({"name":server,"command":command,"args":s.get("args").cloned().unwrap_or(json!([]))}));
                     if !trusted {
                         continue;
@@ -766,7 +770,11 @@ impl Catalog {
                 command,
                 args: args?.iter().map(|a| expand(a)).collect::<Result<_>>()?,
                 cwd,
-                timeout: 30.0,
+                timeout: s
+                    .get("timeout_s")
+                    .map(configuration::timeout_seconds)
+                    .transpose()?
+                    .unwrap_or(30.0),
                 plugin: format!("local:{source}"),
                 version: "local".into(),
                 digest: util::hash(&fs::read(path)?),

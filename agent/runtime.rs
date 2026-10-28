@@ -1927,12 +1927,13 @@ impl Runtime {
             });
             let ctx = self.context(hooks, Some(output));
             let deadline = hooks.shared.lock().unwrap().deadline;
-            let duration = deadline
-                .map(|d| {
-                    d.saturating_duration_since(Instant::now())
-                        .min(Duration::from_secs(300))
-                })
+            let configured = self.catalog.lock().await.configuration.tool_timeout(name)?;
+            let limit = configured
+                .or_else(|| self.mcp.timeouts.get(name).copied())
                 .unwrap_or(Duration::from_secs(300));
+            let duration = deadline
+                .map(|d| d.saturating_duration_since(Instant::now()).min(limit))
+                .unwrap_or(limit);
             if ["bash", "powershell"].contains(&name.as_str()) {
                 tools::execute(name, input, &ctx).await
             } else {
