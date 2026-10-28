@@ -46,31 +46,57 @@ pub fn valid_id(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
+#[cfg(test)]
+thread_local! {
+    static CANONICAL_CALLS: std::cell::Cell<(usize,usize)> = const {std::cell::Cell::new((0,0))};
+}
+fn path_metadata(path: &Path) -> std::io::Result<fs::Metadata> {
+    #[cfg(test)]
+    CANONICAL_CALLS.with(|c| {
+        let (m, r) = c.get();
+        c.set((m + 1, r));
+    });
+    fs::symlink_metadata(path)
+}
+fn path_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(test)]
+    CANONICAL_CALLS.with(|c| {
+        let (m, r) = c.get();
+        c.set((m, r + 1));
+    });
+    fs::canonicalize(path)
+}
 pub fn canonical(path: &Path) -> Result<PathBuf> {
-    // Resolve links before walking a parent component. Extended Windows paths
-    // do not normalize '..' automatically, so none may reach the file APIs.
+    // Resolve a whole existing prefix, but preserve link/.. semantics rather
+    // than letting Win32 normalize parent components before following links.
     let full = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
     let mut resolved = PathBuf::new();
+    let mut dirty = false;
     for component in full.components() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
+                if dirty {
+                    resolved = resolve_prefix(&resolved)?;
+                    dirty = false;
+                }
                 if !resolved.pop() {
                     bail!("path has no parent")
                 }
             }
             std::path::Component::Normal(part) => {
                 resolved.push(part);
-                if fs::symlink_metadata(&resolved).is_ok() {
-                    resolved = fs::canonicalize(&resolved)?;
-                }
+                dirty = true;
             }
             _ => resolved.push(component.as_os_str()),
         }
+    }
+    if dirty {
+        resolved = resolve_prefix(&resolved)?;
     }
     #[cfg(windows)]
     if let Some(raw) = resolved.to_str() {
@@ -82,6 +108,173 @@ pub fn canonical(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(resolved)
+}
+
+fn resolve_prefix(path: &Path) -> Result<PathBuf> {
+    let mut prefix = path;
+    let mut missing = vec![];
+    loop {
+        match path_metadata(prefix) {
+            Ok(_) => {
+                let mut resolved = path_canonicalize(prefix)?;
+                for part in missing.into_iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                missing.push(
+                    prefix
+                        .file_name()
+                        .context("path has no existing prefix")?
+                        .to_os_string(),
+                );
+                prefix = prefix.parent().context("path has no existing parent")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod canonical_tests {
+    use super::*;
+    #[test]
+    fn u5_existing_prefix_is_resolved_once_and_missing_work_is_linear() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deep = dir.path().to_path_buf();
+        for i in 0..32 {
+            deep.push(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        CANONICAL_CALLS.with(|c| c.set((0, 0)));
+        let resolved = canonical(&deep).unwrap();
+        let (metadata, resolves) = CANONICAL_CALLS.with(|c| c.get());
+        assert_eq!(resolves, 1, "repeatedly resolved existing path");
+        assert!(metadata <= 1);
+        let missing = deep.join("a/b/c/d/e/f");
+        CANONICAL_CALLS.with(|c| c.set((0, 0)));
+        assert_eq!(canonical(&missing).unwrap(), resolved.join("a/b/c/d/e/f"));
+        let (metadata, resolves) = CANONICAL_CALLS.with(|c| c.get());
+        assert_eq!(resolves, 1);
+        assert!(metadata <= 7);
+    }
+
+    fn link_directory(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let out = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link.to_string_lossy().replace('/', "\\"))
+                .arg(target.to_string_lossy().replace('/', "\\"))
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn u5_preserves_links_before_parent_components_and_rejects_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let target = dir.path().join("outside/目标");
+        fs::create_dir(&repo).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let link = repo.join("alias");
+        link_directory(&link, &target);
+        assert_eq!(
+            canonical(&link.join("..")).unwrap(),
+            canonical(target.parent().unwrap()).unwrap()
+        );
+        assert_eq!(
+            canonical(&link.join("missing/../new.txt")).unwrap(),
+            canonical(&target).unwrap().join("new.txt")
+        );
+        assert!(in_workspace(&repo, "alias/new.txt").is_err());
+        assert!(in_workspace(&repo, "alias/../private.txt").is_err());
+        assert_eq!(
+            canonical(&repo.join("missing/../inside")).unwrap(),
+            canonical(&repo).unwrap().join("inside")
+        );
+        assert_eq!(
+            canonical(&repo.join("./nested/../../repo/inside")).unwrap(),
+            canonical(&repo).unwrap().join("inside")
+        );
+        let broken_target = dir.path().join("temporary-target");
+        fs::create_dir(&broken_target).unwrap();
+        let broken = repo.join("broken");
+        link_directory(&broken, &broken_target);
+        fs::remove_dir(&broken_target).unwrap();
+        assert!(canonical(&broken.join("missing")).is_err());
+    }
+
+    fn slow_reference(path: &Path) -> Result<PathBuf> {
+        let mut resolved = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                std::path::Component::Normal(part) => {
+                    resolved.push(part);
+                    if path_metadata(&resolved).is_ok() {
+                        resolved = path_canonicalize(&resolved)?;
+                    }
+                }
+                _ => resolved.push(component.as_os_str()),
+            }
+        }
+        Ok(resolved)
+    }
+    #[test]
+    #[ignore = "manual path-depth and syscall benchmark"]
+    fn u5_path_depth_benchmark() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut path = dir.path().to_path_buf();
+        let depth = std::env::var("MINICODE_CANONICAL_BENCH_DEPTH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(32)
+            .clamp(1, 100);
+        let iterations = std::env::var("MINICODE_CANONICAL_BENCH_ITERATIONS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(100)
+            .clamp(1, 1000);
+        let baseline =
+            std::env::var("MINICODE_CANONICAL_BENCH_MODE").is_ok_and(|s| s == "baseline");
+        for i in 0..depth {
+            path.push(format!("d{i}"));
+            fs::create_dir(&path).unwrap();
+        }
+        CANONICAL_CALLS.with(|c| c.set((0, 0)));
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(
+                if baseline {
+                    slow_reference(&path)
+                } else {
+                    canonical(&path)
+                }
+                .unwrap(),
+            );
+        }
+        println!(
+            "U5 baseline={baseline} depth={depth} iterations={iterations} calls={:?} time={:?}",
+            CANONICAL_CALLS.with(|c| c.get()),
+            start.elapsed()
+        );
+    }
 }
 pub fn in_workspace(workspace: &Path, raw: &str) -> Result<PathBuf> {
     if raw.contains('\0') {

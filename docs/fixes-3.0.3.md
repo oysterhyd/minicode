@@ -583,10 +583,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 验证：output/check-3c.ps1 T1 全套检查；日志 output/3C-T1-*.log，评测输出独立保存，避免覆盖既有 output/eval 配置。
 - 最终 Windows 全套通过：fmt、clippy、Rust 125 项、build、协议 194 项通过/1 项既有慢测跳过、生成器与生成文件无差异、60 次主任务及 9 个场景结果校验、TUI 安装/构建/117 项测试。Desktop 未修改，不触发 Go 检查条件。
 
-### 3C 暂停交接
+### 3C 恢复交接记录
 
-- 按用户收尾要求，本次只完成 T1；后续条目未进入实现，不将整个 3C 宣称完成。恢复时从 T2 的失败回归开始。
-- 已定位待处理项：T2 tools.rs 的 fancy_regex/固定目录遍历；T4 replacement_texts/edit 的精确匹配；T5 read_artifact 默认 20000 与 schema 4000；T6 validate 的外部 schema 每次编译分支；T8 Seen::of 与 edit_large 的长度/mtime 复用；T9 tools.rs/store.rs 的无列名 artifacts INSERT；U5 util.rs 的逐组件 canonical。
+- 前次按用户要求在 T1 收尾；本次获准继续后从 T2 恢复，逐项补失败回归、修复和提交。各条目的最终行为及验证见下文。
+- 原始定位：T2 fancy_regex/固定目录遍历；T4 精确匹配；T5 默认 20000 与 schema 4000；T6 外部 schema 每次编译；T8 长度/mtime 复用；T9 无列名 INSERT；U5 逐组件 canonical。
 - T1 全量检查曾暴露路径类型检查位于同文件写锁外的竞态；现已纳入锁内，既有 concurrent_edits_of_one_file_are_serialized 回归通过。两个原有 .pending 测试文件保留不动。
 
 ### T2：忽略规则与无回溯搜索
@@ -633,4 +633,13 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 问题与复现：store.spill 与 command capture 都使用无列名的 INSERT。两项失败回归将 artifacts 列重排并新增带默认值的列，旧代码报“6 columns but 5 values supplied”。
 - 修复：两处明确列出 session_id、artifact_id、kind、relpath、created_at，不改变现有 schema、版本号与旧记录。
 - 测试：迁移前归档仍可读取，迁移后 spill/命令截断归档成功，新增列保留默认值；覆盖两条实际落盘路径。全套日志 output/3C-T9-*.log。
+
+### U5：一次解析已有前缀
+
+- 问题与复现：原 canonical 逐个组件调用 symlink_metadata 和 canonicalize；32 层路径的回归记录到 38 次 canonicalize，预期一次而失败。
+- 修复：先寻找最长已有前缀并 canonicalize 一次，再拼接不存在的正常组件；遇到 .. 先解析当前前缀再取真实父路径，连续 .. 不重复解析已知路径。保留 Windows extended/UNC 输出转换、断链错误与工作区越界拒绝，不用纯字符串消除 .. 来改变 junction/symlink 语义。
+- 测试：已有深路径仅一次解析，六层缺失后缀最多七次 metadata 检查；Windows 实际 junction 与 Unix symlink 覆盖链接后 ..、缺失组件、断链与越界；基准测试独立标记 ignore，手动运行，不添加依赖。
+- 基准：Windows 100 次调用、深度 4/16/64，旧 canonicalize 次数 1000/2200/7000，修复后均 100；64 层耗时约 500 ms 降到 12.6 ms。基准日志 output/3C-U5-bench-*.log。Linux 补充 strace 对照统计实际 readlink/readlinkat 系统调用，见 output/3C-U5-syscall-*.log。
+- 取舍：普通路径与缺失后缀避免重复解析；含 .. 的路径在必要的分段边界解析，以正确处理链接，未为追求一次调用而牺牲路径安全语义。
+- 验证：output/check-3c.ps1 U5 全套 Windows 检查；额外 Linux fmt/clippy/Rust/本批协议与 syscall 基准日志 output/3C-linux-final.log。
 
