@@ -94,7 +94,13 @@ pub fn artifact_lines(path: &Path, args: &Value) -> Result<String> {
         if !capture {
             continue;
         }
-        let line = String::from_utf8(bytes)?;
+        let line = match String::from_utf8(bytes) {
+            Ok(line) => line,
+            Err(error) if error.utf8_error().error_len().is_none() => {
+                String::from_utf8_lossy(error.as_bytes()).into_owned()
+            }
+            Err(error) => return Err(error.into()),
+        };
         if let Some(tail) = tail {
             let selected = output
                 .regex
@@ -211,19 +217,20 @@ impl TextPages {
                 } else {
                     anyhow::bail!("invalid UTF-8")
                 };
-                let mut bytes = [0u8; 4];
-                reader.read_exact(&mut bytes[..length])?;
-                let ch = std::str::from_utf8(&bytes[..length])?
-                    .chars()
-                    .next()
-                    .context("empty UTF-8 scalar")?;
+                let mut bytes = Vec::with_capacity(length);
+                (&mut reader).take(length as u64).read_to_end(&mut bytes)?;
+                let ch = match std::str::from_utf8(&bytes) {
+                    Ok(text) => text.chars().next().context("empty UTF-8 scalar")?,
+                    Err(error) if bytes.len() < length && error.error_len().is_none() => '\u{fffd}',
+                    Err(error) => return Err(error.into()),
+                };
                 if skipped < offset {
                     skipped += 1
                 } else {
                     text.push(ch);
                     count += 1;
                     if count > limit {
-                        extra = ch.len_utf8();
+                        extra = bytes.len();
                         break;
                     }
                 }

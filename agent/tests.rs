@@ -4439,3 +4439,73 @@ fn s4_active_descendant_blocks_all_deletion_and_deleted_ids_leave_no_lock() {
             .exists()
     );
 }
+
+#[test]
+fn s5_incomplete_utf8_at_eof_is_one_replacement_with_stable_page_offsets() {
+    let (_dir, ctx) = fixture();
+    for prefix in ["".to_string(), "中文".to_string(), "a".repeat(8191)] {
+        for tail in [vec![0xe4], vec![0xe4, 0xb8], vec![0xf0, 0x9f, 0x98]] {
+            let artifact = ctx
+                .store
+                .spill(&ctx.session, "history", "placeholder")
+                .unwrap();
+            let path = ctx.store.artifact_path(&ctx.session, &artifact).unwrap();
+            fs::write(&path, [prefix.as_bytes(), &tail].concat()).unwrap();
+            let count = prefix.chars().count();
+            let page = ctx
+                .store
+                .artifact_page(&ctx.session, &artifact, 0, count)
+                .unwrap();
+            assert_eq!(page["text"], prefix);
+            assert_eq!(page["hasMore"], true);
+            let empty = ctx
+                .store
+                .artifact_page(&ctx.session, &artifact, count, 0)
+                .unwrap();
+            assert_eq!(empty["text"], "");
+            assert_eq!(empty["hasMore"], true);
+            let last = ctx
+                .store
+                .artifact_page(&ctx.session, &artifact, count, 1)
+                .unwrap();
+            assert_eq!(last["text"], "\u{fffd}");
+            assert_eq!(last["hasMore"], false);
+            assert_eq!(last["total"], count + 1);
+            let after = ctx
+                .store
+                .artifact_page(&ctx.session, &artifact, count + 1, 1)
+                .unwrap();
+            assert_eq!(after["text"], "");
+            assert_eq!(after["total"], count + 1);
+            let lines =
+                crate::paging::artifact_lines(&path, &json!({"start_line":1,"limit":20000}))
+                    .unwrap();
+            assert_eq!(lines, format!("1\t{prefix}\u{fffd}"));
+        }
+    }
+}
+
+#[test]
+fn s5_invalid_middle_bytes_still_fail_and_valid_split_scalars_are_unchanged() {
+    let (_dir, ctx) = fixture();
+    let artifact = ctx
+        .store
+        .spill(&ctx.session, "history", "placeholder")
+        .unwrap();
+    let path = ctx.store.artifact_path(&ctx.session, &artifact).unwrap();
+    fs::write(&path, [b'a', 0xff, b'b']).unwrap();
+    assert!(
+        ctx.store
+            .artifact_page(&ctx.session, &artifact, 0, 10)
+            .is_err()
+    );
+    assert!(crate::paging::artifact_lines(&path, &json!({"start_line":1})).is_err());
+    let text = format!("{}😀", "a".repeat(8191));
+    fs::write(&path, &text).unwrap();
+    let page = ctx
+        .store
+        .artifact_page(&ctx.session, &artifact, 8191, 1)
+        .unwrap();
+    assert_eq!(page["text"], "😀");
+    assert_eq!(page["hasMore"], false);
+}
