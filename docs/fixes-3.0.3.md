@@ -738,3 +738,13 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 范围外观察：一次既有 Windows Shell 版本探测测试返回“版本未知”；单独重跑及随后完整检查通过，未改写 Shell 探测。本批未处理存储重复写入/全量恢复及系统通知类型隔离。
 - 下一批建议：继续 4B 的系统通知与用户输入分离、消息增量写入和分页恢复；另行跟踪 Shell 版本探测的偶发不稳定，不混入本批上下文实现。
 - 最终结果：Rust 156 项通过（2 个既有手动基准跳过），Node 协议 201 项通过（Windows 下 Unix MCP 用例及 200 秒慢流用例共 2 项按原条件跳过），TUI 118 项通过。主任务 60/60，9 场景保持 7 个通过与 counter_retry/b0、b1 的 2 个预期失败；结果验证、生成文件一致性及其余 CI 命令全部通过。Desktop 无改动，未触发其条件检查。
+
+
+## 批次 4B：消息注入、恢复语义与存储
+
+### R-N：系统通知与用户消息区分
+
+- 核查：后台完成/失联、截断、停滞和动态指令变化已带 system-reminder 标签（runtime.rs 对应通知分支），保留原有实现；验收失败的 Goal::failure 未包裹。TUI historyItems 与 Native History 仍把所有 user 文本映射成用户气泡，因此恢复历史会混淆来源。
+- 修复：验收失败同样使用 system-reminder 标签；TUI/Desktop 将以该标签开头的通知恢复为已有 notice 行，去除外层标签、保留全部正文（含旧版标签外的后台输出），加“系统提示”标识。真实用户文本保持 user 行；模型侧沿用原有 Anthropic 角色归一化，不新增消息角色或破坏旧会话。
+- 回归：Rust 验收通知标签、HTTP mock 验收失败后的模型 payload 与相邻角色、TUI 与 Go 历史通知分类/正文保留，均先失败后修复。已有 live 通知通过 goal_check/background_job 事件生成 notice，不另加重复通知。
+- 验证：完整检查 output/check-4b.ps1 R-N -Desktop；日志 output/4B-R-N-*.log。历史识别以标签为约定，不作为权限或授权依据。

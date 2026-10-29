@@ -3989,3 +3989,12 @@ async fn p12_reopened_runtime_restores_model_calibration() {
     h.reopen().await.unwrap();
     assert_eq!(h.runtime.provider.prompt_scale, scale);
 }
+
+#[test]
+fn rn_acceptance_failure_is_a_system_reminder() {
+    let report = json!({"items":[{"item_id":"check","passed":false,"detail":"missing file"}]});
+    let reminder = crate::goals::Goal::failure(&report);
+    assert!(reminder.starts_with("<system-reminder>\n"));
+    assert!(reminder.ends_with("\n</system-reminder>"));
+    assert!(reminder.contains("missing file"));
+}

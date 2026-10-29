@@ -155,7 +155,12 @@ func History(detail Detail) []*FeedItem {
 			case "text":
 				text := String(block["text"])
 				if text != "" {
-					items = append(items, &FeedItem{ID: id, Kind: message.Role, Text: text, Attachments: attachments})
+					kind := message.Role
+					if kind == "user" && strings.HasPrefix(text, "<system-reminder>") && strings.Contains(text, "</system-reminder>") {
+						kind = "notice"
+						text = "系统提示：" + strings.TrimSpace(strings.Replace(strings.TrimPrefix(text, "<system-reminder>"), "</system-reminder>", "", 1))
+					}
+					items = append(items, &FeedItem{ID: id, Kind: kind, Text: text, Attachments: attachments})
 					attachments = nil
 				}
 			case "tool_use":

@@ -269,7 +269,7 @@ impl Goal {
     }
     pub fn failure(report: &Value) -> String {
         format!(
-            "验收尚未通过，请根据实际失败结果继续修复，不得修改受保护文件或虚构证据。\n{}",
+            "<system-reminder>\n验收尚未通过，请根据实际失败结果继续修复，不得修改受保护文件或虚构证据。\n{}\n</system-reminder>",
             report["items"]
                 .as_array()
                 .unwrap_or(&vec![])

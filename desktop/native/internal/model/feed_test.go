@@ -123,3 +123,17 @@ func TestHistoryKeepsAttachmentWithUserCaption(t *testing.T) {
 		t.Fatal("restored attachment was detached from its caption")
 	}
 }
+
+func TestRNRemindersUseNoticeRows(t *testing.T) {
+	items := History(Detail{Messages: []Message{
+		{Role: "user", Content: []map[string]any{{"type": "text", "text": "real user"}}},
+		{Role: "user", Content: []map[string]any{{"type": "text", "text": "<system-reminder>\n验收失败\n</system-reminder>"}}},
+		{Role: "user", Content: []map[string]any{{"type": "text", "text": "<system-reminder>\n后台完成\n</system-reminder>\n输出: kept"}}},
+	}})
+	if len(items) != 3 || items[0].Kind != "user" || items[1].Kind != "notice" || items[2].Kind != "notice" {
+		t.Fatalf("wrong reminder kinds: %+v", items)
+	}
+	if !strings.Contains(items[1].Text, "系统提示") || strings.Contains(items[1].Text, "<system-reminder>") || !strings.Contains(items[2].Text, "输出: kept") {
+		t.Fatal("reminder text lost or unlabelled")
+	}
+}

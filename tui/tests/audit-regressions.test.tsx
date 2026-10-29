@@ -668,3 +668,15 @@ test('forced Windows shutdown terminates descendants when a bridge ignores EOF',
   assert.notEqual(child.exitCode, null)
   assert.throws(() => process.kill(pid, 0), /ESRCH/)
 })
+
+test('R-N: restored reminders are notices while ordinary user text stays user text', () => {
+  const items = historyItems({summary:{session_id:'s',workspace:'.',model:'fake'},events:[],messages:[
+    {role:'user',content:[{type:'text',text:'real user'}]},
+    {role:'user',content:[{type:'text',text:'<system-reminder>\n验收尚未通过\n</system-reminder>'}]},
+    {role:'user',content:[{type:'text',text:'<system-reminder>\n后台任务已完成\n</system-reminder>\n输出: kept'}]},
+  ]})
+  assert.deepEqual(items.map(item => item.kind), ['user','notice','notice'])
+  assert.match(items[1].text || '',/系统提示/)
+  assert.match(items[2].text || '',/输出: kept/)
+  assert.ok(!items[1].text?.includes('<system-reminder>'))
+})

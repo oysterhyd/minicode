@@ -125,7 +125,10 @@ export function historyItems(detail: SessionDetail): FeedItem[] {
     message.content.forEach((block, blockIndex) => {
       const id = `${(detail.messageOffset || 0) + index}-${blockIndex}`
       if (block.type === 'text' && block.text) {
-        items.push({ id, kind: message.role === 'assistant' ? 'assistant' : 'user', text: String(block.text) })
+        const text = String(block.text)
+        const reminder = message.role === 'user' && text.startsWith('<system-reminder>') && text.includes('</system-reminder>')
+        items.push({ id, kind: reminder ? 'notice' : message.role === 'assistant' ? 'assistant' : 'user',
+          text: reminder ? `系统提示：${text.replace(/^<system-reminder>\s*/, '').replace(/\s*<\/system-reminder>/, '').trim()}` : text })
       }
       if (block.type === 'tool_use') {
         const callId = String(block.id)
