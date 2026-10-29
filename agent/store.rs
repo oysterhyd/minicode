@@ -63,6 +63,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS session_goals(session_id TEXT PRIMARY KEY,state TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS session_meta(session_id TEXT PRIMARY KEY,title TEXT,pinned INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS session_prompts(session_id TEXT PRIMARY KEY,system TEXT NOT NULL,sources TEXT NOT NULL,dynamic_hash TEXT);
+            CREATE TABLE IF NOT EXISTS tool_execution(session_id TEXT NOT NULL,call_id TEXT NOT NULL,started INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(session_id,call_id));
             CREATE TABLE IF NOT EXISTS tool_results(session_id TEXT NOT NULL,call_id TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(session_id,call_id));
             CREATE TABLE IF NOT EXISTS tasks(session_id TEXT NOT NULL,task_id TEXT NOT NULL,title TEXT NOT NULL,depends_on TEXT NOT NULL,status TEXT NOT NULL,owner TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(session_id,task_id));
             CREATE TABLE IF NOT EXISTS project_memory(id TEXT PRIMARY KEY,workspace TEXT NOT NULL,scope TEXT NOT NULL,fact TEXT NOT NULL,source TEXT NOT NULL,updated_at TEXT NOT NULL);")?;
@@ -209,12 +210,20 @@ impl Store {
         self.transaction(|c| {
             if let Some(m) = message {
                 append_message(c, id, m)?;
+                for block in &m.content {
+                    if let Block::ToolUse { id: call_id, .. } = block {
+                        c.execute("INSERT OR IGNORE INTO tool_execution VALUES(?,?,0)", params![id,call_id])?;
+                    }
+                }
             }
             if let Some(r @ Block::ToolResult { tool_use_id, .. }) = result {
                 c.execute(
                     "INSERT OR REPLACE INTO tool_results VALUES(?,?,?)",
                     params![id, tool_use_id, serde_json::to_string(r)?],
                 )?;
+            }
+            if kind == "tool_started" {
+                c.execute("INSERT INTO tool_execution VALUES(?,?,1) ON CONFLICT(session_id,call_id) DO UPDATE SET started=1", params![id,data["call_id"].as_str().context("missing call_id")?])?;
             }
             if let Some(counters) = counters {
                 update_session(c, id, counters, true)?;
@@ -390,6 +399,14 @@ impl Store {
             Ok((until, events))
         })
     }
+    pub fn tool_execution(&self, id: &str) -> Result<std::collections::HashMap<String, bool>> {
+        self.with(|c| {
+            let mut q =
+                c.prepare("SELECT call_id,started FROM tool_execution WHERE session_id=?")?;
+            Ok(q.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+    }
     pub fn tool_results(&self, id: &str) -> Result<std::collections::HashMap<String, Block>> {
         self.with(|c| {
             let mut q = c.prepare("SELECT call_id,result FROM tool_results WHERE session_id=?")?;
@@ -444,6 +461,7 @@ impl Store {
                 "session_meta",
                 "session_prompts",
                 "tool_results",
+                "tool_execution",
                 "tasks",
                 "message_revisions",
             ] {

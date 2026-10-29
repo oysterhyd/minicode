@@ -748,3 +748,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 修复：验收失败同样使用 system-reminder 标签；TUI/Desktop 将以该标签开头的通知恢复为已有 notice 行，去除外层标签、保留全部正文（含旧版标签外的后台输出），加“系统提示”标识。真实用户文本保持 user 行；模型侧沿用原有 Anthropic 角色归一化，不新增消息角色或破坏旧会话。
 - 回归：Rust 验收通知标签、HTTP mock 验收失败后的模型 payload 与相邻角色、TUI 与 Go 历史通知分类/正文保留，均先失败后修复。已有 live 通知通过 goal_check/background_job 事件生成 notice，不另加重复通知。
 - 验证：完整检查 output/check-4b.ps1 R-N -Desktop；日志 output/4B-R-N-*.log。历史识别以标签为约定，不作为权限或授权依据。
+
+### R22 取消与恢复区分未执行和副作用未知
+
+- **问题与根因**：工具批次取消后未开始的调用没有结果；恢复把缺少结果的写操作全部视为副作用未知。`tool_call_start` 在校验与授权之前发出，不能证明执行已经开始。
+- **修复**：新增兼容的 `tool_execution` journal；assistant checkpoint 原子登记排队调用，授权和参数校验通过后、实际执行前记录 `tool_started`。取消收尾立即补齐未开始调用的“用户已中断，未执行”，并接回已经落库的结果；恢复仅将可能执行过的写操作视为副作用未知。旧会话没有状态记录时保留原有保守行为。
+- **测试**：`r22_cancel_backfills_unstarted_calls_before_resume` 复现两项写入第一项完成后取消，验证第二项未执行且恢复无虚假未知提示；`r22_recovery_distinguishes_queued_from_started` 验证排队与已开始写入的恢复差异。
+- **验证**：完整 CI 检查通过，日志 `output/4B-R22-*.log`；Rust 159 项通过、2 项既有手动基准忽略；协议 202 项通过、2 项按既有条件跳过；TUI 119 项通过；离线评测结果验证通过。

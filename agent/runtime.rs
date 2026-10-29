@@ -753,6 +753,7 @@ impl Runtime {
             }
         }
         let journal = self.store.tool_results(&self.session)?;
+        let execution = self.store.tool_execution(&self.session)?;
         let mut results = vec![];
         for call in pending {
             let Block::ToolUse { id, name, .. } = &call else {
@@ -760,6 +761,14 @@ impl Runtime {
             };
             let result = if let Some(result) = journal.get(id) {
                 result.clone()
+            } else if execution.get(id) == Some(&false) {
+                self.record_result(
+                    &call,
+                    Outcome::failure("上次运行已中断，未执行"),
+                    hooks,
+                    true,
+                    0.0,
+                )?
             } else if matches!(
                 &call,
                 Block::ToolUse {
@@ -937,6 +946,11 @@ impl Runtime {
         // Teardown is best-effort: every step runs even when an earlier one
         // fails, and the failures are reported together at the end.
         let mut failures = vec![];
+        if hooks.cancel.is_cancelled()
+            && let Err(error) = self.backfill_cancelled(&hooks)
+        {
+            failures.push(format!("cancelled calls: {error}"));
+        }
         let running = jobs
             .iter()
             .map(|(_, _, _, handle)| !handle.is_finished())
@@ -1494,6 +1508,7 @@ impl Runtime {
                         let c = command.clone();
                         let tool_name = name.clone();
                         let job_cwd = cwd.clone();
+                        self.mark_tool_started(call, hooks)?;
                         let handle = tokio::spawn(async move {
                             tools::run_command_for(&tool_name, &c, &job_cwd, timeout, &ctx).await
                         });
@@ -1690,6 +1705,51 @@ impl Runtime {
             }
             self.refresh_snapshot(hooks).await?;
         }
+    }
+    fn backfill_cancelled(&mut self, hooks: &Hooks) -> Result<()> {
+        let answered = self
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let journal = self.store.tool_results(&self.session)?;
+        let execution = self.store.tool_execution(&self.session)?;
+        let mut results = vec![];
+        for call in self.messages.iter().flat_map(|m| &m.content) {
+            if let Block::ToolUse { id, .. } = call
+                && !answered.contains(id)
+            {
+                if let Some(result) = journal.get(id) {
+                    results.push(result.clone());
+                } else if execution.get(id) == Some(&false) {
+                    results.push(self.record_result(
+                        call,
+                        Outcome::failure("用户已中断，未执行"),
+                        hooks,
+                        false,
+                        0.0,
+                    )?);
+                }
+            }
+        }
+        if !results.is_empty() {
+            self.append(Message {
+                role: "user".into(),
+                content: results,
+            })?;
+        }
+        Ok(())
+    }
+    fn mark_tool_started(&self, call: &Block, hooks: &Hooks) -> Result<()> {
+        Self::check(hooks)?;
+        if let Block::ToolUse { id, name, .. } = call {
+            self.event(hooks, "tool_started", json!({"call_id":id,"name":name}))?;
+        }
+        Ok(())
     }
     fn backfill(&mut self, calls: &[Block], reason: &str) -> Result<()> {
         let content = calls
@@ -1964,6 +2024,7 @@ impl Runtime {
             let duration = deadline
                 .map(|d| d.saturating_duration_since(Instant::now()).min(limit))
                 .unwrap_or(limit);
+            self.mark_tool_started(&call, hooks)?;
             if ["bash", "powershell"].contains(&name.as_str()) {
                 tools::execute(name, input, &ctx).await
             } else {
@@ -1999,6 +2060,7 @@ impl Runtime {
             }
             let granted = self.authorize(&call, hooks).await?;
             let result = if granted {
+                self.mark_tool_started(&call, hooks)?;
                 self.delegate(
                     util::string(input, "kind")?,
                     util::string(input, "task")?,

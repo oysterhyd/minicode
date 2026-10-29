@@ -3998,3 +3998,95 @@ fn rn_acceptance_failure_is_a_system_reminder() {
     assert!(reminder.ends_with("\n</system-reminder>"));
     assert!(reminder.contains("missing file"));
 }
+
+#[tokio::test]
+async fn r22_cancel_backfills_unstarted_calls_before_resume() {
+    let mut h = Harness::new(json!({"turns":[{"tool_calls":[
+        {"name":"write","arguments":{"path":"first.txt","content":"first"}},
+        {"name":"write","arguments":{"path":"second.txt","content":"second"}}
+    ]},{"text":"continued"}]}))
+    .await;
+    let cancel = h.hooks.cancel.clone();
+    let sink = h.hooks.sink.clone();
+    h.hooks.sink = Arc::new(move |v| {
+        if v["item"]["type"] == "tool_call_result" {
+            cancel.cancel();
+        }
+        sink(v);
+    });
+    let result = h
+        .runtime
+        .run(Some("write both".into()), vec![], h.hooks.clone())
+        .await
+        .unwrap();
+    assert_eq!(result.exit_reason, "cancelled");
+    assert!(h.runtime.workspace.join("first.txt").exists());
+    assert!(!h.runtime.workspace.join("second.txt").exists());
+    assert!(h.runtime.messages.iter().flat_map(|m| &m.content).any(
+        |b| matches!(b, Block::ToolResult{content,is_error:true,..} if content.contains("未执行"))
+    ));
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(None).await.unwrap().exit_reason, "completed");
+    assert!(!h.event_types().contains(&"side_effect_unknown".into()));
+}
+
+#[tokio::test]
+async fn r22_recovery_distinguishes_queued_from_started() {
+    let mut h = Harness::new(json!({"turns":[{"text":"continued"}]})).await;
+    let message = Message {
+        role: "assistant".into(),
+        content: vec![
+            Block::ToolUse {
+                id: "queued".into(),
+                name: "write".into(),
+                input: json!({"path":"queued.txt","content":"x"}),
+                input_error: None,
+            },
+            Block::ToolUse {
+                id: "started".into(),
+                name: "write".into(),
+                input: json!({"path":"started.txt","content":"x"}),
+                input_error: None,
+            },
+        ],
+    };
+    h.runtime
+        .store
+        .checkpoint(
+            &h.runtime.session,
+            "assistant_message",
+            &json!({}),
+            Some(&message),
+            None,
+            None,
+        )
+        .unwrap();
+    h.runtime
+        .store
+        .event(
+            &h.runtime.session,
+            "tool_started",
+            &json!({"call_id":"started"}),
+        )
+        .unwrap();
+    h.reopen().await.unwrap();
+    h.runtime.prepare(&h.hooks).await.unwrap();
+    let results = h
+        .runtime
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            Block::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => Some((tool_use_id.as_str(), content.as_str())),
+            _ => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    assert!(results["queued"].contains("未执行"));
+    assert!(!results["queued"].contains("副作用状态未知"));
+    assert!(results["started"].contains("副作用状态未知"));
+    assert!(!h.runtime.workspace.join("queued.txt").exists());
+}
