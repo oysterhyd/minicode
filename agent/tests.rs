@@ -3819,3 +3819,160 @@ async fn x4_chinese_replay_continues_beyond_twice_the_window() {
     assert!(h.event_types().contains(&"context_compacted".into()));
     assert_eq!(h.runtime.provider.index, 12);
 }
+
+#[test]
+fn x5_progressive_shrink_preserves_relevant_reads_and_stops_at_budget() {
+    let (_dir, ctx) = fixture();
+    let mut messages = vec![Message::user("continue work on src/keep.rs")];
+    for i in 0..6 {
+        let path = if i == 0 {
+            "src/keep.rs".to_string()
+        } else {
+            format!("src/old-{i}.rs")
+        };
+        messages.push(Message {
+            role: "assistant".into(),
+            content: vec![Block::ToolUse {
+                id: format!("read-{i}"),
+                name: "read".into(),
+                input: json!({"path":path}),
+                input_error: None,
+            }],
+        });
+        messages.push(Message {
+            role: "user".into(),
+            content: vec![Block::ToolResult {
+                tool_use_id: format!("read-{i}"),
+                content: "abc".repeat(1000),
+                is_error: false,
+                images: vec![],
+            }],
+        });
+    }
+    let system = "x".repeat(9000);
+    let before = context::estimate(&system, &messages, &[]);
+    let stats = context::compact(
+        &ctx.store,
+        &ctx.session,
+        &system,
+        &[],
+        &mut messages,
+        9300,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let result = |id: &str| {
+        messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|b| match b {
+                Block::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == id => Some(content.as_str()),
+                _ => None,
+            })
+    };
+    assert_eq!(
+        result("read-0"),
+        Some("abc".repeat(1000).as_str()),
+        "latest read of a file in the active request must stay available"
+    );
+    assert_eq!(result("read-4"), Some("abc".repeat(1000).as_str()));
+    assert_eq!(result("read-5"), Some("abc".repeat(1000).as_str()));
+    assert!(
+        stats["shrunk_results"].as_u64().unwrap() < 4,
+        "stop once enough space has been recovered"
+    );
+    assert!(stats["tokens_after"].as_u64().unwrap() < before);
+    let preview = result("read-1").unwrap();
+    assert!(preview.contains("src/old-1.rs"));
+    assert!(
+        preview.chars().count() > 1000,
+        "first shrink stage retains a useful file preview"
+    );
+    let artifact = preview
+        .split("[artifact:")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(ctx.store.artifact_path(&ctx.session, artifact).unwrap()).unwrap(),
+        "abc".repeat(1000)
+    );
+    assert_eq!(
+        context::paired_prefix(&messages, &[messages.len()]),
+        Some(messages.len())
+    );
+}
+
+#[test]
+fn x5_archive_refs_include_shell_commands_and_grep_output() {
+    let (_dir, ctx) = fixture();
+    let mut messages = vec![
+        Message::user("original"),
+        Message {
+            role: "assistant".into(),
+            content: vec![Block::ToolUse {
+                id: "shell".into(),
+                name: "bash".into(),
+                input: json!({"command":"rg TODO agent/context.rs agent/provider.rs"}),
+                input_error: None,
+            }],
+        },
+        Message {
+            role: "user".into(),
+            content: vec![Block::ToolResult {
+                tool_use_id: "shell".into(),
+                content: "agent/context.rs:12:TODO\n".repeat(300),
+                is_error: false,
+                images: vec![],
+            }],
+        },
+        Message {
+            role: "assistant".into(),
+            content: vec![Block::ToolUse {
+                id: "search".into(),
+                name: "grep".into(),
+                input: json!({"path":"src","pattern":"TODO"}),
+                input_error: None,
+            }],
+        },
+        Message {
+            role: "user".into(),
+            content: vec![Block::ToolResult {
+                tool_use_id: "search".into(),
+                content: "src/runtime.rs:42:TODO\n".repeat(300),
+                is_error: false,
+                images: vec![],
+            }],
+        },
+        Message::user("latest"),
+    ];
+    assert!(
+        context::compact(
+            &ctx.store,
+            &ctx.session,
+            "",
+            &[],
+            &mut messages,
+            200_000,
+            true
+        )
+        .unwrap()
+        .is_some()
+    );
+    let summary = messages.iter().map(Message::text).collect::<String>();
+    assert!(
+        summary.contains("agent/provider.rs"),
+        "paths embedded in shell arguments must be retained"
+    );
+    assert!(
+        summary.contains("src/runtime.rs"),
+        "grep result filenames must be retained"
+    );
+}

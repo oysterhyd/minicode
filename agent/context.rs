@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn tokens(text: &str) -> u64 {
     if text.is_empty() {
@@ -135,6 +135,253 @@ pub fn paired_prefix(messages: &[Message], boundaries: &[usize]) -> Option<usize
     }
     last
 }
+
+fn text_refs(text: &str) -> Vec<String> {
+    static PATHS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let paths = PATHS.get_or_init(|| regex::Regex::new(r"(?:[A-Za-z]:[\\/]|[\\/])?(?:[.\p{L}\p{N}_@+-]+[\\/])*[.\p{L}\p{N}_@+-]+\.[A-Za-z][A-Za-z0-9_+-]{0,15}").expect("file reference regex"));
+    paths
+        .find_iter(text)
+        .take(40)
+        .filter(|m| m.as_str().len() <= 1024)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+fn input_refs(name: &str, input: &Value) -> Vec<String> {
+    let mut refs = ["path", "file_path"]
+        .iter()
+        .filter_map(|key| input[*key].as_str())
+        .filter(|path| !path.is_empty() && *path != "." && path.len() <= 1024)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if matches!(name, "bash" | "powershell" | "grep")
+        && let Some(command) = input["command"].as_str()
+    {
+        refs.extend(text_refs(command));
+    }
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+struct CallInfo {
+    name: String,
+    refs: Vec<String>,
+    position: usize,
+}
+
+fn call_info(messages: &[Message]) -> HashMap<String, CallInfo> {
+    messages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, m)| {
+            m.content.iter().filter_map(move |b| match b {
+                Block::ToolUse {
+                    id, name, input, ..
+                } => Some((
+                    id.clone(),
+                    CallInfo {
+                        name: name.clone(),
+                        refs: input_refs(name, input),
+                        position: index,
+                    },
+                )),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+fn relevant_reads(messages: &[Message], calls: &HashMap<String, CallInfo>) -> HashSet<String> {
+    let limit = std::env::var("MINICODE_CONTEXT_RELEVANT_READS")
+        .ok()
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(4)
+        .min(16);
+    let mut prompts = messages
+        .iter()
+        .filter(|m| {
+            m.role == "user"
+                && !m
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, Block::ToolResult { .. }))
+        })
+        .map(Message::text)
+        .filter(|text| {
+            !text.starts_with("此前历史已归档") && !text.starts_with("<system-reminder>")
+        });
+    let original = prompts.next().unwrap_or_default();
+    let latest = prompts.next_back().unwrap_or_default();
+    let prompt = format!("{original}\n{latest}").replace('\\', "/");
+    let successful = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|block| match block {
+            Block::ToolResult {
+                tool_use_id,
+                is_error: false,
+                ..
+            } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut reads = calls
+        .iter()
+        .filter(|(id, call)| call.name == "read" && successful.contains(id.as_str()))
+        .collect::<Vec<_>>();
+    reads.sort_by(|(a_id, a), (b_id, b)| b.position.cmp(&a.position).then_with(|| a_id.cmp(b_id)));
+    let mut seen = HashSet::new();
+    reads
+        .into_iter()
+        .filter(|(_, call)| {
+            call.refs
+                .iter()
+                .any(|path| seen.insert(path.clone()) && prompt.contains(&path.replace('\\', "/")))
+        })
+        .take(limit)
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+fn history_refs(messages: &[Message]) -> Vec<String> {
+    let calls = call_info(messages);
+    let mut refs = calls
+        .values()
+        .flat_map(|call| call.refs.clone())
+        .collect::<Vec<_>>();
+    for message in messages {
+        for block in &message.content {
+            match block {
+                Block::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if calls.get(tool_use_id).is_some_and(|call| {
+                    matches!(call.name.as_str(), "bash" | "powershell" | "grep")
+                }) =>
+                {
+                    refs.extend(text_refs(content))
+                }
+                Block::Text { text } if text.starts_with("此前历史已归档") => {
+                    refs.extend(text_refs(text))
+                }
+                _ => {}
+            }
+        }
+    }
+    refs.sort();
+    refs.dedup();
+    refs.truncate(40);
+    refs
+}
+
+fn shrink_results(
+    store: &Store,
+    id: &str,
+    messages: &mut [Message],
+    mut current: u64,
+    target: u64,
+) -> Result<usize> {
+    let calls = call_info(messages);
+    let relevant = relevant_reads(messages, &calls);
+    let total = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|b| matches!(b, Block::ToolResult { .. }))
+        .count();
+    let mut sequence = 0;
+    let mut candidates = vec![];
+    for (mi, message) in messages.iter().enumerate() {
+        for (bi, block) in message.content.iter().enumerate() {
+            if let Block::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } = block
+            {
+                sequence += 1;
+                if sequence + 2 <= total {
+                    let priority = if relevant.contains(tool_use_id) {
+                        3
+                    } else if *is_error {
+                        2
+                    } else if calls
+                        .get(tool_use_id)
+                        .is_some_and(|call| call.name == "read")
+                    {
+                        1
+                    } else {
+                        0
+                    };
+                    candidates.push((priority, sequence, mi, bi));
+                }
+            }
+        }
+    }
+    candidates.sort_unstable();
+    let mut changed = HashSet::new();
+    for keep in [2000, 200] {
+        for &(_, _, mi, bi) in &candidates {
+            if current <= target {
+                return Ok(changed.len());
+            }
+            let Block::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = &mut messages[mi].content[bi]
+            else {
+                unreachable!()
+            };
+            let old = tokens(content);
+            let mut refs = calls
+                .get(tool_use_id)
+                .map(|call| call.refs.clone())
+                .unwrap_or_default();
+            if calls
+                .get(tool_use_id)
+                .is_some_and(|call| matches!(call.name.as_str(), "bash" | "powershell" | "grep"))
+            {
+                refs.extend(text_refs(content));
+            }
+            refs.sort();
+            refs.dedup();
+            refs.truncate(8);
+            let body = content.split("\n...[已压缩").next().unwrap_or(content);
+            let preview = body.chars().take(keep).collect::<String>();
+            let render = |artifact: &str| {
+                format!(
+                    "{preview}\n...[已压缩；文件引用：{}；完整内容见 [artifact:{artifact}]]",
+                    refs.join(", ")
+                )
+            };
+            if tokens(&render("tool_output_000000000000")) >= old {
+                continue;
+            }
+            // Only our own truncation markers identify an existing full archive.
+            let existing = if content.contains("[已压缩") || content.contains("output truncated")
+            {
+                content
+                    .rsplit_once("[artifact:")
+                    .and_then(|(_, rest)| rest.split_once(']'))
+                    .map(|(artifact, _)| artifact)
+                    .filter(|artifact| util::valid_id(artifact))
+                    .map(str::to_string)
+            } else {
+                None
+            };
+            let artifact = match existing {
+                Some(artifact) => artifact,
+                None => store.spill(id, "tool_output", content)?,
+            };
+            *content = render(&artifact);
+            current = current.saturating_sub(old).saturating_add(tokens(content));
+            changed.insert((mi, bi));
+        }
+    }
+    Ok(changed.len())
+}
 pub fn compact(
     store: &Store,
     id: &str,
@@ -184,6 +431,12 @@ pub fn archive_range(
     if force && let Some(&latest) = units.last().filter(|&&i| i > head) {
         keep_start = latest;
     }
+    let calls = call_info(messages);
+    for id in relevant_reads(messages, &calls) {
+        if let Some(call) = calls.get(&id) {
+            keep_start = keep_start.min(call.position);
+        }
+    }
     let candidates = (head + 1..=keep_start).collect::<Vec<_>>();
     let end = paired_prefix(messages, &candidates)?;
     Some(head..end)
@@ -217,7 +470,7 @@ pub fn compact_summarized(
             generated = None;
         }
         let mut goals = vec![];
-        let mut refs = vec![];
+        let refs = history_refs(archive);
         let mut findings = vec![];
         let previous = archive.iter().find_map(|m| {
             let text = m.text();
@@ -236,11 +489,6 @@ pub fn compact_summarized(
                     Block::Text { text } if m.role == "user" && goals.len() < 12 => {
                         goals.push(text.chars().take(240).collect::<String>())
                     }
-                    Block::ToolUse { input, .. } => {
-                        if let Some(path) = input["path"].as_str() {
-                            refs.push(path.to_string());
-                        }
-                    }
                     Block::ToolResult {
                         content,
                         is_error: true,
@@ -252,13 +500,11 @@ pub fn compact_summarized(
                 }
             }
         }
-        refs.sort();
-        refs.dedup();
-        refs.truncate(40);
         let summary = |artifact: &str| {
             if let Some(text) = generated {
                 return Message::user(format!(
-                    "此前历史已归档，完整消息见 [artifact:{artifact}]。\n<structured-summary>\n{text}\n</structured-summary>"
+                    "此前历史已归档，完整消息见 [artifact:{artifact}]。\n<structured-summary>\n{text}\n</structured-summary>\n文件引用：{}",
+                    refs.join(", ")
                 ));
             }
             Message::user(format!(
@@ -297,31 +543,14 @@ pub fn compact_summarized(
             messages.splice(head..end, [summary(&artifact)]);
         }
     }
-    if estimate(system, messages, specs) > trigger || (force && archived == 0) {
-        let total = messages
-            .iter()
-            .flat_map(|m| &m.content)
-            .filter(|b| matches!(b, Block::ToolResult { .. }))
-            .count();
-        let mut index = 0;
-        for m in messages.iter_mut() {
-            for b in &mut m.content {
-                if let Block::ToolResult { content, .. } = b {
-                    index += 1;
-                    if index + 2 <= total
-                        && content.chars().count() > 240
-                        && !content.contains("[已压缩")
-                    {
-                        let artifact = store.spill(id, "tool_output", content)?;
-                        *content = format!(
-                            "{}\n...[已压缩；完整内容见执行报告 [artifact:{artifact}]]",
-                            content.chars().take(200).collect::<String>()
-                        );
-                        shrunk += 1;
-                    }
-                }
-            }
-        }
+    let current = estimate(system, messages, specs);
+    if current > trigger || (force && archived == 0) {
+        let target = if force {
+            trigger.min(current.saturating_mul(3) / 4)
+        } else {
+            trigger
+        };
+        shrunk = shrink_results(store, id, messages, current, target)?;
     }
     let offloaded = if force && archived == 0 && shrunk == 0 {
         offload_large_inner(store, id, messages, true)?
