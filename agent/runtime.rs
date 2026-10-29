@@ -1825,14 +1825,19 @@ impl Runtime {
             } else {
                 "path"
             };
-            match catalog.discover_instructions(input[field].as_str().unwrap_or(".")) {
+            match catalog.discover_instructions_for(
+                input[field].as_str().unwrap_or("."),
+                tools::read_only(name),
+            ) {
                 Ok(sources) if !sources.is_empty() => {
                     for source in sources {
                         self.event(hooks, "project_instructions", source)?;
                     }
-                    return Ok(Some(Outcome::failure(
-                        "已加载该目录的 AGENTS.md 指令。请按新指令重新调用工具。",
-                    )));
+                    if !tools::read_only(name) {
+                        return Ok(Some(Outcome::failure(
+                            "已加载该目录的 AGENTS.md 指令。请按新指令重新调用工具。",
+                        )));
+                    }
                 }
                 Err(error) => return Ok(Some(Outcome::failure(error.to_string()))),
                 _ => {}
@@ -1999,7 +2004,7 @@ impl Runtime {
         else {
             unreachable!()
         };
-        let outcome = if !granted {
+        let mut outcome = if !granted {
             Outcome::failure("用户拒绝了工具执行")
         } else {
             let store = self.store.clone();
@@ -2033,6 +2038,34 @@ impl Runtime {
                     .unwrap_or_else(|_| Outcome::failure("tool timed out"))
             }
         };
+        if ["read", "ls", "grep"].contains(&name.as_str()) {
+            let target =
+                util::in_workspace(&self.workspace, input["path"].as_str().unwrap_or("."))?;
+            let catalog = self.catalog.lock().await;
+            let context = catalog
+                .instructions
+                .iter()
+                .filter(|(path, _)| {
+                    path.parent().is_some_and(|scope| {
+                        target.starts_with(scope) && catalog.pending_scopes.contains(scope)
+                    })
+                })
+                .map(|(path, source)| {
+                    format!(
+                        "<system-reminder>\n目录指令 {}：\n{}\n</system-reminder>",
+                        path.display(),
+                        source.content
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !context.is_empty() {
+                outcome.output = format!("{context}\n{}", outcome.output);
+                if let Some(full) = &mut outcome.full_output {
+                    full.insert_str(0, &format!("{context}\n"));
+                }
+            }
+        }
         let result = self.record_result(
             &call,
             outcome,

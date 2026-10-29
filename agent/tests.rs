@@ -4090,3 +4090,64 @@ async fn r22_recovery_distinguishes_queued_from_started() {
     assert!(results["started"].contains("副作用状态未知"));
     assert!(!h.runtime.workspace.join("queued.txt").exists());
 }
+
+#[tokio::test]
+async fn r25_readonly_nested_instructions_succeed_without_an_extra_turn() {
+    let mut h = Harness::new(json!({"turns":[{"tool_calls":[
+        {"name":"read","arguments":{"path":"nested/file.txt"}},
+        {"name":"ls","arguments":{"path":"nested"}},
+        {"name":"grep","arguments":{"path":"nested","pattern":"payload"}},
+        {"name":"write","arguments":{"path":"nested/out.txt","content":"blocked"}}
+    ]},{"tool_calls":[{"name":"write","arguments":{"path":"nested/out.txt","content":"allowed"}}]},{"text":"done"}]})).await;
+    let nested = h.runtime.workspace.join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("AGENTS.md"), "nested-rules-evidence").unwrap();
+    fs::write(nested.join("file.txt"), "payload-evidence").unwrap();
+    assert_eq!(
+        h.run(Some("inspect nested")).await.unwrap().exit_reason,
+        "completed"
+    );
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let results = events
+        .iter()
+        .filter(|e| e.r#type == "tool_call_result")
+        .collect::<Vec<_>>();
+    for event in &results[..3] {
+        assert_eq!(event.data["success"], true, "{}", event.data);
+        assert!(
+            event.data["output_detail"]
+                .as_str()
+                .unwrap()
+                .contains("nested-rules-evidence")
+        );
+        assert!(
+            event.data["output_detail"]
+                .as_str()
+                .unwrap()
+                .contains("<system-reminder>")
+        );
+    }
+    assert!(
+        results
+            .iter()
+            .find(|e| e.data["name"] == "read")
+            .unwrap()
+            .data["output_detail"]
+            .as_str()
+            .unwrap()
+            .contains("payload-evidence")
+    );
+    assert_eq!(results[3].data["success"], false);
+    assert_eq!(results[4].data["success"], true);
+    assert_eq!(
+        fs::read_to_string(nested.join("out.txt")).unwrap(),
+        "allowed"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.r#type == "project_instructions")
+            .count(),
+        1
+    );
+}

@@ -755,3 +755,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - **修复**：新增兼容的 `tool_execution` journal；assistant checkpoint 原子登记排队调用，授权和参数校验通过后、实际执行前记录 `tool_started`。取消收尾立即补齐未开始调用的“用户已中断，未执行”，并接回已经落库的结果；恢复仅将可能执行过的写操作视为副作用未知。旧会话没有状态记录时保留原有保守行为。
 - **测试**：`r22_cancel_backfills_unstarted_calls_before_resume` 复现两项写入第一项完成后取消，验证第二项未执行且恢复无虚假未知提示；`r22_recovery_distinguishes_queued_from_started` 验证排队与已开始写入的恢复差异。
 - **验证**：完整 CI 检查通过，日志 `output/4B-R22-*.log`；Rust 159 项通过、2 项既有手动基准忽略；协议 202 项通过、2 项按既有条件跳过；TUI 119 项通过；离线评测结果验证通过。
+
+### R25 首次只读访问嵌套目录不再要求重试
+
+- **问题与根因**：公共 preflight 在发现嵌套 AGENTS.md 时无条件返回失败；同批后续只读调用也被 pending scope 拦截。
+- **修复**：只读 read/ls/grep 继续执行并在结果前附带本轮新加载的适用目录指令，以 system-reminder 标记；指令仍通过原有动态快照进入后续模型请求。写入、编辑及 shell 保留原有先看指令再重试的屏障，不改变授权策略。
+- **测试**：`r25_readonly_nested_instructions_succeed_without_an_extra_turn` 先失败后通过；覆盖同批 read/ls/grep 的首次访问、指令只发现一次、写入屏障及下一轮成功重试。完整检查日志 `output/4B-R25-*.log`。
+- **验证说明**：首轮完整协议检查的既有 MCP service 超时用例在并行负载下出现 unknown tool，单独 4 项复跑通过；完整复跑还纠正了新测试对并行完成顺序的假设，改为按工具名查找。最终结果以 `output/4B-R25-final-*.log` 为准，不改动本批之外的 MCP 超时实现。

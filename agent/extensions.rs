@@ -1073,11 +1073,19 @@ impl Catalog {
         Ok(changed)
     }
     pub fn discover_instructions(&mut self, target: &str) -> Result<Vec<Value>> {
+        self.discover_instructions_for(target, false)
+    }
+    pub fn discover_instructions_for(
+        &mut self,
+        target: &str,
+        readonly: bool,
+    ) -> Result<Vec<Value>> {
         let path = util::in_workspace(&self.workspace, target)?;
-        if self
-            .pending_scopes
-            .iter()
-            .any(|scope| path.starts_with(scope))
+        if !readonly
+            && self
+                .pending_scopes
+                .iter()
+                .any(|scope| path.starts_with(scope))
         {
             bail!("该目录的新 AGENTS.md 指令刚被加载；请按新指令重新调用工具。")
         }
