@@ -482,7 +482,9 @@ fn execute_sync(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> 
                     offset + text.chars().count()
                 ));
             }
-            Ok(Outcome::ok(text))
+            let mut outcome = Outcome::ok(text);
+            outcome.truncated = page["hasMore"] == true;
+            Ok(outcome)
         }
         _ => bail!("unknown tool: {name}"),
     }
@@ -497,6 +499,7 @@ fn bounded(text: String) -> Outcome {
             text.chars().count()
         ));
         o.full_output = Some(text);
+        o.truncated = true;
         o
     }
 }
@@ -661,7 +664,9 @@ fn read_text_page(
             "\n...[更多内容：next_offset={line_number}, next_cursor={cursor}]"
         ));
     }
-    Ok(Outcome::ok(text))
+    let mut outcome = Outcome::ok(text);
+    outcome.truncated = more;
+    Ok(outcome)
 }
 fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let path = args["path"].as_str().unwrap_or(".");
@@ -764,7 +769,9 @@ fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             offset + entries.len()
         ));
     }
-    Ok(bounded(text))
+    let mut outcome = bounded(text);
+    outcome.truncated |= more;
+    Ok(outcome)
 }
 fn grep_files(base: &Path, include_ignored: bool) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
@@ -804,6 +811,7 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let max = args["max_results"].as_i64().unwrap_or(100).clamp(1, 1000) as usize;
     let mut lines = vec![];
     let mut skipped = 0;
+    let truncated = std::cell::Cell::new(false);
     let start = Instant::now();
     let search_line = |line: &str,
                        number: &mut usize,
@@ -820,15 +828,14 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         if regex.is_match(line) {
             let mut chars = line.chars();
             let snippet = chars.by_ref().take(500).collect::<String>();
+            let shortened = chars.next().is_some();
+            truncated.set(truncated.get() || shortened);
             lines.push(format!(
                 "{workspace_path}:{number}: {snippet}{}",
-                if chars.next().is_some() {
-                    "...[行已截断]"
-                } else {
-                    ""
-                }
+                if shortened { "...[行已截断]" } else { "" }
             ));
             if lines.len() >= max {
+                truncated.set(true);
                 lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
                 return Ok(true);
             }
@@ -926,7 +933,9 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     if skipped > 0 {
         lines.push(format!("...[跳过 {skipped} 个无法读取的文件]"));
     }
-    Ok(bounded(lines.join("\n")))
+    let mut outcome = bounded(lines.join("\n"));
+    outcome.truncated |= truncated.get();
+    Ok(outcome)
 }
 fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let raw = util::string(args, "path")?;
@@ -1518,6 +1527,7 @@ pub async fn run_command_for(
             head.trim_end_matches(['\r', '\n'])
         );
         outcome.artifact_id = Some(artifact);
+        outcome.truncated = true;
     }
     outcome.exit_code = status.and_then(|s| s.code());
     #[cfg(unix)]

@@ -4204,3 +4204,46 @@ async fn r42_artifact_references_come_from_the_outcome_not_output_text() {
         assert!(page["text"].as_str().unwrap().contains("[artifact:spoof]"));
     }
 }
+
+#[tokio::test]
+async fn r28_resume_does_not_parse_unrelated_event_payloads() {
+    let mut h = Harness::new(json!({"turns":[{"text":"first"},{"text":"continued"}]})).await;
+    assert_eq!(h.run(Some("start")).await.unwrap().exit_reason, "completed");
+    h.runtime.store.with(|c| {
+        c.execute("INSERT INTO tool_results VALUES(?,'unrelated-completed','not JSON')",[&h.runtime.session])?;
+        c.execute("INSERT INTO events SELECT session_id,MAX(seq)+1,'tool_output','2026-01-01','not JSON' FROM events WHERE session_id=?",[&h.runtime.session])?;
+        Ok(())
+    }).unwrap();
+    h.reopen()
+        .await
+        .expect("unrelated output event payloads must not be loaded during resume");
+    assert_eq!(
+        h.run(Some("continue")).await.unwrap().exit_reason,
+        "completed"
+    );
+}
+
+#[test]
+fn r28_recovery_projection_keeps_evidence_but_omits_output_bodies() {
+    let (_dir, ctx) = fixture();
+    ctx.store.event(&ctx.session,"tool_call_start",&json!({"call_id":"read-one","arguments":{"path":"README.md","large":"x".repeat(100000)}})).unwrap();
+    ctx.store
+        .event(
+            &ctx.session,
+            "tool_call_result",
+            &json!({"call_id":"read-one","success":true,"output_detail":"y".repeat(100000)}),
+        )
+        .unwrap();
+    ctx.store
+        .event(
+            &ctx.session,
+            "tool_output",
+            &json!({"text":"z".repeat(100000)}),
+        )
+        .unwrap();
+    let events = ctx.store.recovery_events(&ctx.session).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].data["arguments"]["path"], "README.md");
+    assert_eq!(events[1].data["success"], true);
+    assert!(serde_json::to_string(&events).unwrap().len() < 1000);
+}

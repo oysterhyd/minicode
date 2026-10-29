@@ -136,6 +136,8 @@ pub struct Outcome {
     pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_id: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
     #[serde(skip)]
     pub full_output: Option<String>,
 }
@@ -150,6 +152,7 @@ impl Outcome {
             signal: None,
             job_id: None,
             artifact_id: None,
+            truncated: false,
             full_output: None,
         }
     }

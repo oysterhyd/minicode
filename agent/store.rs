@@ -320,14 +320,15 @@ impl Store {
                 let mut bytes = 0;
                 let mut oldest = 0;
                 while let Some(row) = rows.next()? {
-                    let data: String = row.get(3)?;
-                    if !events.is_empty() && (events.len() == limit || bytes + data.len() > 2_000_000) {
+                    let data = restore_result_detail(c,id,serde_json::from_str(&row.get::<_,String>(3)?)?)?;
+                    let size = serde_json::to_vec(&data)?.len();
+                    if !events.is_empty() && (events.len() == limit || bytes + size > 2_000_000) {
                         event_cursor = Some(oldest);
                         break;
                     }
-                    bytes += data.len();
+                    bytes += size;
                     oldest = row.get(0)?;
-                    events.push(Event { seq: oldest, r#type: row.get(1)?, timestamp: row.get(2)?, data: serde_json::from_str(&data)? });
+                    events.push(Event { seq: oldest, r#type: row.get(1)?, timestamp: row.get(2)?, data });
                 }
                 events.reverse();
             }
@@ -378,10 +379,25 @@ impl Store {
             Ok(())
         })
     }
+    /// Restore only control state and projected accounting/identity fields.
+    /// Output streams, assistant bodies and tool arguments stay on disk.
+    pub fn recovery_events(&self, id: &str) -> Result<Vec<Event>> {
+        self.with(|c| {
+            let mut q = c.prepare("SELECT seq,type,timestamp,CASE
+                WHEN type IN ('assistant_message','provider_response_rejected') THEN json_object('usage',json_extract(data,'$.usage'),'tool_call_ids',json_extract(data,'$.tool_call_ids'),'provider_progress',json_extract(data,'$.provider_progress'))
+                WHEN type='tool_call_start' THEN json_object('call_id',json_extract(data,'$.call_id'),'arguments',json_object('path',json_extract(data,'$.arguments.path')))
+                WHEN type IN ('tool_call_result','tool_started') THEN json_object('call_id',json_extract(data,'$.call_id'),'success',CASE WHEN json_extract(data,'$.success') THEN json('true') ELSE json('false') END)
+                WHEN type='subagent_result' THEN json_object('child_session_id',json_extract(data,'$.child_session_id'),'kind',json_extract(data,'$.kind'),'task',json_extract(data,'$.task'),'exit_reason',json_extract(data,'$.exit_reason'))
+                WHEN type IN ('background_job_started','background_job_completed','background_job_lost') THEN json_object('job_id',json_extract(data,'$.job_id'),'command',json_extract(data,'$.command'))
+                ELSE data END FROM events WHERE session_id=? AND type IN ('session_start','project_instructions','skill_activated','skill_deactivated','project_instructions_changed','subagent_start','subagent_result','assistant_message','provider_response_rejected','tool_call_start','tool_call_result','tool_started','background_job_started','background_job_completed','background_job_lost') ORDER BY seq")?;
+            q.query_map([id], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?
+                .map(|row| {let (seq,kind,timestamp,data)=row?; Ok(Event{seq,r#type:kind,timestamp,data:serde_json::from_str(&data)?})}).collect::<Result<_>>()
+        })
+    }
     pub fn events(&self, id: &str, after: i64) -> Result<Vec<Event>> {
         self.with(|c|{
         let mut q=c.prepare("SELECT seq,type,timestamp,data FROM events WHERE session_id=? AND seq>? ORDER BY seq")?;
-        let mut rows=q.query(params![id,after])?;let mut events=Vec::new();while let Some(row)=rows.next()? {events.push(Event{seq:row.get(0)?,r#type:row.get(1)?,timestamp:row.get(2)?,data:serde_json::from_str(&row.get::<_,String>(3)?)?});}Ok(events)
+        let mut rows=q.query(params![id,after])?;let mut events=Vec::new();while let Some(row)=rows.next()? {events.push(Event{seq:row.get(0)?,r#type:row.get(1)?,timestamp:row.get(2)?,data:restore_result_detail(c,id,serde_json::from_str(&row.get::<_,String>(3)?)?)?});}Ok(events)
     })
     }
     pub fn statistics_events(&self, id: &str, after: i64) -> Result<(i64, Vec<Event>)> {
@@ -405,6 +421,20 @@ impl Store {
                 c.prepare("SELECT call_id,started FROM tool_execution WHERE session_id=?")?;
             Ok(q.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?)
+        })
+    }
+    pub fn tool_results_for(
+        &self,
+        id: &str,
+        calls: &[String],
+    ) -> Result<std::collections::HashMap<String, Block>> {
+        if calls.is_empty() {
+            return Ok(Default::default());
+        }
+        self.with(|c| {
+            let mut q = c.prepare("SELECT call_id,result FROM tool_results WHERE session_id=? AND call_id IN (SELECT value FROM json_each(?))")?;
+            q.query_map(params![id,serde_json::to_string(calls)?], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+                .map(|row| {let (id,result)=row?; Ok((id,serde_json::from_str(&result)?))}).collect()
         })
     }
     pub fn tool_results(&self, id: &str) -> Result<std::collections::HashMap<String, Block>> {
@@ -718,6 +748,27 @@ impl Store {
         Ok(q.query_map([workspace],|r|Ok(json!({"id":r.get::<_,String>(0)?,"workspace":r.get::<_,String>(1)?,"scope":r.get::<_,String>(2)?,"fact":r.get::<_,String>(3)?,"source":r.get::<_,String>(4)?,"updated_at":r.get::<_,String>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
     })
     }
+}
+fn restore_result_detail(c: &Connection, id: &str, mut data: Value) -> Result<Value> {
+    if let Some(call_id) = data["result_ref"].as_str() {
+        let raw: Option<String> = c
+            .query_row(
+                "SELECT result FROM tool_results WHERE session_id=? AND call_id=?",
+                params![id, call_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = raw
+            && let Block::ToolResult {
+                content, images, ..
+            } = serde_json::from_str::<Block>(&raw)?
+        {
+            let offset = data["output_offset"].as_u64().unwrap_or(0) as usize;
+            data["output_detail"] = json!(content.get(offset..).unwrap_or(&content));
+            data["images"] = json!(images);
+        }
+    }
+    Ok(data)
 }
 fn sql_value(v: &Value) -> rusqlite::types::Value {
     match v {

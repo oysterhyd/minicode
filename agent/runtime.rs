@@ -248,7 +248,7 @@ impl Runtime {
         } else {
             None
         };
-        let events = store.events(&id, -1)?;
+        let events = store.recovery_events(&id)?;
         let mut instruction_changes = vec![];
         if session.is_some() && events.iter().any(|e| e.r#type == "session_start") {
             let global = catalog
@@ -426,7 +426,7 @@ impl Runtime {
         }
         let mut recovery_events = events;
         for child_id in child_ids {
-            let child_events = runtime.store.events(&child_id, -1)?;
+            let child_events = runtime.store.recovery_events(&child_id)?;
             let mut usage = Usage::default();
             for event in child_events.iter().filter(|e| {
                 matches!(
@@ -516,7 +516,7 @@ impl Runtime {
     }
     pub fn set_script(&mut self, script: Value) -> Result<()> {
         self.provider.set_script(script)?;
-        let mut events = self.store.events(&self.session, -1)?;
+        let mut events = self.store.recovery_events(&self.session)?;
         if events
             .iter()
             .find(|e| e.r#type == "session_start")
@@ -529,7 +529,7 @@ impl Runtime {
                 .filter_map(|e| e.data["child_session_id"].as_str().map(str::to_string))
                 .collect::<HashSet<_>>();
             for id in children {
-                events.extend(self.store.events(&id, -1)?);
+                events.extend(self.store.recovery_events(&id)?);
             }
             self.restore_script_progress(&events);
         }
@@ -724,7 +724,7 @@ impl Runtime {
         Ok(())
     }
     pub async fn prepare(&mut self, hooks: &Hooks) -> Result<()> {
-        let existing = self.store.events(&self.session, -1)?;
+        let existing = self.store.recovery_events(&self.session)?;
         if !existing.iter().any(|e| e.r#type == "session_start") {
             let catalog = self.catalog.lock().await;
             let global = catalog
@@ -752,7 +752,14 @@ impl Runtime {
                 pending.push(b.clone());
             }
         }
-        let journal = self.store.tool_results(&self.session)?;
+        let ids = pending
+            .iter()
+            .filter_map(|b| match b {
+                Block::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let journal = self.store.tool_results_for(&self.session, &ids)?;
         let execution = self.store.tool_execution(&self.session)?;
         let mut results = vec![];
         for call in pending {
@@ -1716,7 +1723,16 @@ impl Runtime {
                 _ => None,
             })
             .collect::<HashSet<_>>();
-        let journal = self.store.tool_results(&self.session)?;
+        let ids = self
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                Block::ToolUse { id, .. } if !answered.contains(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let journal = self.store.tool_results_for(&self.session, &ids)?;
         let execution = self.store.tool_execution(&self.session)?;
         let mut results = vec![];
         for call in self.messages.iter().flat_map(|m| &m.content) {
@@ -2131,6 +2147,7 @@ impl Runtime {
                 util::prefix(&outcome.output, 4000)
             );
             outcome.artifact_id = Some(artifact);
+            outcome.truncated = true;
         }
         let content = if let Some(error) = &outcome.error {
             if outcome.output.is_empty() {
@@ -2145,14 +2162,19 @@ impl Runtime {
             tool_use_id: id.clone(),
             content,
             is_error: !outcome.success,
-            images: if outcome.success {
-                outcome.images.clone()
-            } else {
-                vec![]
-            },
+            images: outcome.images.clone(),
         };
-        let artifact = outcome.artifact_id;
-        let event=self.store.checkpoint(&self.session,"tool_call_result",&json!({"call_id":id,"name":name,"success":outcome.success,"exit_code":outcome.exit_code,"signal":outcome.signal,"error":outcome.error,"output_preview":util::prefix(&outcome.output,1000),"output_detail":outcome.output,"artifact_id":artifact,"truncated":artifact.is_some()||outcome.output.contains("truncated"),"duration_s":duration,"images":outcome.images,"recovered":recovered}),None,Some(&result),None)?;
+        let output_offset = outcome.error.as_ref().map_or(0, |e| {
+            if outcome.output.is_empty() {
+                e.len()
+            } else {
+                e.len() + 1
+            }
+        });
+        let mut event=self.store.checkpoint(&self.session,"tool_call_result",&json!({"call_id":id,"name":name,"success":outcome.success,"exit_code":outcome.exit_code,"signal":outcome.signal,"error":outcome.error,"output_preview":util::prefix(&outcome.output,1000),"result_ref":id,"output_offset":output_offset,"artifact_id":outcome.artifact_id,"truncated":outcome.truncated,"duration_s":duration,"recovered":recovered}),None,Some(&result),None)?;
+        // Keep the live protocol compatible; only the persisted event is compact.
+        event.data["output_detail"] = json!(outcome.output);
+        event.data["images"] = json!(outcome.images);
         (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
         Ok(result)
     }
@@ -2233,7 +2255,7 @@ impl Runtime {
             } else {
                 let paused = self
                     .store
-                    .events(&self.session, -1)?
+                    .recovery_events(&self.session)?
                     .iter()
                     .rev()
                     .find(|e| {
@@ -2352,7 +2374,7 @@ impl Runtime {
             });
             let structured = parsed.is_some();
             let mut payload=parsed.unwrap_or(json!({"summary":final_text,"findings":[],"evidence_refs":[],"unresolved":["子助手未返回有效的结构化结果。"]}));
-            let events = self.store.events(&child_id, -1)?;
+            let events = self.store.recovery_events(&child_id)?;
             let succeeded = events
                 .iter()
                 .filter(|e| e.r#type == "tool_call_result" && e.data["success"] == true)

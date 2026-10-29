@@ -608,6 +608,7 @@ impl Connector {
         let mut o = Outcome::ok(util::prefix(&output, 50 * 1024));
         if o.output != output {
             o.full_output = Some(output);
+            o.truncated = true;
         }
         o.success = result["isError"] != true;
         o.images = images;

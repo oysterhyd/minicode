@@ -768,3 +768,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - **问题与根因**：runtime 对整段输出取首个 artifact 正则匹配，正文里的历史标记会覆盖本次实际归档链接，普通文件也会被误判为有归档。
 - **修复**：Outcome 新增可选、默认空的 artifact_id；大块输出 spill 和命令 capture 直接赋值，record_result 直接传递字段，删除文本反解析。旧 Outcome JSON 可以继续反序列化；展示用文本标记保持兼容。
 - **测试**：`r42_artifact_references_come_from_the_outcome_not_output_text` 先失败后修复，覆盖普通文件伪标记、skill 大输出 spill、命令大输出归档及正确分页回查。完整检查日志 `output/4B-R42-*.log`。
+
+### R28 结果事件去重、结构化截断与轻量恢复
+
+- **问题与根因**：tool_call_result 同时存 output_detail 与 journal，完整结果之后还进入 messages；截断依赖正文子串，失败时主动清空 images。Runtime/new、prepare、set_script 和 bridge 预算恢复全量读取事件。
+- **修复**：新结果事件只保存 1000 字节预览、result_ref、artifact 引用和状态；完整结果仍在 journal/messages 中，维持崩溃恢复及模型历史语义。实时协议与有界历史页按引用补回旧 output_detail/images，旧事件原样可读。Outcome.truncated 由实际截断、归档和分页分支赋值，普通文本不再误判；失败结果也保留图片。恢复使用按类型过滤、按字段投影的事件数据，跳过输出流和正文；预算直接查询最新值，历史详情仍分页读取并按还原后的实际大小计入页预算。
+- **测试**：Rust 两项覆盖无关损坏输出不影响恢复、控制状态/证据字段保留且 300KB 输出不进入恢复数据；协议两项先失败后通过，直接查 SQLite 验证事件没有完整输出、详情/实时协议兼容、普通 truncated 文本不误报、失败 MCP 图片保留。完整日志 `output/4B-R28-*.log`。
+- **取舍**：不迁移重写已有事件；旧库体积不会立即减少，新写入不再重复存储。模型 messages 与 journal 的两份结果分别承担上下文与原子恢复职责，本批保留。恢复仍需读取相关控制/计费元数据，其数量随会话增长，但不再载入全部历史输出。
+- **追加回归**：恢复与取消收尾也只查询未配对调用的 journal，空列表不查结果正文；用无关损坏 journal 记录复现并验证不会全量载入。

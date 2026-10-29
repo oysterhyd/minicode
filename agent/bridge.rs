@@ -321,20 +321,10 @@ impl Router {
                     }
                 }
             }
-            if let Some(saved) = self
-                .store
-                .events(&r.session, -1)?
-                .iter()
-                .rev()
-                .find(|e| ["budget_changed", "session_start"].contains(&e.r#type.as_str()))
+            if let Some(cap) = self.store.saved_budget(&r.session)?
                 && settings.budget.max_total_tokens == 0
             {
-                let cap = saved.data["budget"]["max_total_tokens"]
-                    .as_i64()
-                    .unwrap_or(0);
-                if cap != 0 {
-                    settings.budget.max_total_tokens = cap;
-                }
+                settings.budget.max_total_tokens = cap;
             }
             settings.model = model;
             settings.pending_model = false;
