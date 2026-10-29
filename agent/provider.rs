@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt, fs,
+    io::Read,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -284,6 +286,7 @@ pub struct Provider {
     pub parameter_compat: Value,
     pub prompt_scale: f64,
     prompt_anchor: Option<PromptAnchor>,
+    calibration_root: PathBuf,
     pub fake: Option<Value>,
     pub index: usize,
     pub call_counter: usize,
@@ -305,6 +308,7 @@ impl Provider {
             parameter_compat: Value::Null,
             prompt_scale: 1.0,
             prompt_anchor: None,
+            calibration_root: configuration.path.with_extension("token-calibration"),
             fake: None,
             index: 0,
             call_counter: 0,
@@ -335,6 +339,7 @@ impl Provider {
                     json!({"turns":[],"exhausted_text":"(fake provider：未提供脚本，这里是一条演示回复。)"})
                 },
             );
+            p.restore_calibration();
             return Ok(p);
         }
         p.window = 128_000;
@@ -413,7 +418,43 @@ impl Provider {
         if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none() {
             bail!("接口地址必须是 HTTP(S) URL")
         };
+        p.restore_calibration();
         Ok(p)
+    }
+    fn calibration_path(&self) -> PathBuf {
+        let key = util::hash(
+            &serde_json::to_vec(&(
+                "token-estimator-v2",
+                &self.configuration_id,
+                &self.model,
+                &self.style,
+                &self.url,
+            ))
+            .expect("serializable model identity"),
+        );
+        self.calibration_root.join(format!("{key}.json"))
+    }
+    fn restore_calibration(&mut self) {
+        // This optional cache contains no prompts or credentials. Bound reads
+        // and ignore corrupt/unknown data so old configurations still work.
+        let read = || -> Result<Value> {
+            let mut bytes = Vec::new();
+            fs::File::open(self.calibration_path())?
+                .take(257)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 256 {
+                bail!("calibration exceeds size limit");
+            }
+            Ok(serde_json::from_slice(&bytes)?)
+        };
+        if let Some(scale) = read()
+            .ok()
+            .filter(|value| value["version"] == 1)
+            .and_then(|value| value["scale"].as_f64())
+            .filter(|scale| scale.is_finite() && (0.5..=3.0).contains(scale))
+        {
+            self.prompt_scale = scale;
+        }
     }
     pub fn identity(&self) -> Option<String> {
         self.fake.as_ref().map(|v|{
@@ -492,6 +533,14 @@ impl Provider {
                 estimated,
                 measured: usage.input_tokens,
             });
+            // A failed cache write must not discard a successful model response.
+            // Atomic replacement keeps concurrent writers valid; latest EMA wins.
+            let _ = util::atomic_write(
+                &self.calibration_path(),
+                json!({"version":1,"scale":self.prompt_scale})
+                    .to_string()
+                    .as_bytes(),
+            );
         }
     }
     pub async fn stream(
@@ -2196,5 +2245,103 @@ mod error_tests {
             ProviderError::ContextOverflow { status: None, .. }
         ));
         assert!(!overflow.is_retryable());
+    }
+}
+
+#[cfg(test)]
+mod calibration_tests {
+    use super::*;
+    fn fixture() -> (tempfile::TempDir, Configuration) {
+        let dir = tempfile::tempdir().unwrap();
+        let configuration = Configuration {
+            path: dir.path().join("config.json"),
+        };
+        configuration.write(&json!({"services":[{"id":"calibration","name":"local fixture","enabled":true,"apiStyle":"openai","baseUrl":"http://127.0.0.1:1","apiKey":"fixture-key","models":[{"modelId":"one","contextWindow":200000,"maxOutputTokens":8192},{"modelId":"two","contextWindow":200000,"maxOutputTokens":8192}]}],"agents":[]})).unwrap();
+        (dir, configuration)
+    }
+    #[test]
+    fn p12_calibration_survives_new_provider_and_isolates_models_and_endpoints() {
+        let (_dir, configuration) = fixture();
+        let mut provider = Provider::new("calibration::one", "off", &configuration).unwrap();
+        provider.observe_prompt(
+            "system",
+            &[Message::user("中文")],
+            &[],
+            &Usage {
+                input_tokens: 1000,
+                available: true,
+                ..Usage::default()
+            },
+        );
+        let scale = provider.prompt_scale;
+        assert!(scale > 1.0);
+        let reloaded = Provider::new("calibration::one", "off", &configuration).unwrap();
+        assert_eq!(
+            reloaded.prompt_scale, scale,
+            "EMA must survive Provider reconstruction"
+        );
+        assert!(
+            reloaded.prompt_anchor.is_none(),
+            "usage prefixes must never leak across sessions"
+        );
+        assert_eq!(
+            Provider::new("calibration::two", "off", &configuration)
+                .unwrap()
+                .prompt_scale,
+            1.0
+        );
+        let mut config = configuration.read().unwrap();
+        config["services"][0]["baseUrl"] = json!("http://127.0.0.1:2");
+        configuration.write(&config).unwrap();
+        assert_eq!(
+            Provider::new("calibration::one", "off", &configuration)
+                .unwrap()
+                .prompt_scale,
+            1.0
+        );
+    }
+
+    #[test]
+    fn p12_corrupt_cache_and_failed_writes_do_not_block_model_usage() {
+        let (_dir, configuration) = fixture();
+        let mut provider = Provider::new("calibration::one", "off", &configuration).unwrap();
+        let messages = [Message::user("中文")];
+        let usage = Usage {
+            input_tokens: 1000,
+            available: true,
+            ..Usage::default()
+        };
+        provider.observe_prompt("system", &messages, &[], &usage);
+        let path = provider.calibration_path();
+        for data in [
+            "broken JSON",
+            r#"{"version":1,"scale":999}"#,
+            r#"{"version":2,"scale":2}"#,
+            r#"{"version":1,"scale":null}"#,
+        ] {
+            fs::write(&path, data).unwrap();
+            assert_eq!(
+                Provider::new("calibration::one", "off", &configuration)
+                    .unwrap()
+                    .prompt_scale,
+                1.0
+            );
+        }
+        fs::write(&path, vec![b' '; 10_000]).unwrap();
+        assert_eq!(
+            Provider::new("calibration::one", "off", &configuration)
+                .unwrap()
+                .prompt_scale,
+            1.0
+        );
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&provider.calibration_root).unwrap();
+        fs::write(&provider.calibration_root, "not a directory").unwrap();
+        provider.observe_prompt("system", &messages, &[], &usage);
+        assert!(provider.prompt_scale > 2.0);
+        assert_eq!(
+            provider.estimated_prompt_tokens("system", &messages, &[]),
+            1000
+        );
     }
 }

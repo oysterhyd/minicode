@@ -3976,3 +3976,16 @@ fn x5_archive_refs_include_shell_commands_and_grep_output() {
         "grep result filenames must be retained"
     );
 }
+
+#[tokio::test]
+async fn p12_reopened_runtime_restores_model_calibration() {
+    let mut h = Harness::new(json!({"turns":[{"text":"ready","input_tokens":20000}]})).await;
+    assert_eq!(
+        h.run(Some("inspect")).await.unwrap().exit_reason,
+        "completed"
+    );
+    let scale = h.runtime.provider.prompt_scale;
+    assert!(scale > 1.0);
+    h.reopen().await.unwrap();
+    assert_eq!(h.runtime.provider.prompt_scale, scale);
+}

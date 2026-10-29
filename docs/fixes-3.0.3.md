@@ -690,12 +690,12 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 验证：完整检查 output/check-4a.ps1 X3，日志 output/4A-X3-*.log。
 - 范围外观察：首次全协议运行中，windows-prompt 的 PowerShell 7 探测短暂返回“版本未知”；相同二进制单独重跑该文件 3/3 通过，随后完整协议 200 项通过、2 项既有跳过。失败原始日志 output/4A-X3-protocol-flake.log，未修改 Shell 探测逻辑。
 
-### 4A 当前交付范围与验证
+### 4A 首次暂停时的交付范围（X3）
 
 - 已完成并分别提交：X1 结构化增量摘要、X2 自动回合内切分与大块输入归档、X3 少量提示下的手动压缩。修改仅涉及 agent/context.rs、provider.rs、runtime.rs、tests.rs，tests/agent/context.test.mjs 与本修复记录；没有新增依赖或修改 Desktop。
 - 每项提交前均完成 fmt、Clippy -D warnings、Rust test/build --locked、全协议、任务/trace 一致性、两组 B0/B1/B2 离线评测及结果验证、npm ci/build 和真实 bridge TUI 测试。最新 X3：Rust 147 通过、2 个既有手动基准跳过；协议 200 通过、2 个既有跳过；TUI 118 通过。主任务 60/60；9 个场景保持 7 个预期通过、2 个预期失败。原始日志 output/4A-X1-submit-*.log、output/4A-X2-*.log、output/4A-X3-*.log。
-- 尚未实现：X4 的 CJK 估算、usage 基准加增量及 ContextOverflow 后压缩重试；X5 的渐进 shrink 与 bash/grep 文件引用提取；P12 的模型校准持久化。这些条目的失败测试草稿仅在忽略的 output/ 目录中，未并入交付或宣称通过。当前 tokens 仍按字符数 / 3；prompt_scale 仍初始化为 1.0；运行时仅保留原有通用重试语义。
-- 因而整批 4A 尚未达到“超过两倍窗口的中文会话持续运行”及“provider 溢出恢复成功”验收，下一次应从 X4 开始，再处理 X5 和 P12，随后验证整批长会话行为。
+- 当时尚未实现（现已在下文完成）：X4 的 CJK 估算、usage 基准加增量及 ContextOverflow 后压缩重试；X5 的渐进 shrink 与 bash/grep 文件引用提取；P12 的模型校准持久化。这些条目的失败测试草稿仅在忽略的 output/ 目录中，未并入交付或宣称通过。当前 tokens 仍按字符数 / 3；prompt_scale 仍初始化为 1.0；运行时仅保留原有通用重试语义。
+- 此暂停点尚未达到“超过两倍窗口的中文会话持续运行”及“provider 溢出恢复成功”验收，后续已完成 X4、X5、P12，最终结果见本节末尾。
 - 风险与待确认：默认摘要使用当前模型，增加调用成本与最多 30 秒等待；可选 compactionModel 可选便宜模型。摘要事实准确性依赖模型，原文 artifact 提供回查。最初用户要求与固定提示仍不可压缩；未完成 X5 前旧工具结果仍沿用一次性 shrink 策略。
 - 保持原有两个 .pending 文件不变；未推送或发布。
 
@@ -717,3 +717,24 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 引用：收集 path/file_path、bash/PowerShell 命令中的路径、grep/命令结果中的文件名，保留历史摘要中的引用，并补到结构化摘要旁。沿用 regex 依赖，引用提取限量且仅作回查提示，不改变工具执行或路径授权。带空格、无扩展名及动态拼接的 shell 路径仍可能提取不全。
 - 测试：相关读文件和最近两次结果保持原文、预算满足后保留其余旧结果、第一档仍有可用文件预览、artifact 回读与调用配对；bash/grep 引用完整进入抽取式归档。提交前完整检查 output/check-4a.ps1 X5，日志 output/4A-X5-*.log。
 - 验证结果：完整检查通过，Rust 153 项、协议 201 项、TUI 118 项通过；两组离线评测与生成文件一致性通过，保留既有跳过及场景预期失败。
+
+
+### P12：按模型持久化 token 校准
+
+- 问题与复现：EMA 仅保存在 Provider 实例，重新构造 Provider 或恢复 Runtime 都回到 1.0。两个失败回归分别得到 1.0 而非已观察到的 2.0，日志 output/4A-P12-red.log。
+- 修复：校准保存到配置文件旁的 <配置文件名去扩展名>.token-calibration/<模型身份哈希>.json，按配置模型 ID、实际模型、API 风格、端点与估算器版本隔离。EMA 仍限制 0.5–3，新 Provider（含切回模型、Runtime 恢复）读取该模型的系数。文件只存格式版本与系数，不存提示词、用量前缀或凭据；usage 基准按新请求重新建立。
+- 兼容与失败策略：可选缓存，无配置/数据库迁移；原子替换避免并发写出半个文件，多个实例最后一次有效观察覆盖。读取最多 257 字节，拒绝超出 256 字节、损坏、未知版本、非有限数和越界系数；缓存不可用回到 1.0，写失败不丢弃成功的模型响应。
+- 测试：Provider 重建、模型/端点隔离、Runtime 重新加载；跨会话没有前缀基准；损坏/过大/越界/未知版本缓存与写入失败降级。提交前完整检查 output/check-4a.ps1 P12，日志 output/4A-P12-*.log。
+
+
+### 批次 4A 最终交付与验收
+
+- 条目状态：X1、X2、X3、X4、X5、P12 全部实现，无整项跳过。X3 的“无内容可压缩”提示沿用已存在的 CLI / Bridge 实现。前面的 X3 暂停点保留为历史记录，不代表当前仍有未完成条目。
+- 独立提交：X1 ab4f522；X2 f204bda；X3 867e5ba；X4 605487d；X5 3b3c293；P12 与本收尾记录同一提交。未推送或发布。
+- 文件范围：agent/context.rs、provider.rs、runtime.rs、tests.rs，tests/agent/context.test.mjs 与 docs/fixes-3.0.3.md。没有新增依赖、修改 TUI/Desktop 源码或改变 SQLite schema 7；旧会话、旧配置、旧脚本和协议继续可用。原有两个 .pending 文件保持不变。
+- 回归覆盖：新增 15 项 Rust 测试及 3 项 bridge/HTTP 契约测试。覆盖结构化进度/决策/已改文件/下一步、增量更新与失败回退、回合内配对切分、大块参数与原文回读、少量提示下手动压缩、CJK text/JSON/schema、usage 基准加增量与前缀失效、当前轮仅一次溢出恢复、超过两倍窗口的中文 FakeProvider 回放、渐进收缩/相关读文件/bash/grep 引用、Provider/Runtime 校准恢复、模型/端点隔离及缓存损坏/写失败降级。每项均有修复前失败证据，长中文回放同时作为集成验收。
+- 验证方式：每项提交前执行原要求的完整 Windows CI 检查，包含 fmt、Clippy -D warnings、Rust test/build --locked、全协议、任务/trace 生成一致性、两组 B0/B1/B2 离线评测及结果验证、npm ci/build 和真实 bridge TUI 测试。原始日志位于 output/4A-X1-submit-*.log、output/4A-X2-*.log、output/4A-X3-*.log、output/4A-X4-*.log、output/4A-X5-*.log、output/4A-P12-*.log。
+- 风险与待确认决策：摘要默认当前模型、最多 30 秒，可用 compactionModel 指定便宜模型；摘要事实准确性依赖模型，原文可回查。相关读文件按初始/最新请求中的路径匹配，默认最多 4 个、可配置 0–16；文件引用提取不覆盖全部 shell 动态路径。预算仍不足时允许硬上限兜底 offload。校准缓存是可选启发式，写入失败不会影响模型响应，多实例并发以最后一次原子写为准。初始用户要求与固定提示仍不可压缩，持续溢出会有界结束。
+- 范围外观察：一次既有 Windows Shell 版本探测测试返回“版本未知”；单独重跑及随后完整检查通过，未改写 Shell 探测。本批未处理存储重复写入/全量恢复及系统通知类型隔离。
+- 下一批建议：继续 4B 的系统通知与用户输入分离、消息增量写入和分页恢复；另行跟踪 Shell 版本探测的偶发不稳定，不混入本批上下文实现。
+- 最终结果：Rust 156 项通过（2 个既有手动基准跳过），Node 协议 201 项通过（Windows 下 Unix MCP 用例及 200 秒慢流用例共 2 项按原条件跳过），TUI 118 项通过。主任务 60/60，9 场景保持 7 个通过与 counter_retry/b0、b1 的 2 个预期失败；结果验证、生成文件一致性及其余 CI 命令全部通过。Desktop 无改动，未触发其条件检查。
