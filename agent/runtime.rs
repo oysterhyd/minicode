@@ -557,10 +557,25 @@ impl Runtime {
         s.window = self.provider.window;
         let mut breakdown = context::breakdown(&system, &self.messages, &specs);
         if let Some(values) = breakdown.as_object_mut() {
+            let total = self
+                .provider
+                .estimated_prompt_tokens(&system, &self.messages, &specs);
+            let raw = values
+                .values()
+                .filter_map(Value::as_u64)
+                .sum::<u64>()
+                .max(1);
             for value in values.values_mut() {
-                *value =
-                    json!((value.as_u64().unwrap_or(0) as f64 * self.provider.prompt_scale) as u64)
+                *value = json!(
+                    (value.as_u64().unwrap_or(0) as u128 * total as u128 / raw as u128) as u64
+                );
             }
+            let assigned = values.values().filter_map(Value::as_u64).sum::<u64>();
+            let messages = values.get("messages").and_then(Value::as_u64).unwrap_or(0);
+            values.insert(
+                "messages".into(),
+                json!(messages.saturating_add(total.saturating_sub(assigned))),
+            );
         }
         s.breakdown = breakdown;
         Ok(())
@@ -1174,8 +1189,9 @@ impl Runtime {
             if self.compaction && self.compact_context(hooks, &system, &specs, false).await? {
                 self.sync_dynamic_context().await?;
             }
-            let mut context_tokens = (context::estimate(&system, &self.messages, &specs) as f64
-                * self.provider.prompt_scale) as u64;
+            let mut context_tokens =
+                self.provider
+                    .estimated_prompt_tokens(&system, &self.messages, &specs);
             // Offloading is a last resort after normal compaction. A large tool
             // result alone must not truncate a fresh, otherwise small context.
             if self.compaction && context_tokens.saturating_add(1024) >= self.provider.window {
@@ -1189,8 +1205,9 @@ impl Runtime {
                         "context_compacted",
                         json!({"offloaded_blocks":offloaded}),
                     )?;
-                    context_tokens = (context::estimate(&system, &self.messages, &specs) as f64
-                        * self.provider.prompt_scale) as u64;
+                    context_tokens =
+                        self.provider
+                            .estimated_prompt_tokens(&system, &self.messages, &specs);
                 }
                 self.message_revision = Some(self.store.message_revision(&self.session)?);
             }
@@ -1228,8 +1245,14 @@ impl Runtime {
                 root: self.store.root().join("attachments"),
             };
             let mut attempt = 0;
+            let mut overflow_recovered = false;
             let retry_policy = RetryPolicy::from_env();
             let (mut response, mut metrics) = loop {
+                if budget.max_total_tokens > 0
+                    && hooks.shared.lock().unwrap().usage.total() >= budget.max_total_tokens as u64
+                {
+                    return Ok("token_budget".into());
+                }
                 // Only the turn deadline bounds the whole request; silence on
                 // the wire is the provider's idle timeout, so long streams that
                 // keep producing bytes are never cut off.
@@ -1251,6 +1274,22 @@ impl Runtime {
                             .downcast_ref::<ProviderError>()
                             .is_some_and(ProviderError::is_retryable);
                         let reset_output = seen.swap(false, Ordering::Relaxed);
+                        let before_compaction = context::estimate(&system, &self.messages, &specs);
+                        if matches!(
+                            error.downcast_ref::<ProviderError>(),
+                            Some(ProviderError::ContextOverflow { .. })
+                        ) && !overflow_recovered
+                            && self.compaction
+                            && self.compact_context(hooks, &system, &specs, true).await?
+                            && context::estimate(&system, &self.messages, &specs)
+                                < before_compaction
+                        {
+                            overflow_recovered = true;
+                            self.sync_dynamic_context().await?;
+                            self.refresh_snapshot(hooks).await?;
+                            self.event(hooks, "provider_retry", json!({"attempt":attempt+1,"next_attempt":attempt+2,"delay_s":0,"reason":"context_overflow","error":text,"reset_output":reset_output}))?;
+                            continue;
+                        }
                         if !retryable || attempt >= retry_policy.max_retries {
                             return Err(
                                 if matches!(
@@ -2302,7 +2341,12 @@ impl Runtime {
         specs: &[ToolSpec],
         force: bool,
     ) -> Result<bool> {
-        let window = (self.provider.window as f64 / self.provider.prompt_scale) as u64;
+        let raw = context::estimate(system, &self.messages, specs);
+        let measured = self
+            .provider
+            .estimated_prompt_tokens(system, &self.messages, specs);
+        let window = ((raw as u128 * self.provider.window as u128) / measured.max(1) as u128)
+            .min(u64::MAX as u128) as u64;
         let trigger = window.saturating_sub((window / 10).min(16_384));
         if !force && context::estimate(system, &self.messages, specs) <= trigger {
             return Ok(false);

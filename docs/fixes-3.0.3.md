@@ -698,3 +698,12 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 因而整批 4A 尚未达到“超过两倍窗口的中文会话持续运行”及“provider 溢出恢复成功”验收，下一次应从 X4 开始，再处理 X5 和 P12，随后验证整批长会话行为。
 - 风险与待确认：默认摘要使用当前模型，增加调用成本与最多 30 秒等待；可选 compactionModel 可选便宜模型。摘要事实准确性依赖模型，原文 artifact 提供回查。最初用户要求与固定提示仍不可压缩；未完成 X5 前旧工具结果仍沿用一次性 shrink 策略。
 - 保持原有两个 .pending 文件不变；未推送或发布。
+
+
+### X4：中文估算、usage 基准与上下文溢出恢复
+
+- 核查：tokens 与 JSON/schema 字符数均按 /3 计算；只有 SSE 分支更新 EMA，JSON 响应不更新；Runtime 将 ContextOverflow 作为不可重试错误直接结束。前置的错误分类与有界响应正文保留已存在，继续使用。
+- 修复：ASCII 保留 /3 估算，CJK 等非 ASCII 字符按约 1 token/字，覆盖文本、工具参数、工具 schema。成功的 SSE/JSON 响应统一更新校准；以实际 input usage 为已发送前缀基准，只估算追加内容。前缀、system、工具、模型/端点/effort 变化自动使基准失效，回退校准估算。Fake 默认固定 usage 不参与校准，只有显式 input_tokens 才作为回放测量。
+- Runtime 的窗口判断、输出 token 余量和 UI 上下文总数统一使用 usage 基准估算。摘要分块也随校准调整输入预算。ContextOverflow 在有可压缩历史时强制压缩并立即重试当前轮一次；不增加逻辑轮次，保留取消、时限和 token 预算，失败/无缩减/二次溢出保留原错误，不做无限重试。provider_retry 新增可选 reason=context_overflow，兼容旧消费者。
+- 测试：先在 X3 提交的实现上复跑新增回归，覆盖 CJK 文本/JSON/schema 估算、usage 基准与增量、前缀改写失效、溢出后当前轮仅重试一次、中文累计超过两倍窗口的 FakeProvider 回放；真实 HTTP mock 验证 context_length_exceeded 后请求缩小及恢复。既有 Unicode/JSON 估算测试同步更新权重。提交前执行完整 CI 检查，日志 output/4A-X4-*.log。
+- 验证结果：全套检查通过，Rust 151 项、协议 201 项、TUI 118 项通过（保留既有跳过）；60 次主任务与 9 个场景保持预期。Fake 可选 context_window 用于回放时模拟窗口拒绝，旧脚本未设置该字段时身份哈希保持不变。

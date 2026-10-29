@@ -262,6 +262,14 @@ fn append_openai_tool_delta(
 }
 
 #[derive(Clone)]
+struct PromptAnchor {
+    messages: usize,
+    fingerprint: String,
+    estimated: u64,
+    measured: u64,
+}
+
+#[derive(Clone)]
 pub struct Provider {
     pub name: String,
     pub model: String,
@@ -275,6 +283,7 @@ pub struct Provider {
     pub effort: String,
     pub parameter_compat: Value,
     pub prompt_scale: f64,
+    prompt_anchor: Option<PromptAnchor>,
     pub fake: Option<Value>,
     pub index: usize,
     pub call_counter: usize,
@@ -295,6 +304,7 @@ impl Provider {
             effort: effort.into(),
             parameter_compat: Value::Null,
             prompt_scale: 1.0,
+            prompt_anchor: None,
             fake: None,
             index: 0,
             call_counter: 0,
@@ -419,13 +429,70 @@ impl Provider {
                 }
                 entry
             }).collect::<Vec<_>>();
-            util::hash(json!({"turns":turns,"exhausted_text":v["exhausted_text"].as_str().unwrap_or("(fake provider: script exhausted)"),"default_input_tokens":v["default_input_tokens"].as_u64().unwrap_or(100),"default_output_tokens":v["default_output_tokens"].as_u64().unwrap_or(20)}).to_string().as_bytes())
+            let mut identity = json!({"turns":turns,"exhausted_text":v["exhausted_text"].as_str().unwrap_or("(fake provider: script exhausted)"),"default_input_tokens":v["default_input_tokens"].as_u64().unwrap_or(100),"default_output_tokens":v["default_output_tokens"].as_u64().unwrap_or(20)});
+            if let Some(window) = v.get("context_window") { identity["context_window"] = window.clone(); }
+            util::hash(identity.to_string().as_bytes())
         })
     }
     pub fn set_script(&mut self, script: Value) -> Result<()> {
         validate_fake(&script)?;
         self.fake = Some(script);
+        self.prompt_anchor = None;
         Ok(())
+    }
+    fn prompt_fingerprint(&self, system: &str, messages: &[Message], specs: &[ToolSpec]) -> String {
+        util::hash(
+            &serde_json::to_vec(&(
+                system,
+                messages,
+                specs,
+                &self.configuration_id,
+                &self.model,
+                &self.style,
+                &self.url,
+                &self.effort,
+                &self.parameter_compat,
+            ))
+            .expect("serializable prompt"),
+        )
+    }
+    pub fn estimated_prompt_tokens(
+        &self,
+        system: &str,
+        messages: &[Message],
+        specs: &[ToolSpec],
+    ) -> u64 {
+        let estimated = context::estimate(system, messages, specs);
+        if let Some(anchor) = &self.prompt_anchor
+            && messages.len() >= anchor.messages
+            && self.prompt_fingerprint(system, &messages[..anchor.messages], specs)
+                == anchor.fingerprint
+        {
+            return anchor.measured.saturating_add(
+                (estimated.saturating_sub(anchor.estimated) as f64 * self.prompt_scale).ceil()
+                    as u64,
+            );
+        }
+        (estimated as f64 * self.prompt_scale).ceil() as u64
+    }
+    fn observe_prompt(
+        &mut self,
+        system: &str,
+        messages: &[Message],
+        specs: &[ToolSpec],
+        usage: &Usage,
+    ) {
+        let estimated = context::estimate(system, messages, specs);
+        if usage.available && usage.input_tokens > 0 && estimated > 0 {
+            let observed = (usage.input_tokens as f64 / estimated as f64).clamp(0.5, 3.0);
+            self.prompt_scale = (self.prompt_scale + observed) / 2.0;
+            self.prompt_anchor = Some(PromptAnchor {
+                messages: messages.len(),
+                fingerprint: self.prompt_fingerprint(system, messages, specs),
+                estimated,
+                measured: usage.input_tokens,
+            });
+        }
     }
     pub async fn stream(
         &mut self,
@@ -435,7 +502,8 @@ impl Provider {
         attachments: &Attachments,
         emit: &Sink,
     ) -> Result<(Response, Value)> {
-        self.stream_inner(system, messages, specs, attachments, emit)
+        let result = self
+            .stream_inner(system, messages, specs, attachments, emit)
             .await
             .map_err(|error| {
                 if error.downcast_ref::<ProviderError>().is_some() {
@@ -443,7 +511,17 @@ impl Provider {
                 } else {
                     ProviderError::Protocol(format!("{error:#}")).into()
                 }
-            })
+            })?;
+        // Fake defaults are fixed fixtures, not measurements of the prompt.
+        if self.fake.as_ref().is_none_or(|script| {
+            script["turns"]
+                .as_array()
+                .and_then(|turns| turns.get(self.index.saturating_sub(1)))
+                .is_some_and(|turn| turn["input_tokens"].as_u64().is_some())
+        }) {
+            self.observe_prompt(system, messages, specs, &result.0.usage);
+        }
+        Ok(result)
     }
 
     /// A separate, tool-free request: never advances the task's fake replay.
@@ -466,15 +544,19 @@ impl Provider {
             self.index = 0;
         }
         self.max_output = self.max_output.min(4096);
-        let budget = self.window.saturating_sub(8192).min(24_000) as usize;
-        if budget < 1024 {
-            bail!("summary model context window is too small");
-        }
         let transcript = serde_json::to_string(messages)?;
         let mut remaining = transcript.as_str();
         let mut summary = String::new();
         let sink: Sink = std::sync::Arc::new(|_| {});
         while !remaining.is_empty() {
+            let budget = (self.window.saturating_sub(8192) as f64 / self.prompt_scale.max(1.0))
+                .min(24_000.0) as usize;
+            if budget < 1024 {
+                bail!("summary model context window is too small");
+            }
+            if summary.chars().count() >= budget {
+                bail!("summary exceeds the available input budget");
+            }
             // One char per token is deliberately conservative for mixed/CJK data.
             let take = budget.saturating_sub(summary.chars().count()).max(1);
             let end = remaining
@@ -488,7 +570,8 @@ impl Provider {
             if max_total_tokens > 0
                 && usage
                     .total()
-                    .saturating_add(budget as u64 + self.max_output)
+                    .saturating_add((budget as f64 * self.prompt_scale.max(1.0)).ceil() as u64)
+                    .saturating_add(self.max_output + 1024)
                     > max_total_tokens
             {
                 bail!("summary token budget exhausted");
@@ -524,6 +607,16 @@ impl Provider {
         emit: &Sink,
     ) -> Result<(Response, Value)> {
         if let Some(script) = &self.fake {
+            if let Some(limit) = script["context_window"].as_u64() {
+                let input_tokens = context::estimate(system, messages, specs);
+                if input_tokens > limit {
+                    return Err(ProviderError::ContextOverflow {
+                        status: Some(400),
+                        body: format!("context_length_exceeded: {input_tokens} > {limit}"),
+                    }
+                    .into());
+                }
+            }
             let turn=script["turns"].as_array().and_then(|v|v.get(self.index)).cloned().unwrap_or_else(||json!({"text":script["exhausted_text"].as_str().unwrap_or("(fake provider: script exhausted)")}));
             self.index += 1;
             // Scripted failures let tests drive retry, error and panic paths
@@ -538,6 +631,12 @@ impl Provider {
                     status.parse::<u16>().ok().map(|status| (status, body))
                 });
                 return Err(match http {
+                    Some((status, body)) if context_overflow(body) => {
+                        ProviderError::ContextOverflow {
+                            status: Some(status),
+                            body: body.into(),
+                        }
+                    }
                     Some((status, body)) => ProviderError::Http {
                         status,
                         body: body.to_string(),
@@ -996,11 +1095,6 @@ impl Provider {
                 });
             }
         }
-        let estimated = context::estimate(system, messages, specs);
-        if usage.available && usage.input_tokens > 0 && estimated > 0 {
-            let observed = (usage.input_tokens as f64 / estimated as f64).clamp(0.5, 3.0);
-            self.prompt_scale = (self.prompt_scale + observed) / 2.0;
-        }
         let mut metrics = json!({"request_seconds":started.elapsed().as_secs_f64(),"generation_seconds":first.zip(last).filter(|(a,b)|b>a).map(|(a,b)|b-a),"first_token_seconds":first,"reasoning":reasoning});
         if !truncated_tools.is_empty() {
             metrics["truncated_tools"] = json!(truncated_tools);
@@ -1190,8 +1284,8 @@ impl Provider {
         let available = self
             .window
             .saturating_sub(
-                (context::estimate(system, messages, tools) as f64 * self.prompt_scale) as u64
-                    + 1024,
+                self.estimated_prompt_tokens(system, messages, tools)
+                    .saturating_add(1024),
             )
             .max(1);
         let cache = self.style == "anthropic" && anthropic_prompt_cache_enabled();
@@ -1795,12 +1889,16 @@ fn validate_fake(v: &Value) -> Result<()> {
             "default_output_tokens",
             "summary",
             "summary_error",
+            "context_window",
         ],
     )?;
     for key in ["summary", "summary_error"] {
         if !v[key].is_null() && !v[key].is_string() {
             bail!("{key} must be a string");
         }
+    }
+    if v.get("context_window").is_some() && v["context_window"].as_u64().is_none_or(|n| n == 0) {
+        bail!("context_window must be a positive integer");
     }
     let empty = vec![];
     let turns = match v.get("turns") {

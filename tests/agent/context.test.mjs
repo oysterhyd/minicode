@@ -57,3 +57,27 @@ test('X3: /compact handles a single long reply and explicitly reports no further
   assert.match((await compact()).message,/已压缩/)
   assert.match((await compact()).message,/没有可压缩/)
 })
+
+
+test('X4: context_length_exceeded compacts history and retries the same round', async t => {
+  const f = await fixture(t)
+  let requests = 0
+  const mock = await sseMock(t, payload => {
+    if (JSON.stringify(payload.system).includes('Summarize the conversation data')) return {status:503,body:'summary unavailable'}
+    requests++
+    if (requests === 1) return {frames:anthropicFrames({text:'此前进度与决定。'.repeat(3000)})}
+    if (requests === 2) return {status:400,body:JSON.stringify({error:{code:'context_length_exceeded',message:'prompt too long'}})}
+    return {frames:anthropicFrames({text:'recovered'})}
+  })
+  const model = await configureService(f,mock.url)
+  const first = await f.run({model,text:'keep original constraints'})
+  const result = await f.run({model,sessionId:first.id,text:'continue'})
+  assert.equal(result.result.exit_reason,'completed')
+  assert.equal(requests,3)
+  const retry = result.events.filter(e => e.event === 'agent_event' && e.item.type === 'provider_retry')
+  assert.equal(retry.length,1)
+  assert.equal(retry[0].item.data.reason,'context_overflow')
+  const taskPayloads = mock.payloads.filter(p => !JSON.stringify(p.system).includes('Summarize the conversation data'))
+  assert.ok(JSON.stringify(taskPayloads[2].messages).length < JSON.stringify(taskPayloads[1].messages).length / 2)
+  assert.match(JSON.stringify(taskPayloads[2].messages),/keep original constraints/)
+})

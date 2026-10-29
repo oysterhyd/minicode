@@ -1318,7 +1318,11 @@ fn context_estimate_matches_serialized_unicode_and_escapes() {
                     .sum::<u64>()
                     + o.len().saturating_sub(1) as u64 * 2
             }
-            _ => value.to_string().chars().count() as u64,
+            _ => value
+                .to_string()
+                .chars()
+                .map(|ch| if ch.is_ascii() { 1 } else { 3 })
+                .sum::<u64>(),
         }
     }
     let text = (0..=0x1f)
@@ -3683,4 +3687,135 @@ fn x3_force_can_offload_a_single_large_answer_but_keeps_the_original_request() {
         .unwrap()
         .is_none()
     );
+}
+
+#[test]
+fn x4_cjk_estimates_cover_text_tool_inputs_and_schemas() {
+    assert_eq!(context::tokens("中文测试"), 4);
+    assert!(context::tokens("abc中文") >= 3);
+    let call = Block::ToolUse {
+        id: "cjk".into(),
+        name: "write".into(),
+        input: json!({"path":"中文.rs","content":"中文".repeat(1000)}),
+        input_error: None,
+    };
+    assert!(context::block_tokens(&call) >= 2000);
+    let spec = crate::models::ToolSpec {
+        name: "工具".into(),
+        description: "描述".repeat(1000),
+        input_schema: json!({"type":"object"}),
+        requires_approval: false,
+    };
+    assert!(context::estimate("", &[], &[spec]) >= 2000);
+}
+
+#[tokio::test]
+async fn x4_usage_anchors_prompt_and_estimates_only_appended_content() {
+    let (_dir, ctx) = fixture();
+    let configuration = ctx.catalog.lock().await.configuration.clone();
+    let mut provider = crate::provider::Provider::new("fake", "off", &configuration).unwrap();
+    provider.style = "anthropic".into();
+    provider.window = 12_000;
+    provider
+        .set_script(json!({"turns":[{"text":"ok","input_tokens":9000}]}))
+        .unwrap();
+    let sink: tools::Sink = Arc::new(|_| {});
+    let mut messages = vec![Message::user("original")];
+    provider
+        .stream("system", &messages, &[], &ctx.attachments, &sink)
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .payload("system", &messages, &[], &ctx.attachments)
+            .unwrap()["max_tokens"],
+        1976
+    );
+    messages.push(Message::user("中".repeat(100)));
+    assert_eq!(
+        provider
+            .payload("system", &messages, &[], &ctx.attachments)
+            .unwrap()["max_tokens"],
+        1776
+    );
+    messages[0] = Message::user("rewritten history invalidates the anchor");
+    assert_eq!(
+        provider
+            .payload("system", &messages, &[], &ctx.attachments)
+            .unwrap()["max_tokens"],
+        8192
+    );
+}
+
+#[tokio::test]
+async fn x4_overflow_compacts_and_retries_the_same_round_once() {
+    for repeated in [false, true] {
+        let error =
+            json!({"error":"provider HTTP 400 {\"error\":{\"code\":\"context_length_exceeded\"}}"});
+        let mut h = Harness::new(json!({"turns":[error.clone(), if repeated {error} else {json!({"text":"recovered"})}, {"text":"must not retry twice"}]})).await;
+        h.runtime.messages = vec![
+            Message::user("original constraints"),
+            Message {
+                role: "assistant".into(),
+                content: vec![Block::text("old progress ".repeat(3000))],
+            },
+        ];
+        h.runtime
+            .store
+            .replace_messages(&h.runtime.session, &h.runtime.messages)
+            .unwrap();
+        h.runtime.message_revision = Some(
+            h.runtime
+                .store
+                .message_revision(&h.runtime.session)
+                .unwrap(),
+        );
+        let result = h.run(Some("continue")).await.unwrap();
+        assert_eq!(
+            result.exit_reason,
+            if repeated {
+                "provider_error"
+            } else {
+                "completed"
+            }
+        );
+        assert_eq!(h.runtime.provider.index, 2);
+        assert_eq!(h.runtime.rounds, 1);
+        assert_eq!(
+            h.event_types()
+                .iter()
+                .filter(|t| *t == "provider_retry")
+                .count(),
+            1
+        );
+        assert_eq!(h.runtime.messages[0].text(), "original constraints");
+    }
+}
+
+#[tokio::test]
+async fn x4_chinese_replay_continues_beyond_twice_the_window() {
+    let source =
+        "已改 agent/context.rs；关键决策是兼容旧会话；测试已通过，下一步继续验证。".repeat(180);
+    let summary = "## Goal\n完成任务\n## Constraints & Preferences\n兼容旧会话\n## Progress\n### Done\n已改 agent/context.rs，测试通过\n### In Progress\n验证\n### Blocked\n无\n## Key Decisions\n兼容旧会话\n## Next Steps\n继续验证\n## Critical Context\n### Read Files\nagent/tests.rs\n### Modified Files\nagent/context.rs";
+    let turns = (0..12).map(|_| json!({"text":source})).collect::<Vec<_>>();
+    let mut h = Harness::new(json!({"turns":turns,"summary":summary})).await;
+    h.runtime.provider.window = 30_000;
+    h.runtime.provider.fake.as_mut().unwrap()["context_window"] = json!(30_000);
+    assert!(source.chars().count() as u64 * 12 > h.runtime.provider.window * 2);
+    for i in 0..12 {
+        let result = h.run(Some(&format!("继续任务 {i}"))).await.unwrap();
+        assert_eq!(
+            result.exit_reason, "completed",
+            "round {i}: {:?}",
+            result.error
+        );
+    }
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.text().contains(summary))
+    );
+    assert!(h.event_types().contains(&"context_compacted".into()));
+    assert_eq!(h.runtime.provider.index, 12);
 }

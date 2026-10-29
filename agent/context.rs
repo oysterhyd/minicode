@@ -11,8 +11,13 @@ pub fn tokens(text: &str) -> u64 {
     if text.is_empty() {
         0
     } else {
-        (text.chars().count() as u64 / 3).max(1)
+        (text.chars().map(char_weight).sum::<u64>() / 3).max(1)
     }
+}
+fn char_weight(ch: char) -> u64 {
+    // CJK and other non-ASCII text need a conservative one-token-per-char
+    // fallback until the provider reports measured usage.
+    if ch.is_ascii() { 1 } else { 3 }
 }
 pub fn block_tokens(b: &Block) -> u64 {
     match b {
@@ -58,7 +63,7 @@ fn json_string_chars(text: &str) -> u64 {
         .map(|ch| match ch {
             '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
             '\0'..='\u{1f}' => 6,
-            _ => 1,
+            _ => char_weight(ch),
         })
         .sum::<u64>()
 }
