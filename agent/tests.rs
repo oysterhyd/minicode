@@ -4509,3 +4509,45 @@ fn s5_invalid_middle_bytes_still_fail_and_valid_split_scalars_are_unchanged() {
     assert_eq!(page["text"], "😀");
     assert_eq!(page["hasMore"], false);
 }
+
+#[tokio::test]
+async fn r28_parent_resume_keeps_progress_after_completed_child_is_deleted() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]},
+        {"text":"{\"summary\":\"ok\",\"findings\":[],\"evidence_refs\":[],\"unresolved\":[]}"},
+        {"text":"parent continued"}
+    ]}))
+    .await;
+    h.hooks.settings.lock().unwrap().budget.max_rounds = 2;
+    assert_eq!(
+        h.run(Some("delegate then continue"))
+            .await
+            .unwrap()
+            .exit_reason,
+        "max_rounds"
+    );
+    let child = h
+        .runtime
+        .store
+        .events(&h.runtime.session, -1)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.r#type == "subagent_result")
+        .unwrap();
+    assert_eq!(child.data["exit_reason"], "completed");
+    h.runtime
+        .store
+        .delete(child.data["child_session_id"].as_str().unwrap())
+        .unwrap();
+    h.reopen().await.unwrap();
+    assert_eq!(
+        h.runtime.provider.index, 2,
+        "parent must recover progress without the removed child's events"
+    );
+    h.hooks.settings.lock().unwrap().budget.max_rounds = 0;
+    assert_eq!(h.run(None).await.unwrap().exit_reason, "completed");
+    assert_eq!(
+        h.runtime.messages.last().unwrap().text(),
+        "parent continued"
+    );
+}
