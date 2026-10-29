@@ -1613,11 +1613,13 @@ fn record_capture(
     copy_utf8_capture(&mut source, &mut temp)?;
     temp.as_file().sync_all()?;
     temp.persist(&path).map_err(|e| e.error)?;
-    ctx.store.with(|c| {
+    let (session, record_artifact) = (ctx.session.clone(), artifact.clone());
+    ctx.store.write(move |c| {
+        let artifact = &record_artifact;
         c.execute(
             "INSERT INTO artifacts(session_id,artifact_id,kind,relpath,created_at) VALUES(?,?,?,?,?)",
             rusqlite::params![
-                ctx.session,
+                session,
                 artifact,
                 "command_output",
                 format!("{artifact}.txt"),

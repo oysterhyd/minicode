@@ -16,6 +16,7 @@ pub mod report;
 pub mod runtime;
 mod sse;
 pub mod store;
+mod store_writer;
 mod textfile;
 pub mod tools;
 pub mod util;

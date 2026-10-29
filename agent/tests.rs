@@ -3092,10 +3092,11 @@ fn message_revision_detects_same_length_changes_and_rolls_back_atomically() {
     assert!(store.message_revision(&id).unwrap() > version);
     assert_eq!(store.messages(&id).unwrap()[0].text(), "other");
     let version = store.message_revision(&id).unwrap();
+    let rollback_id = id.clone();
     assert!(
         store
-            .transaction(|db| -> anyhow::Result<()> {
-                db.execute("DELETE FROM messages WHERE session_id=?", [&id])?;
+            .transaction(move |db| -> anyhow::Result<()> {
+                db.execute("DELETE FROM messages WHERE session_id=?", [&rollback_id])?;
                 anyhow::bail!("rollback")
             })
             .is_err()
@@ -4294,5 +4295,70 @@ fn s1_legacy_titles_are_migrated_and_1000_sessions_need_no_message_reads() {
     assert!(
         elapsed < std::time::Duration::from_millis(500),
         "{elapsed:?}"
+    );
+}
+
+#[test]
+fn s2_reads_continue_during_a_writer_transaction() {
+    let (_dir, ctx) = fixture();
+    let store = ctx.store.clone();
+    let session = ctx.session.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        store.transaction(move |c| {
+            c.execute(
+                "UPDATE sessions SET status='paused' WHERE session_id=?",
+                [session],
+            )?;
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(std::time::Duration::from_millis(500));
+            Ok(())
+        })
+    });
+    ready_rx.recv().unwrap();
+    let started = std::time::Instant::now();
+    let before = ctx.store.session(&ctx.session).unwrap().unwrap();
+    let elapsed = started.elapsed();
+    let _ = release_tx.send(());
+    writer.join().unwrap().unwrap();
+    assert_eq!(
+        before["status"], "running",
+        "reader must see the last committed WAL snapshot"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "{elapsed:?}"
+    );
+    assert_eq!(
+        ctx.store.session(&ctx.session).unwrap().unwrap()["status"],
+        "paused"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn s2_sqlite_busy_wait_does_not_starve_the_async_worker() {
+    let (_dir, ctx) = fixture();
+    let path = ctx.store.path.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        ready_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    ready_rx.recv().unwrap();
+    let store = ctx.store.clone();
+    let session = ctx.session.clone();
+    let started = std::time::Instant::now();
+    let write = tokio::spawn(async move { store.event(&session, "probe", &json!({})) });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let responsive = started.elapsed() < std::time::Duration::from_millis(200);
+    write.await.unwrap().unwrap();
+    holder.join().unwrap();
+    assert!(
+        responsive,
+        "SQLite waits must leave the runtime able to poll other tasks"
     );
 }

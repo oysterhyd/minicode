@@ -16,6 +16,7 @@ use std::{
 pub struct Store {
     pub path: PathBuf,
     connection: Arc<Mutex<Connection>>,
+    writer: Arc<crate::store_writer::Writer>,
     pages: Arc<crate::paging::TextPages>,
 }
 
@@ -48,7 +49,12 @@ impl Store {
                     .unwrap_or(Path::new(".")),
             )?;
         }
-        let mut c = Connection::open(&path)?;
+        let database = if path == Path::new(":memory:") {
+            format!("file:minicode_{}?mode=memory&cache=shared", util::id())
+        } else {
+            path.to_string_lossy().into_owned()
+        };
+        let mut c = Connection::open(&database)?;
         c.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version > 7 {
@@ -108,34 +114,46 @@ impl Store {
                 INSERT INTO message_revisions VALUES(OLD.session_id,1) ON CONFLICT(session_id) DO UPDATE SET version=version+1; END;
             PRAGMA user_version=7;")?;
         tx.commit()?;
+        let reader = Connection::open(&database)?;
+        reader.busy_timeout(std::time::Duration::from_secs(5))?;
         let store = Self {
             path,
-            connection: Arc::new(Mutex::new(c)),
+            connection: Arc::new(Mutex::new(reader)),
+            writer: Arc::new(crate::store_writer::Writer::new(c)?),
             pages: Arc::new(crate::paging::TextPages::default()),
         };
         store.prune_output_artifacts(None)?;
         Ok(store)
     }
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        self.writer.flush()?;
         let connection = self
             .connection
             .lock()
             .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
         f(&connection)
     }
-    pub fn transaction<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        let mut c = self
-            .connection
-            .lock()
-            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
-        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = f(&tx)?;
-        tx.commit()?;
-        Ok(result)
+    pub fn transaction<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.writer.call(true, f)
+    }
+    pub fn write<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.transaction(f)
     }
     pub fn create(&self, workspace: &str, provider: &str, model: &str) -> Result<String> {
         let id = util::id();
-        self.with(|c|{c.execute("INSERT INTO sessions(session_id,created_at,workspace,provider,model,usage_available) VALUES(?,?,?,?,?,0)",params![id,util::now(),workspace,provider,model])?;Ok(())})?;
+        let (record_id, workspace, provider, model) = (
+            id.clone(),
+            workspace.to_owned(),
+            provider.to_owned(),
+            model.to_owned(),
+        );
+        self.write(move |c|{c.execute("INSERT INTO sessions(session_id,created_at,workspace,provider,model,usage_available) VALUES(?,?,?,?,?,0)",params![record_id,util::now(),workspace,provider,model])?;Ok(())})?;
         Ok(id)
     }
     pub fn session(&self, id: &str) -> Result<Option<Value>> {
@@ -170,7 +188,9 @@ impl Store {
         system: &str,
         sources: &Value,
     ) -> Result<(String, Value, Option<String>)> {
-        self.transaction(|c| {
+        let (id, system, sources) = (id.to_owned(), system.to_owned(), sources.clone());
+        self.transaction(move |c| {
+            let (id,system,sources) = (id.as_str(),system.as_str(),&sources);
             c.execute("INSERT INTO session_prompts(session_id,system,sources) VALUES(?,?,?) ON CONFLICT(session_id) DO NOTHING", params![id,system,serde_json::to_string(sources)?])?;
             let (system, sources, hash): (String, String, Option<String>) = c.query_row(
                 "SELECT system,sources,dynamic_hash FROM session_prompts WHERE session_id=?", [id],
@@ -180,7 +200,9 @@ impl Store {
         })
     }
     pub fn append_dynamic_context(&self, id: &str, hash: &str, message: &Message) -> Result<()> {
-        self.transaction(|c| {
+        let (id, hash, message) = (id.to_owned(), hash.to_owned(), message.clone());
+        self.transaction(move |c| {
+            let (id, hash, message) = (id.as_str(), hash.as_str(), &message);
             if c.execute(
                 "UPDATE session_prompts SET dynamic_hash=? WHERE session_id=?",
                 params![hash, id],
@@ -209,7 +231,8 @@ impl Store {
         })
     }
     pub fn update(&self, id: &str, changes: &Value) -> Result<()> {
-        self.with(|c| update_session(c, id, changes, false))
+        let (id, changes) = (id.to_owned(), changes.clone());
+        self.write(move |c| update_session(c, &id, &changes, false))
     }
     pub fn checkpoint(
         &self,
@@ -220,7 +243,18 @@ impl Store {
         result: Option<&Block>,
         counters: Option<&Value>,
     ) -> Result<Event> {
-        self.transaction(|c| {
+        let durable =
+            kind != "tool_output" || message.is_some() || result.is_some() || counters.is_some();
+        let (id, kind, data, message, result, counters) = (
+            id.to_owned(),
+            kind.to_owned(),
+            data.clone(),
+            message.cloned(),
+            result.cloned(),
+            counters.cloned(),
+        );
+        self.writer.call(durable, move |c| {
+            let (id,kind,data,message,result,counters) = (id.as_str(),kind.as_str(),&data,message.as_ref(),result.as_ref(),counters.as_ref());
             if let Some(m) = message {
                 append_message(c, id, m)?;
                 for block in &m.content {
@@ -263,7 +297,8 @@ impl Store {
         self.checkpoint(id, kind, data, None, None, None)
     }
     pub fn append(&self, id: &str, message: &Message) -> Result<()> {
-        self.transaction(|c| append_message(c, id, message))
+        let (id, message) = (id.to_owned(), message.clone());
+        self.transaction(move |c| append_message(c, &id, &message))
     }
     pub fn messages(&self, id: &str) -> Result<Vec<Message>> {
         self.with(|c| read_messages(c, id))
@@ -378,7 +413,9 @@ impl Store {
         self.with(|c| Ok(c.query_row("SELECT json_extract(data,'$.budget.max_total_tokens') FROM events WHERE session_id=? AND type IN ('budget_changed','session_start') ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).optional()?.flatten()))
     }
     pub fn replace_messages(&self, id: &str, messages: &[Message]) -> Result<()> {
-        self.transaction(|c| {
+        let (id, messages) = (id.to_owned(), messages.to_vec());
+        self.transaction(move |c| {
+            let (id, messages) = (id.as_str(), messages.as_slice());
             c.execute("DELETE FROM messages WHERE session_id=?", [id])?;
             let mut insert = c.prepare_cached("INSERT INTO messages VALUES(?,?,?,?)")?;
             for (seq, m) in messages.iter().enumerate() {
@@ -475,7 +512,9 @@ impl Store {
         })
     }
     pub fn save_goal(&self, id: &str, state: &Value) -> Result<()> {
-        self.with(|c| {
+        let (id, state) = (id.to_owned(), state.clone());
+        self.write(move |c| {
+            let (id, state) = (id.as_str(), &state);
             c.execute(
                 "INSERT OR REPLACE INTO session_goals VALUES(?,?)",
                 params![id, serde_json::to_string(state)?],
@@ -485,16 +524,20 @@ impl Store {
     }
     pub fn rename(&self, id: &str, title: Option<&str>) -> Result<()> {
         self.require(id)?;
-        self.with(|c|{c.execute("INSERT INTO session_meta(session_id,title) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET title=excluded.title",params![id,title])?;Ok(())})
+        let (id, title) = (id.to_owned(), title.map(str::to_owned));
+        self.write(move |c|{c.execute("INSERT INTO session_meta(session_id,title) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET title=excluded.title",params![id,title])?;Ok(())})
     }
     pub fn pin(&self, id: &str, pinned: bool) -> Result<()> {
         self.require(id)?;
-        self.with(|c|{c.execute("INSERT INTO session_meta(session_id,pinned) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET pinned=excluded.pinned",params![id,pinned])?;Ok(())})
+        let id = id.to_owned();
+        self.write(move |c|{c.execute("INSERT INTO session_meta(session_id,pinned) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET pinned=excluded.pinned",params![id,pinned])?;Ok(())})
     }
     pub fn delete(&self, id: &str) -> Result<()> {
         let _ownership = self.activation(id)?;
         self.require(id)?;
-        self.transaction(|c| {
+        let delete_id = id.to_owned();
+        self.transaction(move |c| {
+            let id = delete_id.as_str();
             for table in [
                 "sessions",
                 "messages",
@@ -559,7 +602,14 @@ impl Store {
         let rel = format!("{artifact}.txt");
         let path = self.root().join("artifacts").join(id).join(&rel);
         util::atomic_write(&path, text.as_bytes())?;
-        if let Err(e) = self.with(|c| {
+        let (record_session, record_artifact, record_kind, record_rel) = (
+            id.to_owned(),
+            artifact.clone(),
+            kind.to_owned(),
+            rel.clone(),
+        );
+        if let Err(e) = self.write(move |c| {
+            let (id,artifact,kind,rel) = (&record_session,&record_artifact,&record_kind,&record_rel);
             c.execute(
                 "INSERT INTO artifacts(session_id,artifact_id,kind,relpath,created_at) VALUES(?,?,?,?,?)",
                 params![id, artifact, kind, rel, util::now()],
@@ -589,7 +639,8 @@ impl Store {
         if !root.exists() || util::is_link(&root) {
             return Ok(());
         }
-        self.transaction(|c| {
+        let keep = keep.map(|(id, artifact)| (id.to_owned(), artifact.to_owned()));
+        self.transaction(move |c| {
             let mut query = c.prepare("SELECT a.session_id,a.artifact_id,a.relpath,a.created_at FROM artifacts a LEFT JOIN artifact_access x USING(session_id,artifact_id) WHERE a.kind IN ('command_output','tool_output') ORDER BY COALESCE(x.accessed_at,a.created_at),a.created_at,a.artifact_id")?;
             let rows = query.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
             let mut entries = vec![];
@@ -607,7 +658,7 @@ impl Store {
                 entries.push((session, artifact, path, created, size));
             }
             for (session, artifact, path, created, size) in entries {
-                if keep == Some((session.as_str(),artifact.as_str())) { continue; }
+                if keep.as_ref().map(|(id,artifact)|(id.as_str(),artifact.as_str())) == Some((session.as_str(),artifact.as_str())) { continue; }
                 let expired = max_days > 0 && chrono::DateTime::parse_from_rfc3339(&created).is_ok_and(|created| chrono::Utc::now().signed_duration_since(created).num_seconds() > max_days.saturating_mul(86400).min(i64::MAX as u64) as i64);
                 if !expired && (max_bytes == 0 || total <= max_bytes) { continue; }
                 match fs::remove_file(&path) {
@@ -638,7 +689,8 @@ impl Store {
             .context("归档内容不可用")?;
         let path = util::in_workspace(&self.root().join("artifacts").join(id), &rel)?;
         if path.is_file() {
-            self.with(|c| {
+            let (id, artifact) = (id.to_owned(), artifact.to_owned());
+            self.write(move |c| {
                 c.execute("INSERT INTO artifact_access VALUES(?,?,?) ON CONFLICT(session_id,artifact_id) DO UPDATE SET accessed_at=excluded.accessed_at",params![id,artifact,util::now()])?;
                 Ok(())
             })?;
@@ -665,7 +717,9 @@ impl Store {
         let task = util::string(args, "task_id")?;
         let title = util::string(args, "title")?;
         let deps = args.get("depends_on").cloned().unwrap_or(json!([]));
-        self.transaction(|c| {
+        let (id, task, title) = (id.to_owned(), task.to_owned(), title.to_owned());
+        self.transaction(move |c| {
+            let (id, task, title) = (id.as_str(), task.as_str(), title.as_str());
             if c.query_row(
                 "SELECT 1 FROM tasks WHERE session_id=? AND task_id=?",
                 params![id, task],
@@ -745,12 +799,14 @@ impl Store {
         })
     }
     pub fn task_claim(&self, id: &str, task: &str, owner: &str) -> Result<()> {
-        self.transaction(|c|{
+        let (id, task, owner) = (id.to_owned(), task.to_owned(), owner.to_owned());
+        self.transaction(move |c|{
         if c.execute("UPDATE tasks SET status='running',owner=?,updated_at=? WHERE session_id=? AND task_id=? AND status='ready'",params![owner,util::now(),id,task])?!=1 {bail!("task is unknown or not ready: {task}")}Ok(())
     })
     }
     pub fn task_complete(&self, id: &str, task: &str, success: bool) -> Result<()> {
-        self.transaction(|c|{
+        let (id, task) = (id.to_owned(), task.to_owned());
+        self.transaction(move |c|{
         if c.execute("UPDATE tasks SET status=?,updated_at=? WHERE session_id=? AND task_id=? AND status='running' AND owner='agent'",params![if success{"done"}else{"failed"},util::now(),id,task])?!=1 {bail!("task is unknown or not running: {task}")}
         // One set query updates all newly ready dependants, with indexed lookups.
         c.execute("UPDATE tasks SET status='ready',updated_at=? WHERE session_id=? AND status='pending' AND NOT EXISTS(SELECT 1 FROM json_each(tasks.depends_on) AS d LEFT JOIN tasks AS parent ON parent.session_id=tasks.session_id AND parent.task_id=d.value WHERE parent.status IS NULL OR parent.status!='done')",params![util::now(),id])?;Ok(())

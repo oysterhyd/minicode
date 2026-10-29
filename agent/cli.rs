@@ -878,7 +878,9 @@ fn memory(store: &Store, command: MemoryCommand) -> Result<()> {
                 .replace('\\', "/");
             let scope = if scope.is_empty() { ".".into() } else { scope };
             let id = util::id();
-            store.with(|c| {
+            let (saved_id, saved_scope) = (id.clone(), scope.clone());
+            store.write(move |c| {
+                let (id, scope) = (&saved_id, &saved_scope);
                 c.execute(
                     "INSERT INTO project_memory VALUES(?,?,?,?,?,?)",
                     rusqlite::params![
@@ -904,7 +906,8 @@ fn memory(store: &Store, command: MemoryCommand) -> Result<()> {
                 bail!("fact and source must be nonempty")
             };
             let workspace = util::canonical(&workspace)?;
-            let count=store.with(|c|Ok(c.execute("UPDATE project_memory SET fact=?,source=?,updated_at=? WHERE workspace=? AND id=?",rusqlite::params![fact.trim(),source.trim(),util::now(),workspace.to_string_lossy(),memory_id])?))?;
+            let saved_id = memory_id.clone();
+            let count=store.write(move |c|Ok(c.execute("UPDATE project_memory SET fact=?,source=?,updated_at=? WHERE workspace=? AND id=?",rusqlite::params![fact.trim(),source.trim(),util::now(),workspace.to_string_lossy(),saved_id])?))?;
             if count != 1 {
                 bail!("unknown memory id: {memory_id}")
             };
@@ -915,10 +918,11 @@ fn memory(store: &Store, command: MemoryCommand) -> Result<()> {
             workspace,
         } => {
             let workspace = util::canonical(&workspace)?;
-            let count = store.with(|c| {
+            let saved_id = memory_id.clone();
+            let count = store.write(move |c| {
                 Ok(c.execute(
                     "DELETE FROM project_memory WHERE workspace=? AND id=?",
-                    rusqlite::params![workspace.to_string_lossy(), memory_id],
+                    rusqlite::params![workspace.to_string_lossy(), saved_id],
                 )?)
             })?;
             if count != 1 {
