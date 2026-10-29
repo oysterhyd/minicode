@@ -922,7 +922,27 @@ impl Router {
                     json!({"protocolVersion":PROTOCOL_VERSION,"minClientProtocol":MIN_CLIENT_PROTOCOL,"capabilities":CAPABILITIES,"sessions":store.sessions()?,"models":self.configuration.models()?,"defaultModel":model,"commands":serde_json::from_str::<Value>(include_str!("assets/commands.json"))?,"state":c.state(store)?}),
                 )
             }
-            "listSessions" => Ok(json!(store.sessions()?)),
+            "listSessions" => {
+                let offset = p
+                    .get("offset")
+                    .map(|v| {
+                        v.as_u64()
+                            .filter(|n| *n <= i64::MAX as u64)
+                            .context("offset must be a non-negative integer")
+                    })
+                    .transpose()?
+                    .unwrap_or(0) as usize;
+                let limit = p
+                    .get("limit")
+                    .map(|v| {
+                        v.as_u64()
+                            .filter(|n| *n > 0)
+                            .map(|n| n.min(1000) as usize)
+                            .context("limit must be a positive integer")
+                    })
+                    .transpose()?;
+                Ok(json!(store.sessions_page(offset, limit)?))
+            }
             "listTasks" => Ok(json!(if let Some(id) = p["sessionId"].as_str() {
                 store.tasks(id)?
             } else {

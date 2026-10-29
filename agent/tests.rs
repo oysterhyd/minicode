@@ -4247,3 +4247,52 @@ fn r28_recovery_projection_keeps_evidence_but_omits_output_bodies() {
     assert_eq!(events[1].data["success"], true);
     assert!(serde_json::to_string(&events).unwrap().len() < 1000);
 }
+
+#[test]
+fn s1_cached_title_survives_context_replacement_and_custom_rename() {
+    let (_dir, ctx) = fixture();
+    ctx.store
+        .append(&ctx.session, &Message::user("原始任务标题\n详细要求"))
+        .unwrap();
+    ctx.store
+        .replace_messages(&ctx.session, &[Message::user("compressed history")])
+        .unwrap();
+    assert_eq!(ctx.store.sessions().unwrap()[0]["title"], "原始任务标题");
+    ctx.store.rename(&ctx.session, Some("custom")).unwrap();
+    assert_eq!(ctx.store.sessions().unwrap()[0]["title"], "custom");
+    ctx.store.rename(&ctx.session, None).unwrap();
+    assert_eq!(ctx.store.sessions().unwrap()[0]["title"], "原始任务标题");
+}
+
+#[test]
+fn s1_legacy_titles_are_migrated_and_1000_sessions_need_no_message_reads() {
+    let (dir, ctx) = fixture();
+    ctx.store.transaction(|c| {
+        let columns = c.prepare("PRAGMA table_info(sessions)")?.query_map([],|r|r.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if columns.iter().any(|name| name=="auto_title") { c.execute_batch("ALTER TABLE sessions DROP COLUMN auto_title")?; }
+        for i in 0..1000 {
+            let id = format!("bulk_{i:04}");
+            c.execute("INSERT INTO sessions(session_id,created_at,workspace,provider,model) VALUES(?,?,?,?,?)",rusqlite::params![id,format!("{i:020}"),"repo","fake","fake"])?;
+            c.execute("INSERT INTO messages VALUES(?,0,'user',?)",rusqlite::params![id,serde_json::to_string(&vec![Block::text(format!("title {i}\nbody"))])?])?;
+        }
+        Ok(())
+    }).unwrap();
+    drop(ctx);
+    let store = Store::open(dir.path().join("test.db")).unwrap();
+    store.with(|c| { c.execute_batch("ALTER TABLE messages RENAME TO saved_messages; CREATE VIEW messages AS SELECT session_id,seq,role,json('invalid JSON') AS content FROM saved_messages")?; Ok(()) }).unwrap();
+    let started = std::time::Instant::now();
+    let rows = store
+        .sessions()
+        .expect("listing must read cached metadata, not message JSON");
+    let elapsed = started.elapsed();
+    eprintln!("S1: loaded {} sessions in {elapsed:?}", rows.len());
+    assert_eq!(rows.len(), 1001);
+    assert!(
+        rows.iter()
+            .any(|r| r["session_id"] == "bulk_0000" && r["title"] == "title 0")
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "{elapsed:?}"
+    );
+}

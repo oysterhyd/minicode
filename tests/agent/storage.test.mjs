@@ -46,3 +46,15 @@ test('R28: failed MCP tool results retain their images in model history and rest
   assert.equal(result.images.length,1)
   assert.equal(r.detail.events.find(e=>e.type==='tool_call_result').data.images[0].asset_id,result.images[0].asset_id)
 })
+
+test('S1: session list pagination is optional and validates its bounds', async t => {
+  const f = await fixture(t,[{text:'one'},{text:'two'},{text:'three'}])
+  for (let i=0;i<3;i++) { await f.request('resetSession'); await f.run({text:`task ${i}`}) }
+  const all = await f.request('listSessions')
+  assert.equal(all.length,3)
+  const page = await f.request('listSessions',{offset:1,limit:1})
+  assert.deepEqual(page,[all[1]])
+  assert.deepEqual(await f.request('listSessions',{offset:3,limit:1}),[])
+  await assert.rejects(f.request('listSessions',{offset:-1,limit:1}),/offset/)
+  await assert.rejects(f.request('listSessions',{limit:0}),/limit/)
+})

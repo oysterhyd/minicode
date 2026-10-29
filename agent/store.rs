@@ -83,6 +83,18 @@ impl Store {
             }
         }
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !columns.iter().any(|name| name == "auto_title") {
+            tx.execute_batch("ALTER TABLE sessions ADD COLUMN auto_title TEXT")?;
+            let rows = tx.prepare("SELECT session_id,content FROM messages m WHERE role='user' AND seq=(SELECT MIN(seq) FROM messages WHERE session_id=m.session_id AND role='user')")?
+                .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for (id, content) in rows {
+                let message = Message {
+                    role: "user".into(),
+                    content: serde_json::from_str(&content).unwrap_or_default(),
+                };
+                cache_title(&tx, &id, &message)?;
+            }
+        }
         tx.execute_batch("CREATE INDEX IF NOT EXISTS events_activity ON events(session_id,timestamp);
             CREATE INDEX IF NOT EXISTS messages_first_user ON messages(session_id,seq) WHERE role='user';
             CREATE INDEX IF NOT EXISTS sessions_created ON sessions(created_at);
@@ -180,20 +192,21 @@ impl Store {
         })
     }
     pub fn sessions(&self) -> Result<Vec<Value>> {
-        self.with(|c|{
-        let mut q=c.prepare(&format!("SELECT {COLUMNS} FROM sessions ORDER BY created_at DESC,session_id"))?;
-        let rows=q.query_map([],summary)?;let mut result=Vec::new();
-        let mut title_query=c.prepare("SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY seq LIMIT 1")?;
-        let mut meta_query=c.prepare("SELECT title,pinned FROM session_meta WHERE session_id=?")?;
-        let mut time_query=c.prepare("SELECT MAX(timestamp) FROM events WHERE session_id=?")?;
-        for row in rows {let mut v=row?;let id=v["session_id"].as_str().unwrap();
-            let (custom,pinned)=meta_query.query_row([id],|r|Ok((r.get::<_,Option<String>>(0)?,r.get::<_,bool>(1)?))).optional()?.unwrap_or((None,false));
-            let content:Option<String>=title_query.query_row([id],|r|r.get(0)).optional()?;
-            let title=custom.clone().unwrap_or_else(||content.and_then(|s|serde_json::from_str::<Vec<Block>>(&s).ok()).map(|blocks|blocks.iter().filter_map(|b|if let Block::Text{text}=b {Some(text.as_str())} else {None}).collect::<String>()).map(|s|s.chars().take(72).collect::<String>().lines().next().unwrap_or("新建任务").to_string()).unwrap_or("新建任务".into()));
-            let activity:Option<String>=time_query.query_row([id],|r|r.get(0))?;
-            v["title"]=json!(title);v["custom_title"]=json!(custom.is_some());v["pinned"]=json!(pinned);v["updated_at"]=activity.map(Value::String).unwrap_or(v["created_at"].clone());result.push(v);
-        }Ok(result)
-    })
+        self.sessions_page(0, None)
+    }
+    pub fn sessions_page(&self, offset: usize, limit: Option<usize>) -> Result<Vec<Value>> {
+        self.with(|c| {
+            let columns = COLUMNS.split(',').map(|name|format!("s.{name}")).collect::<Vec<_>>().join(",");
+            let mut q = c.prepare(&format!("SELECT {columns},COALESCE(m.title,s.auto_title,'新建任务'),m.title IS NOT NULL,COALESCE(m.pinned,0),COALESCE((SELECT MAX(timestamp) FROM events e WHERE e.session_id=s.session_id),s.created_at) FROM sessions s LEFT JOIN session_meta m ON m.session_id=s.session_id ORDER BY s.created_at DESC,s.session_id LIMIT ? OFFSET ?"))?;
+            Ok(q.query_map(params![limit.map(|n|n.min(i64::MAX as usize) as i64).unwrap_or(-1),offset.min(i64::MAX as usize) as i64], |row| {
+                let mut value = summary(row)?;
+                value["title"] = json!(row.get::<_,String>(13)?);
+                value["custom_title"] = json!(row.get::<_,bool>(14)?);
+                value["pinned"] = json!(row.get::<_,bool>(15)?);
+                value["updated_at"] = json!(row.get::<_,String>(16)?);
+                Ok(value)
+            })?.collect::<rusqlite::Result<_>>()?)
+        })
     }
     pub fn update(&self, id: &str, changes: &Value) -> Result<()> {
         self.with(|c| update_session(c, id, changes, false))
@@ -375,6 +388,7 @@ impl Store {
                     m.role,
                     serde_json::to_string(&m.content)?
                 ])?;
+                cache_title(c, id, m)?;
             }
             Ok(())
         })
@@ -831,6 +845,17 @@ fn append_message(c: &Connection, id: &str, m: &Message) -> Result<()> {
         "INSERT INTO messages VALUES(?,?,?,?)",
         params![id, seq, m.role, serde_json::to_string(&m.content)?],
     )?;
+    cache_title(c, id, m)
+}
+fn cache_title(c: &Connection, id: &str, message: &Message) -> Result<()> {
+    if message.role == "user" {
+        let text = message.text().chars().take(72).collect::<String>();
+        let title = text.lines().next().unwrap_or("新建任务");
+        c.prepare_cached(
+            "UPDATE sessions SET auto_title=? WHERE session_id=? AND auto_title IS NULL",
+        )?
+        .execute(params![title, id])?;
+    }
     Ok(())
 }
 pub fn counters(rounds: u64, usage: &Usage) -> Value {
