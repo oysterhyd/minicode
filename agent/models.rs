@@ -134,6 +134,8 @@ pub struct Outcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
     pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
     #[serde(skip)]
     pub full_output: Option<String>,
 }
@@ -147,6 +149,7 @@ impl Outcome {
             exit_code: None,
             signal: None,
             job_id: None,
+            artifact_id: None,
             full_output: None,
         }
     }

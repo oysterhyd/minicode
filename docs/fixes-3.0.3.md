@@ -762,3 +762,9 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - **修复**：只读 read/ls/grep 继续执行并在结果前附带本轮新加载的适用目录指令，以 system-reminder 标记；指令仍通过原有动态快照进入后续模型请求。写入、编辑及 shell 保留原有先看指令再重试的屏障，不改变授权策略。
 - **测试**：`r25_readonly_nested_instructions_succeed_without_an_extra_turn` 先失败后通过；覆盖同批 read/ls/grep 的首次访问、指令只发现一次、写入屏障及下一轮成功重试。完整检查日志 `output/4B-R25-*.log`。
 - **验证说明**：首轮完整协议检查的既有 MCP service 超时用例在并行负载下出现 unknown tool，单独 4 项复跑通过；完整复跑还纠正了新测试对并行完成顺序的假设，改为按工具名查找。最终结果以 `output/4B-R25-final-*.log` 为准，不改动本批之外的 MCP 超时实现。
+
+### R42 artifact 引用使用结构化字段
+
+- **问题与根因**：runtime 对整段输出取首个 artifact 正则匹配，正文里的历史标记会覆盖本次实际归档链接，普通文件也会被误判为有归档。
+- **修复**：Outcome 新增可选、默认空的 artifact_id；大块输出 spill 和命令 capture 直接赋值，record_result 直接传递字段，删除文本反解析。旧 Outcome JSON 可以继续反序列化；展示用文本标记保持兼容。
+- **测试**：`r42_artifact_references_come_from_the_outcome_not_output_text` 先失败后修复，覆盖普通文件伪标记、skill 大输出 spill、命令大输出归档及正确分页回查。完整检查日志 `output/4B-R42-*.log`。

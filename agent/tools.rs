@@ -1517,6 +1517,7 @@ pub async fn run_command_for(
             "{}\n...[middle output omitted; output truncated; 完整输出见 [artifact:{artifact}]]\n{tail}",
             head.trim_end_matches(['\r', '\n'])
         );
+        outcome.artifact_id = Some(artifact);
     }
     outcome.exit_code = status.and_then(|s| s.code());
     #[cfg(unix)]

@@ -2130,6 +2130,7 @@ impl Runtime {
                 "{}\n...[完整输出已归档为 [artifact:{artifact}]；用 read_artifact 分页续读]",
                 util::prefix(&outcome.output, 4000)
             );
+            outcome.artifact_id = Some(artifact);
         }
         let content = if let Some(error) = &outcome.error {
             if outcome.output.is_empty() {
@@ -2150,11 +2151,7 @@ impl Runtime {
                 vec![]
             },
         };
-        static ARTIFACT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let artifact = ARTIFACT
-            .get_or_init(|| regex::Regex::new(r"\[artifact:([A-Za-z0-9_-]+)\]").unwrap())
-            .captures(&outcome.output)
-            .map(|c| c[1].to_string());
+        let artifact = outcome.artifact_id;
         let event=self.store.checkpoint(&self.session,"tool_call_result",&json!({"call_id":id,"name":name,"success":outcome.success,"exit_code":outcome.exit_code,"signal":outcome.signal,"error":outcome.error,"output_preview":util::prefix(&outcome.output,1000),"output_detail":outcome.output,"artifact_id":artifact,"truncated":artifact.is_some()||outcome.output.contains("truncated"),"duration_s":duration,"images":outcome.images,"recovered":recovered}),None,Some(&result),None)?;
         (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
         Ok(result)
