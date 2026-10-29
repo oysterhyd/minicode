@@ -4362,3 +4362,80 @@ async fn s2_sqlite_busy_wait_does_not_starve_the_async_worker() {
         "SQLite waits must leave the runtime able to poll other tasks"
     );
 }
+
+#[test]
+fn s4_parent_deletion_cascades_descendants_artifacts_and_locks() {
+    let (_dir, ctx) = fixture();
+    let child = ctx.store.create("repo", "fake", "fake").unwrap();
+    let grandchild = ctx.store.create("repo", "fake", "fake").unwrap();
+    let unrelated = ctx.store.create("repo", "fake", "fake").unwrap();
+    for (parent, descendant) in [
+        (&ctx.session, &child),
+        (&child, &grandchild),
+        (&grandchild, &ctx.session),
+    ] {
+        ctx.store
+            .event(
+                parent,
+                "subagent_start",
+                &json!({"child_session_id":descendant}),
+            )
+            .unwrap();
+    }
+    let ids = [&ctx.session, &child, &grandchild];
+    for id in ids {
+        drop(ctx.store.activation(id).unwrap());
+        ctx.store.append(id, &Message::user("child task")).unwrap();
+        ctx.store.spill(id, "history", "archived context").unwrap();
+        ctx.store.freeze_prompt(id, "frozen", &json!([])).unwrap();
+        ctx.store
+            .event(id, "tool_started", &json!({"call_id":"pending"}))
+            .unwrap();
+    }
+    ctx.store.delete(&ctx.session).unwrap();
+    for id in ids {
+        assert!(
+            ctx.store.session(id).unwrap().is_none(),
+            "{id} must be deleted"
+        );
+        assert!(!ctx.store.root().join("artifacts").join(id).exists());
+        assert!(
+            !ctx.store
+                .root()
+                .join(".test.db.locks")
+                .join(format!("{id}.lock"))
+                .exists()
+        );
+        assert!(ctx.store.messages(id).unwrap().is_empty());
+        assert!(ctx.store.tool_execution(id).unwrap().is_empty());
+        assert!(ctx.store.frozen_prompt(id).unwrap().is_none());
+    }
+    assert!(ctx.store.require(&unrelated).is_ok());
+}
+
+#[test]
+fn s4_active_descendant_blocks_all_deletion_and_deleted_ids_leave_no_lock() {
+    let (_dir, ctx) = fixture();
+    let child = ctx.store.create("repo", "fake", "fake").unwrap();
+    ctx.store
+        .event(
+            &ctx.session,
+            "subagent_start",
+            &json!({"child_session_id":child}),
+        )
+        .unwrap();
+    let active = ctx.store.activation(&child).unwrap();
+    assert!(ctx.store.delete(&ctx.session).is_err());
+    assert!(ctx.store.require(&ctx.session).is_ok());
+    assert!(ctx.store.require(&child).is_ok());
+    drop(active);
+    ctx.store.delete(&ctx.session).unwrap();
+    assert!(ctx.store.activation(&ctx.session).is_err());
+    assert!(
+        !ctx.store
+            .root()
+            .join(".test.db.locks")
+            .join(format!("{}.lock", ctx.session))
+            .exists()
+    );
+}

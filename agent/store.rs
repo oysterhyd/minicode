@@ -533,33 +533,74 @@ impl Store {
         self.write(move |c|{c.execute("INSERT INTO session_meta(session_id,pinned) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET pinned=excluded.pinned",params![id,pinned])?;Ok(())})
     }
     pub fn delete(&self, id: &str) -> Result<()> {
-        let _ownership = self.activation(id)?;
+        let mut ownership = vec![self.activation(id)?];
         self.require(id)?;
-        let delete_id = id.to_owned();
+        let ids: Vec<String> = self.with(|c| {
+            let mut q = c.prepare("WITH RECURSIVE descendants(id) AS (SELECT ? UNION SELECT json_extract(e.data,'$.child_session_id') FROM events e JOIN descendants d ON e.session_id=d.id WHERE e.type='subagent_start' AND json_type(e.data,'$.child_session_id')='text') SELECT id FROM descendants ORDER BY id")?;
+            Ok(q.query_map([id], |row|row.get(0))?.collect::<rusqlite::Result<_>>()?)
+        })?;
+        for child in &ids {
+            if !util::valid_id(child) {
+                bail!("invalid child session id");
+            }
+            if child != id && self.session(child)?.is_some() {
+                ownership.push(self.activation(child)?);
+            }
+        }
+        let root = self.root().join("artifacts");
+        let mut directories = vec![];
+        if root.exists() {
+            if util::is_link(&root) {
+                bail!("refusing to delete linked artifacts directory");
+            }
+            let root = util::canonical(&root)?;
+            for session in &ids {
+                let dir = root.join(session);
+                if dir.exists() {
+                    if util::is_link(&dir) {
+                        bail!("refusing to delete linked session artifacts");
+                    }
+                    let resolved = util::canonical(&dir)?;
+                    if !resolved.starts_with(&root) {
+                        bail!("session artifacts escape storage root");
+                    }
+                    directories.push(resolved);
+                }
+            }
+        }
+        let deleted_ids = ids.clone();
         self.transaction(move |c| {
-            let id = delete_id.as_str();
-            for table in [
-                "sessions",
-                "messages",
-                "events",
-                "artifacts",
-                "artifact_access",
-                "session_goals",
-                "session_meta",
-                "session_prompts",
-                "tool_results",
-                "tool_execution",
-                "tasks",
-                "message_revisions",
-            ] {
-                c.execute(&format!("DELETE FROM {table} WHERE session_id=?"), [id])?;
+            for id in deleted_ids {
+                for table in [
+                    "sessions",
+                    "messages",
+                    "events",
+                    "artifacts",
+                    "artifact_access",
+                    "session_goals",
+                    "session_meta",
+                    "session_prompts",
+                    "tool_results",
+                    "tool_execution",
+                    "tasks",
+                    "message_revisions",
+                ] {
+                    c.execute(&format!("DELETE FROM {table} WHERE session_id=?"), [&id])?;
+                }
             }
             Ok(())
         })?;
-        if util::valid_id(id) {
-            let dir = self.root().join("artifacts").join(id);
-            if dir.exists() {
-                fs::remove_dir_all(dir)?;
+        for dir in directories {
+            fs::remove_dir_all(dir)?;
+        }
+        // All rows are gone before releasing ownership. A stale activation
+        // checks existence after locking and cannot start a deleted session.
+        drop(ownership);
+        for session in ids {
+            match fs::remove_file(self.lock_path(&session)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
         }
         Ok(())
@@ -575,24 +616,34 @@ impl Store {
         if !util::valid_id(id) {
             bail!("invalid session id")
         }
-        let dir = self.root().join(format!(
-            ".{}.locks",
-            self.path.file_name().unwrap_or_default().to_string_lossy()
-        ));
-        fs::create_dir_all(&dir)?;
+        let path = self.lock_path(id);
+        fs::create_dir_all(path.parent().unwrap())?;
         let f = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(dir.join(format!("{id}.lock")))?;
+            .open(&path)?;
         fs2::FileExt::try_lock_exclusive(&f)
             .with_context(|| format!("session already running: {id}"))?;
         let lock = SessionLock(f);
+        if self.session(id)?.is_none() {
+            drop(lock);
+            let _ = fs::remove_file(path);
+            bail!("找不到会话");
+        }
         if lock.0.metadata()?.len() == 0 {
             (&lock.0).write_all(&[0])?;
         }
         Ok(lock)
+    }
+    fn lock_path(&self, id: &str) -> PathBuf {
+        self.root()
+            .join(format!(
+                ".{}.locks",
+                self.path.file_name().unwrap_or_default().to_string_lossy()
+            ))
+            .join(format!("{id}.lock"))
     }
     pub fn spill(&self, id: &str, kind: &str, text: &str) -> Result<String> {
         if !util::valid_id(id) || !util::valid_id(kind) {
