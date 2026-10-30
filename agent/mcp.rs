@@ -1,6 +1,7 @@
 use crate::{
     attachments::Attachments,
     extensions::Server,
+    mcp_dispatch::{self, Pending},
     models::{Outcome, ToolSpec},
     util,
 };
@@ -12,12 +13,15 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     process::Stdio,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    process::{Child, ChildStderr, ChildStdin, Command},
     sync::Mutex,
 };
 
@@ -224,25 +228,33 @@ fn windows_command(config: &Server) -> std::path::PathBuf {
     command.to_path_buf()
 }
 
-pub struct Connector {
-    pub config: Server,
-    pub protocol: Option<String>,
-    pub server_version: Option<String>,
+#[derive(Default)]
+struct Lifecycle {
     child: Option<Child>,
     tree: Option<crate::command_process::ProcessTree>,
-    input: Option<ChildStdin>,
-    output: Option<BufReader<ChildStdout>>,
-    client: reqwest::Client,
-    session: Option<String>,
-    sequence: u64,
-    legacy_receiver: Option<tokio::sync::mpsc::Receiver<Value>>,
+    reader_task: Option<tokio::task::JoinHandle<()>>,
     legacy_task: Option<tokio::task::JoinHandle<()>>,
-    endpoint: Option<String>,
-    diagnostics: Arc<StdMutex<Diagnostics>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
-impl Drop for Connector {
+pub struct Connector {
+    pub config: Server,
+    verification: StdMutex<Server>,
+    pub protocol: Option<String>,
+    pub server_version: Option<String>,
+    input: Option<Arc<Mutex<ChildStdin>>>,
+    client: reqwest::Client,
+    session: StdMutex<Option<String>>,
+    sequence: AtomicU64,
+    pending: Arc<Pending>,
+    endpoint: Option<String>,
+    diagnostics: Arc<StdMutex<Diagnostics>>,
+    lifecycle: Mutex<Lifecycle>,
+}
+impl Drop for Lifecycle {
     fn drop(&mut self) {
+        if let Some(task) = self.reader_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.legacy_task.take() {
             task.abort();
         }
@@ -270,24 +282,21 @@ impl Connector {
             bail!("invalid MCP timeout");
         }
         Ok(Self {
+            verification: StdMutex::new(config.clone()),
             config,
             protocol: None,
             server_version: None,
-            child: None,
-            tree: None,
             input: None,
-            output: None,
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
-            session: None,
-            sequence: 0,
-            legacy_receiver: None,
-            legacy_task: None,
+            session: StdMutex::new(None),
+            sequence: AtomicU64::new(0),
+            pending: Arc::new(Pending::default()),
             endpoint: None,
             diagnostics: Arc::new(StdMutex::new(Diagnostics::default())),
-            stderr_task: None,
+            lifecycle: Mutex::new(Lifecycle::default()),
         })
     }
     fn request(&self, url: &str) -> reqwest::RequestBuilder {
@@ -298,7 +307,7 @@ impl Connector {
         for (k, v) in &self.config.headers {
             r = r.header(k, v);
         }
-        if let Some(session) = &self.session {
+        if let Some(session) = &*self.session.lock().unwrap() {
             r = r.header("Mcp-Session-Id", session);
         }
         if let Some(protocol) = &self.protocol {
@@ -330,20 +339,27 @@ impl Connector {
             #[cfg(unix)]
             cmd.process_group(0);
             let mut child = cmd.spawn().context("failed to start MCP server")?;
-            self.tree = Some(crate::command_process::ProcessTree::attach(&child)?);
+            self.lifecycle.get_mut().tree =
+                Some(crate::command_process::ProcessTree::attach(&child)?);
             if let Some(stderr) = child.stderr.take() {
                 let (path, log) = diagnostic_log();
                 self.diagnostics.lock().unwrap().log_path = path;
-                self.stderr_task = Some(tokio::spawn(capture_stderr(
+                self.lifecycle.get_mut().stderr_task = Some(tokio::spawn(capture_stderr(
                     stderr,
                     self.diagnostics.clone(),
                     sensitive_environment(&self.config),
                     log,
                 )));
             }
-            self.input = child.stdin.take();
-            self.output = child.stdout.take().map(BufReader::new);
-            self.child = Some(child);
+            let input = Arc::new(Mutex::new(child.stdin.take().context("MCP stdin missing")?));
+            let output = child.stdout.take().context("MCP stdout missing")?;
+            self.lifecycle.get_mut().reader_task = Some(tokio::spawn(mcp_dispatch::read_stdio(
+                output,
+                input.clone(),
+                self.pending.clone(),
+            )));
+            self.input = Some(input);
+            self.lifecycle.get_mut().child = Some(child);
         } else if self.config.transport == "sse" {
             self.open_legacy().await?;
         }
@@ -409,43 +425,43 @@ impl Connector {
         }
         let response = r.send().await?.error_for_status()?;
         let mut stream = response.bytes_stream();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        self.legacy_task = Some(tokio::spawn(async move {
-            let mut decoder = crate::sse::Decoder::default();
-            while let Some(Ok(chunk)) = stream.next().await {
-                let Ok(events) = decoder.push(&chunk) else {
-                    return;
-                };
-                for event in events {
-                    if event.kind == "endpoint" {
-                        if tx.send(json!({"endpoint":event.data})).await.is_err() {
-                            return;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let pending = self.pending.clone();
+        self.lifecycle.get_mut().legacy_task = Some(tokio::spawn(async move {
+            let mut endpoint = Some(tx);
+            let result: Result<()> = async {
+                let mut decoder = crate::sse::Decoder::default();
+                while let Some(chunk) = stream.next().await {
+                    for event in decoder.push(&chunk?)? {
+                        if event.kind == "endpoint" {
+                            if let Some(tx) = endpoint.take() {
+                                let _ = tx.send(event.data);
+                            }
+                        } else if let Ok(value) = serde_json::from_str::<Value>(&event.data) {
+                            pending.dispatch(value);
                         }
-                    } else if let Ok(v) = serde_json::from_str::<Value>(&event.data)
-                        && tx.send(v).await.is_err()
-                    {
-                        return;
                     }
                 }
+                bail!("MCP SSE stream closed")
             }
+            .await;
+            pending.close(&result.unwrap_err().to_string());
         }));
-        let first = tokio::time::timeout(Duration::from_secs_f64(self.config.timeout), rx.recv())
+        let first = tokio::time::timeout(Duration::from_secs_f64(self.config.timeout), rx)
             .await?
             .context("MCP SSE endpoint missing")?;
-        let url = reqwest::Url::parse(&self.config.url)?.join(util::string(&first, "endpoint")?)?;
+        let url = reqwest::Url::parse(&self.config.url)?.join(&first)?;
         let original = reqwest::Url::parse(&self.config.url)?;
         if url.origin() != original.origin() {
             bail!("MCP SSE endpoint changes origin")
         }
         self.endpoint = Some(url.into());
-        self.legacy_receiver = Some(rx);
         Ok(())
     }
-    async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+    async fn notify(&self, method: &str, params: Value) -> Result<()> {
         let value = json!({"jsonrpc":"2.0","method":method,"params":params});
-        if let Some(input) = self.input.as_mut() {
-            input.write_all(format!("{value}\n").as_bytes()).await?;
-            input.flush().await?;
+        if let Some(input) = &self.input {
+            mcp_dispatch::write(input, &value).await?;
         } else {
             self.request(self.endpoint.as_deref().unwrap_or(&self.config.url))
                 .json(&value)
@@ -455,80 +471,52 @@ impl Connector {
         }
         Ok(())
     }
-    pub async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.sequence += 1;
-        let id = self.sequence;
+    pub async fn rpc(&self, method: &str, params: Value) -> Result<Value> {
+        if !self.pending.live() {
+            bail!("MCP connection closed; retry after reconnect");
+        }
+        let id = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let value = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
         let timeout = Duration::from_secs_f64(self.config.timeout);
         tokio::time::timeout(timeout, async {
-            if let Some(input) = self.input.as_mut() {
-                input.write_all(format!("{value}\n").as_bytes()).await?;
-                input.flush().await?;
-                loop {
-                    let output = self.output.as_mut().context("MCP output closed")?;
-                    let mut line = Vec::new();
-                    loop {
-                        let part = output.fill_buf().await?;
-                        if part.is_empty() {
-                            break;
-                        }
-                        let end = part
-                            .iter()
-                            .position(|b| *b == b'\n')
-                            .map(|n| n + 1)
-                            .unwrap_or(part.len());
-                        if line.len() + end > 16_000_000 {
-                            bail!("MCP response exceeds the size limit")
-                        }
-                        let finished = part[end - 1] == b'\n';
-                        line.extend_from_slice(&part[..end]);
-                        output.consume(end);
-                        if finished {
-                            break;
-                        }
-                    }
-                    let n = line.len();
-                    if n == 0 {
-                        bail!("MCP server closed its output")
-                    }
-                    if line.len() > 16_000_000 {
-                        bail!("MCP response exceeds the size limit")
-                    }
-                    let response: Value = serde_json::from_slice(&line)?;
-                    if response["id"] == id
-                        && (response.get("result").is_some() || response.get("error").is_some())
-                    {
-                        return rpc_result(response);
-                    }
-                    if response["method"] == "ping" && response.get("id").is_some() {
-                        let reply = json!({"jsonrpc":"2.0","id":response["id"],"result":{}});
-                        let input = self.input.as_mut().unwrap();
-                        input.write_all(format!("{reply}\n").as_bytes()).await?;
-                        input.flush().await?;
-                    } else if response["method"].is_string() && response.get("id").is_some() {
-                        let reply = json!({"jsonrpc":"2.0","id":response["id"],"error":{"code":-32601,"message":"Client does not support this method"}});
-                        let input = self.input.as_mut().unwrap();
-                        input.write_all(format!("{reply}\n").as_bytes()).await?;
-                        input.flush().await?;
-                    }
+            if let Some(input) = &self.input {
+                let (_request, rx) = self.pending.register(id)?;
+                if let Err(error) = mcp_dispatch::write(input, &value).await {
+                    self.pending.close("MCP input closed");
+                    return Err(error);
                 }
+                return rpc_result(
+                    rx.await
+                        .context("MCP response reader closed")?
+                        .map_err(anyhow::Error::msg)?,
+                );
             }
+            let pending = if self.config.transport == "sse" {
+                Some(self.pending.register(id)?)
+            } else {
+                None
+            };
             let response = self
                 .request(self.endpoint.as_deref().unwrap_or(&self.config.url))
                 .json(&value)
                 .send()
-                .await?
-                .error_for_status()?;
-            if let Some(s) = response.headers().get("Mcp-Session-Id") {
-                self.session = Some(s.to_str()?.to_string());
+                .await
+                .inspect_err(|_| {
+                    self.pending.close("MCP transport disconnected");
+                })?;
+            if [404, 410].contains(&response.status().as_u16()) {
+                self.pending.close("MCP session expired");
             }
-            if let Some(rx) = self.legacy_receiver.as_mut() {
-                loop {
-                    let v = rx.recv().await.context("MCP SSE stream closed")?;
-                    if v["id"] == id {
-                        return rpc_result(v);
-                    }
-                }
+            let response = response.error_for_status()?;
+            if let Some(s) = response.headers().get("Mcp-Session-Id") {
+                *self.session.lock().unwrap() = Some(s.to_str()?.to_string());
+            }
+            if let Some((_request, rx)) = pending {
+                return rpc_result(
+                    rx.await
+                        .context("MCP SSE stream closed")?
+                        .map_err(anyhow::Error::msg)?,
+                );
             }
             let sse = response
                 .headers()
@@ -567,12 +555,12 @@ impl Connector {
         .context("MCP request timed out")?
     }
     pub async fn call(
-        &mut self,
+        &self,
         name: &str,
         args: Value,
         attachments: &Attachments,
     ) -> Result<Outcome> {
-        self.config.verify()?;
+        self.verification.lock().unwrap().verify()?;
         let result = self
             .rpc("tools/call", json!({"name":name,"arguments":args}))
             .await?;
@@ -614,27 +602,36 @@ impl Connector {
         o.images = images;
         Ok(o)
     }
-    pub async fn close(&mut self) {
-        if let Some(task) = self.legacy_task.take() {
+    pub async fn close(&self) {
+        self.pending.close("MCP connection closed");
+        let mut lifecycle = self.lifecycle.lock().await;
+        if let Some(task) = lifecycle.reader_task.take() {
             task.abort();
         }
-        if let Some(tree) = &self.tree {
+        if let Some(task) = lifecycle.legacy_task.take() {
+            task.abort();
+        }
+        if let Some(tree) = &lifecycle.tree {
             tree.shutdown().await;
         }
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut child) = lifecycle.child.take() {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
-        if let Some(mut task) = self.stderr_task.take()
+        if let Some(mut task) = lifecycle.stderr_task.take()
             && tokio::time::timeout(Duration::from_secs(2), &mut task)
                 .await
                 .is_err()
         {
             task.abort();
         }
-        self.tree = None;
-        self.input = None;
-        self.output = None;
+        lifecycle.tree = None;
+    }
+    fn reusable(&self, server: &Server) -> bool {
+        self.pending.live() && self.config.same_connection(server)
+    }
+    fn update_verification(&self, server: Server) {
+        *self.verification.lock().unwrap() = server;
     }
 
     fn diagnostics(&self) -> (String, Option<PathBuf>) {
@@ -653,20 +650,68 @@ fn rpc_result(v: Value) -> Result<Value> {
 }
 #[derive(Default)]
 pub struct McpRegistry {
-    pub tools: HashMap<String, (ToolSpec, String, Arc<Mutex<Connector>>)>,
+    pub tools: HashMap<String, (ToolSpec, String, Arc<Connector>)>,
     pub timeouts: HashMap<String, Duration>,
     pub statuses: Vec<Value>,
-    connectors: Vec<Arc<Mutex<Connector>>>,
+    connectors: Vec<Arc<Connector>>,
 }
 impl McpRegistry {
+    pub async fn retire_changed(&self, servers: &[Server]) {
+        for connector in &self.connectors {
+            if !servers.iter().any(|server| connector.reusable(server)) {
+                connector.close().await;
+            }
+        }
+    }
+    pub fn needs_reconnect(&self) -> bool {
+        self.connectors.iter().any(|c| !c.pending.live())
+    }
     pub async fn prepare(servers: Vec<Server>) -> Self {
+        Self::reconcile(&Self::default(), servers).await
+    }
+    pub async fn reconcile(previous: &Self, servers: Vec<Server>) -> Self {
         let mut r = Self::default();
         let mut seen = std::collections::HashSet::new();
         let servers = servers
             .into_iter()
             .filter(|server| seen.insert(server.name.clone()))
             .collect::<Vec<_>>();
-        let mut prepared = futures_util::stream::iter(servers).map(|server| async move {
+        let mut changed = vec![];
+        for server in servers {
+            if let Some(connector) = previous
+                .connectors
+                .iter()
+                .find(|c| c.reusable(&server) && server.verify().is_ok())
+            {
+                connector.update_verification(server.clone());
+                for (name, (spec, original, c)) in &previous.tools {
+                    if Arc::ptr_eq(c, connector) {
+                        r.tools.insert(
+                            name.clone(),
+                            (spec.clone(), original.clone(), connector.clone()),
+                        );
+                        r.timeouts
+                            .insert(name.clone(), Duration::from_secs_f64(server.timeout));
+                    }
+                }
+                if let Some(status) = previous
+                    .statuses
+                    .iter()
+                    .find(|s| s["server"] == server.name)
+                {
+                    r.statuses.push(status.clone());
+                }
+                r.connectors.push(connector.clone());
+            } else {
+                changed.push(server);
+            }
+        }
+        for connector in &previous.connectors {
+            if !r.connectors.iter().any(|c| Arc::ptr_eq(c, connector)) {
+                connector.close().await;
+            }
+        }
+        let mut prepared = futures_util::stream::iter(changed).map(|server| async move {
             let mut c = match Connector::new(server.clone()) {
                 Ok(c) => c,
                 Err(_) => {
@@ -701,7 +746,7 @@ impl McpRegistry {
             r.statuses.push(status);
             if let Some(connector) = connector {
                 let timeout = Duration::from_secs_f64(connector.config.timeout);
-                let connector = Arc::new(Mutex::new(connector));
+                let connector = Arc::new(connector);
                 for (spec, original) in tools {
                     r.timeouts.entry(spec.name.clone()).or_insert(timeout);
                     r.tools
@@ -715,13 +760,12 @@ impl McpRegistry {
     }
     pub async fn close(&self) {
         for c in &self.connectors {
-            c.lock().await.close().await;
+            c.close().await;
         }
     }
     pub async fn statuses_with_diagnostics(&self) -> Vec<Value> {
         let mut statuses = self.statuses.clone();
         for connector in &self.connectors {
-            let connector = connector.lock().await;
             let (stderr_tail, log_path) = connector.diagnostics();
             if let Some(status) = statuses
                 .iter_mut()
@@ -751,5 +795,67 @@ mod diagnostic_tests {
         output.extend(redact_stderr(&mut pending, &secrets, true));
         assert_eq!(output, b"before [redacted] after [redacted]");
         assert!(pending.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn server(root: &std::path::Path, code: &str) -> Server {
+        let source = root.join("server.cjs");
+        std::fs::write(&source, code).unwrap();
+        Server {
+            name: "test".into(),
+            command: "node".into(),
+            args: vec![source.to_string_lossy().into_owned()],
+            cwd: root.into(),
+            timeout: 5.0,
+            plugin: String::new(),
+            version: String::new(),
+            digest: util::hash(code.as_bytes()),
+            source,
+            transport: "stdio".into(),
+            url: String::new(),
+            env: Default::default(),
+            headers: Default::default(),
+            local: true,
+            configuration_error: String::new(),
+        }
+    }
+    #[tokio::test]
+    async fn r6_concurrent_requests_demux_out_of_order_and_server_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let config = server(
+            root.path(),
+            r#"
+const pending=[];const send=v=>console.log(JSON.stringify(v));
+require('readline').createInterface({input:process.stdin}).on('line',line=>{
+const r=JSON.parse(line);if(!r.method)return;
+if(r.method==='notifications/initialized')return;
+if(r.method==='initialize')return send({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2025-11-25'}});
+if(r.method==='tools/list')return send({jsonrpc:'2.0',id:r.id,result:{tools:[]}});
+pending.push(r);if(pending.length===2){
+send({jsonrpc:'2.0',id:pending[0].id,method:'ping'});
+send({jsonrpc:'2.0',id:99999,result:{value:'unrelated'}});
+for(const call of pending.reverse())send({jsonrpc:'2.0',id:call.id,result:call.params});pending.length=0;
+}});
+"#,
+        );
+        let mut connector = Connector::new(config).unwrap();
+        connector.discover().await.unwrap();
+        let (a, b) = tokio::join!(
+            connector.rpc("echo", json!({"value":"first"})),
+            connector.rpc("echo", json!({"value":"second"}))
+        );
+        assert_eq!(a.unwrap()["value"], "first");
+        assert_eq!(b.unwrap()["value"], "second");
+        // The server intentionally does not answer a lone call. Closing the
+        // connection must wake it rather than leaving it until its timeout.
+        let (reply, ()) = tokio::join!(connector.rpc("echo", json!({})), async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            connector.close().await;
+        });
+        assert!(reply.unwrap_err().to_string().contains("closed"));
     }
 }

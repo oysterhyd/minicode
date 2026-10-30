@@ -444,7 +444,7 @@ impl Router {
                     Err(panic) => {
                         hooks.cancel.cancel();
                         let r = runtime.lock().await;
-                        let _ = r.close_background(&hooks).await;
+                        let _ = r.close_resources(&hooks).await;
                         r.mcp.close().await;
                         hooks
                             .approvals
@@ -631,7 +631,7 @@ impl Router {
                         runtime
                             .lock()
                             .await
-                            .close_background(&c.hooks(self.event_sink(&c.listeners)))
+                            .close_resources(&c.hooks(self.event_sink(&c.listeners)))
                             .await?;
                     }
                     self.store.delete(id)?;
@@ -732,7 +732,7 @@ impl Router {
                     runtime
                         .lock()
                         .await
-                        .close_background(&previous.hooks(self.event_sink(&previous.listeners)))
+                        .close_resources(&previous.hooks(self.event_sink(&previous.listeners)))
                         .await?;
                 }
                 previous.runtime = None;
@@ -1580,7 +1580,7 @@ impl Router {
             }
             if let Some(runtime) = &c.runtime {
                 let hooks = c.hooks(self.event_sink(&c.listeners));
-                let _ = runtime.lock().await.close_background(&hooks).await;
+                let _ = runtime.lock().await.close_resources(&hooks).await;
             }
         }
     }

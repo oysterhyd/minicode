@@ -2887,7 +2887,7 @@ async fn r3_completed_output_pages_errors_and_resume_reminders() {
             .len(),
         1
     );
-    h.runtime.close_background(&h.hooks).await.unwrap();
+    h.runtime.close_resources(&h.hooks).await.unwrap();
     let job = h
         .runtime
         .background
@@ -2960,7 +2960,7 @@ async fn teardown_reports_a_failed_session_end_and_resets_running() {
     assert!(error.contains("injected storage failure"), "{error}");
     assert_torn_down(&h);
     let types = h.event_types();
-    h.runtime.close_background(&h.hooks).await.unwrap();
+    h.runtime.close_resources(&h.hooks).await.unwrap();
     assert!(
         h.event_types()
             .contains(&"background_job_completed".to_string())

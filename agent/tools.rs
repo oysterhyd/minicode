@@ -355,7 +355,6 @@ async fn execute_inner(name: &str, args: &Value, ctx: &ToolContext) -> Result<Ou
         bail!("tool cancelled")
     }
     if let Some((_, original, connector)) = ctx.mcp.tools.get(name) {
-        let mut connector = connector.lock().await;
         return tokio::select! {_ = ctx.cancel.cancelled()=>Err(anyhow::anyhow!("tool cancelled")),value=connector.call(original,args.clone(),&ctx.attachments)=>value};
     }
     match name {

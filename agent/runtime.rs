@@ -707,10 +707,33 @@ impl Runtime {
         Ok(())
     }
     async fn connect_mcp(&mut self, hooks: &Hooks) -> Result<()> {
+        if self.child
+            && self
+                .allowed
+                .as_ref()
+                .is_some_and(|set| !set.iter().any(|name| name.starts_with("mcp__")))
+        {
+            self.mcp.close().await;
+            self.mcp = Arc::new(McpRegistry::default());
+            return Ok(());
+        }
+        {
+            let mut catalog = self.catalog.lock().await;
+            *catalog = catalog.refresh()?;
+        }
+        let current_servers = self.catalog.lock().await.servers.clone();
+        self.mcp.retire_changed(&current_servers).await;
         self.trust_plugins(hooks).await?;
-        let servers = self.catalog.lock().await.servers.clone();
+        let mut servers = self.catalog.lock().await.servers.clone();
+        if let Some(allowed) = &self.allowed {
+            servers.retain(|server| {
+                allowed
+                    .iter()
+                    .any(|name| name.starts_with(&format!("mcp__{}__", server.name)))
+            });
+        }
         let deadline = hooks.shared.lock().unwrap().deadline;
-        let prepare = McpRegistry::prepare(servers);
+        let prepare = McpRegistry::reconcile(&self.mcp, servers);
         let registry = tokio::select! {
             _=hooks.cancel.cancelled()=>bail!("turn cancelled"),
             result=async {
@@ -907,7 +930,7 @@ impl Runtime {
         }
         Ok(())
     }
-    pub async fn close_background(&self, hooks: &Hooks) -> Result<()> {
+    pub async fn close_resources(&self, hooks: &Hooks) -> Result<()> {
         let mut failures = vec![];
         if let Err(error) = self.background.close().await {
             failures.push(error.to_string());
@@ -918,8 +941,9 @@ impl Runtime {
         {
             failures.push(error.to_string());
         }
+        self.mcp.close().await;
         for child in self.children.values() {
-            if let Err(error) = Box::pin(child.close_background(hooks)).await {
+            if let Err(error) = Box::pin(child.close_resources(hooks)).await {
                 failures.push(error.to_string());
             }
         }
@@ -1001,7 +1025,7 @@ impl Runtime {
             failures.push(format!("cancelled calls: {error}"));
         }
         if (hooks.cancel.is_cancelled() || result.is_err())
-            && let Err(error) = self.close_background(&hooks).await
+            && let Err(error) = self.close_resources(&hooks).await
         {
             failures.push(format!("background jobs: {error}"));
         }
@@ -1011,8 +1035,10 @@ impl Runtime {
         {
             failures.push(format!("background events: {error}"));
         }
-        self.mcp.close().await;
-        self.mcp = Arc::new(McpRegistry::default());
+        if hooks.cancel.is_cancelled() || result.is_err() {
+            self.mcp.close().await;
+            self.mcp = Arc::new(McpRegistry::default());
+        }
         {
             let mut approvals = hooks
                 .approvals
@@ -1082,9 +1108,10 @@ impl Runtime {
             s.phase = if self.pending { "paused" } else { "idle" }.into();
         }
         if panicked || !failures.is_empty() {
-            if let Err(error) = self.close_background(&hooks).await {
+            if let Err(error) = self.close_resources(&hooks).await {
                 failures.push(format!("background jobs: {error}"));
             }
+            self.mcp = Arc::new(McpRegistry::default());
             let mut report = error.into_iter().collect::<Vec<_>>();
             if !failures.is_empty() {
                 report.push(format!("run teardown failed: {}", failures.join("; ")));
@@ -1192,6 +1219,9 @@ impl Runtime {
                 }
             }
             self.background_reminders(hooks)?;
+            if self.mcp.needs_reconnect() {
+                self.connect_mcp(hooks).await?;
+            }
             let (specs, mut system, sources) = {
                 let mut catalog = self.catalog.lock().await;
                 catalog.pending_scopes.clear();
@@ -2444,7 +2474,7 @@ impl Runtime {
             self.event(hooks,"subagent_result",json!({"kind":kind,"task":task,"child_session_id":child_id,"exit_reason":result.exit_reason,"structured":structured,"usage":usage,"usage_scope":"activation","provider_progress":{"index":self.provider.index,"call_counter":self.provider.call_counter},"evidence_refs":verified,"source":source}))?;
             let completed = structured && result.exit_reason == "completed";
             if completed {
-                child.close_background(&child_hooks).await?;
+                child.close_resources(&child_hooks).await?;
             }
             if !completed {
                 self.children.insert(key, child);

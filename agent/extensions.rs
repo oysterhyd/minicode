@@ -65,6 +65,23 @@ pub struct Server {
     pub configuration_error: String,
 }
 impl Server {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.command == other.command
+            && self.args == other.args
+            && self.cwd == other.cwd
+            && self.timeout == other.timeout
+            && self.plugin == other.plugin
+            && self.version == other.version
+            && self.source == other.source
+            && self.transport == other.transport
+            && self.url == other.url
+            && self.env == other.env
+            && self.headers == other.headers
+            && self.local == other.local
+            && self.configuration_error == other.configuration_error
+            && (self.local || self.digest == other.digest)
+    }
     pub fn verify(&self) -> Result<()> {
         if !self.configuration_error.is_empty() {
             bail!("{}", self.configuration_error)

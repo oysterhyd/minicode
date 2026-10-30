@@ -10,6 +10,7 @@ pub mod eval;
 pub mod extensions;
 pub mod goals;
 pub mod mcp;
+mod mcp_dispatch;
 pub mod models;
 pub mod paging;
 pub mod provider;
