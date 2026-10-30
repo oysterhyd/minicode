@@ -188,6 +188,14 @@ impl Routes {
                     if c.busy() {
                         return false;
                     }
+                    // Eviction closes the Runtime. Session-owned processes,
+                    // connections and retained job captures outlive turns.
+                    if c.runtime.as_ref().is_some_and(|r| match r.try_lock() {
+                        Ok(r) => r.holds_resources(),
+                        Err(_) => true,
+                    }) {
+                        return false;
+                    }
                     self.saved_settings
                         .insert(id.clone(), c.settings.lock().unwrap().clone());
                     true
@@ -336,6 +344,9 @@ impl Router {
                 bail!("当前任务仍在运行")
             }
             let hooks = c.hooks(self.event_sink(&c.listeners));
+            if let Some(previous) = &c.runtime {
+                previous.lock().await.close_resources(&hooks).await?;
+            }
             r.refresh_snapshot(&hooks).await?;
             self.commit_settings(c, &r.session, settings);
             c.catalog = Some(r.catalog.clone());

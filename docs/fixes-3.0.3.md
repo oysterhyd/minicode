@@ -879,3 +879,13 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 问题：没有暂停任务的 `/continue` 仍进入 run_inner，随后被作为运行异常收尾并关闭空闲 dev server。新增 `r3_invalid_continue_does_not_close_idle_session_resources` 先失败，日志 `output/5A-invalid-continue-red.log`。
 - 修复：在开始 run 和取得运行锁之前验证 pending；无效 continue 直接报错，保持后台任务和 MCP 状态。聚焦测试通过，日志 `output/5A-invalid-continue-focused.log`。
 - 验证：最终阶段完整检查 `output/5-5A-final-*` 全部通过，包含本回归和后续 R6 资源持有者补充。无协议或存储迁移。
+
+### R3/R6 阶段复核：资源持有者与跨进程会话锁
+
+- 核查与失败证据：Bridge 原有六个空闲 owner 的缓存会回收后台任务表或仍活跃的 MCP 连接；七会话回归表现为原会话 cancelTurn 失去控制权、MCP 计数从 1 重启。另一个 Bridge 进程还可删除正在持有空闲后台/MCP 资源的会话，因为 activation 锁原先随每次 run 释放。日志 `output/5A-owner-retention-red.log`、`output/5A-resource-ownership-red.log`。
+- 修复：Runtime 明确报告保留的任务输出、活跃 MCP 和子会话资源；这些 owner 不参与普通空闲缓存淘汰。正常 run 结束后有资源时继续持有既有 SessionLock，同 owner 下次 run 复用锁；无资源、显式关闭或失败清理后释放。清理期间锁保留到最终事件完成，避免另一个进程在 teardown 中途删除数据；替换 Runtime 也先等待资源清理。跨进程接管/删除须等原资源 owner 退出，同 Bridge 的多视图仍共享 owner。
+- 验证：新增 4 项真实 Bridge 测试覆盖七个会话后仍能查询/终止原后台服务、MCP 状态不重置、另一进程不能删除两类资源所属会话，以及原 owner 关闭后删除成功、进程全部退出。已运行两个文件共 14 项聚焦回归；首轮纯 owner 缓存修复的全套检查也通过。最终完整脚本 `output/check-5.ps1 -Item resource-ownership -Desktop`、日志 `output/5-resource-ownership-`，完整检查已通过。
+- 兼容：复用阶段 0/4 的锁文件与删除保护，不新增存储格式或锁类型。持有活资源的会话数量可能超过普通六 owner 缓存上限，这是会话级资源存活的必要行为；删除/退出仍执行确定的清理。
+- 验证记录：首次资源锁回归全测中，未改动的 `concurrent_edits_of_one_file_are_serialized` 出现一次 Windows os error 2。tools/util/editing/tests 的对应逻辑与 MC5 提交一致；保留日志 `output/5-resource-ownership-test-flake.log`，连续 8 次聚焦复跑和随后完整资源锁检查通过，未修改该并发编辑逻辑，也不声称已根治此时序波动。补齐无效 continue 后的最终全阶段检查使用 `output/check-5.ps1 -Item 5A-final -Desktop`、日志 `output/5-5A-final-`，完整检查已通过。
+
+- 最终阶段结果：`5A-final` 的 fmt、Clippy、Rust 191 通过/2 个既有忽略、build、协议 232 通过/2 个既有跳过、生成文件检查、60 次主任务与 9 个场景、npm ci/build、TUI 119 通过，以及 Desktop go test/vet/vendor UI 全部通过。Runtime 替换在更新快照和设置前完成旧资源清理。

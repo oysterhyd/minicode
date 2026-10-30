@@ -656,6 +656,9 @@ pub struct McpRegistry {
     connectors: Vec<Arc<Connector>>,
 }
 impl McpRegistry {
+    pub fn has_live_connections(&self) -> bool {
+        self.connectors.iter().any(|c| c.pending.live())
+    }
     pub async fn retire_changed(&self, servers: &[Server]) {
         for connector in &self.connectors {
             if !servers.iter().any(|server| connector.reusable(server)) {

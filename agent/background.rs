@@ -61,6 +61,9 @@ fn publish(
     Ok(())
 }
 impl Jobs {
+    pub fn has_jobs(&self) -> bool {
+        !self.0.lock().unwrap().is_empty()
+    }
     pub fn contains(&self, id: &str) -> bool {
         self.0.lock().unwrap().contains_key(id)
     }

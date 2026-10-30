@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import {test} from 'node:test'
-import {fixture, until, pidAlive} from './helpers.mjs'
+import {fixture, until, pidAlive, connect} from './helpers.mjs'
 
 async function script(f, turns) {
   fs.writeFileSync(f.script, JSON.stringify({turns}))
@@ -72,4 +72,21 @@ test('deleting an idle session stops its background server',async t=>{
   await f.request('deleteSession',{sessionId:state.sessionId})
   assert.ok(await until(()=>!pidAlive(pid)))
   assert.equal((await f.request('listSessions')).length,0)
+})
+
+test('idle owner cache retains a session while its background server is running',async t=>{
+  const {f,pid}=await server(t)
+  const original=await f.request('getState')
+  for(let i=1;i<=6;i++)await f.run({clientKey:`other-${i}`,sourceClientKey:'default'})
+  assert.ok(pidAlive(pid),'opening other sessions must not stop the original background task')
+  assert.equal(await f.request('cancelTurn',{sessionId:original.sessionId}),true)
+  assert.ok(await until(()=>!pidAlive(pid)))
+})
+
+test('a second process cannot delete a session that owns an idle background server',async t=>{
+  const {f,pid}=await server(t),state=await f.request('getState'),other=connect(f)
+  await assert.rejects(other.request('deleteSession',{sessionId:state.sessionId}),/session already running/)
+  assert.ok(pidAlive(pid));await f.close()
+  await other.request('deleteSession',{sessionId:state.sessionId})
+  assert.ok(await until(()=>!pidAlive(pid)))
 })

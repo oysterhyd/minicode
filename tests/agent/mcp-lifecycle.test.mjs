@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import {test} from 'node:test'
-import {fixture,pidAlive,until} from './helpers.mjs'
+import {fixture,pidAlive,until,connect} from './helpers.mjs'
 
 const source=`const fs=require('node:fs');
 fs.appendFileSync(process.argv[3]||'mcp-starts',process.argv[2]+':'+process.pid+'\\n');let counter=0;
@@ -123,4 +123,22 @@ test('R6 HTTP sessions persist across turns and expired sessions reconnect withi
   const recovered=await f.run({text:'recover'})
   assert.equal(results(recovered).at(-1),'2:1');assert.equal(initialized,2)
   assert.equal(recovered.result.exit_reason,'completed')
+})
+
+test('R6 idle owner cache retains sessions with live MCP connections',async t=>{
+  const {f,starts}=await setup(t,[call('state'),{text:'first'},call('state'),{text:'second'}])
+  const first=await f.run({clientKey:'view-0',sourceClientKey:'default'})
+  for(let i=1;i<=6;i++)assert.equal(results(await f.run({clientKey:`view-${i}`,sourceClientKey:'default'})).at(-1),'state:1')
+  const continued=await f.run({clientKey:'view-0',sessionId:first.id,text:'continue same connection'})
+  assert.equal(results(continued).at(-1),'state:2')
+  assert.equal(starts().length,7)
+  const pids=starts().map(line=>Number(line.split(':')[1]));await f.close()
+  assert.ok(await until(()=>pids.every(pid=>!pidAlive(pid))))
+})
+
+test('R6 a second process cannot delete an idle session that owns an MCP connection',async t=>{
+  const {f,starts}=await setup(t,[call('state'),{text:'done'}]);const run=await f.run(),other=connect(f)
+  await assert.rejects(other.request('deleteSession',{sessionId:run.id}),/session already running/)
+  const pid=Number(starts()[0].split(':')[1]);assert.ok(pidAlive(pid));await f.close()
+  await other.request('deleteSession',{sessionId:run.id});assert.ok(await until(()=>!pidAlive(pid)))
 })

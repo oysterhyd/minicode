@@ -169,6 +169,7 @@ pub struct Runtime {
     pub goal: Option<Goal>,
     pub mcp: Arc<McpRegistry>,
     pub background: Arc<crate::background::Jobs>,
+    ownership: Mutex<Option<store::SessionLock>>,
     pub allowed: Option<HashSet<String>>,
     pub child: bool,
     pub children: HashMap<(String, String), Box<Runtime>>,
@@ -186,6 +187,11 @@ pub struct Runtime {
     pub files: tools::Files,
 }
 impl Runtime {
+    pub fn holds_resources(&self) -> bool {
+        self.background.has_jobs()
+            || self.mcp.has_live_connections()
+            || self.children.values().any(|c| c.holds_resources())
+    }
     pub async fn new(
         workspace: &Path,
         model: &str,
@@ -390,6 +396,7 @@ impl Runtime {
             goal,
             mcp: Arc::new(McpRegistry::default()),
             background: Default::default(),
+            ownership: Default::default(),
             allowed: None,
             child: false,
             children: HashMap::new(),
@@ -931,6 +938,9 @@ impl Runtime {
         Ok(())
     }
     pub async fn close_resources(&self, hooks: &Hooks) -> Result<()> {
+        self.stop_resources(hooks, true).await
+    }
+    async fn stop_resources(&self, hooks: &Hooks, release_ownership: bool) -> Result<()> {
         let mut failures = vec![];
         if let Err(error) = self.background.close().await {
             failures.push(error.to_string());
@@ -946,6 +956,9 @@ impl Runtime {
             if let Err(error) = Box::pin(child.close_resources(hooks)).await {
                 failures.push(error.to_string());
             }
+        }
+        if release_ownership {
+            self.ownership.lock().unwrap().take();
         }
         if !failures.is_empty() {
             bail!("{}", failures.join("; "));
@@ -968,7 +981,11 @@ impl Runtime {
         if text.is_none() && !self.pending {
             bail!("当前没有暂停的任务");
         }
-        let _ownership = self.store.activation(&self.session)?;
+        let ownership = if self.ownership.lock().unwrap().is_some() {
+            None
+        } else {
+            Some(self.store.activation(&self.session)?)
+        };
         self.store.require(&self.session)?;
         if Some(self.store.message_revision(&self.session)?) != self.message_revision {
             bail!("会话已被另一个进程更新，请重新加载会话后继续；本次没有执行任何操作")
@@ -1028,7 +1045,7 @@ impl Runtime {
             failures.push(format!("cancelled calls: {error}"));
         }
         if (hooks.cancel.is_cancelled() || result.is_err())
-            && let Err(error) = self.close_resources(&hooks).await
+            && let Err(error) = self.stop_resources(&hooks, false).await
         {
             failures.push(format!("background jobs: {error}"));
         }
@@ -1111,7 +1128,7 @@ impl Runtime {
             s.phase = if self.pending { "paused" } else { "idle" }.into();
         }
         if panicked || !failures.is_empty() {
-            if let Err(error) = self.close_resources(&hooks).await {
+            if let Err(error) = self.stop_resources(&hooks, false).await {
                 failures.push(format!("background jobs: {error}"));
             }
             self.mcp = Arc::new(McpRegistry::default());
@@ -1119,7 +1136,15 @@ impl Runtime {
             if !failures.is_empty() {
                 report.push(format!("run teardown failed: {}", failures.join("; ")));
             }
+            self.ownership.lock().unwrap().take();
             bail!(report.join("; "))
+        }
+        if !hooks.cancel.is_cancelled() && error.is_none() && self.holds_resources() {
+            if let Some(ownership) = ownership {
+                *self.ownership.lock().unwrap() = Some(ownership);
+            }
+        } else {
+            self.ownership.lock().unwrap().take();
         }
         Ok(RunResult {
             session_id: self.session.clone(),
@@ -1640,6 +1665,7 @@ impl Runtime {
                                 goal: None,
                                 mcp: self.mcp.clone(),
                                 background: self.background.clone(),
+                                ownership: Default::default(),
                                 allowed: self.allowed.clone(),
                                 child: false,
                                 children,
