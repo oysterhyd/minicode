@@ -141,6 +141,52 @@ fn retry_random() -> f64 {
     bytes[..6].copy_from_slice(&id.as_bytes()[..6]);
     u64::from_le_bytes(bytes) as f64 / ((1u64 << 48) - 1) as f64
 }
+fn genuine_user_text(message: &Message) -> Option<String> {
+    if message.role != "user"
+        || message
+            .content
+            .iter()
+            .any(|block| !matches!(block, Block::Text { .. } | Block::Media { .. }))
+    {
+        return None;
+    }
+    let text = message.text();
+    let trimmed = text.trim_start();
+    (!trimmed.is_empty()
+        && !trimmed.starts_with("<system-reminder>")
+        && !trimmed.starts_with("此前历史已归档"))
+    .then_some(text)
+}
+
+fn delegate_requirements(messages: &[Message]) -> String {
+    const LIMIT: usize = 16_384;
+    const TRUNCATED: &str = "\n[…已截断…]\n";
+    let mut remaining = LIMIT;
+    let mut selected = vec![];
+    for mut text in messages.iter().rev().filter_map(genuine_user_text).take(12) {
+        let separator = usize::from(!selected.is_empty());
+        let available = remaining.saturating_sub(separator);
+        if available <= TRUNCATED.len() {
+            break;
+        }
+        if text.len() > available {
+            // Prefer recent requests; keep both constraints at the beginning
+            // and the final ask when one request alone exceeds the byte cap.
+            let half = (available - TRUNCATED.len()) / 2;
+            let head = util::prefix(&text, half);
+            let mut tail = text.len() - (available - TRUNCATED.len() - head.len());
+            while !text.is_char_boundary(tail) {
+                tail += 1;
+            }
+            text = format!("{head}{TRUNCATED}{}", &text[tail..]);
+        }
+        remaining -= text.len() + separator;
+        selected.push(text);
+    }
+    selected.reverse();
+    selected.join("\n")
+}
+
 fn prompt_sources(sources: &Value) -> BTreeMap<PathBuf, String> {
     sources
         .as_array()
@@ -202,11 +248,21 @@ impl Runtime {
         settings: &Settings,
     ) -> Result<Self> {
         let workspace = util::canonical(workspace)?;
+        let catalog = Catalog::scan(&workspace, configuration, true)?;
+        Self::from_catalog(workspace, model, session, store, catalog, settings).await
+    }
+    async fn from_catalog(
+        workspace: PathBuf,
+        model: &str,
+        session: Option<&str>,
+        store: Store,
+        mut catalog: Catalog,
+        settings: &Settings,
+    ) -> Result<Self> {
         if !workspace.is_dir() {
             bail!("workspace no longer exists")
         }
-        let provider = Provider::new(model, &settings.effort, &configuration)?;
-        let mut catalog = Catalog::scan(&workspace, configuration, true)?;
+        let provider = Provider::new(model, &settings.effort, &catalog.configuration)?;
         let (id, messages, message_revision, usage, rounds, pending) = if let Some(id) = session {
             let summary = store.require(id)?;
             if util::canonical(Path::new(
@@ -1672,7 +1728,7 @@ impl Runtime {
                                     .messages
                                     .iter()
                                     .rev()
-                                    .filter(|m| m.role == "user")
+                                    .filter(|m| genuine_user_text(m).is_some())
                                     .take(12)
                                     .cloned()
                                     .collect::<Vec<_>>()
@@ -2402,6 +2458,7 @@ impl Runtime {
                     "unknown read-only subagent kind: {kind}"
                 )));
             };
+            let inherited_catalog = catalog.clone();
             drop(catalog);
             let key = (kind.to_string(), task.to_string());
             let mut child = if let Some(child) = self.children.remove(&key) {
@@ -2427,12 +2484,12 @@ impl Runtime {
                 let mut settings = hooks.settings.lock().unwrap().clone();
                 settings.acceptance = None;
                 Box::new(
-                    Self::new(
-                        &self.workspace,
+                    Self::from_catalog(
+                        self.workspace.clone(),
                         &self.provider.configuration_id,
                         paused.as_deref(),
                         self.store.clone(),
-                        configuration,
+                        inherited_catalog,
                         &settings,
                     )
                     .await?,
@@ -2455,16 +2512,12 @@ impl Runtime {
                 set.insert("submit_result".into());
                 set
             });
+            // Close only child-owned recovery connections before borrowing the
+            // current parent view. Borrowed handles never close parent services.
+            child.mcp.close().await;
+            child.mcp = Arc::new(self.mcp.restricted(child.allowed.as_ref()));
             child.provider = self.provider.clone();
-            let requirements = self
-                .messages
-                .iter()
-                .rev()
-                .filter(|m| m.role == "user")
-                .take(12)
-                .map(Message::text)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let requirements = delegate_requirements(&self.messages);
             child.custom_prompt = Some(format!(
                 "\n你是子助手。只使用配置的工具，遵守父会话权限。完成时优先调用 submit_result 提交结构化结果；也可最终输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。不得编造证据。\n父任务要求：\n{requirements}\n子助手指令：\n{instructions}"
             ));

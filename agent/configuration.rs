@@ -312,6 +312,7 @@ impl Configuration {
             bail!("指令不能超过 32 KB")
         }
         let tools = draft["tools"].as_array().context("invalid tools")?;
+        let mcp_tool = regex::Regex::new(r"^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_.-]+$")?;
         if tools.iter().any(|t| {
             ![
                 "read",
@@ -324,6 +325,7 @@ impl Configuration {
                 "write",
             ]
             .contains(&t.as_str().unwrap_or_default())
+                && !t.as_str().is_some_and(|name| mcp_tool.is_match(name))
         }) {
             bail!("未知工具")
         }

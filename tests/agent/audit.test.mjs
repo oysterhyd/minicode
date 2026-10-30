@@ -74,7 +74,10 @@ test('delegates inherit loaded skills but never execute the parent acceptance co
     const system = body.messages.find(m => m.role === 'system')?.content || ''
     if (system.includes('你是子助手。')) {
       children++
-      assert.ok(system.includes('PINNED_SKILL_MARKER'))
+      // Active skills belong to the child's dynamic instruction snapshot. They
+      // must not enter its system prompt through synthetic requirements text.
+      assert.ok(body.messages.some(m=>m.role==='user'&&String(m.content).includes('PINNED_SKILL_MARKER')))
+      assert.ok(!system.includes('PINNED_SKILL_MARKER'))
       openai(res, JSON.stringify({ summary: 'Checked', findings: [], evidence_refs: [], unresolved: [] }))
     } else if (parent++ === 0) openai(res, '', [call('delegate', 'delegate', { kind: 'explore', task: 'Inspect safely' })])
     else openai(res, 'Done')

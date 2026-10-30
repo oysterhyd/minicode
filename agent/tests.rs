@@ -1992,6 +1992,88 @@ struct Harness {
     hooks: crate::runtime::Hooks,
     events: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
+
+#[tokio::test]
+async fn r35_requirements_exclude_synthetic_messages_before_selecting_recent_inputs() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]},
+        {"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]}
+    ]}))
+    .await;
+    h.runtime
+        .messages
+        .push(Message::user("ORIGINAL_REAL_REQUEST"));
+    for _ in 0..20 {
+        h.runtime.messages.push(Message::user(
+            "<system-reminder>PRIVATE_REMINDER</system-reminder>",
+        ));
+    }
+    h.runtime
+        .messages
+        .push(Message::user("此前历史已归档 PRIVATE_SYNTHETIC_SUMMARY"));
+    h.runtime.messages.push(Message {
+        role: "user".into(),
+        content: vec![
+            Block::ToolResult {
+                tool_use_id: "old".into(),
+                content: "PRIVATE_TOOL_RESULT".into(),
+                is_error: false,
+                images: vec![],
+            },
+            Block::text("PRIVATE_TOOL_TEXT"),
+        ],
+    });
+    h.runtime
+        .store
+        .replace_messages(&h.runtime.session, &h.runtime.messages)
+        .unwrap();
+    h.runtime.message_revision = Some(
+        h.runtime
+            .store
+            .message_revision(&h.runtime.session)
+            .unwrap(),
+    );
+    h.hooks.settings.lock().unwrap().budget.max_rounds = 2;
+    h.run(Some("LATEST_REAL_REQUEST")).await.unwrap();
+    let child = &h.runtime.children[&("explore".into(), "inspect".into())];
+    let prompt = child.custom_prompt.as_ref().unwrap();
+    assert!(!prompt.contains("PRIVATE_"), "{prompt}");
+    assert!(
+        prompt.contains("ORIGINAL_REAL_REQUEST\nLATEST_REAL_REQUEST"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn r35_requirements_have_a_utf8_byte_limit_and_retain_recent_head_and_tail() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]},
+        {"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]}
+    ]}))
+    .await;
+    h.hooks.settings.lock().unwrap().budget.max_rounds = 2;
+    let text = format!("HEAD_REQUIREMENT{}TAIL_REQUIREMENT", "🙂".repeat(10000));
+    h.run(Some(&text)).await.unwrap();
+    let child = &h.runtime.children[&("explore".into(), "inspect".into())];
+    let requirements = child
+        .custom_prompt
+        .as_ref()
+        .unwrap()
+        .split("父任务要求：\n")
+        .nth(1)
+        .unwrap()
+        .split("\n子助手指令：")
+        .next()
+        .unwrap();
+    assert!(
+        requirements.len() <= 16384,
+        "requirements length: {}",
+        requirements.len()
+    );
+    assert!(requirements.starts_with("HEAD_REQUIREMENT"));
+    assert!(requirements.ends_with("TAIL_REQUIREMENT"));
+    assert!(requirements.contains("已截断"));
+}
 impl Harness {
     async fn new(script: serde_json::Value) -> Self {
         let dir = tempfile::tempdir().unwrap();

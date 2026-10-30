@@ -61,6 +61,42 @@ test('R6 a child without MCP tools never starts another server',async t=>{
   const run=await f.run();assert.equal(run.result.exit_reason,'completed');assert.equal(starts().length,1)
 })
 
+test('R35 child borrows whitelisted parent MCP connection and child close preserves its state',async t=>{
+  const turns=[call('state'),{tool_calls:[{name:'delegate',arguments:{kind:'counter-agent',task:'count'}}]},call('state'),{text:JSON.stringify({summary:'counted',findings:[],evidence_refs:[],unresolved:[]})},call('state'),{text:'parent done'},call('state'),{text:'next turn'}]
+  const {f,starts}=await setup(t,turns)
+  await f.request('saveAgent',{agent:{name:'counter-agent',description:'counter',instructions:'count',tools:[turns[0].tool_calls[0].name],inheritTools:false}})
+  const run=await f.run()
+  const childId=run.detail.events.find(e=>e.type==='subagent_start').data.child_session_id
+  const child=await f.request('getSession',{sessionId:childId})
+  assert.deepEqual(results({detail:child}),['state:2'])
+  assert.deepEqual(results(run),['state:1','state:3'])
+  assert.equal(starts().length,1)
+  assert.equal(results(await f.run({text:'next'})).at(-1),'state:4')
+  assert.equal(starts().length,1)
+})
+
+test('R35 child failure cannot close borrowed parent MCP connections',async t=>{
+  const turns=[call('state'),{tool_calls:[{name:'delegate',arguments:{kind:'counter-agent',task:'fail'}}]},{error:'provider simulated failure'},call('state'),{text:'handled'},call('state'),{text:'next turn'}]
+  const {f,starts}=await setup(t,turns)
+  await f.request('saveAgent',{agent:{name:'counter-agent',description:'counter',instructions:'count',tools:[],inheritTools:true}})
+  assert.deepEqual(results(await f.run()),['state:1','state:2'])
+  assert.equal(results(await f.run({text:'next'})).at(-1),'state:3')
+  assert.equal(starts().length,1)
+})
+
+test('R35 sharing a registry never grants sibling MCP tools to a child',async t=>{
+  const turns=[{tool_calls:[{name:'delegate',arguments:{kind:'limited',task:'attempt forbidden server'}}]},call('b'),{text:JSON.stringify({summary:'forbidden tool refused',findings:[],evidence_refs:[],unresolved:[]})},call('b'),{text:'parent done'}]
+  const {f,starts}=await setup(t,turns,['a','b'])
+  const entries=(await f.request('getLocalExtensions',{workspace:f.workspace})).entries
+  const allowed=entries.find(e=>e.kind==='mcp'&&e.name==='a').runtimeName
+  await f.request('saveAgent',{agent:{name:'limited',description:'only a',instructions:'use a',tools:[`mcp__${allowed}__counter`],inheritTools:false}})
+  for(const name of ['mcp__a__*','mcp____counter','mcp__a__']) await assert.rejects(f.request('saveAgent',{agent:{name:'invalid',description:'invalid',instructions:'test',tools:[name],inheritTools:false}}),/未知工具/)
+  const run=await f.run()
+  const child=await f.request('getSession',{sessionId:run.detail.events.find(e=>e.type==='subagent_start').data.child_session_id})
+  assert.ok(!child.events.some(e=>e.type==='tool_call_result'&&e.data.name===turns[1].tool_calls[0].name&&e.data.success))
+  assert.deepEqual(results(run),['b:1']);assert.equal(starts().length,2)
+})
+
 test('R6 disconnected MCP reconnects on the next turn',async t=>{
   const {f,starts}=await setup(t,[call('state'),{text:'first'},call('state'),{text:'second'}])
   assert.equal(results(await f.run()).at(-1),'state:1')

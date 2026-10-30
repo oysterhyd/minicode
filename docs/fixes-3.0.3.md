@@ -917,3 +917,13 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 展示：TUI 在 delegate 行显示当前活动及工具次数，Ctrl+O 展开/收起调用列表；Desktop 沿用带 Expanded 无障碍语义的原工具披露按钮，折叠时仍显示摘要。两端 live/history 共用各自的归约逻辑，按父调用 ID 精确关联；按子调用 ID 去重、按子事件序号排序且旧 start 不覆盖新 result，终止后不恢复为运行中。旧 subagent_start 保留 kind/task 回退及子会话跳转。
 - 测试：3 项真实 Bridge 回归验证父会话收到并持久化顺序正确的进度、工具开始/完成摘要、敏感字段缺席、暂停及异常终止；TUI 验证相同任务绑定、逆序/重复事件、live/history 一致及运行中 Ctrl+O；Desktop 验证同样的模型行为及真实按钮展开/折叠。无新依赖、无数据库迁移；不支持新事件的旧客户端继续忽略它。
 - 验证：完整 `output/check-5.ps1 -Item R33 -Desktop` 通过，日志前缀 `output/5-R33-`：fmt、Clippy、Rust 195 通过/2 个既有忽略、build、协议 249 通过/2 个既有跳过、生成文件无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 121 通过、Desktop test/vet/vendor UI。首次全测新增错误用例误把父会话终止方式当作子错误验收条件，按现有 provider_error 语义校正后聚焦及全测通过，保留 `output/5-R33-first-protocol.log`。仅在本机 Windows 执行。
+
+### R35 父级资源借用与真实用户 requirements
+
+- 核查：每个 child 仍创建/关闭独立 MCP 注册表；状态计数回归得到 state:1 而非父级连续 state:2，失败子任务也额外启动第二个服务。requirements 从最后 12 条 role=user 直接拼接，20 条提醒挤掉真实输入，单条 UTF-8 请求超过 40 KB 无截断。失败日志 `output/5-R35-red-protocol.log`、`output/5-R35-red-rust.log`。
+- 资源：子 Runtime 构造直接克隆父级已解析 Catalog，保持独立可变状态，后续发现刷新仍复用 EXT1/EXT2 缓存及变更校验。MCP restricted 视图只暴露白名单的精确工具，并记录连接属于父级借用；子任务正常完成、失败、取消、无 MCP 工具、增量重连和移除服务均不得关闭借用连接。只有实际拥有的连接参与资源所有权/会话锁保留。父会话关闭仍统一清理；借用连接断开/变化时，子任务可创建并清理自己的恢复连接，不更改父级所有权。
+- 权限：保留子代理原有 allowed/specs/preflight 三层过滤，复用连接不授予同服务其他工具或兄弟服务权限。saveAgent 原先拒绝所有精确 MCP 工具名，只能 inheritTools；现允许显式 mcp__server__tool 名称，拒绝通配符及空段，运行时仍须真实发现和授权。无 MCP 白名单的 child 不建立连接。
+- requirements：先筛选真实 user 文本，排除含工具回执的消息、空消息、带 system-reminder 标签的系统通知及归档摘要，再选最近 12 条，以时间顺序交给 child。总计最多 16,384 UTF-8 字节，优先保留较新请求；单条过长保留头部约束和末尾请求，用可见标记说明截断，始终在字符边界截断。并行 branch 也在取最近输入前应用相同筛选。
+- 回归：3 项真实 Bridge 测试覆盖精确白名单和继承白名单复用父进程/连续计数、子任务成功/失败后父连接仍可用、兄弟 MCP 调用被拒绝、非法白名单格式；2 项 Rust 测试覆盖提醒/归档/混合工具消息排除、筛选顺序、真实请求顺序及多字节头尾截断。无新依赖或存储迁移。
+- 指令兼容复核：旧 audit 用例通过 system prompt 检查 Skill 正文，实际上依赖合成动态提醒被混入 requirements。R35 去除污染后，Skill 仍由子任务的动态指令快照正确继承；用例现同时验证正文存在于 child user 动态快照、且不被复制进 system requirements。聚焦通过，首轮全测日志保留 `output/5-R35-first-protocol.log`。
+- 验证：完整 `output/check-5.ps1 -Item R35 -Desktop` 通过，日志前缀 `output/5-R35-`：fmt、Clippy、Rust 197 通过/2 个既有忽略、build、协议 252 通过/2 个既有跳过、生成文件无差异、60 次主任务与 9 个场景保持预期、npm ci/build、TUI 121 通过、Desktop test/vet/vendor UI。仅 Windows 在本机执行。

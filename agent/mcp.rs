@@ -654,14 +654,57 @@ pub struct McpRegistry {
     pub timeouts: HashMap<String, Duration>,
     pub statuses: Vec<Value>,
     connectors: Vec<Arc<Connector>>,
+    // Borrowed connections remain owned (and closed) by the parent session.
+    borrowed: Vec<Arc<Connector>>,
 }
 impl McpRegistry {
+    pub fn restricted(&self, allowed: Option<&std::collections::HashSet<String>>) -> Self {
+        let tools: HashMap<_, _> = self
+            .tools
+            .iter()
+            .filter(|(name, _)| allowed.is_none_or(|set| set.contains(*name)))
+            .map(|(name, tool)| (name.clone(), tool.clone()))
+            .collect();
+        let connectors = self
+            .connectors
+            .iter()
+            .filter(|c| {
+                allowed.is_none_or(|set| {
+                    set.iter()
+                        .any(|name| name.starts_with(&format!("mcp__{}__", c.config.name)))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        Self {
+            timeouts: self
+                .timeouts
+                .iter()
+                .filter(|(name, _)| tools.contains_key(*name))
+                .map(|(name, value)| (name.clone(), *value))
+                .collect(),
+            statuses: self
+                .statuses
+                .iter()
+                .filter(|status| connectors.iter().any(|c| status["server"] == c.config.name))
+                .cloned()
+                .collect(),
+            tools,
+            borrowed: connectors.clone(),
+            connectors,
+        }
+    }
+    fn owns(&self, connector: &Arc<Connector>) -> bool {
+        !self.borrowed.iter().any(|c| Arc::ptr_eq(c, connector))
+    }
     pub fn has_live_connections(&self) -> bool {
-        self.connectors.iter().any(|c| c.pending.live())
+        self.connectors
+            .iter()
+            .any(|c| self.owns(c) && c.pending.live())
     }
     pub async fn retire_changed(&self, servers: &[Server]) {
         for connector in &self.connectors {
-            if !servers.iter().any(|server| connector.reusable(server)) {
+            if self.owns(connector) && !servers.iter().any(|server| connector.reusable(server)) {
                 connector.close().await;
             }
         }
@@ -705,12 +748,15 @@ impl McpRegistry {
                     r.statuses.push(status.clone());
                 }
                 r.connectors.push(connector.clone());
+                if !previous.owns(connector) {
+                    r.borrowed.push(connector.clone());
+                }
             } else {
                 changed.push(server);
             }
         }
         for connector in &previous.connectors {
-            if !r.connectors.iter().any(|c| Arc::ptr_eq(c, connector)) {
+            if previous.owns(connector) && !r.connectors.iter().any(|c| Arc::ptr_eq(c, connector)) {
                 connector.close().await;
             }
         }
@@ -763,7 +809,9 @@ impl McpRegistry {
     }
     pub async fn close(&self) {
         for c in &self.connectors {
-            c.close().await;
+            if self.owns(c) {
+                c.close().await;
+            }
         }
     }
     pub async fn statuses_with_diagnostics(&self) -> Vec<Value> {
