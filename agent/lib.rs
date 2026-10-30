@@ -7,6 +7,7 @@ pub mod configuration;
 pub mod context;
 mod editing;
 pub mod eval;
+mod extension_cache;
 pub mod extensions;
 pub mod goals;
 pub mod mcp;

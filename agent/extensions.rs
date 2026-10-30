@@ -1,5 +1,6 @@
 use crate::{
     configuration::{self, Configuration},
+    extension_cache::{self, watch},
     util,
 };
 use anyhow::{Context, Result, bail};
@@ -21,6 +22,7 @@ pub struct Source {
 }
 impl Source {
     pub fn read(path: &Path, limit: u64) -> Result<Self> {
+        watch(path);
         let mut bytes = vec![];
         fs::File::open(path)?
             .take(limit + 1)
@@ -140,6 +142,7 @@ fn json_file(path: &Path, limit: u64) -> Result<Value> {
     }
 }
 pub fn skill_metadata(path: &Path) -> Result<(String, String)> {
+    watch(path);
     if util::is_link(path) {
         bail!("skill path is a link or junction")
     }
@@ -163,12 +166,14 @@ pub fn skill_metadata(path: &Path) -> Result<(String, String)> {
     ))
 }
 pub fn fingerprint(root: &Path) -> Result<String> {
+    watch(root);
     if util::is_link(root) {
         bail!("plugin directory is a link")
     }
     let mut files = vec![];
     for entry in walkdir::WalkDir::new(root).sort_by_file_name().into_iter() {
         let entry = entry?;
+        watch(entry.path());
         if util::is_link(entry.path()) {
             bail!("plugin contains a link: {}", entry.path().display())
         }
@@ -217,6 +222,7 @@ pub fn fingerprint(root: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 fn directories(root: &Path) -> Vec<PathBuf> {
+    watch(root);
     let mut paths = fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -234,6 +240,18 @@ fn directories(root: &Path) -> Vec<PathBuf> {
 }
 impl Catalog {
     pub fn scan(workspace: &Path, configuration: Configuration, check_lock: bool) -> Result<Self> {
+        let config = configuration.clone();
+        extension_cache::catalog(workspace, configuration, check_lock, || {
+            Self::scan_uncached(workspace, config, check_lock)
+        })
+    }
+    fn scan_uncached(
+        workspace: &Path,
+        configuration: Configuration,
+        check_lock: bool,
+    ) -> Result<Self> {
+        #[cfg(test)]
+        record_catalog_scan(workspace);
         let mut result = Self {
             workspace: util::canonical(workspace)?,
             skills: BTreeMap::new(),
@@ -305,6 +323,8 @@ impl Catalog {
     }
     fn scan_plugins(&mut self, check_lock: bool) -> Result<()> {
         let root = self.workspace.join(".minicode/plugins");
+        watch(&root);
+        watch(root.parent().unwrap());
         if util::is_link(&root) || util::is_link(root.parent().unwrap()) {
             bail!("plugin configuration directory is a link or junction")
         }
@@ -319,6 +339,7 @@ impl Catalog {
         let valid_name = NAME.get_or_init(|| regex::Regex::new(r"^[a-z][a-z0-9_]{0,31}$").unwrap());
         for dir in directories(&root) {
             let path = dir.join("plugin.json");
+            watch(&path);
             if !path.is_file() {
                 continue;
             }
@@ -425,6 +446,7 @@ impl Catalog {
             self.plugins.push(json!({"name":name,"version":version,"enabled":enabled,"digest":&digest[..12],"sha256":digest,"path":dir,"skills":raw["skills"].is_string(),"agents":raw["agents"].is_string(),"servers":server_names,"trusted":trusted,"trustRequired":!trusted&&!commands.is_empty(),"commands":commands}));
         }
         let lockpath = self.workspace.join(".minicode/plugins.lock.json");
+        watch(&lockpath);
         if check_lock && lockpath.exists() && json_file(&lockpath, 1_000_000)? != lock {
             bail!(
                 "plugin lock differs from local manifests; run `minicode plugins lock` after reviewing changes"
@@ -445,6 +467,7 @@ impl Catalog {
             .join("trusted-plugins.json")
     }
     fn trust_store(&self) -> Value {
+        watch(&self.trust_path());
         fs::read(self.trust_path())
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -546,13 +569,17 @@ impl Catalog {
         Ok(key)
     }
     fn local_skills(&mut self, root: &Path, scope: &str, source: &str, parent: &str) -> Result<()> {
+        watch(&root.join("SKILL.md"));
         let paths = if root.join("SKILL.md").is_file() {
             vec![root.join("SKILL.md")]
         } else {
             directories(root)
                 .into_iter()
                 .map(|d| d.join("SKILL.md"))
-                .filter(|p| p.is_file())
+                .filter(|p| {
+                    watch(p);
+                    p.is_file()
+                })
                 .take(1000)
                 .collect()
         };
@@ -630,6 +657,7 @@ impl Catalog {
         override_raw: Option<Value>,
         plugin_root: &Path,
     ) -> Result<()> {
+        watch(path);
         if !path.is_file() {
             return Ok(());
         }
@@ -813,7 +841,10 @@ impl Catalog {
             root.join("manifest.json"),
         ]
         .into_iter()
-        .find(|p| p.is_file());
+        .find(|p| {
+            watch(p);
+            p.is_file()
+        });
         let Some(path) = path else { return Ok(()) };
         let Ok(raw) = json_file(&path, 1_000_000) else {
             return Ok(());
@@ -928,6 +959,7 @@ impl Catalog {
             ] {
                 self.local_skills(&base.join(relative), scope, source, "")?;
             }
+            watch(&base.join(".agents/servers"));
             for e in fs::read_dir(base.join(".agents/servers"))
                 .into_iter()
                 .flatten()
@@ -996,6 +1028,7 @@ impl Catalog {
         if let Ok(override_dir) = std::env::var("PI_DESKTOP_AGENTS_DIR") {
             let dir = PathBuf::from(override_dir);
             self.local_skills(&dir.join("skills"), "global", "Pi Desktop", "")?;
+            watch(&dir.join("servers"));
             for e in fs::read_dir(dir.join("servers"))
                 .into_iter()
                 .flatten()
@@ -1066,7 +1099,9 @@ impl Catalog {
             .unwrap_or(Path::new("."))
             .join("AGENTS.md");
         let mut changed = vec![];
+        watch(global.parent().unwrap());
         for path in [global.clone(), self.workspace.join("AGENTS.md")] {
+            watch(&path);
             if util::is_link(&path) || (path == global && util::is_link(path.parent().unwrap())) {
                 bail!("instructions path is a link or junction")
             }
@@ -1211,5 +1246,200 @@ impl Catalog {
         ));
         text.push_str("\n运行时会通过 <system-reminder> 更新动态项目指令和 Skills；同一来源以最新有效版本为准。\n");
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+fn catalog_scan_counts() -> &'static std::sync::Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(Default::default)
+}
+#[cfg(test)]
+fn record_catalog_scan(workspace: &Path) {
+    *catalog_scan_counts()
+        .lock()
+        .unwrap()
+        .entry(workspace.into())
+        .or_default() += 1;
+}
+#[cfg(test)]
+mod catalog_cache_tests {
+    use super::*;
+    #[test]
+    fn ext1_unchanged_catalog_scans_once_and_runtime_state_stays_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = util::canonical(dir.path()).unwrap();
+        let configuration = Configuration {
+            path: workspace.join("config.json"),
+        };
+        let skill = workspace.join(".minicode/skills/helper");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: helper\ndescription: cached\n---\nbody",
+        )
+        .unwrap();
+        let mut first = Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        first.load("helper").unwrap();
+        first.pending_scopes.insert(workspace.join("sub"));
+        let second = Catalog::scan(&workspace, configuration, true).unwrap();
+        assert!(second.active.is_empty());
+        assert!(second.pending_scopes.is_empty());
+        assert_eq!(
+            catalog_scan_counts().lock().unwrap()[&workspace],
+            1,
+            "unchanged constructors must share the discovery cache"
+        );
+    }
+
+    #[test]
+    fn ext1_catalog_refreshes_added_modified_deleted_sources_and_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = util::canonical(dir.path()).unwrap();
+        let workspace = root.join("repo");
+        fs::create_dir(&workspace).unwrap();
+        let configuration = Configuration {
+            path: root.join("config.json"),
+        };
+        let skill = workspace.join(".minicode/skills/helper");
+        fs::create_dir_all(&skill).unwrap();
+        assert!(
+            Catalog::scan(&workspace, configuration.clone(), true)
+                .unwrap()
+                .skills
+                .is_empty()
+        );
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: helper\ndescription: first\n---\nbody",
+        )
+        .unwrap();
+        fs::write(workspace.join("AGENTS.md"), "first rules").unwrap();
+        let first = Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        assert_eq!(first.skills["helper"].description, "first");
+        assert_eq!(
+            first.instructions[&workspace.join("AGENTS.md")].content,
+            "first rules"
+        );
+        util::atomic_write(
+            &skill.join("SKILL.md"),
+            b"---\nname: helper\ndescription: other\n---\nbody",
+        )
+        .unwrap();
+        util::atomic_write(&workspace.join("AGENTS.md"), b"other rules").unwrap();
+        let second = Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        assert_eq!(second.skills["helper"].description, "other");
+        assert_eq!(
+            second.instructions[&workspace.join("AGENTS.md")].content,
+            "other rules"
+        );
+        fs::remove_file(skill.join("SKILL.md")).unwrap();
+        fs::remove_file(workspace.join("AGENTS.md")).unwrap();
+        let deleted = Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        assert!(deleted.skills.is_empty());
+        assert!(
+            !deleted
+                .instructions
+                .contains_key(&workspace.join("AGENTS.md"))
+        );
+        fs::write(
+            workspace.join(".mcp.json"),
+            r#"{"mcpServers":{"new":{"command":"not-started"}}}"#,
+        )
+        .unwrap();
+        let added = Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        let entry = added
+            .local
+            .iter()
+            .find(|e| {
+                e["kind"] == "mcp"
+                    && e["name"] == "new"
+                    && e["path"] == workspace.join(".mcp.json").to_string_lossy().as_ref()
+            })
+            .unwrap();
+        assert!(added.servers.is_empty());
+        added
+            .set_local(entry["id"].as_str().unwrap(), true)
+            .unwrap();
+        assert_eq!(
+            Catalog::scan(&workspace, configuration.clone(), true)
+                .unwrap()
+                .servers
+                .len(),
+            1
+        );
+        fs::remove_file(workspace.join(".mcp.json")).unwrap();
+        assert!(
+            Catalog::scan(&workspace, configuration, true)
+                .unwrap()
+                .servers
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ext1_cache_keeps_plugin_integrity_and_lock_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = util::canonical(dir.path()).unwrap();
+        let configuration = Configuration {
+            path: workspace.join("config.json"),
+        };
+        Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        let plugin = workspace.join(".minicode/plugins/cache_test");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(plugin.join("plugin.json"),serde_json::to_vec(&json!({"name":"cache_test","version":"1.0.0","minicode_version":crate::VERSION,"enabled":false})).unwrap()).unwrap();
+        let added = Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        assert_eq!(added.plugins.len(), 1);
+        added.write_lock().unwrap();
+        let before = Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        fs::create_dir(plugin.join("nested")).unwrap();
+        fs::write(plugin.join("nested/code.js"), "changed").unwrap();
+        assert!(
+            Catalog::scan(&workspace, configuration.clone(), true)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("lock differs")
+        );
+        let unlocked = Catalog::scan(&workspace, configuration.clone(), false).unwrap();
+        assert_ne!(unlocked.plugins[0]["sha256"], before.plugins[0]["sha256"]);
+        unlocked.write_lock().unwrap();
+        Catalog::scan(&workspace, configuration.clone(), true).unwrap();
+        fs::remove_dir_all(&plugin).unwrap();
+        fs::remove_file(workspace.join(".minicode/plugins.lock.json")).unwrap();
+        assert!(
+            Catalog::scan(&workspace, configuration, true)
+                .unwrap()
+                .plugins
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ext1_concurrent_constructors_coalesce_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = util::canonical(dir.path()).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let workspace = workspace.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Catalog::scan(
+                        &workspace,
+                        Configuration {
+                            path: workspace.join("config.json"),
+                        },
+                        true,
+                    )
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(catalog_scan_counts().lock().unwrap()[&workspace], 1);
     }
 }
