@@ -457,6 +457,12 @@ impl Store {
             q.query_map([id], |r| r.get::<_,String>(0))?.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
         })
     }
+    pub fn submitted_result(&self, id: &str) -> Result<Option<Value>> {
+        self.with(|c| {
+            let data:Option<String>=c.query_row("SELECT json_extract(t.data,'$.arguments') FROM events s JOIN events t ON t.session_id=s.session_id AND t.type='tool_call_start' AND json_extract(t.data,'$.call_id')=json_extract(s.data,'$.call_id') WHERE s.session_id=? AND s.type='subagent_result_submitted' ORDER BY s.seq DESC,t.seq DESC LIMIT 1",[id],|r|r.get(0)).optional()?.flatten();
+            data.map(|s|Ok(serde_json::from_str(&s)?)).transpose()
+        })
+    }
     pub fn statistics_events(&self, id: &str, after: i64) -> Result<(i64, Vec<Event>)> {
         self.with(|c| {
             // Capture an upper bound so concurrent writers cannot advance the

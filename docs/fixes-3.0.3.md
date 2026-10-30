@@ -889,3 +889,14 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 验证记录：首次资源锁回归全测中，未改动的 `concurrent_edits_of_one_file_are_serialized` 出现一次 Windows os error 2。tools/util/editing/tests 的对应逻辑与 MC5 提交一致；保留日志 `output/5-resource-ownership-test-flake.log`，连续 8 次聚焦复跑和随后完整资源锁检查通过，未修改该并发编辑逻辑，也不声称已根治此时序波动。补齐无效 continue 后的最终全阶段检查使用 `output/check-5.ps1 -Item 5A-final -Desktop`、日志 `output/5-5A-final-`，完整检查已通过。
 
 - 最终阶段结果：`5A-final` 的 fmt、Clippy、Rust 191 通过/2 个既有忽略、build、协议 232 通过/2 个既有跳过、生成文件检查、60 次主任务与 9 个场景、npm ci/build、TUI 119 通过，以及 Desktop go test/vet/vendor UI 全部通过。Runtime 替换在更新快照和设置前完成旧资源清理。
+
+## 阶段 5B：子代理可靠性与隔离
+
+### R31 容错结构化结果与 submit_result
+
+- 核查：原实现直接 `serde_json::from_str(final_text)`；围栏、附加说明和 submit_result 回归失败，裸 JSON、非法结构拒绝和父会话不可调用的控制场景通过。日志 `output/5B-R31-red.log`（7 项中 4 项失败）。已有 summary 字符串及三个字符串数组的结构检查继续使用，不放宽元素类型。
+- 结果提交：仅子代理获得 submit_result 工具，仍执行 schema、白名单及权限授权。成功提交立即结束子任务，补齐同一响应后续工具的“未执行”回执；不消耗父任务的下一轮模型响应。新工具拒绝未知参数，不能通过额外 path 字段伪造文件接触记录。父会话的工具表不包含 submit_result，旧裸 JSON 路径和文本结果中的已有额外字段保持兼容。
+- 恢复：提交事件只保存 call_id，实际结果从既有 tool_call_start 参数取得，避免重复持久化正文。提交标记落库后才返回成功；工具回执写入失败时可恢复并幂等补回回执，无需再次请求子模型。正常结果仍经过原 evidence_refs 验证流程，R31b 继续处理路径及搜索命中的真实性。
+- 文本回退：`agent/subagent_result.rs` 支持裸 JSON、Markdown JSON 围栏及说明中的首个合法结果对象；识别到无关的完整对象/数组时跳过整个值，防止从嵌套示例中抽出结果。最多解析 128 个候选，拒绝类型错误或不完整结构。沿用既有提供商/协议体积限制，不给原本合法的大结果新增更低上限。
+- 测试：8 项真实 Bridge 回归覆盖三种文本形式、工具提交直接完成、非法类型/未知参数修正、嵌套无关对象拒绝、父会话拒绝、提交后不执行写入；2 项 Rust 回归覆盖解析边界/大结果，以及注入回执写失败后重载并恢复，确认子会话模型请求与提交标记均只有一次。
+- 验证：完整脚本 `output/check-5.ps1 -Item R31 -Desktop` 全部通过，日志前缀 `output/5-R31-`：fmt、Clippy、Rust 193 通过/2 个既有忽略、build、协议 240 通过/2 个既有跳过、任务/trace 无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 119 通过、Desktop go test/vet/vendor UI。首次 Clippy 的测试迭代器告警改为从末尾查找后重跑通过。无新依赖或 schema 迁移；新增工具/事件兼容旧客户端，子任务进度展示在 R33 完成。

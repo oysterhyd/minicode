@@ -128,6 +128,7 @@ pub fn read_only(name: &str) -> bool {
         "grep",
         "read_artifact",
         "bash_output",
+        "submit_result",
         "skills_list",
         "skill_load",
         "skill_unload",
@@ -148,11 +149,12 @@ pub fn replay_safe(name: &str) -> bool {
         "skill_resource",
         "task_list",
         "memory_list",
+        "submit_result",
     ]
     .contains(&name)
 }
 pub fn parallel_read(name: &str) -> bool {
-    replay_safe(name)
+    replay_safe(name) && name != "submit_result"
 }
 pub fn policy(name: &str, mode: &str) -> &'static str {
     if mode == "bypass"
@@ -179,6 +181,9 @@ pub fn specs(
     allow_delegate: bool,
 ) -> Vec<ToolSpec> {
     let mut specs = builtins().clone();
+    if allow_delegate {
+        specs.retain(|s| s.name != "submit_result");
+    }
     if !allow_delegate {
         specs.retain(|s| s.name != "delegate");
     }

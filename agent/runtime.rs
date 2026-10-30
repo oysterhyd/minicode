@@ -170,6 +170,7 @@ pub struct Runtime {
     pub mcp: Arc<McpRegistry>,
     pub background: Arc<crate::background::Jobs>,
     ownership: Mutex<Option<store::SessionLock>>,
+    submitted_result: Option<Value>,
     pub allowed: Option<HashSet<String>>,
     pub child: bool,
     pub children: HashMap<(String, String), Box<Runtime>>,
@@ -382,6 +383,10 @@ impl Runtime {
             .map(|(_, sources, _)| prompt_sources(sources))
             .unwrap_or_default();
         let dynamic_hash = frozen.and_then(|(_, _, hash)| hash);
+        let submitted_result = store.submitted_result(&id)?;
+        if let Some(value) = &submitted_result {
+            crate::subagent_result::validate(value)?;
+        }
         let mut runtime = Self {
             session: id,
             workspace,
@@ -397,6 +402,7 @@ impl Runtime {
             mcp: Arc::new(McpRegistry::default()),
             background: Default::default(),
             ownership: Default::default(),
+            submitted_result,
             allowed: None,
             child: false,
             children: HashMap::new(),
@@ -1194,6 +1200,10 @@ impl Runtime {
         hooks: &Hooks,
     ) -> Result<String> {
         self.prepare(hooks).await?;
+        Self::check(hooks)?;
+        if self.child && self.submitted_result.is_some() {
+            return Ok("completed".into());
+        }
         if let Some(text) = text {
             let mut content = attachments;
             content.push(Block::text(text));
@@ -1573,6 +1583,17 @@ impl Runtime {
                 let Block::ToolUse { name, input, .. } = call else {
                     unreachable!()
                 };
+                if self.child && self.submitted_result.is_some() {
+                    results.push(self.record_result(
+                        call,
+                        Outcome::failure("子助手已提交最终结果，后续调用未执行"),
+                        hooks,
+                        false,
+                        0.0,
+                    )?);
+                    index += 1;
+                    continue;
+                }
                 if ["bash", "powershell"].contains(&name.as_str()) && input["background"] == true {
                     if let Some(outcome) = self.preflight(call, hooks, false).await? {
                         results.push(self.record_result(call, outcome, hooks, false, 0.0)?);
@@ -1666,6 +1687,7 @@ impl Runtime {
                                 mcp: self.mcp.clone(),
                                 background: self.background.clone(),
                                 ownership: Default::default(),
+                                submitted_result: None,
                                 allowed: self.allowed.clone(),
                                 child: false,
                                 children,
@@ -1782,6 +1804,9 @@ impl Runtime {
             })?;
             self.sync_dynamic_context().await?;
             self.event(hooks, "round_end", json!({"round":self.rounds}))?;
+            if self.child && self.submitted_result.is_some() {
+                return Ok("completed".into());
+            }
             if repeated >= 3 {
                 self.append(Message::user("<system-reminder>\n连续多轮工具调用与结果完全相同，任务已暂停以避免无效循环。继续时请重新评估目标与可用证据。\n</system-reminder>"))?;
                 return Ok("stalled".into());
@@ -2178,6 +2203,46 @@ impl Runtime {
         Ok(result)
     }
     async fn invoke(&mut self, call: Block, hooks: &Hooks, recovered: bool) -> Result<Block> {
+        if self.child
+            && let Block::ToolUse {
+                name, input, id, ..
+            } = &call
+            && name == "submit_result"
+        {
+            if let Some(outcome) = self.preflight(&call, hooks, recovered).await? {
+                return self.record_result(&call, outcome, hooks, recovered, 0.0);
+            }
+            if let Err(error) = crate::subagent_result::validate(input) {
+                return self.record_result(
+                    &call,
+                    Outcome::failure(error.to_string()),
+                    hooks,
+                    recovered,
+                    0.0,
+                );
+            }
+            if !self.authorize(&call, hooks).await? {
+                return self.record_result(
+                    &call,
+                    Outcome::failure("用户拒绝了工具执行"),
+                    hooks,
+                    recovered,
+                    0.0,
+                );
+            }
+            self.mark_tool_started(&call, hooks)?;
+            if self.submitted_result.as_ref() != Some(input) {
+                self.event(hooks, "subagent_result_submitted", json!({"call_id":id}))?;
+            }
+            self.submitted_result = Some(input.clone());
+            return self.record_result(
+                &call,
+                Outcome::ok("Structured result submitted to parent."),
+                hooks,
+                recovered,
+                0.0,
+            );
+        }
         if let Block::ToolUse { name, input, .. } = &call
             && name == "delegate"
             && !self.child
@@ -2383,6 +2448,7 @@ impl Runtime {
             child.allowed = allowed.map(|mut set| {
                 set.remove("delegate");
                 set.retain(|s| !s.starts_with("task_"));
+                set.insert("submit_result".into());
                 set
             });
             child.provider = self.provider.clone();
@@ -2396,7 +2462,7 @@ impl Runtime {
                 .collect::<Vec<_>>()
                 .join("\n");
             child.custom_prompt = Some(format!(
-                "\n你是子助手。只使用配置的工具，遵守父会话权限。最终只输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。不得编造证据。\n父任务要求：\n{requirements}\n子助手指令：\n{instructions}"
+                "\n你是子助手。只使用配置的工具，遵守父会话权限。完成时优先调用 submit_result 提交结构化结果；也可最终输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。不得编造证据。\n父任务要求：\n{requirements}\n子助手指令：\n{instructions}"
             ));
             let child_id = child.session.clone();
             self.event(
@@ -2450,13 +2516,10 @@ impl Runtime {
                 .find(|m| m.role == "assistant")
                 .map(Message::text)
                 .unwrap_or_default();
-            let parsed = serde_json::from_str::<Value>(&final_text).ok().filter(|v| {
-                v["summary"].is_string()
-                    && ["findings", "evidence_refs", "unresolved"].iter().all(|k| {
-                        v[k].as_array()
-                            .is_some_and(|items| items.iter().all(Value::is_string))
-                    })
-            });
+            let parsed = child
+                .submitted_result
+                .clone()
+                .or_else(|| crate::subagent_result::extract(&final_text));
             let structured = parsed.is_some();
             let mut payload=parsed.unwrap_or(json!({"summary":final_text,"findings":[],"evidence_refs":[],"unresolved":["子助手未返回有效的结构化结果。"]}));
             let events = self.store.recovery_events(&child_id)?;

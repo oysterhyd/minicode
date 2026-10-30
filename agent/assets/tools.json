@@ -115,6 +115,22 @@
     "requires_approval": false
   },
   {
+    "name": "submit_result",
+    "description": "Submit this child assistant's final structured result to the parent. This completes the child task; later calls in the same batch are skipped. Available only to child assistants. Reference only files actually observed through successful tools.",
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summary": {"type": "string"},
+        "findings": {"type": "array", "items": {"type": "string"}},
+        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+        "unresolved": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["summary", "findings", "evidence_refs", "unresolved"]
+    },
+    "requires_approval": false
+  },
+  {
     "name": "edit",
     "description": "Edit one file atomically. Use old_text/new_text or edits[] (1–100 operations against the original snapshot). Exact matching is preferred, then unique normalized matches for trailing whitespace, typographic quotes, Unicode compatibility variants and common indentation. Ambiguity or overlapping edits fail without writes. Failed matches return candidate lines without applying them. Set match_mode=exact to disable normalization. Existing encoding/BOM are preserved.",
     "input_schema": {

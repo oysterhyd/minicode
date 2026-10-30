@@ -2613,6 +2613,65 @@ fn background_then(last: serde_json::Value) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn r31_saved_submission_resumes_without_another_child_model_request() {
+    let payload = json!({"summary":"saved","findings":[],"evidence_refs":[],"unresolved":[]});
+    let delegate =
+        json!({"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"submit"}}]});
+    let mut h=Harness::new(json!({"turns":[delegate,{"tool_calls":[{"name":"submit_result","arguments":payload}]},delegate,{"text":"parent done"}]})).await;
+    h.hooks.settings.lock().unwrap().budget.max_rounds = 2;
+    rusqlite::Connection::open(&h.runtime.store.path).unwrap().execute_batch("CREATE TRIGGER fail_submission_receipt BEFORE INSERT ON events WHEN NEW.type='tool_call_result' AND json_extract(NEW.data,'$.name')='submit_result' BEGIN SELECT RAISE(ABORT,'receipt failed'); END;").unwrap();
+    assert_eq!(
+        h.run(Some("submit task")).await.unwrap().exit_reason,
+        "max_rounds"
+    );
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let child = events
+        .iter()
+        .find(|e| e.r#type == "subagent_start")
+        .unwrap()
+        .data["child_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        h.runtime.store.submitted_result(&child).unwrap(),
+        Some(payload)
+    );
+    rusqlite::Connection::open(&h.runtime.store.path)
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_submission_receipt;")
+        .unwrap();
+    h.hooks.settings.lock().unwrap().budget.max_rounds = 0;
+    h.reopen().await.unwrap();
+    assert_eq!(h.run(None).await.unwrap().exit_reason, "completed");
+    let child_events = h.runtime.store.events(&child, -1).unwrap();
+    assert_eq!(
+        child_events
+            .iter()
+            .filter(|e| e.r#type == "assistant_message")
+            .count(),
+        1
+    );
+    assert_eq!(
+        child_events
+            .iter()
+            .filter(|e| e.r#type == "subagent_result_submitted")
+            .count(),
+        1
+    );
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    assert!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e.r#type == "subagent_result")
+            .unwrap()
+            .data["structured"]
+            == true
+    );
+}
+
+#[tokio::test]
 async fn r3_background_survives_turn_and_notifies_after_final_answer() {
     let mut h = Harness::new(json!({"turns":[
         {"tool_calls":[{"name":"bash","arguments":{"command":"node -e \"console.log('READY');setTimeout(()=>{console.log('FINISHED')},1800)\"","background":true}}]},
