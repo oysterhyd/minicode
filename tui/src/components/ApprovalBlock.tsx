@@ -38,11 +38,8 @@ function title(item: FeedItem): string {
 export function approvalOptions(item: FeedItem): string[] {
   // Trust is remembered per plugin fingerprint either way; a changed plugin asks again.
   if (item.name === 'workspace_trust') return ['是，信任并启动这些 MCP 服务', '是（插件内容变化前不再询问）', '否，不启动']
-  const always = item.name === 'bash' ? '是，并且本会话不再询问 Bash 命令'
-    : item.name === 'edit' ? '是，并且本会话不再询问文件编辑'
-      : item.name === 'write' ? '是，并且本会话不再询问文件写入'
-        : `是，并且本会话不再询问 ${toolMeta(item.name).done}`
-  return ['是', always, '否，并告诉 MiniCode 应该怎么做']
+  if (item.grantRule) return ['是，仅本次', `本会话允许：${item.grantRule}`, '否，并告诉 MiniCode 应该怎么做', `写入项目规则：${item.grantRule}`]
+  return ['是，仅本次', '否，并告诉 MiniCode 应该怎么做']
 }
 
 function previewLines(item: FeedItem): { text: string[]; diff: DiffLine[] } {
@@ -89,7 +86,7 @@ export function approvalRows(item: FeedItem, choice: number, columns: number): R
   rows.push(<Text> 是否继续？</Text>)
   approvalOptions(item).forEach((option, index) => {
     const active = index === choice
-    const label = `${index + 1}. ${option}${index === 2 ? ' (esc)' : ''}`
+    const label = `${index + 1}. ${option}${index === (approvalOptions(item).length === 2 ? 1 : 2) ? ' (esc)' : ''}`
     rows.push(
       <Text color={active ? theme.permission : undefined}>
         {active ? ' ❯ ' : '   '}{truncateWidth(label, Math.max(1, width - 3))}

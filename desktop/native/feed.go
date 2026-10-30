@@ -649,8 +649,11 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 			}
 			// Trust is kept per plugin fingerprint; "always allow" has no meaning there.
 			trust := item.Name == "workspace_trust"
-			if !trust && key(tr("本会话始终允许 ")+item.Name, "A", false).Disabled(item.Deciding).Clicked() {
+			if item.GrantRule != "" && key(tr("本会话允许：")+item.GrantRule, "A", false).Disabled(item.Deciding).Clicked() {
 				d.decide(item, true, true)
+			}
+			if item.GrantRule != "" && key(tr("写入项目规则"), "P", false).Disabled(item.Deciding).Clicked() {
+				d.decideScope(item, true, "project")
 			}
 			approve := tr("批准执行")
 			if trust {
@@ -664,8 +667,11 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 	if card.Shortcut(0, ui.KeyY) {
 		d.decide(item, true, false)
 	}
-	if card.Shortcut(0, ui.KeyA) {
+	if item.GrantRule != "" && card.Shortcut(0, ui.KeyA) {
 		d.decide(item, true, true)
+	}
+	if item.GrantRule != "" && card.Shortcut(0, ui.KeyP) {
+		d.decideScope(item, true, "project")
 	}
 	if card.Shortcut(0, ui.KeyN) || card.Shortcut(0, ui.KeyEscape) {
 		d.decide(item, false, false)

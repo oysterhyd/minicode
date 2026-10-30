@@ -35,3 +35,7 @@ export async function fixture(t,turns=[],env={}){const f=profile(turns),c=connec
 export function expectSequence(events,predicates){let at=0;for(const [n,check] of predicates.entries()){const found=events.slice(at).findIndex(check);if(found<0)throw Error(`sequence step ${n} missing after index ${at}: ${JSON.stringify(events.map(e=>e.event==='agent_event'?e.item.type:e.event))}`);at+=found+1}}
 export function pidAlive(pid){try{process.kill(pid,0);return true}catch(error){return error.code==='EPERM'}}
 export async function until(check,ms=10000){const end=Date.now()+ms;while(Date.now()<end){if(await check())return true;await delay(25)}return false}
+
+// Transport/lifecycle fixtures explicitly authorize their local mock tools.
+// Permission tests exercise the default policy without calling this helper.
+export function allowMockMcp(f){const dir=path.join(f.root,'.minicode');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'settings.json'),JSON.stringify({permissions:{allow:['mcp__*']}}))}

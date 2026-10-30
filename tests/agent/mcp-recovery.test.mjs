@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import {test} from 'node:test'
-import {fixture,pidAlive,until} from './helpers.mjs'
+import {allowMockMcp,fixture,pidAlive,until} from './helpers.mjs'
 
 async function setup(t,code,turns,limited) {
   const f=await fixture(t),file=path.join(f.root,'server.cjs')
@@ -14,7 +14,7 @@ async function setup(t,code,turns,limited) {
   const configPath=path.join(f.root,'.minicode/desktop-config.json'),config=JSON.parse(fs.readFileSync(configPath,'utf8'))
   config.toolTimeouts={[name(limited)]:0.1};fs.writeFileSync(configPath,JSON.stringify(config))
   fs.writeFileSync(f.script,JSON.stringify({turns:turns(name)}))
-  await f.request('setPermissionMode',{mode:'bypass'})
+  allowMockMcp(f);await f.request('setPermissionMode',{mode:'bypass'})
   return f
 }
 const call=(name,arguments_={})=>({tool_calls:[{name,arguments:arguments_}]})

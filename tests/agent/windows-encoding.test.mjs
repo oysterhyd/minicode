@@ -23,6 +23,8 @@ test('Windows shell children preserve explicit Python encoding preferences', {sk
 test('PowerShell console output encoding uses UTF-8 without a BOM', {skip:process.platform!=='win32'}, async t=>{
   const f=await fixture(t,[{tool_calls:[{name:'powershell',arguments:{command:'[Console]::OutputEncoding.GetPreamble().Length'}}]},{text:'done'}])
   await f.request('setPermissionMode',{mode:'bypass'})
+  const approvals=(async()=>{const approval=await f.wait(e=>e.event==='approval');assert.equal(approval.request.tool_name,'powershell');assert.equal(approval.request.grant_rule,null);await f.request('resolveApproval',{approvalId:approval.approvalId,sessionId:approval.sessionId,granted:true})})()
   const result=await f.run()
+  await approvals
   assert.equal(result.detail.events.find(e=>e.type==='tool_call_result').data.output_detail.trim(),'0')
 })

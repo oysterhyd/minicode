@@ -36,6 +36,7 @@ pub struct Settings {
     pub always_allow: HashSet<String>,
     pub pending_model: bool,
     pub registry_dirty: bool,
+    pub permission_rules: Value,
 }
 impl Settings {
     pub fn new(configuration: &Configuration) -> Result<Self> {
@@ -48,6 +49,7 @@ impl Settings {
             always_allow: HashSet::new(),
             pending_model: false,
             registry_dirty: false,
+            permission_rules: Value::Null,
         })
     }
 }
@@ -219,6 +221,9 @@ pub struct Runtime {
     submitted_result: Option<Value>,
     isolation: Option<Arc<crate::delegate_workspace::Workspace>>,
     isolations: HashMap<String, Arc<crate::delegate_workspace::Workspace>>,
+    permissions: Arc<crate::permissions::Rules>,
+    permission_workspace: PathBuf,
+    permission_settings: PathBuf,
     pub allowed: Option<HashSet<String>>,
     pub child: bool,
     pub children: HashMap<(String, String), Box<Runtime>>,
@@ -266,6 +271,18 @@ impl Runtime {
             bail!("workspace no longer exists")
         }
         let provider = Provider::new(model, &settings.effort, &catalog.configuration)?;
+        let permission_settings = catalog
+            .configuration
+            .path
+            .parent()
+            .context("configuration has no parent")?
+            .to_path_buf();
+        let permissions = Arc::new(crate::permissions::Rules::load(
+            &workspace,
+            &permission_settings,
+            &settings.permission_rules,
+            &settings.always_allow,
+        )?);
         let (id, messages, message_revision, usage, rounds, pending) = if let Some(id) = session {
             let summary = store.require(id)?;
             if util::canonical(Path::new(
@@ -448,6 +465,7 @@ impl Runtime {
         }
         let mut runtime = Self {
             session: id,
+            permission_workspace: workspace.clone(),
             workspace,
             store,
             catalog: Arc::new(tokio::sync::Mutex::new(catalog)),
@@ -464,6 +482,8 @@ impl Runtime {
             submitted_result,
             isolation: None,
             isolations: HashMap::new(),
+            permissions,
+            permission_settings,
             allowed: None,
             child: false,
             children: HashMap::new(),
@@ -532,6 +552,7 @@ impl Runtime {
                     bail!("saved child isolation mismatch")
                 }
                 runtime.isolation = Some(Arc::new(workspace));
+                runtime.permission_workspace = PathBuf::from(parent);
             }
         }
         let child_ids = events
@@ -1336,6 +1357,7 @@ impl Runtime {
             output,
             deadline: hooks.shared.lock().unwrap().deadline,
             files: self.files.clone(),
+            permissions: self.permissions.clone(),
         }
     }
     async fn run_inner(
@@ -1376,6 +1398,12 @@ impl Runtime {
         loop {
             Self::check(hooks)?;
             let settings = hooks.settings.lock().unwrap().clone();
+            self.permissions = Arc::new(crate::permissions::Rules::load(
+                &self.permission_workspace,
+                &self.permission_settings,
+                &settings.permission_rules,
+                &settings.always_allow,
+            )?);
             if settings.pending_model || settings.model != self.provider.configuration_id {
                 let config = self.catalog.lock().await.configuration.clone();
                 let mut next = Provider::new(&settings.model, &settings.effort, &config)?;
@@ -1835,6 +1863,9 @@ impl Runtime {
                                 submitted_result: None,
                                 isolation: None,
                                 isolations: HashMap::new(),
+                                permissions: self.permissions.clone(),
+                                permission_workspace: self.permission_workspace.clone(),
+                                permission_settings: self.permission_settings.clone(),
                                 allowed: self.allowed.clone(),
                                 child: false,
                                 children,
@@ -2091,6 +2122,15 @@ impl Runtime {
                 "invalid arguments for {name}: {error}"
             ))));
         }
+        match self.permissions.decision(&self.workspace, name, input) {
+            Ok(Some(crate::permissions::Decision::Deny)) => {
+                return Ok(Some(Outcome::failure(
+                    "permission denied by an explicit rule or unsupported restricted shell syntax",
+                )));
+            }
+            Err(error) => return Ok(Some(Outcome::failure(error.to_string()))),
+            _ => {}
+        }
         if let Some(isolation) = &self.isolation {
             if ["bash", "powershell"].contains(&name.as_str()) {
                 return Ok(Some(Outcome::failure(
@@ -2139,6 +2179,13 @@ impl Runtime {
         };
         Self::check(hooks)?;
         let settings = hooks.settings.lock().unwrap().clone();
+        let rules = crate::permissions::Rules::load(
+            &self.permission_workspace,
+            &self.permission_settings,
+            &settings.permission_rules,
+            &settings.always_allow,
+        )?;
+        let explicit = rules.decision(&self.workspace, name, input)?;
         let merge = name == "review_delegate" && input["action"] == "merge";
         let decision = if name == "review_delegate" {
             if merge {
@@ -2151,7 +2198,17 @@ impl Runtime {
                 "allow"
             }
         } else {
-            tools::policy(name, &settings.mode)
+            match explicit {
+                Some(crate::permissions::Decision::Deny) => "deny",
+                Some(crate::permissions::Decision::Ask) => "ask",
+                Some(crate::permissions::Decision::Allow) => "allow",
+                None => tools::policy(name, &settings.mode),
+            }
+        };
+        let decision = if explicit == Some(crate::permissions::Decision::Deny) {
+            "deny"
+        } else {
+            decision
         };
         if decision == "deny" {
             return Ok(false);
@@ -2167,22 +2224,22 @@ impl Runtime {
         } else {
             format!("{name}: {}", util::prefix(&input.to_string(), 1000))
         };
-        let request = json!({"call_id":id,"tool_name":name,"arguments":input,"summary":summary});
+        let grant = if merge {
+            None
+        } else {
+            crate::permissions::Rules::grant_rule(&self.workspace, name, input)?
+        };
+        let request = json!({"call_id":id,"tool_name":name,"arguments":input,"summary":summary,"grant_rule":grant});
         self.event(
             hooks,
             "approval_request",
             json!({"call_id":id,"name":name,"arguments":input}),
         )?;
-        let granted = if !merge && settings.always_allow.contains(name) {
-            (hooks.sink)(
-                json!({"event":"approval_auto","sessionId":self.session,"request":request}),
-            );
-            true
-        } else {
-            let granted = self.ask(hooks, name, request).await?;
-            Self::phase(hooks, "tools");
-            granted
-        };
+        let remember = grant
+            .map(|rule| json!({"rule":rule,"workspace":self.permission_workspace}).to_string())
+            .unwrap_or_default();
+        let granted = self.ask(hooks, &remember, request).await?;
+        Self::phase(hooks, "tools");
         self.event(
             hooks,
             "approval_decision",
@@ -2802,6 +2859,8 @@ impl Runtime {
                 )
             };
             child.child = true;
+            child.permission_workspace = self.permission_workspace.clone();
+            child.permissions = self.permissions.clone();
             child.isolation = isolation;
             child.compaction = self.compaction;
             child.goal = None;

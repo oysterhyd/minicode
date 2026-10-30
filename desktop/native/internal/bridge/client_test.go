@@ -189,7 +189,7 @@ func TestRealBridgeApprovalStreamingAndSessionRecovery(t *testing.T) {
 		Running bool     `json:"running"`
 	}
 	request(t, c, "getState", params, &state)
-	if len(state.Always) != 1 || state.Always[0] != "write" || state.Running {
+	if len(state.Always) != 1 || state.Always[0] != "write(verified.txt)" || state.Running {
 		t.Fatal("session permission/running state not preserved")
 	}
 	var detail struct {

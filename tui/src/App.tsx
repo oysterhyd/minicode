@@ -26,7 +26,7 @@ import {
 } from './caret.js'
 import { acceptsRunEvent, applyDesktopEvent, bindFeedSession, emptyFeed, pendingApproval, type FeedState } from './feed.js'
 import { AssistantMarkdown } from './components/AssistantMarkdown.js'
-import { ApprovalBlock, ApprovalPanel, approvalRows } from './components/ApprovalBlock.js'
+import { ApprovalBlock, ApprovalPanel, approvalRows, approvalOptions } from './components/ApprovalBlock.js'
 import { Banner, type BannerProps } from './components/Banner.js'
 import { Prompt, SlashMenu, slashMenuRows } from './components/Prompt.js'
 import { NEXT_PERMISSION, Notice, ShortcutPanel, shortcutLayout, Spinner, StatusLine } from './components/StatusLine.js'
@@ -482,7 +482,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
   }
   sendRef.current = send
 
-  async function decide(granted: boolean, remember = false) {
+  async function decide(granted: boolean, remember: boolean | 'project' = false) {
     const item = pendingApproval(feedRef.current.items)
     if (!item?.approvalId || approvalRef.current) return
     approvalRef.current = item.approvalId
@@ -491,7 +491,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         approvalId: item.approvalId,
         granted,
         sessionId: sessionRef.current,
-        ...(remember && granted ? { remember: 'session' } : {}),
+        ...(remember && granted ? { remember: remember === 'project' ? 'project' : 'session' } : {}),
       })
       if (!resolved) {
         approvalRef.current = null
@@ -616,14 +616,17 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         setApprovalChoice(next)
       }
       const letter = input.toLowerCase()
+      const count = approvalOptions(waiting).length
       if (!key.ctrl && !key.meta) {
         if (letter === 'y' || input === '1') { void decide(true); return }
-        if (letter === 'a' || input === '2') { void decide(true, true); return }
+        if ((letter === 'a' || input === '2') && count > 2) { void decide(true, true); return }
+        if (input === '2' && count === 2) { void decide(false); return }
         if (letter === 'n' || input === '3') { void decide(false); return }
+        if (count === 4 && (letter === 'p' || input === '4')) { void decide(true, 'project'); return }
       }
-      if (key.upArrow) { choose((choice + 2) % 3); return }
-      if (key.downArrow || (key.tab && !key.shift)) { choose((choice + 1) % 3); return }
-      if (key.return) { void decide(choice !== 2, choice === 1); return }
+      if (key.upArrow) { choose((choice + count - 1) % count); return }
+      if (key.downArrow || (key.tab && !key.shift)) { choose((choice + 1) % count); return }
+      if (key.return) { void decide(choice !== (count === 2 ? 1 : 2), choice === 3 ? 'project' : count > 2 && choice === 1); return }
       // The panel replaces the prompt; keep the draft untouched until it closes.
       if (!key.ctrl && !(key.tab && key.shift)) return
     }

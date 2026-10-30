@@ -769,6 +769,13 @@ func (d *desktop) cancel(v *conversation) {
 }
 
 func (d *desktop) decide(item *model.FeedItem, granted, remember bool) {
+	scope := ""
+	if remember {
+		scope = "session"
+	}
+	d.decideScope(item, granted, scope)
+}
+func (d *desktop) decideScope(item *model.FeedItem, granted bool, scope string) {
 	v := d.current()
 	id := item.ApprovalID
 	if id == "" || item.Deciding {
@@ -776,8 +783,8 @@ func (d *desktop) decide(item *model.FeedItem, granted, remember bool) {
 	}
 	item.Deciding = true
 	params := map[string]any{"approvalId": id, "granted": granted}
-	if granted && remember {
-		params["remember"] = "session"
+	if granted && scope != "" {
+		params["remember"] = scope
 	}
 	var handled bool
 	d.request(v, "resolveApproval", params, &handled, func(err error) {
@@ -1069,7 +1076,7 @@ func (d *desktop) handleEvent(event bridge.Event) {
 		if callID == v.approvalCallID {
 			v.approvalCallID = ""
 		}
-		v.append(&model.FeedItem{ID: "approval-" + event.ApprovalID, Kind: "approval", Name: request.ToolName, Args: request.Arguments, ApprovalID: event.ApprovalID, CallID: callID})
+		v.append(&model.FeedItem{ID: "approval-" + event.ApprovalID, Kind: "approval", Name: request.ToolName, Args: request.Arguments, ApprovalID: event.ApprovalID, GrantRule: request.GrantRule, CallID: callID})
 		d.signal(v, "需要审批", request.ToolName)
 	case "run_done", "run_error":
 		d.finish(v, event)

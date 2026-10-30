@@ -15,7 +15,7 @@ test('B21: eviction preserves session mode, effort and remembered grants across 
  }
  assert.equal((await f.request('getState',{clientKey:'view0'})).sessionId,null,'fixture did not evict first session')
  const restored=await f.request('selectSession',{clientKey:'view0',sessionId:first.sessionId,deferRuntime:true})
- assert.equal(restored.permissionMode,'bypass');assert.equal(restored.effort,'high');assert.deepEqual(restored.alwaysAllow,['write'])
+ assert.equal(restored.permissionMode,'bypass');assert.equal(restored.effort,'high');assert.deepEqual(restored.alwaysAllow,['write(cache.txt)'])
  await f.run({clientKey:'view0',sessionId:first.sessionId,text:'after cache eviction'})
- assert.deepEqual((await f.request('getState',{clientKey:'view0',sessionId:first.sessionId})).alwaysAllow,['write'])
+ assert.deepEqual((await f.request('getState',{clientKey:'view0',sessionId:first.sessionId})).alwaysAllow,['write(cache.txt)'])
 })

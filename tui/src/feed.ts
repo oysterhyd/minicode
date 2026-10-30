@@ -130,6 +130,7 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
         args: event.request.arguments,
         text: event.request.summary,
         approvalId: event.approvalId,
+        grantRule: event.request.grant_rule || undefined,
         callId: state.approvalCallId,
       }],
     }

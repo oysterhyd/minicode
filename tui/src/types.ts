@@ -48,6 +48,7 @@ export type FeedItem = {
   pending?: boolean
   interrupted?: boolean
   approvalId?: string
+  grantRule?: string
   granted?: boolean
   auto?: boolean
   childSessionId?: string
@@ -61,7 +62,7 @@ export type FeedItem = {
   tone?: 'info' | 'warning' | 'error'
 }
 
-export type ApprovalRequestData = { tool_name: string; arguments: Record<string, unknown>; summary: string }
+export type ApprovalRequestData = { tool_name: string; arguments: Record<string, unknown>; summary: string; grant_rule?: string | null }
 
 export type DesktopEvent = {
   clientKey?: string

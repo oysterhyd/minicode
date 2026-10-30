@@ -36,6 +36,7 @@ pub struct ToolContext {
     pub output: Option<Sink>,
     pub deadline: Option<Instant>,
     pub files: Files,
+    pub permissions: Arc<crate::permissions::Rules>,
 }
 /// What the session last saw of each file: the state after its latest read or
 /// after its own successful edit / write. Edits are checked against it so a
@@ -157,7 +158,7 @@ pub fn parallel_read(name: &str) -> bool {
     replay_safe(name) && name != "submit_result"
 }
 pub fn policy(name: &str, mode: &str) -> &'static str {
-    if mode == "bypass"
+    if mode == "bypass" && !name.starts_with("mcp__")
         || read_only(name)
         || ["task_create", "task_claim", "task_complete", "kill_shell"].contains(&name)
     {
@@ -727,6 +728,14 @@ fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         let mut subdirs = vec![];
         let mut files = vec![];
         for e in children {
+            if matches!(
+                ctx.permissions
+                    .path_decision(&ctx.workspace, "ls", &e.path().to_string_lossy())
+                    .unwrap_or(Some(crate::permissions::Decision::Deny)),
+                Some(crate::permissions::Decision::Deny)
+            ) {
+                continue;
+            }
             let kind = e.file_type()?;
             if kind.is_dir() {
                 if util::SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref()) {
@@ -890,6 +899,14 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             bail!("search timed out; narrow path or glob and retry")
         }
         let path = entry.path();
+        if matches!(
+            ctx.permissions
+                .path_decision(&ctx.workspace, "grep", &path.to_string_lossy())
+                .unwrap_or(Some(crate::permissions::Decision::Deny)),
+            Some(crate::permissions::Decision::Deny)
+        ) {
+            continue;
+        }
         let relative = if base.is_file() {
             base.file_name()
                 .unwrap_or_default()

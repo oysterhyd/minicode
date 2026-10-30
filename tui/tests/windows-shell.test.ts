@@ -5,5 +5,5 @@ import { toolMeta } from '../src/tools.js'
 
 test('PowerShell approvals identify the command tool', () => {
   assert.equal(toolMeta('powershell').done, 'PowerShell')
-  assert.match(approvalOptions({ id: 'approval', kind: 'approval', name: 'powershell' })[1], /PowerShell/)
+  assert.match(approvalOptions({ id: 'approval', kind: 'approval', name: 'powershell', grantRule: 'powershell(Get-ChildItem)' })[1], /powershell\(Get-ChildItem\)/)
 })

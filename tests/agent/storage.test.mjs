@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {DatabaseSync} from 'node:sqlite'
 import {test} from 'node:test'
-import {fixture} from './helpers.mjs'
+import {fixture,allowMockMcp} from './helpers.mjs'
 
 test('R28: persisted events contain previews and references while old detail consumers still work', async t => {
   const f = await fixture(t, [{tool_calls:[
@@ -30,6 +30,7 @@ test('R28: persisted events contain previews and references while old detail con
 
 test('R28: failed MCP tool results retain their images in model history and restored detail', async t => {
   const f = await fixture(t)
+  allowMockMcp(f)
   const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6x1cAAAAASUVORK5CYII='
   const server = path.join(f.root,'image-error.cjs')
   fs.writeFileSync(server,`require('readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id===undefined)return;const result=r.method==='initialize'?{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'image-error',version:'1'}}:r.method==='tools/list'?{tools:[{name:'inspect',inputSchema:{type:'object'}}]}:{isError:true,content:[{type:'text',text:'failed with image'},{type:'image',mimeType:'image/png',data:'${image}'}]};console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}))})`)

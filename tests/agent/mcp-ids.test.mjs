@@ -3,14 +3,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import {test} from 'node:test'
-import {fixture} from './helpers.mjs'
+import {allowMockMcp,fixture} from './helpers.mjs'
 
 async function enable(f,config) {
   fs.writeFileSync(path.join(f.workspace,'.mcp.json'),JSON.stringify({mcpServers:{ids:{...config,timeout_s:1}}}))
   const entry=(await f.request('getLocalExtensions',{workspace:f.workspace})).entries.find(e=>e.kind==='mcp')
   await f.request('setLocalExtensionEnabled',{workspace:f.workspace,id:entry.id,enabled:true})
   fs.writeFileSync(f.script,JSON.stringify({turns:[{tool_calls:[{name:`mcp__${entry.runtimeName}__echo`,arguments:{}}]},{text:'done'}]}))
-  await f.request('setPermissionMode',{mode:'bypass'})
+  allowMockMcp(f);await f.request('setPermissionMode',{mode:'bypass'})
 }
 function result(r) {
   return r.method==='initialize'?{protocolVersion:'2025-11-25',serverInfo:{name:'ids',version:'1'}}:

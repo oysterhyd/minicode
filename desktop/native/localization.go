@@ -578,6 +578,8 @@ Agent 运行的终端命令会显示在这里。|Terminal commands run by the ag
 需要你的批准|Your approval is required
 Agent 请求|Agent requests\x20
 批准执行|Approve
+本会话允许：|Allow for this conversation:
+写入项目规则|Save project rule
 本会话始终允许 |Always allow in this conversation:\x20
 拒绝|Deny
 显示全部 %d 行|Show all %d lines

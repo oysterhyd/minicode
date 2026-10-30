@@ -693,10 +693,33 @@ impl Router {
             }
             let id = util::string(params, "approvalId")?;
             let entry = owner.approvals.lock().unwrap().remove(id);
-            if let Some((tool, tx)) = entry {
+            if let Some((scope, tx)) = entry {
                 let granted = params["granted"] == true;
-                if granted && params["remember"] == "session" {
-                    owner.settings.lock().unwrap().always_allow.insert(tool);
+                if granted
+                    && matches!(params["remember"].as_str(), Some("session" | "project"))
+                    && let Ok(scope) = serde_json::from_str::<Value>(&scope)
+                {
+                    let rule = util::string(&scope, "rule")?;
+                    if params["remember"] == "project" {
+                        if let Err(error) = crate::permissions::persist_project(
+                            Path::new(util::string(&scope, "workspace")?),
+                            rule,
+                        ) {
+                            owner
+                                .approvals
+                                .lock()
+                                .unwrap()
+                                .insert(id.to_string(), (scope.to_string(), tx));
+                            return Err(error);
+                        }
+                    } else {
+                        owner
+                            .settings
+                            .lock()
+                            .unwrap()
+                            .always_allow
+                            .insert(rule.into());
+                    }
                 }
                 return Ok(json!(tx.send(granted).is_ok()));
             }

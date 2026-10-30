@@ -947,3 +947,19 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 回归：17 项真实 Bridge 场景覆盖默认只读、显式隔离、两种模式下批准/拒绝合并、脏内容和审批期间冲突、跨响应审阅、无沙箱拒绝 shell、取消、直接打开 child、父进程恢复、暂停可写 child 恢复、大 diff 完整归档、创建失败、清理失败后跨进程锁及崩溃后删除清理；5 项 Rust 场景覆盖独立副本/持久审阅摘要、逐文件失败回滚与新目录回滚、创建中途失败、Windows junction/Unix symlink 及清理重定向拒绝、Git dirty/untracked/ignored 数据。新增清理锁和删除回归的失败证据为 `output/5-A4-cleanup-ownership-red.log`、`output/5-A4-delete-red.log`。协议 helper 也修正 signalCode 已终止的进程清理，避免强制退出测试等待已错过的 exit 事件。
 - 兼容与限制：无新依赖或数据库表迁移，新工具、delegate 参数、ToolSpec hint、session_start 元数据均可选。旧父会话仍可恢复；新 child 会话持久化白名单/隔离边界。单次快照上限 50,000 文件/512 MiB、单文件 64 MiB，超限明确失败，避免复制构建输出耗尽存储。链接和 submodule 本身不作为可写副本导入，需在实际目标目录单独委派；不把完整副本描述成 OS 进程沙箱。
 - 最终验证：完整 `output/check-5.ps1 -Item A4-complete -Desktop` 全部通过，日志前缀 `output/5-A4-complete-`：fmt、Clippy、Rust 204 通过/2 个既有忽略、build、协议 269 通过/2 个既有跳过、生成文件无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 121 通过、Desktop test/vet/vendor UI。首次核心检查 `A4`、路径/大 diff 检查 `A4-final`、清理锁检查 `A4-ownership` 亦通过；最终检查在 Store.delete 清理补齐后重新构建并执行，未复用之前的评测目录。本机执行 Windows；Unix 的 symlink/权限分支尚未在 Linux/macOS 实机运行。
+
+## 阶段 6：权限、凭据与沙箱
+
+### R26 分层权限规则与有范围的审批
+
+- 核查：旧 tools::policy 只按名称/模式决定，Bridge 把记住审批变成 always_allow 整个工具；bypass 放行任意 MCP。新增路径 deny 和复合命令 deny 两项回归先失败，见 `output/6-R26-red-protocol.log`。
+- DSL：permissions.allow/ask/deny 支持工具名模式（包括 mcp__server__*）、bash/powershell 命令精确匹配及 token 前缀 `:*`、工作区相对文件 glob。读取用户 settings.json、项目 .minicode/settings.json、项目本地 settings.local.json、CLI --allow/--ask/--deny，按低到高累加规则；新层贡献不删除旧层的显式拒绝。最终全局 deny > ask > allow > 模式默认，重复规则不改变结果；错误类型、未知 effect、无效 glob/相对路径和超限输入明确拒绝，避免错误配置静默放行。每轮刷新规则，子任务沿用父项目规则来源，隔离 child 仍按隔离目录的相对路径匹配。
+- 文件：复用 canonical/in_workspace 规范化实际路径，Windows 匹配大小写及分隔符；拒绝配置中的 ../ 和绝对路径。read 的 deny/ask 同时约束 grep/ls 和 edit/write 的读取侧，edit 规则也覆盖 write。grep/ls 对实际文件逐项过滤 deny，链接/越界条目不读取；对可能触及 ask 文件的搜索/列表保守要求整次确认，确认后仍过滤 deny。不能通过 `sub/../.env`、搜索目录或编辑预览读出被拒绝内容。
+- Shell：识别引号/转义和 ;、&&、||、管道的命令段，每段独立匹配。前缀按解析后的完整 token 比较，npm test 不匹配 npm testing，带引号的 rm/-rf 仍命中 deny。PowerShell 大小写及 Windows 可执行文件大小写兼容。变量/命令替换、重定向、脚本块等未能可靠解释的结构要求单次审批；存在 shell deny 时无法确认未绕过该 deny 的结构及常见解释器/包装命令直接拒绝。规则是执行授权策略，不声称能证明任意脚本或包管理器内部代码的行为；OS 文件和网络边界在 SEC2 实现。
+- 审批：授权请求携带由运行时计算的 grant_rule；本会话只记住具体命令的执行文件/子命令 token 前缀或具体文件路径，不记住整个 bash/powershell。旧整工具 shell grant 忽略；原生非 shell 旧 grant 保持兼容。MCP 默认为 ask（包括 bypass），仅明确匹配 allow 或确认后记住的精确 MCP 工具可放行。workspace_trust、review_delegate 合并以及后续危险操作不产生可记住规则。显式 deny 在 preflight 直接失败，不创建可批准的请求。
+- 界面与持久化：TUI、Desktop、原生 CLI 提供仅本次、会话规则、写入项目规则；同时展示具体范围。无可靠范围时只提供单次确认，不提示可永久放行。复用既有 ask/resolveApproval 确认通道和 atomic_write 替换，新项目规则写入 settings.local.json，经 fs2 进程间事务锁合并并去重；保存失败保留待审批状态，不授予未保存的权限。R26 首次提取 settings_file 公用事务入口，C2 后续复用到服务配置。
+- 回归：5 项 Bridge 场景覆盖分层 deny、搜索/路径归一化、会话前缀不放行另一命令、复合段 deny、项目范围保存和默认 bypass 的 MCP 单次/会话授权；3 项 Rust 场景覆盖完整 token、所有复合分隔符、引号、保守语法、路径 glob、ask/deny 优先和四层合并。TUI 实际快捷键 P 发送 project 范围，Desktop 真实控件显示单次/具体会话范围/项目选项。旧会话缓存断言改为具体 write(cache.txt)；本地 MCP 传输测试显式授权 mock 服务，不再依赖旧 bypass 漏洞，权限测试不调用 mock 授权 helper。
+- 验证过程：初次范围变更的全测发现 MCP 图像测试缺少显式 mock 授权、PowerShell 方法调用测试现在需要确认，已按新语义更新；日志保留 `output/6-R26-second-protocol.log`。首次并行 Desktop 全测还出现一次未修改历史分页用例的时序失败，需在最终完整检查复核，未宣称修复其时序根因。新增中文界面文案已补英语目录。
+- 最终复核补充：拒绝 read 同时阻止 edit/write 预览侧读取，带路径的 rm 可执行文件及加引号 token 不绕过相应 deny；不能安全表示成规则的引用参数不生成可记住前缀。PowerShell 的相邻引号、反引号及 stop-parsing 形式采用单次确认。路径越界错误恢复为原工具失败回执，避免 preflight 新校验把原有可恢复工具错误升级成 run 异常。窄屏测试已扩展为四选项并验证环绕选择项目/拒绝；聚焦 TUI 13 项及 Desktop 权限/历史/语言测试通过。
+- 已有波动记录：并行全测中原 concurrent_edits_of_one_file_are_serialized 再次出现一次 Windows canonical 临时名称导致读取 ledger 未命中；保留 `output/6-R26-concurrent-edit-flake.log`，聚焦重跑及后续完整 Rust 检查通过。相关编辑、替换及 canonical 实现未在 R26 修改，不声称已修复该既有时序问题。
+- 最终验证：`output/check-5.ps1 -Item R26-final-code -Desktop` 全部通过，日志前缀 `output/5-R26-final-code-`：fmt、Clippy、Rust 207 通过/2 个既有忽略、build、协议 274 通过/2 个既有跳过、生成文件无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 122 通过、Desktop test/vet/vendor UI。Desktop Bridge 集成的旧整工具 write 断言同步为 write(verified.txt)，最终全测已覆盖。仅 Windows 实机执行，Linux/macOS 分支需对应平台 CI 验证。

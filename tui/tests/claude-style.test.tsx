@@ -66,7 +66,7 @@ test('approval panel replaces the prompt and supports arrow selection', async ()
     await delay(40)
     client.emit({
       event: 'approval', sessionId: 'sess-1', approvalId: 'a1',
-      request: { tool_name: 'bash', arguments: { command: 'npm test' }, summary: '运行测试' },
+      request: { tool_name: 'bash', arguments: { command: 'npm test' }, summary: '运行测试', grant_rule: 'bash(npm test:*)' },
     })
     await delay(40)
     const frame = stripAnsi(ui.lastFrame() || '')
@@ -75,7 +75,7 @@ test('approval panel replaces the prompt and supports arrow selection', async ()
     assert.doesNotMatch(frame, /输入下一条消息/)
     ui.stdin.write('\x1b[B')
     await delay(30)
-    assert.match(stripAnsi(ui.lastFrame() || ''), /❯ 2\. 是，并且本会话不再询问 Bash 命令/)
+    assert.match(stripAnsi(ui.lastFrame() || ''), /❯ 2\. 本会话允许：bash\(npm test:\*\)/)
     ui.stdin.write('\r')
     await delay(30)
     const resolved = client.requests.find(item => item.method === 'resolveApproval')
@@ -139,7 +139,7 @@ test('approval letter shortcuts ignore control and alt chords', async () => {
     await delay(40)
     client.emit({
       event: 'approval', sessionId: 'sess-1', approvalId: 'a1',
-      request: { tool_name: 'bash', arguments: { command: 'npm test' }, summary: '运行测试' },
+      request: { tool_name: 'bash', arguments: { command: 'npm test' }, summary: '运行测试', grant_rule: 'bash(npm test:*)' },
     })
     await delay(40)
     for (const chord of ['\x01', '\x19', '\x0e', '\x1ba', '\x1by', '\x1bn']) {
@@ -200,11 +200,15 @@ for (const columns of [40, 120]) {
         event: 'approval', sessionId: 'sess-1', approvalId: 'edit-1',
         request: {
           tool_name: 'edit', summary: 'edit: src/App.tsx',
+          grant_rule: 'edit(src/App.tsx)',
           arguments: { path: 'src/App.tsx', old_text: 'a\nb\nc\nd\ne\nf\ng', new_text: 'a\nB\nC\nD\nE\nF\ng' },
         },
       })
       await delay(40)
       checkFrame(/3\. 否/)
+      ui.stdin.write('\x1b[A')
+      await delay(20)
+      checkFrame(/❯ 4\. 写入项目规则/)
       ui.stdin.write('\x1b[A')
       await delay(20)
       checkFrame(/❯ 3\. 否/)

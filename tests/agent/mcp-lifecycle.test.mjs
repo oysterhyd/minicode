@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import {test} from 'node:test'
-import {fixture,pidAlive,until,connect} from './helpers.mjs'
+import {allowMockMcp,fixture,pidAlive,until,connect} from './helpers.mjs'
 
 const source=`const fs=require('node:fs');
 fs.appendFileSync(process.argv[3]||'mcp-starts',process.argv[2]+':'+process.pid+'\\n');let counter=0;
@@ -27,7 +27,7 @@ async function setup(t,turns,names=['state']) {
     if(match)tool.name=`mcp__${actual[match[1]]}__counter`
   }
   fs.writeFileSync(f.script,JSON.stringify({turns}))
-  await f.request('setPermissionMode',{mode:'bypass'})
+  allowMockMcp(f);await f.request('setPermissionMode',{mode:'bypass'})
   return {f,config,starts:()=>fs.readFileSync(path.join(f.workspace,'mcp-starts'),'utf8').trim().split('\n')}
 }
 const call=name=>({tool_calls:[{name:`mcp__${name}__counter`,arguments:{}}]})
@@ -116,7 +116,7 @@ test('R6 a changed trusted plugin reconnects only its own server',async t=>{
     fs.writeFileSync(path.join(root,'plugin.json'),JSON.stringify({name,version:'1.0.0',minicode_version:version,enabled:true,mcp_servers:[{name,command:process.execPath,args:[server,name,log]}]}))
   }
   await f.request('trustWorkspace',{workspace:f.workspace})
-  await f.request('setPermissionMode',{mode:'bypass'})
+  allowMockMcp(f);await f.request('setPermissionMode',{mode:'bypass'})
   assert.deepEqual(results(await f.run()),['a:1','b:1'])
   fs.writeFileSync(path.join(f.workspace,'.minicode/plugins/a/extra.txt'),'updated')
   await f.request('lockPlugins',{workspace:f.workspace})
@@ -152,7 +152,7 @@ test('R6 HTTP sessions persist across turns and expired sessions reconnect withi
   await f.request('setLocalExtensionEnabled',{workspace:f.workspace,id:entry.id,enabled:true})
   const tool={tool_calls:[{name:`mcp__${entry.runtimeName}__counter`,arguments:{}}]}
   fs.writeFileSync(f.script,JSON.stringify({turns:[tool,{text:'first'},tool,{text:'second'},tool,tool,{text:'recovered'}]}))
-  await f.request('setPermissionMode',{mode:'bypass'})
+  allowMockMcp(f);await f.request('setPermissionMode',{mode:'bypass'})
   assert.equal(results(await f.run()).at(-1),'1:1')
   assert.equal(results(await f.run({text:'again'})).at(-1),'1:2');assert.equal(initialized,1)
   expire=true

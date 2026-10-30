@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import {test} from 'node:test'
-import {fixture} from './helpers.mjs'
+import {allowMockMcp,fixture} from './helpers.mjs'
 
 for (const mode of ['service', 'tool', 'success', 'long']) {
   test(`MCP configurable timeout: ${mode}`, async t => {
@@ -23,7 +23,7 @@ for (const mode of ['service', 'tool', 'success', 'long']) {
       fs.writeFileSync(configPath,JSON.stringify(config))
     }
     fs.writeFileSync(f.script,JSON.stringify({turns:[{tool_calls:[{name,arguments:{}}]},{text:'done'}]}))
-    await f.request('setPermissionMode',{mode:'bypass'})
+    allowMockMcp(f);await f.request('setPermissionMode',{mode:'bypass'})
     const result = await f.run()
     const output = result.detail.events.find(e => e.type === 'tool_call_result').data
     assert.equal(output.success, mode === 'success' || mode === 'long')

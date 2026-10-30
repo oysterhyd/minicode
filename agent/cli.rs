@@ -110,6 +110,12 @@ struct RunOptions {
     yes: bool,
     #[arg(long)]
     acceptance: Option<PathBuf>,
+    #[arg(long="allow",action=clap::ArgAction::Append)]
+    allow: Vec<String>,
+    #[arg(long="ask",action=clap::ArgAction::Append)]
+    ask: Vec<String>,
+    #[arg(long="deny",action=clap::ArgAction::Append)]
+    deny: Vec<String>,
 }
 #[derive(Subcommand)]
 enum SessionCommand {
@@ -361,6 +367,8 @@ async fn prepare(
     }
     let configuration = Configuration::default();
     let mut settings = Settings::new(&configuration)?;
+    settings.permission_rules =
+        json!({"allow":options.allow,"ask":options.ask,"deny":options.deny});
     let summary = session.map(|id| store.require(id)).transpose()?;
     let workspace = options
         .workspace
@@ -541,6 +549,7 @@ async fn run_with_input(
 ) -> Result<crate::models::RunResult> {
     hooks.cancel = CancellationToken::new();
     let approvals = hooks.approvals.clone();
+    let permission_settings = hooks.settings.clone();
     let sink = hooks.sink.clone();
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Value>();
     hooks.sink = Arc::new(move |event| {
@@ -567,21 +576,28 @@ async fn run_with_input(
                 if !input_open {
                     if let Some((_, tx)) = approvals.lock().unwrap().remove(&id) { let _ = tx.send(false); }
                 } else {
-                    println!("\n审批：{}\n允许执行？[y/N]", event["request"]["summary"].as_str().unwrap_or_default());
+                    println!("\n审批：{}", event["request"]["summary"].as_str().unwrap_or_default());
+                    if let Some(rule)=event["request"]["grant_rule"].as_str() {println!("规则：{rule}\n仅本次 y / 本会话此前缀 a / 写入项目规则 p / 拒绝 N");}else{println!("仅本次 y / 拒绝 N（此操作不可记住）");}
                     waiting.push_back(id);
                 }
             }
             line = input.recv(), if input_open && !waiting.is_empty() => {
-                let granted = match line {
-                    Some(Ok(line)) => matches!(line.trim().to_lowercase().as_str(), "y" | "yes"),
+                let (granted,remember) = match line {
+                    Some(Ok(line)) => {let line=line.trim().to_lowercase();(matches!(line.as_str(),"y"|"yes"|"a"|"p"),line)},
                     other => {
                         input_open = false;
                         if let Some(Err(error)) = other { eprintln!("读取输入失败：{error}"); }
-                        false
+                        (false,String::new())
                     }
                 };
                 if let Some(id) = waiting.pop_front()
-                    && let Some((_, tx)) = approvals.lock().unwrap().remove(&id) {
+                    && let Some((scope, tx)) = approvals.lock().unwrap().remove(&id) {
+                    let mut granted=granted;
+                    if granted && matches!(remember.as_str(),"a"|"p") && let Ok(scope)=serde_json::from_str::<Value>(&scope) {
+                        let rule=scope["rule"].as_str().unwrap_or_default();
+                        if remember=="a" {permission_settings.lock().unwrap().always_allow.insert(rule.into());}
+                        else if let Err(error)=crate::permissions::persist_project(Path::new(scope["workspace"].as_str().unwrap_or_default()),rule) {eprintln!("项目规则保存失败：{error}");granted=false;}
+                    }
                     let _ = tx.send(granted);
                 }
                 if !input_open {
