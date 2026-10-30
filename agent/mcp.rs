@@ -461,7 +461,7 @@ impl Connector {
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
         let value = json!({"jsonrpc":"2.0","method":method,"params":params});
         if let Some(input) = &self.input {
-            mcp_dispatch::write(input, &value).await?;
+            mcp_dispatch::write(input, &value, &self.pending).await?;
         } else {
             self.request(self.endpoint.as_deref().unwrap_or(&self.config.url))
                 .json(&value)
@@ -481,7 +481,7 @@ impl Connector {
         tokio::time::timeout(timeout, async {
             if let Some(input) = &self.input {
                 let (_request, rx) = self.pending.register(id)?;
-                if let Err(error) = mcp_dispatch::write(input, &value).await {
+                if let Err(error) = mcp_dispatch::write(input, &value, &self.pending).await {
                     self.pending.close("MCP input closed");
                     return Err(error);
                 }
@@ -857,5 +857,48 @@ for(const call of pending.reverse())send({jsonrpc:'2.0',id:call.id,result:call.p
             connector.close().await;
         });
         assert!(reply.unwrap_err().to_string().contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn mc4_cancelled_reader_request_drops_registration_but_retains_frame() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("half-frame");
+        let mut config = server(
+            root.path(),
+            r#"
+const fs=require('fs');let half=false;const queued=[];const send=(id,result)=>console.log(JSON.stringify({jsonrpc:'2.0',id,result}));
+require('readline').createInterface({input:process.stdin}).on('line',line=>{
+const r=JSON.parse(line);if(!r.method||r.id===undefined)return;
+if(r.method==='initialize')return send(r.id,{protocolVersion:'2025-11-25'});
+if(r.method==='tools/list')return send(r.id,{tools:[]});
+if(r.method==='pause'){
+half=true;const frame=JSON.stringify({jsonrpc:'2.0',id:r.id,result:{value:'cancelled'}})+'\n';const split=Math.floor(frame.length/2);
+process.stdout.write(frame.slice(0,split));fs.writeFileSync(process.env.MC4_MARKER,'seen');
+setTimeout(()=>{process.stdout.write(frame.slice(split));half=false;for(const id of queued)send(id,{value:'next'});},500);
+}else if(half)queued.push(r.id);else send(r.id,{value:'next'});
+});
+"#,
+        );
+        config
+            .env
+            .insert("MC4_MARKER".into(), marker.to_string_lossy().into_owned());
+        let mut connector = Connector::new(config).unwrap();
+        connector.discover().await.unwrap();
+        {
+            let call = connector.rpc("pause", json!({}));
+            tokio::pin!(call);
+            tokio::select! {
+                result=&mut call=>panic!("response should still be partial: {result:?}"),
+                result=tokio::time::timeout(Duration::from_secs(5),async {
+                    while !marker.exists() {tokio::time::sleep(Duration::from_millis(10)).await;}
+                })=>result.unwrap(),
+            }
+        }
+        assert!(connector.pending.live());
+        assert_eq!(
+            connector.rpc("fast", json!({})).await.unwrap()["value"],
+            "next"
+        );
+        connector.close().await;
     }
 }

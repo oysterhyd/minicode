@@ -79,10 +79,31 @@ impl Pending {
         }
     }
 }
-pub(crate) async fn write(input: &tokio::sync::Mutex<ChildStdin>, value: &Value) -> Result<()> {
+struct Writing<'a> {
+    pending: &'a Pending,
+    complete: bool,
+}
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.pending
+                .close("MCP frame write interrupted; reconnect required");
+        }
+    }
+}
+pub(crate) async fn write(
+    input: &tokio::sync::Mutex<ChildStdin>,
+    value: &Value,
+    pending: &Pending,
+) -> Result<()> {
     let mut input = input.lock().await;
+    let mut writing = Writing {
+        pending,
+        complete: false,
+    };
     input.write_all(format!("{value}\n").as_bytes()).await?;
     input.flush().await?;
+    writing.complete = true;
     Ok(())
 }
 pub(crate) async fn read_stdio(
@@ -118,7 +139,7 @@ pub(crate) async fn read_stdio(
             }
             let response = serde_json::from_slice(&line).context("invalid MCP response frame")?;
             if let Some(reply) = pending.dispatch(response) {
-                write(&input, &reply).await?;
+                write(&input, &reply, &pending).await?;
             }
         }
     }
