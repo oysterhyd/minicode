@@ -934,3 +934,16 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 修复：在 delegate 的统一 child 激活路径上设置 child.compaction=self.compaction，既覆盖新创建/恢复的 child，也覆盖并行分支真正创建的 child。Runtime 的普通默认值及评测 b0/b1/b2 定义保持原状，无协议、配置或依赖变化。
 - 测试：串行回归覆盖父开关 false/true、新 child 继承，以及同一暂停 child 在父开关切换后继续执行；真实本地 HTTP 提供商回归触发实际双 child 并行分支，在两个开关值下验证返回父会话的两个实际 Runtime。聚焦通过，见 `output/5-R43-focused.log`；不调用真实模型 API。
 - 验证：完整 `output/check-5.ps1 -Item R43 -Desktop` 全部通过，日志前缀 `output/5-R43-`：fmt、Clippy、Rust 199 通过/2 个既有忽略、build、协议 252 通过/2 个既有跳过、任务/trace 无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 121 通过、Desktop test/vet/vendor UI。本机仅执行 Windows 平台。
+
+### A4 默认只读、独立快照与父会话审阅合并
+
+- 核查：fixer/ui-designer 的文件工具和 shell 在父工作区直接执行，bypass/accept_edits 会跳过文件审批，默认委派即可改写主目录。新增默认只读、显式可写但未合并的两项协议回归均先失败，见 `output/5-A4-red-protocol.log`。
+- 默认边界：delegate 新增可选 writable，默认为 false；子工具白名单再与只读能力相交，不能通过模式、inheritTools、伪造工具调用或直接打开子会话恢复写权限。MCP 仅在原白名单内且服务声明 readOnlyHint=true 时可供只读 child 使用；未声明的工具保守排除。该提示是已信任 MCP 服务的能力声明，不把远端服务当成本机文件系统沙箱。隔离可写 child 不借用在父目录运行的 MCP，防止绕过本地隔离。
+- 隔离：显式可写任务在会话存储的 delegates/随机 ID/work 中使用独立文件副本；base 保存创建时的字节/权限，复制当前未提交内容。Git 项目取 tracked 和未忽略的 untracked 文件，未安装 Git或非 Git 目录使用既有 ignore 遍历；不复制 .git、硬链接或目录链接，必要的已固定项目指令额外复制并重新绑定到隔离路径。文件工具继续执行真实 canonical 工作区边界，并禁止写入 .git 或通过路径别名触及 Git 元数据。创建失败清理临时目录，不影响主工作区。
+- Shell：本项在运行时 preflight 拒绝隔离 child 的 bash/powershell，不能靠 cwd 或提示词假装限制绝对路径。后续 SEC2 为该入口提供真实 OS 沙箱；在沙箱不可用时继续明确拒绝执行。内置代理描述同步说明需显式请求隔离可写任务，不再默认为可修改主目录。
+- 审阅：父会话专有 review_delegate(delegate_call_id, action) 提供 inspect/merge/discard。inspect 输出完整 unified diff，按现有 50 KiB 工具上限归档大 diff，read_artifact 可分页读取完整内容；非 UTF-8 变化明确标注为二进制。以路径、前后内容和权限的摘要绑定审阅版本，merge 只能出现在后续模型响应，不能在同一批次中跳过查看结果；快照改变须重新 inspect。bypass、accept_edits 和旧 alwaysAllow 都不能跳过独立合并审批。拒绝或 discard 删除副本，主目录不变。
+- 合并：复用原子文件替换；取得进程间合并锁后，在首次写入前核对所有父文件是否仍等于 base。已有脏内容允许保留并作为基线；后续外部修改、链接/别名、文件类型变化或 diff 摘要变化均拒绝。应用中失败时仅回滚本次写入并移除本次创建的空目录；如果外部进程又改了已写文件，不覆盖它，而是报告需复核的回滚冲突。权限变化随文件保存，不操作主仓库的 index 和提交，保留与本次 diff 无关的未提交内容。
+- 生命周期：快照和审阅状态持久化，父进程中断后可恢复审阅或恢复同一个暂停 child；Windows 路径在创建/恢复时统一 canonical，避免长路径表示差异。正常回合保留待审改动和父 SessionLock，取消/关闭/拒绝后清理。清理遇到链接或文件系统错误会报告并继续持有锁，阻止另一进程提前删除会话；修复后可重试。Store.delete 同样在 activation 锁下清理崩溃 owner 留下的快照，再删除会话日志，避免失去目录归属信息。
+- 回归：17 项真实 Bridge 场景覆盖默认只读、显式隔离、两种模式下批准/拒绝合并、脏内容和审批期间冲突、跨响应审阅、无沙箱拒绝 shell、取消、直接打开 child、父进程恢复、暂停可写 child 恢复、大 diff 完整归档、创建失败、清理失败后跨进程锁及崩溃后删除清理；5 项 Rust 场景覆盖独立副本/持久审阅摘要、逐文件失败回滚与新目录回滚、创建中途失败、Windows junction/Unix symlink 及清理重定向拒绝、Git dirty/untracked/ignored 数据。新增清理锁和删除回归的失败证据为 `output/5-A4-cleanup-ownership-red.log`、`output/5-A4-delete-red.log`。协议 helper 也修正 signalCode 已终止的进程清理，避免强制退出测试等待已错过的 exit 事件。
+- 兼容与限制：无新依赖或数据库表迁移，新工具、delegate 参数、ToolSpec hint、session_start 元数据均可选。旧父会话仍可恢复；新 child 会话持久化白名单/隔离边界。单次快照上限 50,000 文件/512 MiB、单文件 64 MiB，超限明确失败，避免复制构建输出耗尽存储。链接和 submodule 本身不作为可写副本导入，需在实际目标目录单独委派；不把完整副本描述成 OS 进程沙箱。
+- 最终验证：完整 `output/check-5.ps1 -Item A4-complete -Desktop` 全部通过，日志前缀 `output/5-A4-complete-`：fmt、Clippy、Rust 204 通过/2 个既有忽略、build、协议 269 通过/2 个既有跳过、生成文件无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 121 通过、Desktop test/vet/vendor UI。首次核心检查 `A4`、路径/大 diff 检查 `A4-final`、清理锁检查 `A4-ownership` 亦通过；最终检查在 Store.delete 清理补齐后重新构建并执行，未复用之前的评测目录。本机执行 Windows；Unix 的 symlink/权限分支尚未在 Linux/macOS 实机运行。

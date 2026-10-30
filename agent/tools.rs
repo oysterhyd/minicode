@@ -185,7 +185,7 @@ pub fn specs(
         specs.retain(|s| s.name != "submit_result");
     }
     if !allow_delegate {
-        specs.retain(|s| s.name != "delegate");
+        specs.retain(|s| !["delegate", "review_delegate"].contains(&s.name.as_str()));
     }
     if let Some(spec) = specs.iter_mut().find(|s| s.name == "delegate") {
         spec.description="Delegate a bounded task to an assistant with its configured tools and the parent permission policy. Available kinds: ".into();
@@ -219,6 +219,7 @@ mod validator_cache_tests {
             description: String::new(),
             input_schema: json!({"type":"integer","$comment":"x".repeat(65536)}),
             requires_approval: false,
+            read_only_hint: false,
         };
         let mut cache = ValidatorCache::default();
         let first = cache.get(&spec).unwrap();
@@ -235,6 +236,7 @@ mod validator_cache_tests {
             description: String::new(),
             input_schema: json!({"type":"integer"}),
             requires_approval: false,
+            read_only_hint: false,
         };
         let expected = external_validator(&spec).unwrap();
         let tasks = (0..8)
@@ -254,6 +256,7 @@ mod validator_cache_tests {
             description: String::new(),
             input_schema: json!({"type":"string"}),
             requires_approval: false,
+            read_only_hint: false,
         };
         let first = external_validator(&spec).unwrap();
         let again = external_validator(&spec).unwrap();
@@ -519,7 +522,7 @@ fn execute_sync(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> 
         _ => bail!("unknown tool: {name}"),
     }
 }
-fn bounded(text: String) -> Outcome {
+pub(crate) fn bounded(text: String) -> Outcome {
     if text.len() <= 50 * 1024 {
         Outcome::ok(text)
     } else {

@@ -397,6 +397,7 @@ impl Connector {
                             .cloned()
                             .unwrap_or(json!({"type":"object"})),
                         requires_approval: true,
+                        read_only_hint: tool["annotations"]["readOnlyHint"] == true,
                     },
                     original,
                 ));

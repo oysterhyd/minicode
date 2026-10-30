@@ -10,7 +10,7 @@ fs.appendFileSync(process.argv[3]||'mcp-starts',process.argv[2]+':'+process.pid+
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
 const r=JSON.parse(line);if(r.id===undefined)return;
 const result=r.method==='initialize'?{protocolVersion:'2025-11-25',serverInfo:{name:'stateful',version:'1'}}:
-r.method==='tools/list'?{tools:[{name:'counter',inputSchema:{type:'object'}}]}:
+r.method==='tools/list'?{tools:[{name:'counter',inputSchema:{type:'object'},annotations:{readOnlyHint:true}}]}:
 {content:[{type:'text',text:process.argv[2]+':'+(++counter)}]};
 process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n')})`
 

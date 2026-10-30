@@ -1381,6 +1381,7 @@ fn context_estimate_matches_serialized_unicode_and_escapes() {
         description: text,
         input_schema: input.clone(),
         requires_approval: false,
+        read_only_hint: false,
     });
     let expected = context::tokens("test")
         + (chars(&input) / 3).max(1)
@@ -4013,6 +4014,7 @@ fn catalog_reasoning_tool_restrictions_prevent_invalid_chat_requests() {
         description: "read".into(),
         input_schema: json!({"type":"object"}),
         requires_approval: false,
+        read_only_hint: false,
     }];
     let messages = [Message::user("hello")];
     let body = provider
@@ -4357,6 +4359,7 @@ fn x4_cjk_estimates_cover_text_tool_inputs_and_schemas() {
         description: "描述".repeat(1000),
         input_schema: json!({"type":"object"}),
         requires_approval: false,
+        read_only_hint: false,
     };
     assert!(context::estimate("", &[], &[spec]) >= 2000);
 }

@@ -217,6 +217,8 @@ pub struct Runtime {
     pub background: Arc<crate::background::Jobs>,
     ownership: Mutex<Option<store::SessionLock>>,
     submitted_result: Option<Value>,
+    isolation: Option<Arc<crate::delegate_workspace::Workspace>>,
+    isolations: HashMap<String, Arc<crate::delegate_workspace::Workspace>>,
     pub allowed: Option<HashSet<String>>,
     pub child: bool,
     pub children: HashMap<(String, String), Box<Runtime>>,
@@ -237,6 +239,7 @@ impl Runtime {
     pub fn holds_resources(&self) -> bool {
         self.background.has_jobs()
             || self.mcp.has_live_connections()
+            || self.isolations.values().any(|workspace| workspace.active())
             || self.children.values().any(|c| c.holds_resources())
     }
     pub async fn new(
@@ -459,6 +462,8 @@ impl Runtime {
             background: Default::default(),
             ownership: Default::default(),
             submitted_result,
+            isolation: None,
+            isolations: HashMap::new(),
             allowed: None,
             child: false,
             children: HashMap::new(),
@@ -472,6 +477,63 @@ impl Runtime {
             dynamic_hash,
             files: Default::default(),
         };
+        for event in events
+            .iter()
+            .filter(|event| event.r#type == "subagent_isolation")
+        {
+            let id = util::string(&event.data, "isolation_id")?;
+            let call = util::string(&event.data, "call_id")?;
+            let existing = runtime
+                .isolations
+                .values()
+                .find(|workspace| workspace.id == id)
+                .cloned();
+            if let Some(workspace) = existing {
+                runtime.isolations.insert(call.into(), workspace);
+            } else if let Some(workspace) = crate::delegate_workspace::Workspace::load(
+                &runtime.store.root(),
+                &runtime.session,
+                &runtime.workspace,
+                id,
+            )? {
+                runtime.isolations.insert(call.into(), Arc::new(workspace));
+            }
+        }
+        if let Some(start) = events
+            .iter()
+            .find(|event| event.r#type == "session_start" && event.data["child"] == true)
+        {
+            runtime.child = true;
+            runtime.allowed = Some(
+                serde_json::from_value(start.data["allowed_tools"].clone())
+                    .context("invalid saved child whitelist")?,
+            );
+            if let Some(isolation) = start.data["isolation"].as_object() {
+                let id = isolation
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .context("invalid saved child isolation")?;
+                let owner = isolation
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .context("invalid saved child owner")?;
+                let parent = isolation
+                    .get("parent_workspace")
+                    .and_then(Value::as_str)
+                    .context("invalid saved child workspace")?;
+                let workspace = crate::delegate_workspace::Workspace::load(
+                    &runtime.store.root(),
+                    owner,
+                    Path::new(parent),
+                    id,
+                )?
+                .context("isolated child workspace is closed")?;
+                if util::canonical(&workspace.work())? != runtime.workspace {
+                    bail!("saved child isolation mismatch")
+                }
+                runtime.isolation = Some(Arc::new(workspace));
+            }
+        }
         let child_ids = events
             .iter()
             .filter(|e| e.r#type == "subagent_start")
@@ -656,6 +718,12 @@ impl Runtime {
         if let Some(allowed) = &self.allowed {
             specs.retain(|s| allowed.contains(&s.name));
         }
+        if self.child && self.isolation.is_none() {
+            specs.retain(|spec| {
+                tools::read_only(&spec.name)
+                    || spec.name.starts_with("mcp__") && spec.read_only_hint
+            });
+        }
         specs
     }
     fn system(&self, catalog: &Catalog, specs: &[crate::models::ToolSpec]) -> Result<String> {
@@ -827,7 +895,7 @@ impl Runtime {
                 .parent()
                 .unwrap()
                 .join("AGENTS.md");
-            self.event(hooks,"session_start",json!({"workspace":self.workspace,"provider":self.provider.name,"model":self.provider.configuration_id,"budget":hooks.settings.lock().unwrap().budget,"project_instructions":catalog.instructions.values().map(|s|s.metadata(&global)).collect::<Vec<_>>(),"active_skills":catalog.active,"provider_resume_identity":self.provider.identity()}))?;
+            self.event(hooks,"session_start",json!({"workspace":self.workspace,"provider":self.provider.name,"model":self.provider.configuration_id,"budget":hooks.settings.lock().unwrap().budget,"project_instructions":catalog.instructions.values().map(|s|s.metadata(&global)).collect::<Vec<_>>(),"active_skills":catalog.active,"provider_resume_identity":self.provider.identity(),"child":self.child,"allowed_tools":self.allowed,"isolation":self.isolation.as_ref().map(|workspace|workspace.metadata())}))?;
         }
         if let Some(goal) = &self.goal {
             goal.save(&self.store, &self.session)?;
@@ -1014,12 +1082,27 @@ impl Runtime {
             failures.push(error.to_string());
         }
         self.mcp.close().await;
+        for (call, workspace) in &self.isolations {
+            if !workspace.active() {
+                continue;
+            }
+            match workspace.discard() {
+                Ok(()) => if let Err(error) = self.event(
+                    hooks,
+                    "subagent_isolation_closed",
+                    json!({"call_id":call,"isolation_id":workspace.id,"reason":"session_close"}),
+                ) {
+                    failures.push(error.to_string())
+                },
+                Err(error) => failures.push(format!("isolation cleanup: {error}")),
+            }
+        }
         for child in self.children.values() {
             if let Err(error) = Box::pin(child.close_resources(hooks)).await {
                 failures.push(error.to_string());
             }
         }
-        if release_ownership {
+        if release_ownership && !self.isolations.values().any(|workspace| workspace.active()) {
             self.ownership.lock().unwrap().take();
         }
         if !failures.is_empty() {
@@ -1198,7 +1281,13 @@ impl Runtime {
             if !failures.is_empty() {
                 report.push(format!("run teardown failed: {}", failures.join("; ")));
             }
-            self.ownership.lock().unwrap().take();
+            if self.isolations.values().any(|workspace| workspace.active()) {
+                if let Some(ownership) = ownership {
+                    *self.ownership.lock().unwrap() = Some(ownership);
+                }
+            } else {
+                self.ownership.lock().unwrap().take();
+            }
             bail!(report.join("; "))
         }
         if !hooks.cancel.is_cancelled() && error.is_none() && self.holds_resources() {
@@ -1744,6 +1833,8 @@ impl Runtime {
                                 background: self.background.clone(),
                                 ownership: Default::default(),
                                 submitted_result: None,
+                                isolation: None,
+                                isolations: HashMap::new(),
                                 allowed: self.allowed.clone(),
                                 child: false,
                                 children,
@@ -1986,10 +2077,31 @@ impl Runtime {
         let Some(spec) = spec else {
             return Ok(Some(Outcome::failure(format!("unknown tool: {name}"))));
         };
+        if self.child
+            && self.isolation.is_none()
+            && !tools::read_only(name)
+            && !(name.starts_with("mcp__") && spec.read_only_hint)
+        {
+            return Ok(Some(Outcome::failure(format!(
+                "read-only child cannot use {name}"
+            ))));
+        }
         if let Err(error) = tools::validate(spec, input) {
             return Ok(Some(Outcome::failure(format!(
                 "invalid arguments for {name}: {error}"
             ))));
+        }
+        if let Some(isolation) = &self.isolation {
+            if ["bash", "powershell"].contains(&name.as_str()) {
+                return Ok(Some(Outcome::failure(
+                    "隔离子任务的 shell 需要操作系统沙箱；当前未启用可用沙箱，命令未执行。",
+                )));
+            }
+            if ["edit", "write"].contains(&name.as_str())
+                && let Err(error) = isolation.check_child_path(input["path"].as_str().unwrap_or(""))
+            {
+                return Ok(Some(Outcome::failure(error.to_string())));
+            }
         }
         let mut catalog = self.catalog.lock().await;
         if ["read", "ls", "grep", "edit", "write", "bash", "powershell"].contains(&name.as_str()) {
@@ -2027,20 +2139,41 @@ impl Runtime {
         };
         Self::check(hooks)?;
         let settings = hooks.settings.lock().unwrap().clone();
-        let decision = tools::policy(name, &settings.mode);
+        let merge = name == "review_delegate" && input["action"] == "merge";
+        let decision = if name == "review_delegate" {
+            if merge {
+                if settings.mode == "plan" {
+                    "deny"
+                } else {
+                    "ask"
+                }
+            } else {
+                "allow"
+            }
+        } else {
+            tools::policy(name, &settings.mode)
+        };
         if decision == "deny" {
             return Ok(false);
         }
         if decision == "allow" {
             return Ok(true);
         }
-        let request = json!({"call_id":id,"tool_name":name,"arguments":input,"summary":format!("{name}: {}",util::prefix(&input.to_string(),1000))});
+        let summary = if merge {
+            format!(
+                "将子任务 {} 的已审阅改动合并到主工作区？拒绝将丢弃这些子任务改动。",
+                input["delegate_call_id"].as_str().unwrap_or_default()
+            )
+        } else {
+            format!("{name}: {}", util::prefix(&input.to_string(), 1000))
+        };
+        let request = json!({"call_id":id,"tool_name":name,"arguments":input,"summary":summary});
         self.event(
             hooks,
             "approval_request",
             json!({"call_id":id,"name":name,"arguments":input}),
         )?;
-        let granted = if settings.always_allow.contains(name) {
+        let granted = if !merge && settings.always_allow.contains(name) {
             (hooks.sink)(
                 json!({"event":"approval_auto","sessionId":self.session,"request":request}),
             );
@@ -2259,6 +2392,27 @@ impl Runtime {
         Ok(result)
     }
     async fn invoke(&mut self, call: Block, hooks: &Hooks, recovered: bool) -> Result<Block> {
+        if let Block::ToolUse { name, input, .. } = &call
+            && name == "review_delegate"
+            && !self.child
+        {
+            let started = Instant::now();
+            let result = if let Some(outcome) = self.preflight(&call, hooks, recovered).await? {
+                outcome
+            } else {
+                self.mark_tool_started(&call, hooks)?;
+                self.review_delegate(&call, input, hooks)
+                    .await
+                    .unwrap_or_else(|error| Outcome::failure(error.to_string()))
+            };
+            return self.record_result(
+                &call,
+                result,
+                hooks,
+                recovered,
+                started.elapsed().as_secs_f64(),
+            );
+        }
         if self.child
             && let Block::ToolUse {
                 name, input, id, ..
@@ -2322,6 +2476,7 @@ impl Runtime {
                     id,
                     util::string(input, "kind")?,
                     util::string(input, "task")?,
+                    input["writable"] == true,
                     hooks,
                 )
                 .await?
@@ -2387,11 +2542,69 @@ impl Runtime {
         (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
         Ok(result)
     }
+    async fn review_delegate(
+        &mut self,
+        call: &Block,
+        input: &Value,
+        hooks: &Hooks,
+    ) -> Result<Outcome> {
+        let key = util::string(input, "delegate_call_id")?;
+        let workspace = self
+            .isolations
+            .get(key)
+            .filter(|workspace| workspace.active())
+            .cloned()
+            .context("no pending isolated changes for this delegate call")?;
+        match util::string(input, "action")? {
+            "inspect" => {
+                let diff = workspace.inspect(self.rounds)?;
+                self.event(
+                    hooks,
+                    "subagent_changes_reviewed",
+                    json!({"call_id":key,"isolation_id":workspace.id,"round":self.rounds}),
+                )?;
+                Ok(tools::bounded(diff))
+            }
+            "discard" => {
+                workspace.discard()?;
+                self.event(
+                    hooks,
+                    "subagent_isolation_closed",
+                    json!({"call_id":key,"isolation_id":workspace.id,"reason":"discard"}),
+                )?;
+                Ok(Outcome::ok("已丢弃子任务改动；主工作区未修改。"))
+            }
+            "merge" => {
+                workspace.ready_to_merge(self.rounds)?;
+                if !self.authorize(call, hooks).await? {
+                    workspace.discard()?;
+                    self.event(hooks,"subagent_isolation_closed",json!({"call_id":key,"isolation_id":workspace.id,"reason":"merge_rejected"}))?;
+                    return Ok(Outcome::failure(
+                        "用户拒绝合并，已丢弃子任务改动；主工作区未修改。",
+                    ));
+                }
+                Self::check(hooks)?;
+                let count = workspace.merge(self.rounds)?;
+                self.event(
+                    hooks,
+                    "subagent_changes_merged",
+                    json!({"call_id":key,"isolation_id":workspace.id,"files":count}),
+                )?;
+                let cleanup = workspace
+                    .discard()
+                    .err()
+                    .map(|error| format!("\n改动已合并；隔离目录清理失败，请重试 discard：{error}"))
+                    .unwrap_or_default();
+                Ok(Outcome::ok(format!("已合并 {count} 个文件。{cleanup}")))
+            }
+            _ => bail!("invalid review action"),
+        }
+    }
     async fn readonly_delegate(&self, call: &Block) -> Result<bool> {
         let Block::ToolUse { name, input, .. } = call else {
             return Ok(false);
         };
-        if name != "delegate" || self.child {
+        if name != "delegate" || self.child || input["writable"] == true {
             return Ok(false);
         }
         let catalog = self.catalog.lock().await;
@@ -2417,6 +2630,7 @@ impl Runtime {
         call_id: &'a str,
         kind: &'a str,
         task: &'a str,
+        writable: bool,
         hooks: &'a Hooks,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Outcome>> + Send + 'a>> {
         Box::pin(async move {
@@ -2458,34 +2672,126 @@ impl Runtime {
                     "unknown read-only subagent kind: {kind}"
                 )));
             };
-            let inherited_catalog = catalog.clone();
+            let mut inherited_catalog = catalog.clone();
             drop(catalog);
             let key = (kind.to_string(), task.to_string());
-            let mut child = if let Some(child) = self.children.remove(&key) {
+            let mut cached = self.children.remove(&key);
+            let recovery = self.store.recovery_events(&self.session)?;
+            let mut paused = cached
+                .as_ref()
+                .map(|child| child.session.clone())
+                .or_else(|| {
+                    recovery
+                        .iter()
+                        .rev()
+                        .find(|e| {
+                            ["subagent_start", "subagent_result"].contains(&e.r#type.as_str())
+                                && e.data["kind"] == kind
+                                && e.data["task"] == task
+                        })
+                        .and_then(|e| {
+                            if e.r#type == "subagent_start" || e.data["exit_reason"] != "completed"
+                            {
+                                e.data["child_session_id"].as_str().map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })
+                });
+            let isolation = if writable {
+                let previous_workspace = if let Some(child) = &cached {
+                    Some(child.workspace.clone())
+                } else if let Some(id) = &paused {
+                    self.store
+                        .session(id)?
+                        .and_then(|summary| summary["workspace"].as_str().map(PathBuf::from))
+                } else {
+                    None
+                };
+                let existing = self
+                    .isolations
+                    .values()
+                    .find(|workspace| {
+                        workspace.active()
+                            && previous_workspace.as_ref().is_some_and(|previous| {
+                                util::canonical(&workspace.work())
+                                    .is_ok_and(|work| work == *previous)
+                            })
+                    })
+                    .cloned();
+                let workspace = if let Some(workspace) = existing {
+                    workspace
+                } else {
+                    let extra = inherited_catalog
+                        .instructions
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    Arc::new(crate::delegate_workspace::Workspace::create(
+                        &self.workspace,
+                        &self.store.root(),
+                        &self.session,
+                        &extra,
+                    )?)
+                };
+                self.isolations.insert(call_id.into(), workspace.clone());
+                self.event(
+                    hooks,
+                    "subagent_isolation",
+                    json!({"call_id":call_id,"isolation_id":workspace.id,"kind":kind,"task":task}),
+                )?;
+                Some(workspace)
+            } else {
+                None
+            };
+            let child_workspace = util::canonical(
+                &isolation
+                    .as_ref()
+                    .map_or_else(|| self.workspace.clone(), |workspace| workspace.work()),
+            )?;
+            let saved_workspace = paused
+                .as_ref()
+                .map(|id| {
+                    self.store.require(id).and_then(|summary| {
+                        summary["workspace"]
+                            .as_str()
+                            .map(PathBuf::from)
+                            .context("invalid child workspace")
+                    })
+                })
+                .transpose()?;
+            if saved_workspace
+                .as_ref()
+                .is_some_and(|saved| *saved != child_workspace)
+            {
+                paused = None;
+                if let Some(child) = cached.take() {
+                    child.close_resources(hooks).await?;
+                }
+            }
+            if isolation.is_some() {
+                inherited_catalog.workspace = child_workspace.clone();
+                inherited_catalog.instructions = inherited_catalog
+                    .instructions
+                    .into_iter()
+                    .map(|(path, mut source)| {
+                        let path = path.strip_prefix(&self.workspace).map_or_else(
+                            |_| path.clone(),
+                            |relative| child_workspace.join(relative),
+                        );
+                        source.path = path.clone();
+                        (path, source)
+                    })
+                    .collect();
+            }
+            let mut child = if let Some(child) = cached {
                 child
             } else {
-                let paused = self
-                    .store
-                    .recovery_events(&self.session)?
-                    .iter()
-                    .rev()
-                    .find(|e| {
-                        ["subagent_start", "subagent_result"].contains(&e.r#type.as_str())
-                            && e.data["kind"] == kind
-                            && e.data["task"] == task
-                    })
-                    .and_then(|e| {
-                        if e.r#type == "subagent_start" || e.data["exit_reason"] != "completed" {
-                            e.data["child_session_id"].as_str().map(str::to_string)
-                        } else {
-                            None
-                        }
-                    });
                 let mut settings = hooks.settings.lock().unwrap().clone();
                 settings.acceptance = None;
                 Box::new(
                     Self::from_catalog(
-                        self.workspace.clone(),
+                        child_workspace,
                         &self.provider.configuration_id,
                         paused.as_deref(),
                         self.store.clone(),
@@ -2496,23 +2802,44 @@ impl Runtime {
                 )
             };
             child.child = true;
+            child.isolation = isolation;
             child.compaction = self.compaction;
             child.goal = None;
             child.files = self.files.clone();
             // A delegated task must see the same pinned project instructions
             // and activated skills as the request that created it.
-            {
+            if !writable {
                 let parent_catalog = self.catalog.lock().await;
                 let mut child_catalog = child.catalog.lock().await;
                 child_catalog.instructions = parent_catalog.instructions.clone();
                 child_catalog.active = parent_catalog.active.clone();
             }
-            child.allowed = allowed.map(|mut set| {
-                set.remove("delegate");
-                set.retain(|s| !s.starts_with("task_"));
-                set.insert("submit_result".into());
-                set
+            let mut set = allowed.unwrap_or_else(|| {
+                tools::builtins()
+                    .iter()
+                    .map(|spec| spec.name.clone())
+                    .chain(self.mcp.tools.keys().cloned())
+                    .collect()
             });
+            {
+                set.remove("delegate");
+                set.remove("review_delegate");
+                set.retain(|s| !s.starts_with("task_"));
+                if writable {
+                    set.retain(|name| !name.starts_with("mcp__"));
+                } else {
+                    set.retain(|name| {
+                        tools::read_only(name)
+                            || self
+                                .mcp
+                                .tools
+                                .get(name)
+                                .is_some_and(|(spec, _, _)| spec.read_only_hint)
+                    });
+                }
+                set.insert("submit_result".into());
+            }
+            child.allowed = Some(set);
             // Close only child-owned recovery connections before borrowing the
             // current parent view. Borrowed handles never close parent services.
             child.mcp.close().await;
@@ -2676,6 +3003,13 @@ impl Runtime {
             }
             payload["evidence_refs"] = json!(verified);
             payload["child_session_id"] = json!(child_id);
+            if let Some(isolation) = &child.isolation {
+                payload["isolation_id"] = json!(isolation.id);
+                payload["requires_review"] = json!(true);
+                payload["review_instructions"] = json!(format!(
+                    "主工作区尚未修改。父会话须调用 review_delegate(delegate_call_id={call_id}, action=inspect)，查看 diff 后在后续响应中选择 merge 或 discard。"
+                ));
+            }
             payload["status"] = json!(if structured {
                 result.exit_reason.as_str()
             } else {

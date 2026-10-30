@@ -440,7 +440,7 @@ impl Store {
                 WHEN type IN ('tool_call_result','tool_started') THEN json_object('call_id',json_extract(data,'$.call_id'),'name',json_extract(data,'$.name'),'observed_paths',json_extract(data,'$.observed_paths'),'success',CASE WHEN json_extract(data,'$.success') THEN json('true') ELSE json('false') END)
                 WHEN type='subagent_result' THEN json_object('child_session_id',json_extract(data,'$.child_session_id'),'kind',json_extract(data,'$.kind'),'task',json_extract(data,'$.task'),'exit_reason',json_extract(data,'$.exit_reason'),'provider_progress',json_extract(data,'$.provider_progress'))
                 WHEN type IN ('background_job_started','background_job_completed','background_job_lost') THEN json_object('job_id',json_extract(data,'$.job_id'),'command',json_extract(data,'$.command'))
-                ELSE data END FROM events WHERE session_id=? AND type IN ('session_start','project_instructions','skill_activated','skill_deactivated','project_instructions_changed','subagent_start','subagent_result','assistant_message','provider_response_rejected','tool_call_start','tool_call_result','tool_started','background_job_started','background_job_completed','background_job_lost') ORDER BY seq")?;
+                ELSE data END FROM events WHERE session_id=? AND type IN ('session_start','project_instructions','skill_activated','skill_deactivated','project_instructions_changed','subagent_start','subagent_result','subagent_isolation','assistant_message','provider_response_rejected','tool_call_start','tool_call_result','tool_started','background_job_started','background_job_completed','background_job_lost') ORDER BY seq")?;
             q.query_map([id], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?
                 .map(|row| {let (seq,kind,timestamp,data)=row?; Ok(Event{seq,r#type:kind,timestamp,data:serde_json::from_str(&data)?})}).collect::<Result<_>>()
         })
@@ -577,6 +577,31 @@ impl Store {
                         bail!("session artifacts escape storage root");
                     }
                     directories.push(resolved);
+                }
+            }
+        }
+        // An owner may have crashed while retaining a reviewable snapshot.
+        // Clean it under the same activation locks before deleting its journal.
+        let mut snapshots = std::collections::HashSet::new();
+        for session in &ids {
+            let Some(summary) = self.session(session)? else {
+                continue;
+            };
+            for event in self
+                .recovery_events(session)?
+                .iter()
+                .filter(|event| event.r#type == "subagent_isolation")
+            {
+                let snapshot = util::string(&event.data, "isolation_id")?;
+                if snapshots.insert(snapshot.to_string())
+                    && let Some(workspace) = crate::delegate_workspace::Workspace::load(
+                        &self.root(),
+                        session,
+                        Path::new(util::string(&summary, "workspace")?),
+                        snapshot,
+                    )?
+                {
+                    workspace.discard()?;
                 }
             }
         }

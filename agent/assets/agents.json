@@ -26,7 +26,7 @@
   {
     "name": "test-runner",
     "label": "测试执行者",
-    "description": "执行指定测试或构建，分析失败原因。",
+    "description": "分析测试与构建；需执行命令时由父会话显式请求隔离可写任务。",
     "tools": [
       "read",
       "ls",
@@ -38,7 +38,7 @@
   {
     "name": "fixer",
     "label": "修复者",
-    "description": "根据具体任务实现完整的代码修复。",
+    "description": "分析代码修复；需修改文件时由父会话显式请求隔离可写任务。",
     "tools": [
       "read",
       "ls",
@@ -53,7 +53,7 @@
   {
     "name": "ui-designer",
     "label": "UI 设计师",
-    "description": "实现界面和交互，检查布局、可访问性与状态。",
+    "description": "审查界面和交互；需实现改动时由父会话显式请求隔离可写任务。",
     "tools": [
       "read",
       "ls",

@@ -472,6 +472,10 @@
           "minLength": 1,
           "title": "Task",
           "type": "string"
+        },
+        "writable": {
+          "type": "boolean",
+          "description": "Defaults to false. True requests an isolated writable child. Changes must be inspected and explicitly merged with review_delegate. Shell needs a real OS sandbox."
         }
       },
       "required": [
@@ -481,6 +485,20 @@
       "type": "object"
     },
     "requires_approval": false
+  },
+  {
+    "name": "review_delegate",
+    "description": "Inspect, explicitly merge, or discard isolated child changes. Inspect the complete diff first; merge must be requested in a later model response and requires user approval in every permission mode.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "delegate_call_id": {"type": "string", "minLength": 1},
+        "action": {"type": "string", "enum": ["inspect", "merge", "discard"]}
+      },
+      "required": ["delegate_call_id", "action"],
+      "additionalProperties": false
+    },
+    "requires_approval": true
   },
   {
     "name": "task_create",

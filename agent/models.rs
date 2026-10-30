@@ -122,6 +122,8 @@ pub struct ToolSpec {
     pub description: String,
     pub input_schema: Value,
     pub requires_approval: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only_hint: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Outcome {

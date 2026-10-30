@@ -5,6 +5,7 @@ pub mod cli;
 mod command_process;
 pub mod configuration;
 pub mod context;
+mod delegate_workspace;
 mod editing;
 pub mod eval;
 mod extension_cache;
