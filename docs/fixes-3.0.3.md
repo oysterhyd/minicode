@@ -873,3 +873,9 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 精度与边界：直接按十进制位数和指数检查整数性及 u64 溢出，不先转 f64；`1.0000000000000001`、`0.99999999999999999` 和相邻大整数的小数不能舍入成另一个待响应 ID。新增 serde_json 的 `raw_value` 功能读取原始 ID，无新增包、版本或 lockfile 变化，也不启用影响整个应用数值行为的 arbitrary_precision。重复 ID 字段属于不明确帧，拒绝并沿 MC4 路径关闭连接。
 - 回归：2 项 Rust 测试覆盖数字/字符串/浮点/指数、u64 最大值、浮点精度边界、无效值、极端指数、重复字段与服务端请求；10 项真实 Bridge 测试覆盖 stdio 三种 ID、HTTP JSON/Streamable SSE/旧 SSE 的字符串和浮点 ID，以及无效/舍入 ID 不抢占正确响应。MC4 的半帧和并发分发回归继续运行。
 - 验证：完整脚本 `output/check-5.ps1 -Item MC5 -Desktop` 全部通过，日志前缀 `output/5-MC5-`：fmt、Clippy、Rust 190 通过/2 个既有忽略、build、协议 228 通过/2 个既有跳过、任务/trace 无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 119 通过、Desktop go test/vet/vendor UI。作为阶段 5A 六项主体完成回归，包含前五项全部测试。仅本机 Windows 平台可实际执行。
+
+### R3 补充：无效 continue 保持空闲资源
+
+- 问题：没有暂停任务的 `/continue` 仍进入 run_inner，随后被作为运行异常收尾并关闭空闲 dev server。新增 `r3_invalid_continue_does_not_close_idle_session_resources` 先失败，日志 `output/5A-invalid-continue-red.log`。
+- 修复：在开始 run 和取得运行锁之前验证 pending；无效 continue 直接报错，保持后台任务和 MCP 状态。聚焦测试通过，日志 `output/5A-invalid-continue-focused.log`。
+- 验证：最终阶段完整检查 `output/5-5A-final-*` 全部通过，包含本回归和后续 R6 资源持有者补充。无协议或存储迁移。

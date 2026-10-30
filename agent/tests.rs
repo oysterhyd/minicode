@@ -2940,6 +2940,30 @@ fn assert_torn_down(h: &Harness) {
 }
 
 #[tokio::test]
+async fn r3_invalid_continue_does_not_close_idle_session_resources() {
+    let mut h = Harness::new(background_then(json!({"text":"started"}))).await;
+    h.run(Some("start")).await.unwrap();
+    assert!(!h.runtime.pending);
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let job = events
+        .iter()
+        .find(|e| e.r#type == "background_job_started")
+        .unwrap()
+        .data["job_id"]
+        .clone();
+    assert!(
+        h.run(None).await.is_err(),
+        "an invalid continue must fail before starting a run"
+    );
+    let page = h.runtime.background.output(&json!({"job_id":job})).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&page.output).unwrap()["status"],
+        "running"
+    );
+    h.runtime.close_resources(&h.hooks).await.unwrap();
+}
+
+#[tokio::test]
 async fn teardown_continues_after_a_failed_background_job_event() {
     let mut h = Harness::new(background_then(json!({"text":"done"}))).await;
     inject_storage_failure(&h, "background_job_completed");

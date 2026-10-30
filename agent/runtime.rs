@@ -965,6 +965,9 @@ impl Runtime {
         attachments: Vec<Block>,
         hooks: Hooks,
     ) -> Result<RunResult> {
+        if text.is_none() && !self.pending {
+            bail!("当前没有暂停的任务");
+        }
         let _ownership = self.store.activation(&self.session)?;
         self.store.require(&self.session)?;
         if Some(self.store.message_revision(&self.session)?) != self.message_revision {
