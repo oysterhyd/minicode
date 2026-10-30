@@ -2168,6 +2168,126 @@ impl Harness {
             .clone()
     }
 }
+
+#[tokio::test]
+async fn r43_serial_children_inherit_compaction_on_creation_and_resume() {
+    for initial in [false, true] {
+        let mut h = Harness::new(json!({"turns":[
+            {"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]},
+            {"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]},
+            {"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]},
+            {"tool_calls":[{"name":"read","arguments":{"path":"README.md"}}]}
+        ]}))
+        .await;
+        h.hooks.settings.lock().unwrap().budget.max_rounds = 2;
+        h.runtime.compaction = initial;
+        h.run(Some("inspect")).await.unwrap();
+        let key = ("explore".into(), "inspect".into());
+        let child = &h.runtime.children[&key];
+        let id = child.session.clone();
+        assert_eq!(
+            child.compaction, initial,
+            "new child must inherit parent setting"
+        );
+        h.runtime.compaction = !initial;
+        h.run(Some("continue inspect")).await.unwrap();
+        let child = &h.runtime.children[&key];
+        assert_eq!(child.session, id, "paused child should be resumed");
+        assert_eq!(
+            child.compaction, !initial,
+            "resumed child must inherit current parent setting"
+        );
+    }
+}
+
+#[tokio::test]
+async fn r43_real_parallel_children_inherit_both_compaction_settings() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for enabled in [false, true] {
+        let mut h = Harness::new(json!({"turns":[]})).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for index in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut data = vec![];
+                let mut buffer = [0u8; 8192];
+                let header = loop {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&buffer[..n]);
+                    if let Some(at) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&data[..header]).to_ascii_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                while data.len() < header + length {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&buffer[..n]);
+                }
+                let request: serde_json::Value =
+                    serde_json::from_slice(&data[header..header + length]).unwrap();
+                let system = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["role"] == "system")
+                    .unwrap()["content"]
+                    .as_str()
+                    .unwrap();
+                let calls = if system.contains("你是子助手。") {
+                    vec![
+                        json!({"id":format!("read-{index}"),"type":"function","function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}}),
+                    ]
+                } else {
+                    ["a","b"].into_iter().map(|task|json!({"id":format!("delegate-{task}"),"type":"function","function":{"name":"delegate","arguments":json!({"kind":"explore","task":task}).to_string()}})).collect()
+                };
+                let body=json!({"choices":[{"message":{"role":"assistant","tool_calls":calls},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let configuration = h.runtime.catalog.lock().await.configuration.clone();
+        let saved=configuration.save_service(&json!({"name":"Local R43 fixture","baseUrl":url,"apiStyle":"openai","apiKey":"local-fixture-key","enabled":true,"models":[{"modelId":"fixture","contextWindow":200000,"maxOutputTokens":8192}]})).unwrap();
+        let model = saved["defaultModel"].as_str().unwrap();
+        h.runtime.provider = crate::provider::Provider::new(model, "off", &configuration).unwrap();
+        h.hooks.settings.lock().unwrap().model = model.into();
+        h.hooks.settings.lock().unwrap().budget.max_rounds = 3;
+        h.runtime.compaction = enabled;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            h.run(Some("inspect two tasks")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.exit_reason, "max_rounds");
+        server.await.unwrap();
+        assert_eq!(
+            h.runtime.children.len(),
+            2,
+            "both parallel child runtimes must return to parent"
+        );
+        for child in h.runtime.children.values() {
+            assert_eq!(
+                child.compaction, enabled,
+                "actual parallel child must inherit parent setting"
+            )
+        }
+    }
+}
 fn assert_strict_anthropic_roles(messages: &[serde_json::Value]) {
     assert_eq!(messages.first().map(|m| &m["role"]), Some(&json!("user")));
     for pair in messages.windows(2) {

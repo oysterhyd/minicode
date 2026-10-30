@@ -2496,6 +2496,7 @@ impl Runtime {
                 )
             };
             child.child = true;
+            child.compaction = self.compaction;
             child.goal = None;
             child.files = self.files.clone();
             // A delegated task must see the same pinned project instructions

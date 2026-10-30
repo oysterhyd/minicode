@@ -927,3 +927,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 回归：3 项真实 Bridge 测试覆盖精确白名单和继承白名单复用父进程/连续计数、子任务成功/失败后父连接仍可用、兄弟 MCP 调用被拒绝、非法白名单格式；2 项 Rust 测试覆盖提醒/归档/混合工具消息排除、筛选顺序、真实请求顺序及多字节头尾截断。无新依赖或存储迁移。
 - 指令兼容复核：旧 audit 用例通过 system prompt 检查 Skill 正文，实际上依赖合成动态提醒被混入 requirements。R35 去除污染后，Skill 仍由子任务的动态指令快照正确继承；用例现同时验证正文存在于 child user 动态快照、且不被复制进 system requirements。聚焦通过，首轮全测日志保留 `output/5-R35-first-protocol.log`。
 - 验证：完整 `output/check-5.ps1 -Item R35 -Desktop` 通过，日志前缀 `output/5-R35-`：fmt、Clippy、Rust 197 通过/2 个既有忽略、build、协议 252 通过/2 个既有跳过、生成文件无差异、60 次主任务与 9 个场景保持预期、npm ci/build、TUI 121 通过、Desktop test/vet/vendor UI。仅 Windows 在本机执行。
+
+### R43 子代理 compaction 设置一致继承
+
+- 核查：eval 的 b0 明确设置 Runtime.compaction=false；并行 delegate 分支只把父开关传给中间 Runtime，随后串行/并行共用的真实 child 构造仍使用默认 true。两个新增回归均复现 false→true 的错误，见 `output/5-R43-red.log`。
+- 修复：在 delegate 的统一 child 激活路径上设置 child.compaction=self.compaction，既覆盖新创建/恢复的 child，也覆盖并行分支真正创建的 child。Runtime 的普通默认值及评测 b0/b1/b2 定义保持原状，无协议、配置或依赖变化。
+- 测试：串行回归覆盖父开关 false/true、新 child 继承，以及同一暂停 child 在父开关切换后继续执行；真实本地 HTTP 提供商回归触发实际双 child 并行分支，在两个开关值下验证返回父会话的两个实际 Runtime。聚焦通过，见 `output/5-R43-focused.log`；不调用真实模型 API。
+- 验证：完整 `output/check-5.ps1 -Item R43 -Desktop` 全部通过，日志前缀 `output/5-R43-`：fmt、Clippy、Rust 199 通过/2 个既有忽略、build、协议 252 通过/2 个既有跳过、任务/trace 无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 121 通过、Desktop test/vet/vendor UI。本机仅执行 Windows 平台。
