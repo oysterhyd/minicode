@@ -437,7 +437,7 @@ impl Connector {
                             if let Some(tx) = endpoint.take() {
                                 let _ = tx.send(event.data);
                             }
-                        } else if let Ok(value) = serde_json::from_str::<Value>(&event.data) {
+                        } else if let Ok(value) = mcp_dispatch::decode(event.data.as_bytes()) {
                             pending.dispatch(value);
                         }
                     }
@@ -529,7 +529,7 @@ impl Connector {
                 let bytes = bytes?;
                 if sse {
                     for event in decoder.push(&bytes)? {
-                        if let Ok(v) = serde_json::from_str::<Value>(&event.data)
+                        if let Ok(v) = mcp_dispatch::decode(event.data.as_bytes())
                             && v["id"] == id
                         {
                             return rpc_result(v);
@@ -545,7 +545,7 @@ impl Connector {
             if sse {
                 bail!("MCP SSE response missing result")
             }
-            let response: Value = serde_json::from_slice(&buffer)?;
+            let response = mcp_dispatch::decode(&buffer)?;
             if response["id"] != id {
                 bail!("MCP response id does not match request");
             }
