@@ -436,8 +436,8 @@ impl Store {
         self.with(|c| {
             let mut q = c.prepare("SELECT seq,type,timestamp,CASE
                 WHEN type IN ('assistant_message','provider_response_rejected') THEN json_object('usage',json_extract(data,'$.usage'),'tool_call_ids',json_extract(data,'$.tool_call_ids'),'provider_progress',json_extract(data,'$.provider_progress'))
-                WHEN type='tool_call_start' THEN json_object('call_id',json_extract(data,'$.call_id'),'arguments',json_object('path',json_extract(data,'$.arguments.path')))
-                WHEN type IN ('tool_call_result','tool_started') THEN json_object('call_id',json_extract(data,'$.call_id'),'success',CASE WHEN json_extract(data,'$.success') THEN json('true') ELSE json('false') END)
+                WHEN type='tool_call_start' THEN json_object('call_id',json_extract(data,'$.call_id'),'name',json_extract(data,'$.name'),'arguments',json_object('path',json_extract(data,'$.arguments.path')))
+                WHEN type IN ('tool_call_result','tool_started') THEN json_object('call_id',json_extract(data,'$.call_id'),'name',json_extract(data,'$.name'),'observed_paths',json_extract(data,'$.observed_paths'),'success',CASE WHEN json_extract(data,'$.success') THEN json('true') ELSE json('false') END)
                 WHEN type='subagent_result' THEN json_object('child_session_id',json_extract(data,'$.child_session_id'),'kind',json_extract(data,'$.kind'),'task',json_extract(data,'$.task'),'exit_reason',json_extract(data,'$.exit_reason'),'provider_progress',json_extract(data,'$.provider_progress'))
                 WHEN type IN ('background_job_started','background_job_completed','background_job_lost') THEN json_object('job_id',json_extract(data,'$.job_id'),'command',json_extract(data,'$.command'))
                 ELSE data END FROM events WHERE session_id=? AND type IN ('session_start','project_instructions','skill_activated','skill_deactivated','project_instructions_changed','subagent_start','subagent_result','assistant_message','provider_response_rejected','tool_call_start','tool_call_result','tool_started','background_job_started','background_job_completed','background_job_lost') ORDER BY seq")?;

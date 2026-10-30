@@ -68,6 +68,42 @@ fn utf8_bounds() {
     }
 }
 
+#[tokio::test]
+async fn r31b_native_observations_cover_only_hits_and_visible_paths() {
+    let (_dir, ctx) = fixture();
+    fs::create_dir(ctx.workspace.join("src")).unwrap();
+    fs::write(ctx.workspace.join("src/a.md"), "needle\n").unwrap();
+    fs::write(ctx.workspace.join("src/b.md"), "none\n").unwrap();
+    let result = tools::execute(
+        "grep",
+        &json!({"pattern":"needle","path":"src","glob":"*.md"}),
+        &ctx,
+    )
+    .await;
+    assert!(result.success);
+    assert_eq!(result.observed_paths, vec!["src/a.md"]);
+    let result = tools::execute("grep", &json!({"pattern":"absent","path":"src/a.md"}), &ctx).await;
+    assert!(result.success);
+    assert!(result.observed_paths.is_empty());
+    let result = tools::execute("ls", &json!({"path":"src","limit":1}), &ctx).await;
+    assert_eq!(result.observed_paths, vec!["src", "src/a.md"]);
+    let result = tools::execute("ls", &json!({"path":"src","limit":1,"offset":1}), &ctx).await;
+    assert_eq!(result.observed_paths, vec!["src", "src/b.md"]);
+    let result = tools::execute("read", &json!({"path":"./src/a.md"}), &ctx).await;
+    assert_eq!(result.observed_paths, vec!["src/a.md"]);
+    let result = tools::execute("skills_list", &json!({"path":"src/b.md"}), &ctx).await;
+    assert!(result.success);
+    assert!(result.observed_paths.is_empty());
+    let old = serde_json::to_value(crate::models::Outcome::ok("legacy")).unwrap();
+    assert!(old.get("observed_paths").is_none());
+    assert!(
+        serde_json::from_value::<crate::models::Outcome>(old)
+            .unwrap()
+            .observed_paths
+            .is_empty()
+    );
+}
+
 fn t9_reorder_and_extend_artifacts(store: &Store) {
     store.with(|c| {c.execute_batch("CREATE TABLE migrated_artifacts(created_at TEXT NOT NULL,artifact_id TEXT NOT NULL,kind TEXT NOT NULL,session_id TEXT NOT NULL,relpath TEXT NOT NULL,migration_marker TEXT NOT NULL DEFAULT 'migrated',PRIMARY KEY(session_id,artifact_id));
         INSERT INTO migrated_artifacts(created_at,artifact_id,kind,session_id,relpath) SELECT created_at,artifact_id,kind,session_id,relpath FROM artifacts;

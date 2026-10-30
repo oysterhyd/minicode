@@ -350,9 +350,34 @@ pub fn validate(spec: &ToolSpec, input: &Value) -> Result<()> {
     Ok(())
 }
 pub async fn execute(name: &str, args: &Value, ctx: &ToolContext) -> Outcome {
-    match execute_inner(name, args, ctx).await {
+    let mut outcome = match execute_inner(name, args, ctx).await {
         Ok(o) => o,
         Err(e) => Outcome::failure(e.to_string()),
+    };
+    if outcome.success
+        && ["read", "write", "edit"].contains(&name)
+        && let Some(raw) = args["path"].as_str()
+        && let Ok(path) = util::in_workspace(&ctx.workspace, raw)
+        && let Some(path) = observed_path(ctx, &path)
+    {
+        outcome.observed_paths.push(path);
+    }
+    outcome
+}
+fn observed_path(ctx: &ToolContext, path: &Path) -> Option<String> {
+    let path = util::canonical(path).ok()?;
+    let relative = portable_path(path.strip_prefix(&ctx.workspace).ok()?.to_str()?);
+    Some(if relative.is_empty() {
+        ".".into()
+    } else {
+        relative
+    })
+}
+fn portable_path(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
     }
 }
 async fn execute_inner(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
@@ -683,6 +708,7 @@ fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = args["limit"].as_u64().unwrap_or(500).min(500) as usize;
     let mut entries = vec![];
+    let mut observed = observed_path(ctx, &base).into_iter().collect::<Vec<_>>();
     let mut seen = 0;
     let mut used = 0;
     let mut more = false;
@@ -715,11 +741,7 @@ fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             .map(|p| (p, true))
             .chain(files.iter().map(|p| (p, false)))
         {
-            let relative = entry
-                .0
-                .strip_prefix(&base)?
-                .to_string_lossy()
-                .replace('\\', "/");
+            let relative = portable_path(&entry.0.strip_prefix(&base)?.to_string_lossy());
             let text = if entry.1 {
                 format!("{relative}/")
             } else {
@@ -732,6 +754,9 @@ fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
                 }
                 used += text.len() + 1;
                 entries.push(text);
+                if let Some(path) = observed_path(ctx, entry.0) {
+                    observed.push(path);
+                }
             }
             seen += 1;
         }
@@ -776,6 +801,7 @@ fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     }
     let mut outcome = bounded(text);
     outcome.truncated |= more;
+    outcome.observed_paths = observed;
     Ok(outcome)
 }
 fn grep_files(base: &Path, include_ignored: bool) -> impl Iterator<Item = ignore::DirEntry> {
@@ -815,12 +841,14 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         .map(|g| g.compile_matcher());
     let max = args["max_results"].as_i64().unwrap_or(100).clamp(1, 1000) as usize;
     let mut lines = vec![];
+    let observed = std::cell::RefCell::new(std::collections::BTreeSet::new());
     let mut skipped = 0;
     let truncated = std::cell::Cell::new(false);
     let start = Instant::now();
     let search_line = |line: &str,
                        number: &mut usize,
                        workspace_path: &str,
+                       actual_path: Option<&str>,
                        lines: &mut Vec<String>|
      -> Result<bool> {
         if ctx.cancel.is_cancelled() {
@@ -831,6 +859,9 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         }
         *number += 1;
         if regex.is_match(line) {
+            if let Some(path) = actual_path {
+                observed.borrow_mut().insert(path.to_string());
+            }
             let mut chars = line.chars();
             let snippet = chars.by_ref().take(500).collect::<String>();
             let shortened = chars.next().is_some();
@@ -862,9 +893,7 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
                 .to_string_lossy()
                 .into_owned()
         } else {
-            path.strip_prefix(&base)?
-                .to_string_lossy()
-                .replace('\\', "/")
+            portable_path(&path.strip_prefix(&base)?.to_string_lossy())
         };
         if glob.as_ref().is_some_and(|g| {
             !g.is_match(&relative) && !g.is_match(path.file_name().unwrap_or_default())
@@ -892,10 +921,11 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             continue;
         }
         let mut reader = BufReader::new(std::io::Cursor::new(head).chain(reader));
-        let workspace_path = path
-            .strip_prefix(&ctx.workspace)?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = path.strip_prefix(&ctx.workspace)?;
+        let workspace_path = portable_path(&relative.to_string_lossy());
+        // The walker never follows links. Record its actual path only for
+        // matching files, and leave canonical comparison to the verifier.
+        let actual_path = relative.to_str().map(portable_path);
         let mut number = 0;
         let mut chunk = vec![];
         let mut ended_with_lf = false;
@@ -922,13 +952,27 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
                 pieces.pop();
             }
             for line in pieces {
-                if search_line(line, &mut number, &workspace_path, &mut lines)? {
+                if search_line(
+                    line,
+                    &mut number,
+                    &workspace_path,
+                    actual_path.as_deref(),
+                    &mut lines,
+                )? {
                     break 'files;
                 }
             }
         }
         // Text that ends with a line break has one more, empty, line.
-        if ended_with_lf && search_line("", &mut number, &workspace_path, &mut lines)? {
+        if ended_with_lf
+            && search_line(
+                "",
+                &mut number,
+                &workspace_path,
+                actual_path.as_deref(),
+                &mut lines,
+            )?
+        {
             break 'files;
         }
     }
@@ -940,6 +984,7 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     }
     let mut outcome = bounded(lines.join("\n"));
     outcome.truncated |= truncated.get();
+    outcome.observed_paths = observed.into_inner().into_iter().collect();
     Ok(outcome)
 }
 fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {

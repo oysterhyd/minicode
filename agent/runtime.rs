@@ -2321,7 +2321,7 @@ impl Runtime {
                 e.len() + 1
             }
         });
-        let mut event=self.store.checkpoint(&self.session,"tool_call_result",&json!({"call_id":id,"name":name,"success":outcome.success,"exit_code":outcome.exit_code,"signal":outcome.signal,"error":outcome.error,"output_preview":util::prefix(&outcome.output,1000),"result_ref":id,"output_offset":output_offset,"artifact_id":outcome.artifact_id,"truncated":outcome.truncated,"duration_s":duration,"recovered":recovered}),None,Some(&result),None)?;
+        let mut event=self.store.checkpoint(&self.session,"tool_call_result",&json!({"call_id":id,"name":name,"success":outcome.success,"exit_code":outcome.exit_code,"signal":outcome.signal,"error":outcome.error,"output_preview":util::prefix(&outcome.output,1000),"result_ref":id,"output_offset":output_offset,"artifact_id":outcome.artifact_id,"truncated":outcome.truncated,"duration_s":duration,"recovered":recovered,"observed_paths":outcome.observed_paths}),None,Some(&result),None)?;
         // Keep the live protocol compatible; only the persisted event is compact.
         event.data["output_detail"] = json!(outcome.output);
         event.data["images"] = json!(outcome.images);
@@ -2523,19 +2523,42 @@ impl Runtime {
             let structured = parsed.is_some();
             let mut payload=parsed.unwrap_or(json!({"summary":final_text,"findings":[],"evidence_refs":[],"unresolved":["子助手未返回有效的结构化结果。"]}));
             let events = self.store.recovery_events(&child_id)?;
-            let succeeded = events
+            let mut observed = HashSet::new();
+            for result in events
                 .iter()
                 .filter(|e| e.r#type == "tool_call_result" && e.data["success"] == true)
-                .filter_map(|e| e.data["call_id"].as_str())
-                .collect::<HashSet<_>>();
-            let observed = events
-                .iter()
-                .filter(|e| {
-                    e.r#type == "tool_call_start"
-                        && succeeded.contains(e.data["call_id"].as_str().unwrap_or_default())
-                })
-                .filter_map(|e| e.data["arguments"]["path"].as_str())
-                .collect::<HashSet<_>>();
+            {
+                let legacy_call = if result.data["name"].as_str().is_none()
+                    || result.data["observed_paths"].is_null()
+                {
+                    events.iter().rev().find(|e| {
+                        e.r#type == "tool_call_start" && e.data["call_id"] == result.data["call_id"]
+                    })
+                } else {
+                    None
+                };
+                let name = result.data["name"]
+                    .as_str()
+                    .or_else(|| legacy_call.and_then(|call| call.data["name"].as_str()))
+                    .unwrap_or_default();
+                if !["read", "write", "edit", "grep", "ls"].contains(&name) {
+                    continue;
+                }
+                if let Some(paths) = result.data["observed_paths"].as_array() {
+                    for path in paths.iter().filter_map(Value::as_str) {
+                        if let Ok(path) = util::in_workspace(&child.workspace, path) {
+                            observed.insert(path);
+                        }
+                    }
+                } else if let Some(call) = legacy_call
+                    && ["read", "write", "edit", "ls"]
+                        .contains(&call.data["name"].as_str().unwrap_or_default())
+                    && let Some(path) = call.data["arguments"]["path"].as_str()
+                    && let Ok(path) = util::in_workspace(&child.workspace, path)
+                {
+                    observed.insert(path);
+                }
+            }
             let requested = payload["evidence_refs"]
                 .as_array()
                 .cloned()
@@ -2543,9 +2566,9 @@ impl Runtime {
             let mut verified = vec![];
             for r in requested {
                 if let Some(reference) = r.as_str() {
-                    let path = reference.split(':').next().unwrap_or(reference);
-                    if observed.contains(path)
-                        && util::in_workspace(&self.workspace, path).is_ok_and(|p| p.exists())
+                    let path = crate::subagent_result::reference_path(reference);
+                    if util::in_workspace(&child.workspace, path)
+                        .is_ok_and(|path| path.exists() && observed.contains(&path))
                     {
                         verified.push(r)
                     } else {

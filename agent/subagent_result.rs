@@ -1,5 +1,15 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
+pub(crate) fn reference_path(reference: &str) -> &str {
+    static LOCATION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = LOCATION.get_or_init(|| {
+        regex::Regex::new(r":[1-9][0-9]*(?::[1-9][0-9]*)?(?:-[1-9][0-9]*)?$").unwrap()
+    });
+    pattern
+        .find(reference)
+        .map(|location| &reference[..location.start()])
+        .unwrap_or(reference)
+}
 
 pub(crate) fn validate(value: &Value) -> Result<()> {
     if !value["summary"].is_string() {
@@ -42,6 +52,19 @@ pub(crate) fn extract(text: &str) -> Option<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn r31b_locations_preserve_drive_letters_and_non_location_colons() {
+        for (reference, path) in [
+            ("src/a.rs:10", "src/a.rs"),
+            ("src/a.rs:10:2", "src/a.rs"),
+            ("src/a.rs:1-20", "src/a.rs"),
+            (r"C:\repo\a.rs:2", r"C:\repo\a.rs"),
+            ("name:word", "name:word"),
+            ("../outside.rs:3", "../outside.rs"),
+        ] {
+            assert_eq!(reference_path(reference), path);
+        }
+    }
     #[test]
     fn r31_extracts_only_complete_valid_structures() {
         let result = json!({"summary":"中文 { braces }","findings":["ok"],"evidence_refs":[],"unresolved":[]});

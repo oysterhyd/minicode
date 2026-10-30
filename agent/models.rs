@@ -140,6 +140,8 @@ pub struct Outcome {
     pub truncated: bool,
     #[serde(skip)]
     pub full_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_paths: Vec<String>,
 }
 impl Outcome {
     pub fn ok(output: impl Into<String>) -> Self {
@@ -154,6 +156,7 @@ impl Outcome {
             artifact_id: None,
             truncated: false,
             full_output: None,
+            observed_paths: vec![],
         }
     }
     pub fn failure(error: impl Into<String>) -> Self {

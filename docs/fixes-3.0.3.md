@@ -900,3 +900,12 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 文本回退：`agent/subagent_result.rs` 支持裸 JSON、Markdown JSON 围栏及说明中的首个合法结果对象；识别到无关的完整对象/数组时跳过整个值，防止从嵌套示例中抽出结果。最多解析 128 个候选，拒绝类型错误或不完整结构。沿用既有提供商/协议体积限制，不给原本合法的大结果新增更低上限。
 - 测试：8 项真实 Bridge 回归覆盖三种文本形式、工具提交直接完成、非法类型/未知参数修正、嵌套无关对象拒绝、父会话拒绝、提交后不执行写入；2 项 Rust 回归覆盖解析边界/大结果，以及注入回执写失败后重载并恢复，确认子会话模型请求与提交标记均只有一次。
 - 验证：完整脚本 `output/check-5.ps1 -Item R31 -Desktop` 全部通过，日志前缀 `output/5-R31-`：fmt、Clippy、Rust 193 通过/2 个既有忽略、build、协议 240 通过/2 个既有跳过、任务/trace 无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 119 通过、Desktop go test/vet/vendor UI。首次 Clippy 的测试迭代器告警改为从末尾查找后重跑通过。无新依赖或 schema 迁移；新增工具/事件兼容旧客户端，子任务进度展示在 R33 完成。
+
+### R31b 真实文件接触记录与证据路径归一化
+
+- 核查：原代码仅比较成功调用的原始 input.path；未指定 path 的 grep、`./README.md` 与 `README.md`、分页 ls 均误报。还发现 skills_list 携带一个未使用的 path 参数便能把未读文件标成已验证。4 项真实失败回归均复现，日志 `output/5B-R31b-red.log`。当前工具表没有独立 glob 工具；glob 是 grep 的筛选参数，本项覆盖其实际命中文件，不新增重复工具。
+- 修复：Outcome 增加兼容的可选 observed_paths；原生 read/write/edit 成功后记录规范路径，grep 只记录真正产生命中的文件，ls 记录实际显示的分页条目和所访问目录。元数据由执行器产生并随成功回执落库，验证不解析可伪造的输出文本，也不把纯控制工具的额外 path 参数当作接触证明。失败调用、无命中 grep、未显示的分页条目和工作区外引用保持未验证。
+- 路径：执行器和验证器复用工作区 canonical 边界；引用只移除尾部行号/列号/行范围，保留 Windows 盘符，支持相对路径、`./`、Windows 分隔符与实际文件大小写。路径字符串仅在 Windows 转换反斜杠，避免把 Unix 文件名里的字面反斜杠误当目录分隔符；不可无损表示的原生路径不授予引用证明。
+- 存储与兼容：R28 的恢复投影补充工具名和 observed_paths，不读取输出正文。旧回执没有元数据时，仅对成功的原生 read/write/edit/ls 参数做保守回退，工具名可从对应调用恢复；旧 grep 没有可靠命中元数据时须重新 grep/read，不从任意输出文本推断授权。旧 Outcome 缺少新字段时仍正常反序列化，无 schema 迁移或新依赖。
+- 测试：6 项真实 Bridge 回归覆盖 grep glob/无 path、等价路径/行列号/Windows 大小写、伪造和工作区外文件、ls 分页、纯工具参数伪造、无命中显式 grep，以及移除新字段后重载子会话的旧记录兼容。2 项 Rust 回归覆盖原生接触元数据、无命中/分页/普通读取、旧 Outcome 和盘符/位置后缀解析。
+- 验证：完整脚本 `output/check-5.ps1 -Item R31b -Desktop` 全部通过，日志前缀 `output/5-R31b-`：fmt、Clippy、Rust 195 通过/2 个既有忽略、build、协议 246 通过/2 个既有跳过、任务/trace 无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 119 通过、Desktop go test/vet/vendor UI。仅 Windows 分支在本机执行。
