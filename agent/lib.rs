@@ -1,4 +1,5 @@
 pub mod attachments;
+pub mod background;
 pub mod bridge;
 pub mod cli;
 mod command_process;

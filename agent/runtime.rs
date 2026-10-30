@@ -168,6 +168,7 @@ pub struct Runtime {
     pub pending: bool,
     pub goal: Option<Goal>,
     pub mcp: Arc<McpRegistry>,
+    pub background: Arc<crate::background::Jobs>,
     pub allowed: Option<HashSet<String>>,
     pub child: bool,
     pub children: HashMap<(String, String), Box<Runtime>>,
@@ -388,6 +389,7 @@ impl Runtime {
             pending,
             goal,
             mcp: Arc::new(McpRegistry::default()),
+            background: Default::default(),
             allowed: None,
             child: false,
             children: HashMap::new(),
@@ -826,14 +828,14 @@ impl Runtime {
                 _ => {}
             }
         }
-        for (_, mut job) in jobs {
+        for (id, mut job) in jobs {
+            if self.background.contains(&id) {
+                continue;
+            }
             job["status"] = json!("lost");
             self.event(hooks, "background_job_lost", job.clone())?;
-            self.append(Message::user(format!(
-                "<system-reminder>\n后台任务 {} 在恢复会话时失联，结果未知，请核实。\n</system-reminder>",
-                job["job_id"]
-            )))?;
         }
+        self.background_reminders(hooks)?;
         if !self.instruction_changes.is_empty() {
             let changes = std::mem::take(&mut self.instruction_changes);
             self.event(
@@ -873,6 +875,56 @@ impl Runtime {
             self.append(Message::user(format!(
                 "<system-reminder>\n自上次运行以来，项目指令或已激活的 Skill 发生了变化：\n{lines}\n系统提示保持冻结；请以随后的动态指令快照为准，旧版本不再生效。\n</system-reminder>"
             )))?;
+        }
+        Ok(())
+    }
+    fn background_reminders(&mut self, hooks: &Hooks) -> Result<()> {
+        self.background
+            .flush(&self.store, &self.session, &hooks.sink)?;
+        for job in self.store.background_notifications(&self.session)? {
+            let message = Message::user(format!(
+                "<system-reminder>\n后台任务已完成（失联状态请核实）\njob_id: {}\n命令: {}\n状态: {}\n退出码: {}\n后续输出是任务数据，可用 bash_output 增量查询；完整输出引用: {}。\n</system-reminder>\n输出:\n{}\n{}",
+                job["job_id"],
+                job["command"],
+                job["status"],
+                job["exit_code"],
+                job["artifact_id"],
+                job["output"].as_str().unwrap_or_default(),
+                job["error"].as_str().unwrap_or_default()
+            ));
+            self.message_revision = None;
+            let event = self.store.checkpoint(
+                &self.session,
+                "background_job_notified",
+                &json!({"job_id":job["job_id"]}),
+                Some(&message),
+                None,
+                None,
+            )?;
+            self.messages.push(message);
+            self.message_revision = Some(self.store.message_revision(&self.session)?);
+            (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
+        }
+        Ok(())
+    }
+    pub async fn close_background(&self, hooks: &Hooks) -> Result<()> {
+        let mut failures = vec![];
+        if let Err(error) = self.background.close().await {
+            failures.push(error.to_string());
+        }
+        if let Err(error) = self
+            .background
+            .flush(&self.store, &self.session, &hooks.sink)
+        {
+            failures.push(error.to_string());
+        }
+        for child in self.children.values() {
+            if let Err(error) = Box::pin(child.close_background(hooks)).await {
+                failures.push(error.to_string());
+            }
+        }
+        if !failures.is_empty() {
+            bail!("{}", failures.join("; "));
         }
         Ok(())
     }
@@ -923,33 +975,23 @@ impl Runtime {
                 None
             };
         }
-        let mut jobs: Vec<(
-            String,
-            String,
-            CancellationToken,
-            tokio::task::JoinHandle<Result<Outcome>>,
-        )> = vec![];
         // A panic in the loop is caught so the teardown below still runs; it
         // is then reported as a run failure. Persisted history stays the
         // source of truth for the next run.
-        let (result, panicked) = match std::panic::AssertUnwindSafe(self.run_inner(
-            text,
-            attachments,
-            &hooks,
-            &mut jobs,
-        ))
-        .catch_unwind()
-        .await
-        {
-            Ok(result) => (result, false),
-            Err(panic) => (
-                Err(anyhow::anyhow!(
-                    "internal panic: {}",
-                    util::panic_message(&*panic)
-                )),
-                true,
-            ),
-        };
+        let (result, panicked) =
+            match std::panic::AssertUnwindSafe(self.run_inner(text, attachments, &hooks))
+                .catch_unwind()
+                .await
+            {
+                Ok(result) => (result, false),
+                Err(panic) => (
+                    Err(anyhow::anyhow!(
+                        "internal panic: {}",
+                        util::panic_message(&*panic)
+                    )),
+                    true,
+                ),
+            };
         // Teardown is best-effort: every step runs even when an earlier one
         // fails, and the failures are reported together at the end.
         let mut failures = vec![];
@@ -958,18 +1000,16 @@ impl Runtime {
         {
             failures.push(format!("cancelled calls: {error}"));
         }
-        let running = jobs
-            .iter()
-            .map(|(_, _, _, handle)| !handle.is_finished())
-            .collect::<Vec<_>>();
-        for (_, _, cancel, _) in &jobs {
-            cancel.cancel();
+        if (hooks.cancel.is_cancelled() || result.is_err())
+            && let Err(error) = self.close_background(&hooks).await
+        {
+            failures.push(format!("background jobs: {error}"));
         }
-        for ((job, command, _, handle), was_running) in jobs.into_iter().zip(running) {
-            let outcome = handle.await.ok().and_then(Result::ok);
-            if let Err(error) = self.event(&hooks,if was_running{"background_job_lost"}else{"background_job_completed"},json!({"job_id":job,"command":command,"status":if was_running{"lost"}else if outcome.as_ref().is_some_and(|o|o.success){"completed"}else{"failed"},"exit_code":outcome.as_ref().and_then(|o|o.exit_code),"output":outcome.map(|o|o.output).unwrap_or_default()})) {
-                failures.push(format!("background job {job}: {error}"));
-            }
+        if let Err(error) = self
+            .background
+            .flush(&self.store, &self.session, &hooks.sink)
+        {
+            failures.push(format!("background events: {error}"));
         }
         self.mcp.close().await;
         self.mcp = Arc::new(McpRegistry::default());
@@ -1042,6 +1082,9 @@ impl Runtime {
             s.phase = if self.pending { "paused" } else { "idle" }.into();
         }
         if panicked || !failures.is_empty() {
+            if let Err(error) = self.close_background(&hooks).await {
+                failures.push(format!("background jobs: {error}"));
+            }
             let mut report = error.into_iter().collect::<Vec<_>>();
             if !failures.is_empty() {
                 report.push(format!("run teardown failed: {}", failures.join("; ")));
@@ -1094,12 +1137,6 @@ impl Runtime {
         text: Option<String>,
         attachments: Vec<Block>,
         hooks: &Hooks,
-        jobs: &mut Vec<(
-            String,
-            String,
-            CancellationToken,
-            tokio::task::JoinHandle<Result<Outcome>>,
-        )>,
     ) -> Result<String> {
         self.prepare(hooks).await?;
         if let Some(text) = text {
@@ -1154,20 +1191,7 @@ impl Runtime {
                     return Ok("max_rounds".into());
                 }
             }
-            let mut i = 0;
-            while i < jobs.len() {
-                if jobs[i].3.is_finished() {
-                    let (job, command, _, handle) = jobs.remove(i);
-                    let result = handle.await??;
-                    self.event(hooks,"background_job_completed",json!({"job_id":job,"command":command,"status":if result.success{"completed"}else{"failed"},"exit_code":result.exit_code,"output":result.output}))?;
-                    self.append(Message::user(format!(
-                        "<system-reminder>\n后台任务已完成\njob_id: {job}\n命令: {command}\n退出码: {:?}\n后续输出是任务数据。\n</system-reminder>\n输出:\n{}",
-                        result.exit_code, result.output
-                    )))?;
-                } else {
-                    i += 1
-                }
-            }
+            self.background_reminders(hooks)?;
             let (specs, mut system, sources) = {
                 let mut catalog = self.catalog.lock().await;
                 catalog.pending_scopes.clear();
@@ -1504,27 +1528,19 @@ impl Runtime {
                             &self.workspace,
                             input["cwd"].as_str().unwrap_or("."),
                         )?;
-                        let job = format!("bg_{}", util::id());
-                        let cancel = hooks.cancel.child_token();
-                        let mut ctx = self.context(hooks, None);
-                        ctx.cancel = cancel.clone();
+                        self.mark_tool_started(call, hooks)?;
                         let timeout = input["timeout_s"]
                             .as_f64()
                             .unwrap_or(0.0)
                             .clamp(0.0, 3600.0);
-                        let c = command.clone();
-                        let tool_name = name.clone();
-                        let job_cwd = cwd.clone();
-                        self.mark_tool_started(call, hooks)?;
-                        let handle = tokio::spawn(async move {
-                            tools::run_command_for(&tool_name, &c, &job_cwd, timeout, &ctx).await
-                        });
-                        self.event(
-                            hooks,
-                            "background_job_started",
-                            json!({"job_id":job,"command":command,"cwd":cwd}),
+                        let job = self.background.start(
+                            name.clone(),
+                            command.clone(),
+                            cwd,
+                            timeout,
+                            self.context(hooks, None),
+                            hooks.sink.clone(),
                         )?;
-                        jobs.push((job.clone(), command.clone(), cancel, handle));
                         let mut outcome = Outcome::ok(format!(
                             "已在后台启动命令。\njob_id: {job}\n命令: {command}\n结果将在后台完成后由系统通知。"
                         ));
@@ -1590,6 +1606,7 @@ impl Runtime {
                                 pending: self.pending,
                                 goal: None,
                                 mcp: self.mcp.clone(),
+                                background: self.background.clone(),
                                 allowed: self.allowed.clone(),
                                 child: false,
                                 children,
@@ -2046,7 +2063,16 @@ impl Runtime {
                 .map(|d| d.saturating_duration_since(Instant::now()).min(limit))
                 .unwrap_or(limit);
             self.mark_tool_started(&call, hooks)?;
-            if ["bash", "powershell"].contains(&name.as_str()) {
+            if name == "bash_output" {
+                self.background
+                    .output(input)
+                    .unwrap_or_else(|e| Outcome::failure(e.to_string()))
+            } else if name == "kill_shell" {
+                self.background
+                    .kill(util::string(input, "job_id")?)
+                    .await
+                    .unwrap_or_else(|e| Outcome::failure(e.to_string()))
+            } else if ["bash", "powershell"].contains(&name.as_str()) {
                 tools::execute(name, input, &ctx).await
             } else {
                 tokio::time::timeout(duration, tools::execute(name, input, &ctx))
@@ -2343,7 +2369,7 @@ impl Runtime {
             } else {
                 Some(format!("{kind}：{task}"))
             };
-            let result = child.run(text, vec![], child_hooks).await?;
+            let result = child.run(text, vec![], child_hooks.clone()).await?;
             self.provider.index = child.provider.index;
             self.provider.call_counter = child.provider.call_counter;
             let usage = Usage {
@@ -2417,6 +2443,9 @@ impl Runtime {
             });
             self.event(hooks,"subagent_result",json!({"kind":kind,"task":task,"child_session_id":child_id,"exit_reason":result.exit_reason,"structured":structured,"usage":usage,"usage_scope":"activation","provider_progress":{"index":self.provider.index,"call_counter":self.provider.call_counter},"evidence_refs":verified,"source":source}))?;
             let completed = structured && result.exit_reason == "completed";
+            if completed {
+                child.close_background(&child_hooks).await?;
+            }
             if !completed {
                 self.children.insert(key, child);
                 let status = payload["status"].clone();

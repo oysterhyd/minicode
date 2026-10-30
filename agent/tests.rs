@@ -2611,6 +2611,307 @@ fn background_then(last: serde_json::Value) -> serde_json::Value {
         last
     ]})
 }
+
+#[tokio::test]
+async fn r3_background_survives_turn_and_notifies_after_final_answer() {
+    let mut h = Harness::new(json!({"turns":[
+        {"tool_calls":[{"name":"bash","arguments":{"command":"node -e \"console.log('READY');setTimeout(()=>{console.log('FINISHED')},1800)\"","background":true}}]},
+        {"text":"server started"},
+        {"text":"next turn"}
+    ]})).await;
+    assert_eq!(h.run(Some("start")).await.unwrap().exit_reason, "completed");
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let job = events
+        .iter()
+        .find(|e| e.r#type == "background_job_started")
+        .unwrap()
+        .data["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !events.iter().any(|e| e.r#type == "background_job_lost"),
+        "normal turn completion must retain the process"
+    );
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        if h.event_types()
+            .contains(&"background_job_completed".to_string())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < end,
+            "completion must be recorded while idle"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        h.run(Some("status")).await.unwrap().exit_reason,
+        "completed"
+    );
+    let reminders = h
+        .runtime
+        .messages
+        .iter()
+        .map(Message::text)
+        .filter(|s| s.contains("后台任务已完成") && s.contains(&job))
+        .collect::<Vec<_>>();
+    assert_eq!(reminders.len(), 1);
+    assert!(reminders[0].contains("FINISHED"));
+    h.run(Some("again")).await.unwrap();
+    assert_eq!(
+        h.runtime
+            .messages
+            .iter()
+            .map(Message::text)
+            .filter(|s| s.contains("后台任务已完成") && s.contains(&job))
+            .count(),
+        1
+    );
+}
+
+async fn r3_wait_output(h: &Harness, job: &str, marker: &str) -> serde_json::Value {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let result = h
+            .runtime
+            .background
+            .output(&json!({"job_id":job,"cursor":0,"limit":65536}))
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        if page["output"].as_str().unwrap().contains(marker) {
+            return page;
+        }
+        assert!(std::time::Instant::now() < end, "missing {marker}: {page}");
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::*};
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0;
+        let alive = GetExitCodeProcess(handle, &mut code) != 0 && code == 259;
+        CloseHandle(handle);
+        alive
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+    }
+}
+#[tokio::test]
+async fn r3_incremental_output_termination_and_runtime_drop() {
+    let mut h = Harness::new(background_then(json!({"text":"started"}))).await;
+    h.runtime.set_script(json!({"turns":[
+        {"tool_calls":[{"name":"bash","arguments":{"command":"node -e \"console.log('READY');setInterval(()=>console.log('TICK'),50)\"","background":true}}]},
+        {"text":"started"}
+    ]})).unwrap();
+    h.run(Some("start")).await.unwrap();
+    let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
+    let job = events
+        .iter()
+        .find(|e| e.r#type == "background_job_started")
+        .unwrap()
+        .data["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first = r3_wait_output(&h, &job, "READY").await;
+    let cursor = first["next_cursor"].as_u64().unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+    let result = h.runtime.background.output(&json!({"job_id":job})).unwrap();
+    let page: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+    assert_eq!(page["cursor"], cursor);
+    assert!(page["output"].as_str().unwrap().contains("TICK"));
+    assert!(!page["output"].as_str().unwrap().contains("READY"));
+    assert!(
+        h.runtime
+            .background
+            .output(&json!({"job_id":"other_session"}))
+            .is_err()
+    );
+    assert!(
+        h.runtime
+            .background
+            .output(&json!({"job_id":job,"cursor":u64::MAX}))
+            .is_err()
+    );
+    assert!(h.runtime.background.kill(&job).await.unwrap().success);
+    assert!(h.runtime.background.kill(&job).await.unwrap().success);
+    let result = h.runtime.background.output(&json!({"job_id":job})).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result.output).unwrap()["status"],
+        "failed"
+    );
+    assert_eq!(
+        h.event_types()
+            .iter()
+            .filter(|s| *s == "background_job_completed")
+            .count(),
+        1
+    );
+
+    // Dropping the last session owner also cancels a task without a run guard.
+    let ctx = h.runtime.context(&h.hooks, None);
+    let jobs = Arc::new(crate::background::Jobs::default());
+    let id = jobs
+        .start(
+            "bash".into(),
+            "node -e \"console.log(process.pid);setInterval(()=>{},1000)\"".into(),
+            h.runtime.workspace.clone(),
+            0.0,
+            ctx,
+            h.hooks.sink.clone(),
+        )
+        .unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let pid = loop {
+        let result = jobs.output(&json!({"job_id":id,"cursor":0})).unwrap();
+        let page: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        if let Ok(pid) = page["output"].as_str().unwrap().trim().parse::<u32>() {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < end);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    drop(jobs);
+    while crate::tests::process_is_alive(pid) {
+        assert!(
+            std::time::Instant::now() < end,
+            "dropped session leaked process {pid}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn r3_completed_output_pages_errors_and_resume_reminders() {
+    let mut h = Harness::new(json!({"turns":[{"text":"next"}]})).await;
+    let job = h
+        .runtime
+        .background
+        .start(
+            "bash".into(),
+            "node -e \"process.stdout.write('中😀x'.repeat(20000));process.exitCode=7\"".into(),
+            h.runtime.workspace.clone(),
+            0.0,
+            h.runtime.context(&h.hooks, None),
+            h.hooks.sink.clone(),
+        )
+        .unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let page = h
+            .runtime
+            .background
+            .output(&json!({"job_id":job,"cursor":0,"limit":4}))
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_str(&page.output).unwrap();
+        if page["status"] != "running" {
+            assert_eq!(page["exit_code"], 7);
+            assert!(page["truncated"] == true);
+            break;
+        }
+        assert!(std::time::Instant::now() < end);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let mut output = String::new();
+    let mut cursor = 0;
+    loop {
+        let result = h
+            .runtime
+            .background
+            .output(&json!({"job_id":job,"cursor":cursor,"limit":4097}))
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        output.push_str(page["output"].as_str().unwrap());
+        cursor = page["next_cursor"].as_u64().unwrap();
+        if page["truncated"] == false {
+            assert!(page["artifact_id"].is_string());
+            break;
+        }
+    }
+    assert_eq!(output, "中😀x".repeat(20000));
+    assert_eq!(
+        h.runtime
+            .store
+            .background_notifications(&h.runtime.session)
+            .unwrap()
+            .len(),
+        1
+    );
+    h.reopen().await.unwrap();
+    h.run(Some("resume status")).await.unwrap();
+    assert!(
+        h.runtime
+            .store
+            .background_notifications(&h.runtime.session)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        h.runtime
+            .messages
+            .iter()
+            .any(|m| m.text().contains("后台任务已完成") && m.text().contains(&job))
+    );
+
+    let job = h
+        .runtime
+        .background
+        .start(
+            "bash".into(),
+            "node -e \"setTimeout(()=>{},30000)\"".into(),
+            h.runtime.workspace.clone(),
+            0.2,
+            h.runtime.context(&h.hooks, None),
+            h.hooks.sink.clone(),
+        )
+        .unwrap();
+    let (a, b) = tokio::join!(
+        h.runtime.background.kill(&job),
+        h.runtime.background.kill(&job)
+    );
+    assert!(a.unwrap().success && b.unwrap().success);
+    assert_eq!(
+        h.runtime
+            .store
+            .background_notifications(&h.runtime.session)
+            .unwrap()
+            .len(),
+        1
+    );
+    h.runtime.close_background(&h.hooks).await.unwrap();
+    let job = h
+        .runtime
+        .background
+        .start(
+            "bash".into(),
+            "node -e \"setTimeout(()=>{},30000)\"".into(),
+            h.runtime.workspace.clone(),
+            0.2,
+            h.runtime.context(&h.hooks, None),
+            h.hooks.sink.clone(),
+        )
+        .unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let result = h.runtime.background.output(&json!({"job_id":job})).unwrap();
+        let page: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        if page["status"] != "running" {
+            assert!(page["error"].as_str().unwrap().contains("timed out"));
+            break;
+        }
+        assert!(std::time::Instant::now() < end);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
 fn assert_torn_down(h: &Harness) {
     let snapshot = h.hooks.snapshot.lock().unwrap();
     assert!(!snapshot.running);
@@ -2618,12 +2919,33 @@ fn assert_torn_down(h: &Harness) {
     drop(snapshot);
     assert!(h.hooks.approvals.lock().unwrap().is_empty());
     assert!(h.runtime.mcp.statuses.is_empty());
+    for event in h
+        .runtime
+        .store
+        .events(&h.runtime.session, -1)
+        .unwrap()
+        .iter()
+        .filter(|e| e.r#type == "background_job_started")
+    {
+        let result = h
+            .runtime
+            .background
+            .output(&json!({"job_id":event.data["job_id"]}))
+            .unwrap();
+        assert_ne!(
+            serde_json::from_str::<serde_json::Value>(&result.output).unwrap()["status"],
+            "running"
+        );
+    }
 }
 
 #[tokio::test]
 async fn teardown_continues_after_a_failed_background_job_event() {
     let mut h = Harness::new(background_then(json!({"text":"done"}))).await;
-    inject_storage_failure(&h, "background_job_lost");
+    inject_storage_failure(&h, "background_job_completed");
+    h.runtime
+        .set_script(background_then(json!({"panic":"force cleanup"})))
+        .unwrap();
     let error = h.run(Some("task")).await.unwrap_err().to_string();
     assert!(error.contains("injected storage failure"), "{error}");
     assert_torn_down(&h);
@@ -2638,7 +2960,11 @@ async fn teardown_reports_a_failed_session_end_and_resets_running() {
     assert!(error.contains("injected storage failure"), "{error}");
     assert_torn_down(&h);
     let types = h.event_types();
-    assert!(types.contains(&"background_job_lost".to_string()));
+    h.runtime.close_background(&h.hooks).await.unwrap();
+    assert!(
+        h.event_types()
+            .contains(&"background_job_completed".to_string())
+    );
     assert!(!types.contains(&"session_end".to_string()));
 }
 
@@ -2649,7 +2975,11 @@ async fn a_panicking_run_is_torn_down_and_reported() {
     assert!(error.contains("panic") && error.contains("boom"), "{error}");
     assert_torn_down(&h);
     let events = h.runtime.store.events(&h.runtime.session, -1).unwrap();
-    assert!(events.iter().any(|e| e.r#type == "background_job_lost"));
+    assert!(
+        events
+            .iter()
+            .any(|e| e.r#type == "background_job_completed")
+    );
     let end = events.iter().find(|e| e.r#type == "session_end").unwrap();
     assert_eq!(end.data["exit_reason"], "internal_error");
     assert!(h.runtime.pending);

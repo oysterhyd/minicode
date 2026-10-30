@@ -818,3 +818,15 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 存储只增加兼容的 journal 表和可空标题列；旧事件读取仍兼容，输出详情通过引用补回，旧事件不批量重写。恢复保留相关控制/计费元数据，不加载无关输出；messages 与 journal 仍分别承担模型历史和原子恢复职责。
 - 待确认决策：保留 FULL；预览默认空闲 10ms 合批、可设 MINICODE_STORE_BATCH_MS=0；分页参数可选，旧客户端默认仍取全量列表；首次写入新指令目录仍保留重试屏障。
 - 下一批建议：客户端采用会话分页；建立长会话/多会话并发的存储压力基准；另定旧事件离线瘦身与保留策略。单独跟踪 R25 首轮遇到的既有 MCP 0.6 秒发现超时用例负载波动，不混入本批实现。
+
+## 阶段 5A：后台任务与 MCP 生命周期
+
+### R3 会话级后台任务、增量输出与显式终止
+
+- 核查：`Runtime::run` 原先在局部 `jobs` 中保存 JoinHandle，收尾无条件取消全部任务；`prepare` 将没有完成事件的任务一律标记失联。现有 R-N 的 `<system-reminder>`、R28 的事件/checkpoint 与 R41 的尽力收尾机制均可复用；SEC1 插件信任流程保留。先运行新测试，正常结束后出现 `background_job_lost` 的断言失败，日志 `output/5A-R3-red.log`。
+- 实现：`agent/background.rs` 的任务表由会话 Runtime 持有，保存命令、PID、独立取消令牌、磁盘输出、字节游标、完成结果和清理句柄。正常 run 结束不再取消；输出查询工具 `bash_output` 支持隐式递增游标和显式分页，`kill_shell` 等待整个进程树退出，并发/重复终止均可安全等待。任务表最多保留 128 项，每个 capture 沿用 100 MB 限额、长输出 artifact 和显式 timeout。后台命令完成时也收回仍存活的后代；前台命令现有的正常释放行为保持不变。
+- 通知：独立任务在模型答复及会话空闲时写完成事件；超过 4000 字节的提醒正文保留 artifact 引用。下一次模型请求前查找未通知的完成/失联事件，并以 `background_job_notified` 与 reminder 消息的原子 checkpoint 确认送达。普通用户输入不承担任务通知。事件写失败保留内存结果并在下一轮/关闭时重试，不伪造成功。
+- 清理：运行取消、异常/panic、收尾存储错误、空闲 `cancelTurn`、删除会话、Bridge EOF、CLI 退出/切会话、已完成子会话均显式等待清理；最后一个任务表 owner 被释放时也取消进程。Windows 使用现有 Job Object，Unix 使用现有进程组；不能跨 agent 进程重启继续运行，恢复时没有在本进程管理的未完成任务仍按失联报告，已完成提醒和归档可恢复。
+- 回归：3 项 Rust 测试覆盖跨回合/空闲完成/提醒只送一次、增量游标、未知任务/越界游标、并发/重复终止、Drop 清理、Unicode 长输出分页、退出码/超时和重启恢复提醒；保留并更新原 R41 panic/存储失败测试。4 项真实 Bridge 测试启动 HTTP dev server，验证下一轮服务仍可访问、新增输出、终止、空闲停止、删除及 EOF 后 PID 消失。
+- 兼容性：仅新增工具与事件，不修改已有协议版本、会话 schema 或配置；无新依赖。会话关闭不再保留活进程，恢复不尝试根据旧 PID 操作未知进程，避免 PID 重用风险。两个既有 `.pending` 文件保持原样。
+- 完整验证：`output/check-5.ps1 -Item R3 -Desktop` 全部通过：fmt、Clippy `--locked --all-targets -D warnings`、Rust test/build、全协议 209 通过/2 个既有跳过、生成任务/trace 无差异、60 次主任务与 9 个场景符合预期、npm ci/build、真实 Bridge TUI 119 通过，以及 Desktop go test/vet/vendor UI（包内无测试）。日志前缀 `output/5-R3-`。最后补齐 CLI/子会话/外层 panic 清理及提醒 artifact 后，重新执行 fmt、Clippy、全 Rust 178 通过/2 个既有手动基准忽略、build 和 7 项后台/生命周期真实协议回归，日志 `output/5-R3-*-final*`。Linux/macOS 行为本机不可执行，不能据 Windows 结果标记通过。

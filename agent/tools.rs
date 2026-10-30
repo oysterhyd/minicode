@@ -127,6 +127,7 @@ pub fn read_only(name: &str) -> bool {
         "ls",
         "grep",
         "read_artifact",
+        "bash_output",
         "skills_list",
         "skill_load",
         "skill_unload",
@@ -156,7 +157,7 @@ pub fn parallel_read(name: &str) -> bool {
 pub fn policy(name: &str, mode: &str) -> &'static str {
     if mode == "bypass"
         || read_only(name)
-        || ["task_create", "task_claim", "task_complete"].contains(&name)
+        || ["task_create", "task_claim", "task_complete", "kill_shell"].contains(&name)
     {
         "allow"
     } else if ["write", "edit"].contains(&name) {
@@ -1397,12 +1398,50 @@ pub async fn run_command_for(
     timeout: f64,
     ctx: &ToolContext,
 ) -> Result<Outcome> {
+    run_command_captured(
+        name,
+        command,
+        cwd,
+        timeout,
+        ctx,
+        Arc::new(CommandCapture::new()?),
+    )
+    .await
+}
+
+pub(crate) struct CommandCapture {
+    pub file: tempfile::NamedTempFile,
+    pub pid: std::sync::atomic::AtomicU32,
+    pub background: bool,
+}
+impl CommandCapture {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            file: tempfile::NamedTempFile::new()?,
+            pid: Default::default(),
+            background: false,
+        })
+    }
+}
+pub(crate) async fn run_command_captured(
+    name: &str,
+    command: &str,
+    cwd: &Path,
+    timeout: f64,
+    ctx: &ToolContext,
+    capture: Arc<CommandCapture>,
+) -> Result<Outcome> {
     // Drain bounded pipe chunks to disk; EOF tells us whether descendants still
     // hold output, independently of redirected processes in the command tree.
-    let mut captured = tempfile::NamedTempFile::new()?;
+    let captured = &capture.file;
+    let mut capture_file = captured.reopen()?;
     let mut cmd = shell_for(name, command, cwd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("failed to start command")?;
+    capture.pid.store(
+        child.id().unwrap_or(0),
+        std::sync::atomic::Ordering::Release,
+    );
     let mut tree = match crate::command_process::ProcessTree::attach(&child) {
         Ok(tree) => tree,
         Err(error) => {
@@ -1470,7 +1509,7 @@ pub async fn run_command_for(
         }
         tokio::select! {_ = tokio::time::sleep(Duration::from_millis(50))=>{},_ = ctx.cancel.cancelled()=>{}}
     };
-    if !timed_out && !quota && !cancelled && !lingered {
+    if !capture.background && !timed_out && !quota && !cancelled && !lingered {
         tree.release()?;
     } else {
         tree.shutdown().await;
@@ -1487,15 +1526,12 @@ pub async fn run_command_for(
     }
     let total = captured.as_file().metadata()?.len().min(100_000_000);
     #[cfg(windows)]
-    let capture_utf8 = capture_is_utf8(captured.as_file_mut(), total)?;
+    let capture_utf8 = capture_is_utf8(&mut capture_file, total)?;
     #[cfg(not(windows))]
     let capture_utf8 = true;
-    captured.as_file_mut().seek(SeekFrom::Start(0))?;
+    capture_file.seek(SeekFrom::Start(0))?;
     let mut bytes = vec![];
-    captured
-        .as_file_mut()
-        .take(256_000)
-        .read_to_end(&mut bytes)?;
+    (&mut capture_file).take(256_000).read_to_end(&mut bytes)?;
     let decoded = decode_capture_sample(&bytes, capture_utf8);
     let decoded = decoded.trim_end_matches(['\r', '\n']);
     const PREVIEW_BYTES: usize = 50 * 1024 - 512;
@@ -1508,20 +1544,15 @@ pub async fn run_command_for(
             .take(999)
             .collect::<String>();
         let tail_source = if total > 256_000 {
-            captured
-                .as_file_mut()
-                .seek(SeekFrom::Start(total.saturating_sub(128_000)))?;
+            capture_file.seek(SeekFrom::Start(total.saturating_sub(128_000)))?;
             bytes.clear();
-            captured
-                .as_file_mut()
-                .take(128_000)
-                .read_to_end(&mut bytes)?;
+            (&mut capture_file).take(128_000).read_to_end(&mut bytes)?;
             decode_capture_sample(&bytes, capture_utf8)
         } else {
             decoded.to_string()
         };
         let tail = util::tail(&tail_source, 999, PREVIEW_BYTES / 2);
-        let artifact = record_capture(&captured, ctx, total)?;
+        let artifact = record_capture(captured, ctx, total)?;
         outcome.output = format!(
             "{}\n...[middle output omitted; output truncated; 完整输出见 [artifact:{artifact}]]\n{tail}",
             head.trim_end_matches(['\r', '\n'])
@@ -1790,7 +1821,7 @@ fn decode_windows(bytes: &[u8], oem: u32, ansi: u32) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
-fn decode(bytes: &[u8]) -> String {
+pub(crate) fn decode(bytes: &[u8]) -> String {
     #[cfg(windows)]
     let text = unsafe {
         use windows_sys::Win32::Globalization::{GetACP, GetOEMCP};

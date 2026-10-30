@@ -47,6 +47,7 @@ pub struct Conversation {
     pub sequence: Arc<AtomicU64>,
     pub runtime: Option<Arc<tokio::sync::Mutex<Runtime>>>,
     pub cancel: Arc<Mutex<CancellationToken>>,
+    background: Arc<Mutex<std::sync::Weak<crate::background::Jobs>>>,
     pub client_key: String,
     listeners: Arc<RwLock<HashSet<String>>>,
     pub running: Option<tokio::task::JoinHandle<()>>,
@@ -66,6 +67,7 @@ impl Conversation {
             sequence: Arc::new(AtomicU64::new(0)),
             runtime: None,
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            background: Default::default(),
             client_key: "default".into(),
             listeners: Arc::new(RwLock::new(HashSet::new())),
             running: None,
@@ -131,6 +133,7 @@ struct Owner {
     snapshot: Arc<Mutex<Snapshot>>,
     approvals: Approvals,
     cancel: Arc<Mutex<CancellationToken>>,
+    background: Arc<Mutex<std::sync::Weak<crate::background::Jobs>>>,
 }
 impl Owner {
     fn new(c: Conversation) -> Self {
@@ -142,6 +145,7 @@ impl Owner {
             snapshot: c.snapshot.clone(),
             approvals: c.approvals.clone(),
             cancel: c.cancel.clone(),
+            background: c.background.clone(),
             conversation: tokio::sync::Mutex::new(c),
         }
     }
@@ -336,6 +340,7 @@ impl Router {
             self.commit_settings(c, &r.session, settings);
             c.catalog = Some(r.catalog.clone());
             c.workspace = Some(workspace.into());
+            *c.background.lock().unwrap() = Arc::downgrade(&r.background);
             c.runtime = Some(Arc::new(tokio::sync::Mutex::new(r)));
             c.settings.lock().unwrap().registry_dirty = false;
         } else if c.settings.lock().unwrap().registry_dirty {
@@ -439,6 +444,7 @@ impl Router {
                     Err(panic) => {
                         hooks.cancel.cancel();
                         let r = runtime.lock().await;
+                        let _ = r.close_background(&hooks).await;
                         r.mcp.close().await;
                         hooks
                             .approvals
@@ -619,6 +625,15 @@ impl Router {
                     if conversation.as_ref().is_some_and(|c| c.busy()) {
                         bail!("任务运行中，无法删除会话")
                     }
+                    if let Some(c) = &conversation
+                        && let Some(runtime) = &c.runtime
+                    {
+                        runtime
+                            .lock()
+                            .await
+                            .close_background(&c.hooks(self.event_sink(&c.listeners)))
+                            .await?;
+                    }
                     self.store.delete(id)?;
                     let mut routes = self.routes.write().unwrap();
                     if let Some(owner) = routes.sessions.remove(id) {
@@ -652,6 +667,17 @@ impl Router {
             }
             if method == "cancelTurn" {
                 owner.cancel.lock().unwrap().cancel();
+                let background = owner.background.lock().unwrap().upgrade();
+                if let Some(jobs) = background {
+                    jobs.cancel();
+                    if !owner.snapshot.lock().unwrap().running {
+                        jobs.close().await?;
+                        let id = owner.snapshot.lock().unwrap().session.clone();
+                        if let Some(id) = id {
+                            jobs.flush(&self.store, &id, &self.event_sink(&owner.listeners))?;
+                        }
+                    }
+                }
                 return Ok(json!(true));
             }
             let id = util::string(params, "approvalId")?;
@@ -702,6 +728,13 @@ impl Router {
             } else {
                 // resetSession also invalidates the old runtime so a later
                 // explicit resume re-pins changed instructions (R1).
+                if let Some(runtime) = &previous.runtime {
+                    runtime
+                        .lock()
+                        .await
+                        .close_background(&previous.hooks(self.event_sink(&previous.listeners)))
+                        .await?;
+                }
                 previous.runtime = None;
                 previous.catalog = None;
                 previous.workspace = None;
@@ -1544,6 +1577,10 @@ impl Router {
             let mut c = c.conversation.lock().await;
             if let Some(handle) = c.running.take() {
                 let _ = handle.await;
+            }
+            if let Some(runtime) = &c.runtime {
+                let hooks = c.hooks(self.event_sink(&c.listeners));
+                let _ = runtime.lock().await.close_background(&hooks).await;
             }
         }
     }

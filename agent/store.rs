@@ -451,6 +451,12 @@ impl Store {
         let mut rows=q.query(params![id,after])?;let mut events=Vec::new();while let Some(row)=rows.next()? {events.push(Event{seq:row.get(0)?,r#type:row.get(1)?,timestamp:row.get(2)?,data:restore_result_detail(c,id,serde_json::from_str(&row.get::<_,String>(3)?)?)?});}Ok(events)
     })
     }
+    pub fn background_notifications(&self, id: &str) -> Result<Vec<Value>> {
+        self.with(|c| {
+            let mut q = c.prepare("SELECT e.data FROM events e WHERE e.session_id=? AND e.type IN ('background_job_completed','background_job_lost') AND NOT EXISTS (SELECT 1 FROM events n WHERE n.session_id=e.session_id AND n.type='background_job_notified' AND json_extract(n.data,'$.job_id')=json_extract(e.data,'$.job_id')) ORDER BY e.seq")?;
+            q.query_map([id], |r| r.get::<_,String>(0))?.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+        })
+    }
     pub fn statistics_events(&self, id: &str, after: i64) -> Result<(i64, Vec<Event>)> {
         self.with(|c| {
             // Capture an upper bound so concurrent writers cannot advance the

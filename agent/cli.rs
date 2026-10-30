@@ -200,6 +200,7 @@ pub async fn main() -> Result<()> {
             let (mut runtime, hooks) = prepare(&store, None, &options).await?;
             banner(&runtime);
             let result = run(&mut runtime, Some(task), hooks).await?;
+            runtime.background.close().await?;
             println!(
                 "\n会话 {} · {} · 轮数 {} · Token {}",
                 result.session_id,
@@ -627,7 +628,7 @@ async fn chat(mut runtime: Runtime, hooks: Hooks) -> Result<()> {
             eprintln!("错误：{error}");
         }
     }
-    Ok(())
+    runtime.close_background(&hooks).await
 }
 
 async fn chat_command(
@@ -792,6 +793,7 @@ async fn chat_command(
                     }
                 }
             }
+            runtime.close_background(hooks).await?;
             *runtime = next;
             *hooks.settings.lock().unwrap() = settings;
             *hooks.snapshot.lock().unwrap() = Snapshot::default();
