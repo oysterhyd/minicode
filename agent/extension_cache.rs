@@ -111,6 +111,73 @@ fn unchanged(deps: &Dependencies) -> bool {
     deps.iter()
         .all(|(path, stamp)| !stamp.unreadable && Stamp::read(path) == *stamp)
 }
+fn inherit(deps: &Dependencies) {
+    TRACKING.with(|tracking| {
+        if let Some(parent) = tracking.borrow_mut().as_mut() {
+            for (path, stamp) in deps {
+                parent.entry(path.clone()).or_insert_with(|| stamp.clone());
+            }
+        }
+    });
+}
+struct Digest {
+    value: String,
+    dependencies: Dependencies,
+}
+type DigestSlot = Arc<Mutex<Option<Digest>>>;
+type DigestCache = VecDeque<((PathBuf, bool), DigestSlot)>;
+/// The plugin and imported-file caches use the same metadata signatures and
+/// dependency propagation as Catalog discovery, including nested cache hits.
+pub(crate) fn fingerprint(
+    path: &Path,
+    tree: bool,
+    build: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    static CACHE: OnceLock<Mutex<DigestCache>> = OnceLock::new();
+    let key = (util::canonical(path)?, tree);
+    let slot = {
+        let mut cache = CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = cache.iter().position(|(k, _)| k == &key) {
+            let entry = cache.remove(index).unwrap();
+            let slot = entry.1.clone();
+            cache.push_back(entry);
+            slot
+        } else {
+            if cache.len() >= 128 {
+                cache.pop_front();
+            }
+            let slot = Arc::new(Mutex::new(None));
+            cache.push_back((key, slot.clone()));
+            slot
+        }
+    };
+    let mut entry = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = entry.as_ref()
+        && unchanged(&entry.dependencies)
+    {
+        inherit(&entry.dependencies);
+        return Ok(entry.value.clone());
+    }
+    *entry = None;
+    let tracking = Tracking::begin();
+    watch(path);
+    let result = build();
+    let dependencies = tracking.finish();
+    inherit(&dependencies);
+    let value = result?;
+    if unchanged(&dependencies) {
+        *entry = Some(Digest {
+            value: value.clone(),
+            dependencies,
+        });
+    }
+    Ok(value)
+}
 #[derive(Clone, PartialEq, Eq)]
 struct Key {
     workspace: PathBuf,

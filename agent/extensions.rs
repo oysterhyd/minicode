@@ -89,7 +89,7 @@ impl Server {
             bail!("{}", self.configuration_error)
         }
         let digest = if self.local {
-            util::hash(&fs::read(&self.source)?)
+            file_fingerprint(&self.source)?
         } else {
             fingerprint(&self.cwd)?
         };
@@ -166,6 +166,14 @@ pub fn skill_metadata(path: &Path) -> Result<(String, String)> {
     ))
 }
 pub fn fingerprint(root: &Path) -> Result<String> {
+    if util::is_link(root) {
+        bail!("plugin directory is a link");
+    }
+    extension_cache::fingerprint(root, true, || fingerprint_uncached(root))
+}
+fn fingerprint_uncached(root: &Path) -> Result<String> {
+    #[cfg(test)]
+    record_fingerprint(root);
     watch(root);
     if util::is_link(root) {
         bail!("plugin directory is a link")
@@ -220,6 +228,13 @@ pub fn fingerprint(root: &Path) -> Result<String> {
         }
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+fn file_fingerprint(path: &Path) -> Result<String> {
+    extension_cache::fingerprint(path, false, || {
+        #[cfg(test)]
+        record_fingerprint(path);
+        Ok(util::hash(&fs::read(path)?))
+    })
 }
 fn directories(root: &Path) -> Vec<PathBuf> {
     watch(root);
@@ -822,7 +837,7 @@ impl Catalog {
                     .unwrap_or(30.0),
                 plugin: format!("local:{source}"),
                 version: "local".into(),
-                digest: util::hash(&fs::read(path)?),
+                digest: file_fingerprint(path)?,
                 source: path.into(),
                 transport: transport.into(),
                 url: expand(s["url"].as_str().unwrap_or_default())?,
@@ -1261,6 +1276,137 @@ fn record_catalog_scan(workspace: &Path) {
         .unwrap()
         .entry(workspace.into())
         .or_default() += 1;
+}
+#[cfg(test)]
+fn fingerprint_counts() -> &'static std::sync::Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(Default::default)
+}
+#[cfg(test)]
+fn record_fingerprint(path: &Path) {
+    *fingerprint_counts()
+        .lock()
+        .unwrap()
+        .entry(path.into())
+        .or_default() += 1;
+}
+#[cfg(test)]
+mod fingerprint_cache_tests {
+    use super::*;
+    fn server(root: &Path, source: &Path, local: bool, digest: String) -> Server {
+        Server {
+            name: "cache-test".into(),
+            command: String::new(),
+            args: vec![],
+            cwd: root.into(),
+            timeout: 1.0,
+            plugin: String::new(),
+            version: String::new(),
+            digest,
+            source: source.into(),
+            transport: "stdio".into(),
+            url: String::new(),
+            env: Default::default(),
+            headers: Default::default(),
+            local,
+            configuration_error: String::new(),
+        }
+    }
+    #[test]
+    fn ext2_repeated_plugin_verification_hashes_once_and_changed_files_reject() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = util::canonical(dir.path()).unwrap();
+        fs::write(root.join("code.js"), "first").unwrap();
+        let first = fingerprint(&root).unwrap();
+        let server = server(&root, &root.join("code.js"), false, first.clone());
+        server.verify().unwrap();
+        server.verify().unwrap();
+        assert_eq!(fingerprint(&root).unwrap(), first);
+        let count = fingerprint_counts().lock().unwrap()[&root];
+        assert_eq!(count, 1);
+        util::atomic_write(&root.join("code.js"), b"other").unwrap();
+        assert_ne!(fingerprint(&root).unwrap(), first);
+        assert!(server.verify().is_err());
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/new.js"), "new").unwrap();
+        let added = fingerprint(&root).unwrap();
+        fs::remove_file(root.join("nested/new.js")).unwrap();
+        assert_ne!(fingerprint(&root).unwrap(), added);
+    }
+    #[test]
+    fn ext2_repeated_imported_config_hashes_once_and_refreshes_on_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = util::canonical(dir.path()).unwrap();
+        let path = root.join(".mcp.json");
+        fs::write(&path, "first").unwrap();
+        let first = file_fingerprint(&path).unwrap();
+        let server = server(&root, &path, true, first.clone());
+        server.verify().unwrap();
+        server.verify().unwrap();
+        assert_eq!(file_fingerprint(&path).unwrap(), first);
+        let count = fingerprint_counts().lock().unwrap()[&path];
+        assert_eq!(count, 1);
+        util::atomic_write(&path, b"other").unwrap();
+        assert_ne!(file_fingerprint(&path).unwrap(), first);
+        assert!(server.verify().is_err());
+        fs::remove_file(&path).unwrap();
+        assert!(server.verify().is_err());
+    }
+    #[test]
+    fn ext2_cached_real_root_does_not_authorize_a_link_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = util::canonical(dir.path()).unwrap();
+        let plugin = root.join("plugin");
+        fs::create_dir(&plugin).unwrap();
+        fs::write(plugin.join("code.js"), "code").unwrap();
+        fingerprint(&plugin).unwrap();
+        let alias = root.join("alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&plugin, &alias).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let status = std::process::Command::new("cmd.exe")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(&alias)
+                .arg(&plugin)
+                .creation_flags(0x08000000)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        assert!(
+            fingerprint(&alias)
+                .unwrap_err()
+                .to_string()
+                .contains("link")
+        );
+    }
+    #[test]
+    fn ext2_cached_fingerprint_dependencies_invalidate_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = util::canonical(dir.path()).unwrap();
+        let root = workspace.join(".minicode/plugins/nested");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("plugin.json"),serde_json::to_vec(&json!({"name":"nested","version":"1.0.0","minicode_version":crate::VERSION,"enabled":false})).unwrap()).unwrap();
+        fs::write(root.join("code.js"), "old").unwrap();
+        fingerprint(&root).unwrap();
+        let config = Configuration {
+            path: workspace.join("config.json"),
+        };
+        let first = Catalog::scan(&workspace, config.clone(), true).unwrap();
+        first.write_lock().unwrap();
+        Catalog::scan(&workspace, config.clone(), true).unwrap();
+        fs::write(root.join("code.js"), "changed body").unwrap();
+        assert!(
+            Catalog::scan(&workspace, config, true)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("lock differs")
+        );
+    }
 }
 #[cfg(test)]
 mod catalog_cache_tests {
