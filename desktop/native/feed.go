@@ -482,6 +482,9 @@ func (d *desktop) stepWith(c *ui.Context, p palette, item *model.FeedItem, more,
 			if head.Clicked() {
 				v.Open["tool-"+item.ID] = !open
 			}
+			if item.ChildSessionID != "" {
+				ui.Text(c, model.ChildSummary(item)).SingleLine().Margin(0, 0, 4, 6).FontSize(p.font(11.48)).TextColor(p.Text3)
+			}
 			if item.Success && len(item.Attachments) > 0 {
 				ui.Column(c).Margin(2, 0, 8, 6).Children(func() { d.readImages(c, p, item.Attachments) })
 			}
@@ -495,6 +498,13 @@ func (d *desktop) stepWith(c *ui.Context, p palette, item *model.FeedItem, more,
 }
 
 func (d *desktop) toolDetail(c *ui.Context, p palette, v *conversation, item *model.FeedItem) {
+	if len(item.ChildProgress) > 0 {
+		ui.Column(c).Gap(4).Children(func() {
+			for _, step := range item.ChildProgress {
+				ui.Text(c, step.Name+" · "+model.ChildStatusLabel(step.Status)).SingleLine().FontSize(p.font(11.48)).TextColor(p.Text2)
+			}
+		})
+	}
 	switch item.Name {
 	case "bash", "powershell":
 		d.terminal(c, p, model.String(item.Args["command"]), item.Output)

@@ -7,6 +7,7 @@ import { theme, useTerminalSize } from '../terminal.js'
 import { thoughtLabel, toolOutputLines } from '../transcript.js'
 import { parseToolDiff, toolMeta, toolTarget } from '../tools.js'
 import { DiffRows } from './DiffView.js'
+import { childStatusLabel, childSummary } from '../child-progress.js'
 
 const COLLAPSED = 3
 const EXPANDED = 80
@@ -123,6 +124,8 @@ export function ToolLine({
           {item.auto ? <Text dimColor> · 已自动批准</Text> : null}
         </Text>
       )}
+      {item.childSessionId ? <OutputRows lines={[childSummary(item) + (expanded ? '' : ' (ctrl+o 展开)')]} columns={columns} /> : null}
+      {expanded && item.childProgress?.length ? <OutputRows lines={item.childProgress.map(step => `${step.name} · ${childStatusLabel(step.status)}`).slice(-EXPANDED)} columns={columns} /> : null}
       {body}
     </Box>
   )

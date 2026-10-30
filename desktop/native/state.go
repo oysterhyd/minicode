@@ -1205,13 +1205,12 @@ func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
 				item.Version++
 			}
 		}
-	case "subagent_start":
-		for _, item := range v.Items {
-			if item.Kind == "tool" && item.Name == "delegate" && model.String(item.Args["kind"]) == model.String(data["kind"]) && model.String(item.Args["task"]) == model.String(data["task"]) {
-				item.ChildSessionID = model.String(data["child_session_id"])
-			}
+	case "subagent_start", "subagent_progress", "subagent_result":
+		model.ApplyChildEvent(v.Items, event)
+		if event.Type == "subagent_result" {
+			d.refreshState(v)
 		}
-	case "subagent_result", "context_compacted":
+	case "context_compacted":
 		d.refreshState(v)
 	}
 	notice, tone := "", "info"

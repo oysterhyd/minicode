@@ -909,3 +909,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 存储与兼容：R28 的恢复投影补充工具名和 observed_paths，不读取输出正文。旧回执没有元数据时，仅对成功的原生 read/write/edit/ls 参数做保守回退，工具名可从对应调用恢复；旧 grep 没有可靠命中元数据时须重新 grep/read，不从任意输出文本推断授权。旧 Outcome 缺少新字段时仍正常反序列化，无 schema 迁移或新依赖。
 - 测试：6 项真实 Bridge 回归覆盖 grep glob/无 path、等价路径/行列号/Windows 大小写、伪造和工作区外文件、ls 分页、纯工具参数伪造、无命中显式 grep，以及移除新字段后重载子会话的旧记录兼容。2 项 Rust 回归覆盖原生接触元数据、无命中/分页/普通读取、旧 Outcome 和盘符/位置后缀解析。
 - 验证：完整脚本 `output/check-5.ps1 -Item R31b -Desktop` 全部通过，日志前缀 `output/5-R31b-`：fmt、Clippy、Rust 195 通过/2 个既有忽略、build、协议 246 通过/2 个既有跳过、任务/trace 无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 119 通过、Desktop go test/vet/vendor UI。仅 Windows 分支在本机执行。
+
+### R33 子任务实时摘要与可折叠进度
+
+- 核查：delegate 的 sink 只转发审批；两个客户端都按 kind/task 关联子会话，相同任务会串行或并发串错。新增协议、TUI reducer/快捷键及 Desktop 模型/真实界面测试先失败，见 `output/5-R33-red-protocol.log`、`output/5-R33-red-tui.log`、`output/5-R33-red-desktop.log`、`output/5-R33-red-desktop-ui.log`。
+- 后端：subagent_start/result 新增可选父 call_id；子 round_start 和工具 start/result 转为父会话持久化 subagent_progress，携带 child_session_id、原子会话事件序号、工具调用 ID、名称和状态。按白名单构造摘要，不复制参数、路径、输出、推理或错误正文。子任务失败也有安全的终止事件，暂停和取消继续沿用既有 exit_reason。
+- 展示：TUI 在 delegate 行显示当前活动及工具次数，Ctrl+O 展开/收起调用列表；Desktop 沿用带 Expanded 无障碍语义的原工具披露按钮，折叠时仍显示摘要。两端 live/history 共用各自的归约逻辑，按父调用 ID 精确关联；按子调用 ID 去重、按子事件序号排序且旧 start 不覆盖新 result，终止后不恢复为运行中。旧 subagent_start 保留 kind/task 回退及子会话跳转。
+- 测试：3 项真实 Bridge 回归验证父会话收到并持久化顺序正确的进度、工具开始/完成摘要、敏感字段缺席、暂停及异常终止；TUI 验证相同任务绑定、逆序/重复事件、live/history 一致及运行中 Ctrl+O；Desktop 验证同样的模型行为及真实按钮展开/折叠。无新依赖、无数据库迁移；不支持新事件的旧客户端继续忽略它。
+- 验证：完整 `output/check-5.ps1 -Item R33 -Desktop` 通过，日志前缀 `output/5-R33-`：fmt、Clippy、Rust 195 通过/2 个既有忽略、build、协议 249 通过/2 个既有跳过、生成文件无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 121 通过、Desktop test/vet/vendor UI。首次全测新增错误用例误把父会话终止方式当作子错误验收条件，按现有 provider_error 语义校正后聚焦及全测通过，保留 `output/5-R33-first-protocol.log`。仅在本机 Windows 执行。

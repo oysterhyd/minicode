@@ -85,7 +85,7 @@ export function layoutTranscript(items: FeedItem[], settled = true): { frozen: L
 export function lastExpandableTool(items: FeedItem[], afterUserIndex: number): FeedItem | undefined {
   for (let i = items.length - 1; i >= Math.max(0, afterUserIndex); i--) {
     const item = items[i]
-    if (item.kind === 'tool' && (item.output || item.args?.command || item.name?.startsWith('skill'))) return item
+    if (item.kind === 'tool' && (item.output || item.args?.command || item.name?.startsWith('skill') || item.childSessionId)) return item
   }
 }
 

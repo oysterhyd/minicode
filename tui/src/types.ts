@@ -1,3 +1,5 @@
+import { applyChildEvent, type ChildStep } from './child-progress.js'
+
 export type Usage = {
   input_tokens: number
   output_tokens: number
@@ -49,6 +51,10 @@ export type FeedItem = {
   granted?: boolean
   auto?: boolean
   childSessionId?: string
+  childProgress?: ChildStep[]
+  childStatus?: string
+  childSeq?: number
+  childFinished?: boolean
   artifactId?: string
   startedAt?: number
   endedAt?: number
@@ -140,7 +146,7 @@ export function historyItems(detail: SessionDetail): FeedItem[] {
         const result = results.get(callId)
         const persisted = messageResults.get(callId)
         const start = starts.get(callId)
-        const child = children.find(event => event.data.kind === input.kind && event.data.task === input.task
+        const child = children.find(event => (event.data.call_id ? event.data.call_id === callId : event.data.kind === input.kind && event.data.task === input.task)
           && event.seq > (start?.seq ?? -1) && event.seq < (result?.seq ?? Infinity))
         const output = result?.data.output_detail || result?.data.output_preview || persisted?.content || ''
         const error = result?.data.error
@@ -162,7 +168,7 @@ export function historyItems(detail: SessionDetail): FeedItem[] {
       }
     })
   })
-  return items
+  return detail.events.reduce((items, event) => applyChildEvent(items, event.type, event.data), items)
 }
 
 export const emptyState: AgentState = {

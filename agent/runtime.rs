@@ -2243,7 +2243,9 @@ impl Runtime {
                 0.0,
             );
         }
-        if let Block::ToolUse { name, input, .. } = &call
+        if let Block::ToolUse {
+            id, name, input, ..
+        } = &call
             && name == "delegate"
             && !self.child
         {
@@ -2261,6 +2263,7 @@ impl Runtime {
             let result = if granted {
                 self.mark_tool_started(&call, hooks)?;
                 self.delegate(
+                    id,
                     util::string(input, "kind")?,
                     util::string(input, "task")?,
                     hooks,
@@ -2355,6 +2358,7 @@ impl Runtime {
     }
     fn delegate<'a>(
         &'a mut self,
+        call_id: &'a str,
         kind: &'a str,
         task: &'a str,
         hooks: &'a Hooks,
@@ -2468,15 +2472,46 @@ impl Runtime {
             self.event(
                 hooks,
                 "subagent_start",
-                json!({"kind":kind,"task":task,"child_session_id":child_id,"source":source}),
+                json!({"call_id":call_id,"kind":kind,"task":task,"child_session_id":child_id,"source":source}),
             )?;
             let child_settings = hooks.settings.clone();
             let parent_sink = hooks.sink.clone();
             let parent_session = self.session.clone();
+            let parent_store = self.store.clone();
+            let parent_call = call_id.to_string();
+            let progress_child = child_id.clone();
             let sink: Sink = Arc::new(move |mut event| {
                 if matches!(event["event"].as_str(), Some("approval" | "approval_auto")) {
                     event["sessionId"] = json!(parent_session);
                     parent_sink(event);
+                } else if event["event"] == "agent_event" {
+                    let item = &event["item"];
+                    let (phase, status) = match item["type"].as_str() {
+                        Some("round_start") => ("model", "running"),
+                        Some("tool_call_start") => ("tool", "running"),
+                        Some("tool_call_result") => (
+                            "tool",
+                            if item["data"]["success"] == true {
+                                "completed"
+                            } else {
+                                "failed"
+                            },
+                        ),
+                        _ => return,
+                    };
+                    // Whitelist summary fields; never copy arguments, text, output or errors.
+                    let mut data = json!({"call_id":parent_call,"child_session_id":progress_child,"child_event_seq":item["seq"],"phase":phase,"status":status});
+                    if phase == "tool" {
+                        data["child_call_id"] = item["data"]["call_id"].clone();
+                        data["name"] = item["data"]["name"].clone();
+                    }
+                    if let Ok(progress) =
+                        parent_store.event(&parent_session, "subagent_progress", &data)
+                    {
+                        parent_sink(
+                            json!({"event":"agent_event","sessionId":parent_session,"item":progress}),
+                        );
+                    }
                 }
             });
             let child_hooks = Hooks {
@@ -2494,7 +2529,13 @@ impl Runtime {
             } else {
                 Some(format!("{kind}：{task}"))
             };
-            let result = child.run(text, vec![], child_hooks.clone()).await?;
+            let result = match child.run(text, vec![], child_hooks.clone()).await {
+                Ok(result) => result,
+                Err(error) => {
+                    self.event(hooks, "subagent_result", json!({"call_id":call_id,"kind":kind,"task":task,"child_session_id":child_id,"exit_reason":"error"}))?;
+                    return Err(error);
+                }
+            };
             self.provider.index = child.provider.index;
             self.provider.call_counter = child.provider.call_counter;
             let usage = Usage {
@@ -2586,7 +2627,7 @@ impl Runtime {
             } else {
                 "invalid_result"
             });
-            self.event(hooks,"subagent_result",json!({"kind":kind,"task":task,"child_session_id":child_id,"exit_reason":result.exit_reason,"structured":structured,"usage":usage,"usage_scope":"activation","provider_progress":{"index":self.provider.index,"call_counter":self.provider.call_counter},"evidence_refs":verified,"source":source}))?;
+            self.event(hooks,"subagent_result",json!({"call_id":call_id,"kind":kind,"task":task,"child_session_id":child_id,"exit_reason":result.exit_reason,"structured":structured,"usage":usage,"usage_scope":"activation","provider_progress":{"index":self.provider.index,"call_counter":self.provider.call_counter},"evidence_refs":verified,"source":source}))?;
             let completed = structured && result.exit_reason == "completed";
             if completed {
                 child.close_resources(&child_hooks).await?;

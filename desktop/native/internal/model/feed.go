@@ -129,7 +129,11 @@ func History(detail Detail) []*FeedItem {
 		case "approval_decision":
 			decisions[id] = event
 		case "subagent_start":
-			children[String(event.Data["kind"])+":"+String(event.Data["task"])] = String(event.Data["child_session_id"])
+			key := id
+			if key == "" {
+				key = String(event.Data["kind"]) + ":" + String(event.Data["task"])
+			}
+			children[key] = String(event.Data["child_session_id"])
 		}
 	}
 	items := make([]*FeedItem, 0, len(detail.Messages))
@@ -193,8 +197,12 @@ func History(detail Detail) []*FeedItem {
 				if Bool(result.Data["success"]) {
 					images = ImageReferences(result.Data["images"])
 				}
+				child := children[callID]
+				if child == "" {
+					child = children[String(args["kind"])+":"+String(args["task"])]
+				}
 				items = append(items, &FeedItem{ID: callID, Kind: "tool", Name: name, Args: args,
-					ChildSessionID: children[String(args["kind"])+":"+String(args["task"])],
+					ChildSessionID: child,
 					ArtifactID:     String(result.Data["artifact_id"]), Output: output,
 					Attachments: images,
 					Success:     success, Pending: false, Interrupted: !ok && !delivered,
@@ -204,6 +212,9 @@ func History(detail Detail) []*FeedItem {
 		if len(attachments) > 0 {
 			items = append(items, &FeedItem{ID: fmt.Sprintf("%d-media", detail.MessageOffset+i), Kind: "user", Attachments: attachments})
 		}
+	}
+	for _, event := range detail.Events {
+		ApplyChildEvent(items, event)
 	}
 	return items
 }

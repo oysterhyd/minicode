@@ -1,4 +1,5 @@
 import type { DesktopEvent, FeedItem } from './types.js'
+import { applyChildEvent } from './child-progress.js'
 
 export type FeedState = {
   runId?: string | null
@@ -211,13 +212,8 @@ function applyAgentEvent(
       items: replaceItem(state.items, index, item => ({ ...item, approvalId: undefined, granted: Boolean(data.granted) })),
     }
   }
-  if (type === 'subagent_start') {
-    const index = state.items.findLastIndex(item => item.kind === 'tool' && item.pending && item.name === 'delegate'
-      && item.args?.kind === data.kind && item.args?.task === data.task)
-    return {
-      ...state,
-      items: replaceItem(state.items, index, item => ({ ...item, childSessionId: String(data.child_session_id) })),
-    }
+  if (['subagent_start', 'subagent_progress', 'subagent_result'].includes(type)) {
+    return { ...state, items: applyChildEvent(state.items, type, data) }
   }
   if (type === 'provider_retry') {
     return {

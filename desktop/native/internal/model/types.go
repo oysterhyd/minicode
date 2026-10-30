@@ -263,6 +263,10 @@ type FeedItem struct {
 	Deciding       bool
 	Auto           bool
 	ChildSessionID string
+	ChildProgress  []ChildStep
+	ChildStatus    string
+	ChildSeq       int
+	ChildFinished  bool
 	ArtifactID     string
 	StartedAt      time.Time
 	EndedAt        time.Time
