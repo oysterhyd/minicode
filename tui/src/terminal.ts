@@ -55,13 +55,13 @@ export const theme = LIGHT ? {
 export const ACCENT = theme.claude
 
 export function enterTerminalScreen(stdout: NodeJS.WriteStream = process.stdout) {
-  stdout.write('\x1b[?1049h\x1b[2J\x1b[H\x1b[?2004h\x1b[?1000h\x1b[?1006h')
+  stdout.write('\x1b[?2004h')
   let restored = false
   const restore = () => {
     if (restored) return
     restored = true
     process.off('exit', restore)
-    stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l\x1b[?25h')
+    stdout.write('\x1b[?2004l\x1b[?25h')
   }
   process.once('exit', restore)
   return restore

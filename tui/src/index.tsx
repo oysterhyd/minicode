@@ -39,8 +39,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const client = new BridgeClient(child)
   const restoreTerminal = enterTerminalScreen()
   try {
-    const instance = render(createElement(App, { client, options, version: '3.0.2' }), {
+    const instance = render(createElement(App, { client, options, version: '3.0.3', scrollback: true }), {
       exitOnCtrlC: false,
+      incrementalRendering: true,
     })
     await instance.waitUntilExit()
     return 0

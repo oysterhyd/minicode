@@ -33,6 +33,7 @@ import { NEXT_PERMISSION, Notice, ShortcutPanel, shortcutLayout, Spinner, Status
 import { ThoughtLine, ToolLine } from './components/ToolLine.js'
 import { UserBubble } from './components/UserBubble.js'
 import { TranscriptViewport, type TranscriptScroll } from './components/TranscriptViewport.js'
+import { TranscriptLog } from './components/TranscriptLog.js'
 import { lastExpandableTool, layoutTranscript, type LayoutItem } from './transcript.js'
 import type {
   AgentState,
@@ -57,6 +58,7 @@ export type AppProps = {
   client: BridgeApi
   options: LaunchOptions
   version?: string
+  scrollback?: boolean
 }
 
 type FrozenItem = LayoutItem | ({ kind: 'banner' } & BannerProps)
@@ -84,7 +86,7 @@ function FeedRow({ item, now, expanded, detailOnly, recent }: {
   return <Notice text={item.text || ''} tone={item.tone} />
 }
 
-export function App({ client, options, version = '3.0.2' }: AppProps) {
+export function App({ client, options, version = '3.0.3', scrollback = false }: AppProps) {
   const { exit } = useApp()
   const [feed, setFeed] = useState<FeedState>(emptyFeed)
   const [agent, setAgent] = useState<AgentState>(emptyState)
@@ -102,6 +104,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
   const [banner, setBanner] = useState<BannerProps | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [scrolled, setScrolled] = useState(false)
+  const [screenEpoch, setScreenEpoch] = useState(0)
   const [approvalChoice, setApprovalChoice] = useState(0)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const approvalChoiceRef = useRef({ id: '', choice: 0 })
@@ -280,6 +283,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
     historyRef.current = null
     transcriptRef.current?.returnToLatest()
     clearTranscript(stdout)
+    setScreenEpoch(value => value + 1)
     setExpanded(new Set())
     setBanner({
       version,
@@ -384,6 +388,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         setExpanded(new Set())
         transcriptRef.current?.returnToLatest()
         clearTranscript(stdout)
+        setScreenEpoch(value => value + 1)
         setBanner({
           version,
           workspace: workspaceRef.current,
@@ -771,7 +776,8 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
     items.push(...layout.frozen)
     return items
   }, [banner, layout.frozen])
-  const visibleItems = [...frozenItems, ...layout.live]
+  const visibleItems = scrollback ? layout.live.slice(-Math.max(1, terminal.rows)) : [...frozenItems, ...layout.live]
+  const expandedTool = feed.items.findLast(item => item.kind === 'tool' && expanded.has(item.id) && !item.pending)
   const promptHeight = Math.min(Math.max(1, Math.min(6, Math.floor(terminal.rows / 3))),
     promptRows(draft, caret, terminal.columns - 4).rows.length) + 2 + (queued.length ? 1 : 0)
   const menuTitle = matches[0]?.kind === 'value'
@@ -791,7 +797,9 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
   const recent = sessions.filter(row => row.session_id !== feed.sessionId).map(row => row.title || row.session_id.slice(0, 8))
 
   return (
-    <Box flexDirection="column" width={terminal.columns} height={terminal.rows} overflowY="hidden">
+    <Box flexDirection="column" width={terminal.columns} height={scrollback ? undefined : terminal.rows} overflowY={scrollback ? undefined : 'hidden'}>
+      {scrollback ? <TranscriptLog items={frozenItems} epoch={screenEpoch} columns={terminal.columns}
+        renderItem={item => <FeedRow item={item} now={item.kind === 'tool' || item.kind === 'thought' ? (item.endedAt || now) : now} expanded={new Set()} recent={recent} />} /> : null}
       <TranscriptViewport height={liveHeight} scrollRef={transcriptRef} onScrollChange={setScrolled}>
         {visibleItems.map((item, index) => (
           <Box key={item.kind === 'banner' ? 'banner' : `${item.id}-${index}`} flexShrink={0} flexDirection="column">
@@ -800,6 +808,7 @@ export function App({ client, options, version = '3.0.2' }: AppProps) {
         ))}
         {feed.error && feed.items.at(-1)?.text !== feed.error ? <Notice text={feed.error} tone="error" /> : null}
       </TranscriptViewport>
+      {scrollback && expandedTool ? <ToolLine item={expandedTool} now={now} expanded /> : null}
       <Box flexDirection="column" flexShrink={0}>
         {feed.busy && !waiting ? (
           <Spinner

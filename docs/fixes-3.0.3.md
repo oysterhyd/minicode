@@ -1098,3 +1098,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：terminal.ts::clearTranscript 动态导入 Ink instances.js 并修改五个私有状态。修复：受控 ANSI 清屏序列，无私有导入/状态变更。当前视口无 Static 缓存，后续滚屏实现须保持此约束。回归：terminal.test.ts 无 Ink renderer 的流先失败后通过。状态：已修复。
 
+
+### T-UI9 — stream sealed transcript to native scrollback
+
+核查：App/TranscriptViewport 全量 Yoga 树与备用屏、鼠标捕获导致 O(N) 重绘。修复：默认启动器用 TranscriptLog，公开 renderToString/useStdout.write 一次输出完成条目，无 Static 的私有缓存重放；实时视口限制未完成条目数，嵌入 App 保留原视口模式。终端默认仅 bracketed paste，不捕获鼠标、不进备用屏。Desktop 已有 AppendFeed 与 ui.List，重建仅结构变化，未重复重写。回归：1200 条目一次渲染，10 次更新计数不变；terminal.test.ts 输入模式。基准：transcript-bench.tsx Windows/Node22，1200条/20次，102.05ms→0.20ms 活动树；只衡量 Ink 树渲染，不包含网络和首次回放。状态：已修复（原生终端人工选择/复制仍需人工验收）。
+
