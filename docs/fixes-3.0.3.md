@@ -1183,3 +1183,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：CLI恢复/报告默认文件名、Bridge会话列表存在[..8]。修复：统一util::short_id用get(..8)，不足/跨UTF8边界回退完整ID，实际匹配仍用完整ID。回归：l17_short_ids_never_split_utf8_or_panic 空/短/ASCII长/中文/emoji边界，先编译失败后通过。状态：已修复。
 
+
+### A2 — follow the user requested language
+
+核查：两平台模板强制中文总结。修复：使用用户语言，明确指定输出语言优先，保留简洁改动/验证总结。回归：prompt-language.test.mjs 同时验证两平台无硬性中文并要求用户语言/显式偏好，先失败后通过。状态：已修复（离线测试验证提示契约，不声称fake provider能验证真实模型语言遵循）。
+
