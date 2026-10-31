@@ -1248,3 +1248,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充任务卡验收：Desktop常驻卡复用真实任务状态，显示完成/进行中/失败/待执行，多于4条提示/tasks；共享/tasks通过现有Store.tasks提供全部任务供三端查看，不引入G4编辑接口。Desktop隐藏work页测试新增状态可见断言；共享命令协议回归覆盖/tasks。状态更新：已修复。
 
+
+### A3 — retain provider truncation contract with equivalent guidance
+
+集成回归发现旧R17协议测试禁止text-only截断payload出现工具调用一词。新增行为指引语义不变，措辞改为独立的只读操作，保留旧断言且无需减弱测试。真实provider截断回归通过。
+
