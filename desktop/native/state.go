@@ -89,6 +89,8 @@ type artifact struct {
 type desktop struct {
 	requestActive                          int
 	requestPending                         []func()
+	requestControlActive                   int
+	requestControlPending                  []func()
 	bridgeFailed                           bool
 	bridgeError                            string
 	navigationVersion                      uint64
@@ -221,8 +223,12 @@ func (d *desktop) request(v *conversation, method string, extra map[string]any, 
 	}
 	params := d.params(v, extra)
 	deadline := time.Now().Add(35 * time.Second)
+	active, pending, limit := &d.requestActive, &d.requestPending, 16
+	if method == "cancelTurn" || method == "resolveApproval" {
+		active, pending, limit = &d.requestControlActive, &d.requestControlPending, 2
+	}
 	start := func() {
-		d.requestActive++
+		*active += 1
 		go func() {
 			ctx, cancel := context.WithDeadline(context.Background(), deadline)
 			defer cancel()
@@ -231,22 +237,22 @@ func (d *desktop) request(v *conversation, method string, extra map[string]any, 
 				err = d.client.Request(ctx, method, params, target)
 			}
 			d.schedule(func() {
-				d.requestActive--
-				if len(d.requestPending) > 0 {
-					next := d.requestPending[0]
-					d.requestPending = d.requestPending[1:]
+				*active -= 1
+				if len(*pending) > 0 {
+					next := (*pending)[0]
+					*pending = (*pending)[1:]
 					next()
 				}
 				done(err)
 			})
 		}()
 	}
-	if d.requestActive >= 16 {
-		if len(d.requestPending) >= 128 {
+	if *active >= limit {
+		if len(*pending) >= 128 {
 			done(fmt.Errorf("Bridge request queue is full"))
 			return
 		}
-		d.requestPending = append(d.requestPending, start)
+		*pending = append(*pending, start)
 	} else {
 		start()
 	}

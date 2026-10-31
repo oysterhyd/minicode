@@ -77,3 +77,31 @@ func TestTU6TasksRemainVisibleInConversation(t *testing.T) {
 		t.Fatal("task only exists in the hidden work tab")
 	}
 }
+
+type prioritizedRequests struct {
+	blockingRequests
+	controls chan struct{}
+}
+
+func (b *prioritizedRequests) Request(ctx context.Context, method string, params any, target any) error {
+	if method == "cancelTurn" {
+		b.controls <- struct{}{}
+		return nil
+	}
+	return b.blockingRequests.Request(ctx, method, params, target)
+}
+func TestD7CancellationBypassesSaturatedNormalRequests(t *testing.T) {
+	r := newTestRig(t, "home")
+	b := &prioritizedRequests{blockingRequests: blockingRequests{release: make(chan struct{})}, controls: make(chan struct{}, 1)}
+	r.d.client = b
+	defer close(b.release)
+	for range 16 {
+		r.d.request(r.d.current(), "getState", nil, nil, func(error) {})
+	}
+	r.d.request(r.d.current(), "cancelTurn", nil, nil, func(error) {})
+	select {
+	case <-b.controls:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("cancellation queued behind blocked normal requests")
+	}
+}

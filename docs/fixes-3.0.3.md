@@ -1223,3 +1223,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充验收：归档页按终端列宽拆成可滚动的Unicode显示行，超长单行不再在Text内部不可访问；覆盖2000个emoji/中文的无损重组。活动视口扣除reasoning/任务/附件/归档面板高度，审批隐藏低优先级归档查看器。状态更新：已修复，单页仍受Bridge 20000字符上限，历史页只保留当前内容与offset栈。
 
+
+### D7 — reserve bounded capacity for cancellation and approvals
+
+补充回归先复现：16个普通请求阻塞时cancelTurn也被排队。修复：保留独立2个控制请求名额，普通仍16，两个等待队列各128且deadline包含排队；总活动请求上限18。TestD7CancellationBypassesSaturatedNormalRequests验证取消不会被普通请求饿死，原80请求峰值断言仍通过。状态：已修复。
+
