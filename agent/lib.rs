@@ -19,6 +19,7 @@ pub mod permissions;
 pub mod provider;
 pub mod report;
 pub mod runtime;
+pub mod sandbox;
 mod settings_file;
 mod sse;
 pub mod store;

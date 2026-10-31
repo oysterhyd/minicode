@@ -31,7 +31,8 @@
       "read",
       "ls",
       "grep",
-      "bash"
+      "bash",
+      "powershell"
     ],
     "instructions": "运行与任务相关的测试或构建，报告命令、结果和失败原因。"
   },
@@ -45,6 +46,7 @@
       "grep",
       "read_artifact",
       "bash",
+      "powershell",
       "edit",
       "write"
     ],
@@ -60,6 +62,7 @@
       "grep",
       "read_artifact",
       "bash",
+      "powershell",
       "edit",
       "write"
     ],

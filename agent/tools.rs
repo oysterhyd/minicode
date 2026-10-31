@@ -37,6 +37,8 @@ pub struct ToolContext {
     pub deadline: Option<Instant>,
     pub files: Files,
     pub permissions: Arc<crate::permissions::Rules>,
+    pub sandbox: crate::sandbox::Config,
+    pub force_sandbox: bool,
 }
 /// What the session last saw of each file: the state after its latest read or
 /// after its own successful edit / write. Edits are checked against it so a
@@ -1505,6 +1507,24 @@ pub(crate) async fn run_command_captured(
     let captured = &capture.file;
     let mut capture_file = captured.reopen()?;
     let mut cmd = shell_for(name, command, cwd);
+    let mut sandbox = if ctx.sandbox.enabled || ctx.force_sandbox {
+        match crate::sandbox::prepare(&cmd, cwd, &ctx.workspace, &ctx.sandbox) {
+            Ok(prepared) => Some(prepared),
+            Err(error) => {
+                ctx.store.event(
+                    &ctx.session,
+                    "shell_sandbox",
+                    &json!({"enforced":false,"command_executed":false,"error":error.to_string()}),
+                )?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(prepared) = &mut sandbox {
+        std::mem::swap(&mut cmd, &mut prepared.command);
+    }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("failed to start command")?;
     capture.pid.store(
@@ -1518,6 +1538,9 @@ pub(crate) async fn run_command_captured(
             return Err(error.context("failed to own command process tree"));
         }
     };
+    if let Some(prepared) = &sandbox {
+        prepared.owned()?;
+    }
     let file = Arc::new(std::sync::Mutex::new(captured.as_file().try_clone()?));
     let mut readers = OutputReaders(vec![
         capture_pipe(child.stdout.take().unwrap(), file.clone()),
@@ -1531,7 +1554,15 @@ pub(crate) async fn run_command_captured(
     let mut exited = None;
     let mut lingered = false;
     let mut last_emit = Instant::now();
+    let mut sandbox_announced = false;
     let status = loop {
+        if let Some(prepared) = &sandbox
+            && !sandbox_announced
+            && prepared.enforced()
+        {
+            ctx.store.event(&ctx.session,"shell_sandbox",&json!({"enforced":true,"backend":prepared.protection,"network":ctx.sandbox.network,"workspace":ctx.workspace}))?;
+            sandbox_announced = true;
+        }
         if exited.is_none()
             && let Some(status) = child.try_wait()?
         {
@@ -1578,12 +1609,33 @@ pub(crate) async fn run_command_captured(
         }
         tokio::select! {_ = tokio::time::sleep(Duration::from_millis(50))=>{},_ = ctx.cancel.cancelled()=>{}}
     };
-    if !capture.background && !timed_out && !quota && !cancelled && !lingered {
+    if sandbox.is_none() && !capture.background && !timed_out && !quota && !cancelled && !lingered {
         tree.release()?;
     } else {
         tree.shutdown().await;
     }
     drop(tree);
+    if let Some(prepared) = &mut sandbox {
+        prepared.finish()?;
+    }
+    if sandbox.is_some() && !sandbox_announced {
+        ctx.store.event(
+            &ctx.session,
+            "shell_sandbox",
+            &json!({"enforced":false,"command_executed":if cfg!(windows){Some(false)}else{None},"reason":"sandbox bootstrap could not be verified"}),
+        )?;
+        let mut bytes = vec![];
+        captured.reopen()?.take(2000).read_to_end(&mut bytes)?;
+        let reason = if cfg!(windows) {
+            "OS shell sandbox could not start; command was not executed"
+        } else {
+            "OS shell sandbox startup could not be verified; command may have started"
+        };
+        bail!(
+            "{reason}: {}",
+            util::terminal_text(&String::from_utf8_lossy(&bytes))
+        );
+    }
     for reader in &mut readers.0 {
         match tokio::time::timeout(Duration::from_secs(1), &mut *reader).await {
             Ok(result) => result??,

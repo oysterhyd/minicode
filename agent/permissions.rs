@@ -25,6 +25,14 @@ struct Rule {
 }
 
 impl Rules {
+    pub fn has_file_denies(&self) -> bool {
+        self.entries.iter().any(|rule| {
+            rule.effect == Decision::Deny
+                && ["read", "edit", "write", "grep", "ls"]
+                    .iter()
+                    .any(|name| rule.tool.is_match(name))
+        })
+    }
     pub fn load(
         workspace: &Path,
         settings: &Path,
@@ -442,7 +450,7 @@ pub fn commands(text: &str) -> Commands {
 fn normalize_command(text: &str) -> String {
     text.trim().to_string()
 }
-fn command_words(text: &str) -> Vec<String> {
+pub(crate) fn command_words(text: &str) -> Vec<String> {
     let mut words = vec![];
     let mut word = String::new();
     let mut quote = None;

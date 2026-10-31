@@ -41,6 +41,8 @@ fn fixture() -> (tempfile::TempDir, ToolContext) {
     );
     let ctx = ToolContext {
         permissions: Default::default(),
+        sandbox: Default::default(),
+        force_sandbox: false,
         workspace: workspace.clone(),
         session,
         store,
@@ -2097,6 +2099,7 @@ impl Harness {
             pending_model: false,
             registry_dirty: false,
             permission_rules: json!(null),
+            shell_sandbox: None,
         };
         let mut runtime =
             crate::runtime::Runtime::new(&workspace, "fake", None, store, configuration, &settings)

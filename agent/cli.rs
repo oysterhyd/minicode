@@ -36,6 +36,20 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    #[cfg(windows)]
+    #[command(hide = true)]
+    SandboxWorker {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        cwd: PathBuf,
+        #[arg(long)]
+        program: PathBuf,
+        #[arg(long)]
+        status: PathBuf,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// NDJSON protocol v2 host for Desktop and Ink TUI.
     Bridge,
     /// 执行一个任务并保存会话。
@@ -116,6 +130,10 @@ struct RunOptions {
     ask: Vec<String>,
     #[arg(long="deny",action=clap::ArgAction::Append)]
     deny: Vec<String>,
+    #[arg(long, conflicts_with = "no_sandbox")]
+    sandbox: bool,
+    #[arg(long)]
+    no_sandbox: bool,
 }
 #[derive(Subcommand)]
 enum SessionCommand {
@@ -192,6 +210,17 @@ pub async fn main() -> Result<()> {
         .or_else(|| std::env::var_os("MINICODE_DB_PATH").map(PathBuf::from))
         .unwrap_or(util::data_dir().join("sessions.db"));
     match cli.command {
+        #[cfg(windows)]
+        Commands::SandboxWorker {
+            profile,
+            cwd,
+            program,
+            status,
+            args,
+        } => {
+            let code = crate::sandbox::worker(&profile, &cwd, &program, &status, &args)?;
+            std::process::exit(code)
+        }
         Commands::Bridge => bridge::serve(Store::open(path)?).await,
         Commands::Tui { args } => launch_tui(
             &args,
@@ -369,6 +398,13 @@ async fn prepare(
     let mut settings = Settings::new(&configuration)?;
     settings.permission_rules =
         json!({"allow":options.allow,"ask":options.ask,"deny":options.deny});
+    settings.shell_sandbox = if options.sandbox {
+        Some(true)
+    } else if options.no_sandbox {
+        Some(false)
+    } else {
+        None
+    };
     let summary = session.map(|id| store.require(id)).transpose()?;
     let workspace = options
         .workspace

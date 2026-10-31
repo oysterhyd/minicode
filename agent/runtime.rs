@@ -37,6 +37,7 @@ pub struct Settings {
     pub pending_model: bool,
     pub registry_dirty: bool,
     pub permission_rules: Value,
+    pub shell_sandbox: Option<bool>,
 }
 impl Settings {
     pub fn new(configuration: &Configuration) -> Result<Self> {
@@ -50,6 +51,7 @@ impl Settings {
             pending_model: false,
             registry_dirty: false,
             permission_rules: Value::Null,
+            shell_sandbox: None,
         })
     }
 }
@@ -224,6 +226,7 @@ pub struct Runtime {
     permissions: Arc<crate::permissions::Rules>,
     permission_workspace: PathBuf,
     permission_settings: PathBuf,
+    sandbox: crate::sandbox::Config,
     pub allowed: Option<HashSet<String>>,
     pub child: bool,
     pub children: HashMap<(String, String), Box<Runtime>>,
@@ -283,6 +286,8 @@ impl Runtime {
             &settings.permission_rules,
             &settings.always_allow,
         )?);
+        let sandbox =
+            crate::sandbox::Config::load(&workspace, &permission_settings, settings.shell_sandbox)?;
         let (id, messages, message_revision, usage, rounds, pending) = if let Some(id) = session {
             let summary = store.require(id)?;
             if util::canonical(Path::new(
@@ -484,6 +489,7 @@ impl Runtime {
             isolations: HashMap::new(),
             permissions,
             permission_settings,
+            sandbox,
             allowed: None,
             child: false,
             children: HashMap::new(),
@@ -1358,6 +1364,8 @@ impl Runtime {
             deadline: hooks.shared.lock().unwrap().deadline,
             files: self.files.clone(),
             permissions: self.permissions.clone(),
+            sandbox: self.sandbox.clone(),
+            force_sandbox: self.isolation.is_some(),
         }
     }
     async fn run_inner(
@@ -1404,6 +1412,11 @@ impl Runtime {
                 &settings.permission_rules,
                 &settings.always_allow,
             )?);
+            self.sandbox = crate::sandbox::Config::load(
+                &self.permission_workspace,
+                &self.permission_settings,
+                settings.shell_sandbox,
+            )?;
             if settings.pending_model || settings.model != self.provider.configuration_id {
                 let config = self.catalog.lock().await.configuration.clone();
                 let mut next = Provider::new(&settings.model, &settings.effort, &config)?;
@@ -1866,6 +1879,7 @@ impl Runtime {
                                 permissions: self.permissions.clone(),
                                 permission_workspace: self.permission_workspace.clone(),
                                 permission_settings: self.permission_settings.clone(),
+                                sandbox: self.sandbox.clone(),
                                 allowed: self.allowed.clone(),
                                 child: false,
                                 children,
@@ -2131,17 +2145,16 @@ impl Runtime {
             Err(error) => return Ok(Some(Outcome::failure(error.to_string()))),
             _ => {}
         }
-        if let Some(isolation) = &self.isolation {
-            if ["bash", "powershell"].contains(&name.as_str()) {
-                return Ok(Some(Outcome::failure(
-                    "隔离子任务的 shell 需要操作系统沙箱；当前未启用可用沙箱，命令未执行。",
-                )));
-            }
-            if ["edit", "write"].contains(&name.as_str())
-                && let Err(error) = isolation.check_child_path(input["path"].as_str().unwrap_or(""))
-            {
-                return Ok(Some(Outcome::failure(error.to_string())));
-            }
+        if ["bash", "powershell"].contains(&name.as_str()) && self.permissions.has_file_denies() {
+            return Ok(Some(Outcome::failure(
+                "configured file deny rules cannot be guaranteed for arbitrary shell programs; command was not executed. Use scoped native file tools for this workspace.",
+            )));
+        }
+        if let Some(isolation) = &self.isolation
+            && ["edit", "write"].contains(&name.as_str())
+            && let Err(error) = isolation.check_child_path(input["path"].as_str().unwrap_or(""))
+        {
+            return Ok(Some(Outcome::failure(error.to_string())));
         }
         let mut catalog = self.catalog.lock().await;
         if ["read", "ls", "grep", "edit", "write", "bash", "powershell"].contains(&name.as_str()) {
@@ -2171,6 +2184,34 @@ impl Runtime {
         Ok(None)
     }
     async fn authorize(&self, call: &Block, hooks: &Hooks) -> Result<bool> {
+        if !self.authorize_policy(call, hooks).await? {
+            return Ok(false);
+        }
+        if let Block::ToolUse {
+            id, name, input, ..
+        } = call
+            && ["bash", "powershell"].contains(&name.as_str())
+            && let Some(reason) =
+                crate::sandbox::dangerous(input["command"].as_str().unwrap_or_default())
+        {
+            self.event(
+                hooks,
+                "approval_request",
+                json!({"call_id":id,"name":"dangerous_command","reason":reason}),
+            )?;
+            let request = json!({"call_id":id,"tool_name":"dangerous_command","arguments":input,"summary":format!("高危命令独立确认（{reason}）：{}",util::prefix(input["command"].as_str().unwrap_or_default(),1000))});
+            let granted = self.ask(hooks, "", request).await?;
+            Self::phase(hooks, "tools");
+            self.event(
+                hooks,
+                "approval_decision",
+                json!({"call_id":id,"name":"dangerous_command","granted":granted}),
+            )?;
+            return Ok(granted);
+        }
+        Ok(true)
+    }
+    async fn authorize_policy(&self, call: &Block, hooks: &Hooks) -> Result<bool> {
         let Block::ToolUse {
             id, name, input, ..
         } = call

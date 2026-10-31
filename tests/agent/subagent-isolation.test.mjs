@@ -78,12 +78,15 @@ test('A4 merge cannot skip review or approve an unseen diff in the same model re
   assert.ok(!fs.existsSync(path.join(f.workspace,'child.txt')))
 })
 
-test('A4 writable child shell is refused when OS isolation is unavailable',async t=>{
+test('A4 writable child shell has no unrestricted fallback',async t=>{
   const f=await fixture(t,[delegate(),{tool_calls:[{name:'bash',arguments:{command:'echo unsafe > shell.txt'}}]},done,review('discard'),{text:'parent done'}])
-  await f.request('setPermissionMode',{mode:'bypass'});const run=await f.run()
+  await f.request('setPermissionMode',{mode:'bypass'})
+  const approvals=(async()=>{const approval=await f.wait(e=>e.event==='approval');await f.request('resolveApproval',{approvalId:approval.approvalId,sessionId:approval.sessionId,granted:true})})()
+  const run=await f.run();await approvals
   const child=await f.request('getSession',{sessionId:run.detail.events.find(e=>e.type==='subagent_start').data.child_session_id})
   const shell=child.events.find(e=>e.type==='tool_call_result'&&e.data.name==='bash')
-  assert.equal(shell.data.success,false);assert.match(shell.data.error,/sandbox|沙箱|隔离/i)
+  if(shell.data.success)assert.ok(child.events.some(e=>e.type==='shell_sandbox'&&e.data.enforced===true))
+  else assert.match(shell.data.error+' '+shell.data.output_detail,/sandbox|沙箱|隔离|AppContainer/i)
   assert.ok(!fs.existsSync(path.join(f.workspace,'shell.txt')))
 })
 
