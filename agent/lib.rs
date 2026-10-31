@@ -14,6 +14,7 @@ mod delegate_workspace;
 mod editing;
 mod environment;
 pub mod eval;
+mod eval_stats;
 mod extension_cache;
 pub mod extensions;
 pub mod goals;

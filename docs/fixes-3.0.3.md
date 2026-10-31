@@ -1368,3 +1368,11 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 核查：两份设计文档引用已删除的 src/minicode 和 evals/run_eval.py；plan.md 的当前差异与 M4 仍声称 TaskStore 未接 Runtime，并误导读者把离线 CI 当成全部评测。当前 task 工具已在 agent/tools.rs 接入 Store。修复：明确历史快照范围、映射 Rust/Ink 当前入口、更新任务与真实评测状态；旧目录树仅在显式 historical-paths 块内保留。新增 scripts/check-doc-paths.mjs，校验这三份设计文档的链接与内联代码路径，CI 显式运行。
 
 测试：tests/agent/doc-paths.test.mjs 先复现缺检查入口，检查器再对原文报出旧路径/缺失链接；修复后覆盖有效路径、失效链接、失效内联路径和显式历史块。完整 CI 结果见 output/stage8a-e2/。
+
+### E3 — repeat model and mechanism evaluation matrices (8A)
+
+核查：已有真实单模型 --model、--repeats 与交替调度，也有历史 120 次真实运行，故不接受“全部离线/只跑一次”的判断；缺多模型、逐机制、方差、定价与版本趋势。修复：多值 --model、五组独立消融、真实/机制组默认且至少三次；单次离线 CI 行为保留。开关进入 Provider 请求、Runtime 压缩/委派执行与系统模板；项目指令、权限和 Skills 保留。每模型/机制目录隔离，配置与二进制/夹具身份防止混用；按组及每任务报告均值/样本方差、缓存命中和费用，提供跨版本 compare-results 工具。不完整用量、未知定价与离线合成费用为 null；无价格抓取或付费实测。
+
+测试：tests/agent/eval-matrix.test.mjs 先因缺 --ablations 失败，修复后以两种 Anthropic HTTP 模拟模型 × 五机制 × 三次验证 30 次运行、真实请求字段、项目指令保留、样本量/方差、缓存量与费用、同配置恢复不重复请求、失败保留分母、旧离线命令和趋势；Rust e3_disabled_delegation_cannot_be_called_directly 先复现模型绕过工具列表启动子助手，再补执行端拦截；eval_stats 单测覆盖样本方差与未知值。完整检查见 output/stage8a-e3/。
+
+取舍：OpenAI 服务端自动缓存不可关闭，no-cache 仅控制显式缓存并在记录说明能力；采样参数可选且必须由模型支持；重复三次是最小描述样本，不能证明统计显著性或把未触发机制归因为性能收益。真实网关费用/多模型质量比较需另行配置模型与单价后运行，不使用本机账户自动发起付费请求。

@@ -2,7 +2,7 @@ use crate::{
     configuration::Configuration,
     goals,
     models::Budget,
-    runtime::{Hooks, Ledger, Runtime, Settings, Snapshot},
+    runtime::{Hooks, Ledger, Mechanisms, Runtime, Settings, Snapshot},
     store::Store,
     tools, util,
 };
@@ -30,10 +30,20 @@ pub struct Options {
     #[arg(long, short, default_value = "reports/eval")]
     output: PathBuf,
     /// Use a configured real model instead of deterministic offline scripts.
+    #[arg(long, value_delimiter = ',')]
+    model: Vec<String>,
+    /// Each entry disables only one mechanism relative to full.
+    #[arg(long, value_delimiter = ',', default_value = "default", value_parser = ["default", "full", "no-compression", "no-cache", "no-subagents", "no-prompt"])]
+    ablations: Vec<String>,
     #[arg(long)]
-    model: Option<String>,
-    #[arg(long, default_value_t = 1)]
-    repeats: usize,
+    repeats: Option<usize>,
+    #[arg(long)]
+    temperature: Option<f64>,
+    #[arg(long)]
+    seed: Option<u64>,
+    /// Model-keyed USD per million input/output/cache_read/cache_write tokens.
+    #[arg(long)]
+    prices: Option<PathBuf>,
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
     #[arg(long, default_value = "alternating", value_parser = ["alternating", "grouped"])]
@@ -174,17 +184,37 @@ async fn one(
     task: &Path,
     baseline: &str,
     repeat: usize,
+    variant: (&str, &str),
+    prices: &Value,
     cancel: CancellationToken,
 ) -> Result<Value> {
+    let (model, ablation) = variant;
     let id = task
         .file_name()
         .context("invalid task directory")?
         .to_string_lossy();
     let spec: Value = serde_yaml::from_str(&fs::read_to_string(task.join("task.yaml"))?)?;
     let fixture = util::hash(serde_json::to_vec(&json!({"definition":spec,"files":snapshot(&task.join("repo"))?,"script":goals::hash_file(&task.join("script.json"))?}))?.as_slice());
-    let model = options.model.as_deref().unwrap_or("fake");
-    let run_dir = options
-        .output
+    let mut mechanisms = Mechanisms::default();
+    match ablation {
+        "default" => mechanisms.compression = baseline != "b0",
+        "no-compression" => mechanisms.compression = false,
+        "no-cache" => mechanisms.cache = false,
+        "no-subagents" => mechanisms.subagents = false,
+        "no-prompt" => mechanisms.prompt = false,
+        _ => {}
+    }
+    let matrix = options.model.len() > 1 || options.ablations != ["default"];
+    let output = if matrix {
+        options
+            .output
+            .join("matrix")
+            .join(util::hash(model.as_bytes()))
+            .join(ablation)
+    } else {
+        options.output.clone()
+    };
+    let run_dir = output
         .join("runs")
         .join(id.as_ref())
         .join(baseline)
@@ -209,6 +239,9 @@ async fn one(
     let started = Instant::now();
     let settings = Settings {
         model: model.into(),
+        mechanisms: mechanisms.clone(),
+        temperature: options.temperature,
+        seed: options.seed,
         mode: "bypass".into(),
         budget: Budget {
             max_rounds: spec["budget"]["max_rounds"].as_u64().unwrap_or(64),
@@ -232,7 +265,13 @@ async fn one(
             task.join("script.json"),
         )?)?)?;
     }
-    runtime.compaction = baseline != "b0";
+    let cache_control = if runtime.provider.style == "anthropic" {
+        "explicit"
+    } else if model == "fake" {
+        "synthetic"
+    } else {
+        "automatic; no-cache cannot disable server caching"
+    };
     let hooks = Hooks {
         settings: Arc::new(Mutex::new(settings)),
         snapshot: Arc::new(Mutex::new(Snapshot::default())),
@@ -302,12 +341,49 @@ async fn one(
         None
     };
     let events = runtime.store.events(&runtime.session, -1)?;
-    let record = json!({"task":id,"task_id":id,"baseline":baseline,"repeat":repeat,"model":model,"fixture_sha256":fixture,"passed":failures.is_empty(),"hidden_pass":hidden_pass,"exit_reason":result.exit_reason,"attempts":attempts,"rounds":runtime.rounds,"usage":runtime.usage,"input_tokens":runtime.usage.input_tokens,"output_tokens":runtime.usage.output_tokens,"seconds":started.elapsed().as_secs_f64(),"error":if failures.is_empty(){Value::Null}else{json!(failures.join("; "))},"session_id":runtime.session,"compactions":events.iter().filter(|e|e.r#type=="context_compacted").count()});
+    let usage_complete = runtime.usage.available
+        && result.error.is_none()
+        && events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.r#type.as_str(),
+                    "assistant_message" | "provider_response_rejected"
+                )
+            })
+            .all(|e| e.data["usage"]["available"] != false);
+    let cost = if model != "fake" && usage_complete {
+        crate::eval_stats::cost(&runtime.usage, &prices[model])
+    } else {
+        None
+    };
+    let record = json!({"task":id,"task_id":id,"baseline":baseline,"repeat":repeat,"model":model,"ablation":ablation,"mechanisms":mechanisms,"cache_control":cache_control,"cost_usd":cost,"usage_complete":usage_complete,"provider_error":result.error,"fixture_sha256":fixture,"passed":failures.is_empty(),"hidden_pass":hidden_pass,"exit_reason":result.exit_reason,"attempts":attempts,"rounds":runtime.rounds,"usage":runtime.usage,"input_tokens":runtime.usage.input_tokens,"output_tokens":runtime.usage.output_tokens,"seconds":started.elapsed().as_secs_f64(),"error":if failures.is_empty(){Value::Null}else{json!(failures.join("; "))},"session_id":runtime.session,"compactions":events.iter().filter(|e|e.r#type=="context_compacted").count()});
     util::atomic_write(&record_path, &serde_json::to_vec_pretty(&record)?)?;
     Ok(record)
 }
 pub async fn run(mut options: Options) -> Result<()> {
-    if options.repeats == 0 || options.concurrency == 0 || options.concurrency > 32 {
+    let matrix = !options.model.is_empty() || options.ablations != ["default"];
+    let repeats = options.repeats.unwrap_or(if matrix { 3 } else { 1 });
+    if matrix && repeats < 3 {
+        bail!("model and mechanism evaluations require at least 3 repeats");
+    }
+    if options
+        .temperature
+        .is_some_and(|t| !t.is_finite() || !(0.0..=2.0).contains(&t))
+    {
+        bail!("temperature must be finite and between 0 and 2");
+    }
+    let prices = crate::eval_stats::prices(options.prices.as_deref())?;
+    if options.model.is_empty() {
+        options.model.push("fake".into());
+    }
+    for values in [&options.model, &options.ablations] {
+        let unique = values.iter().collect::<std::collections::HashSet<_>>();
+        if unique.len() != values.len() || values.iter().any(|s| s.trim().is_empty()) {
+            bail!("models and ablations must be nonempty and unique");
+        }
+    }
+    if repeats == 0 || options.concurrency == 0 || options.concurrency > 32 {
         bail!("repeats and concurrency must be positive (concurrency <=32)")
     }
     if !options.tasks_dir.is_dir() {
@@ -354,16 +430,27 @@ pub async fn run(mut options: Options) -> Result<()> {
     }
     let mut combinations = vec![];
     for task in &tasks {
-        for repeat in 1..=options.repeats {
+        for repeat in 1..=repeats {
             for baseline in &baselines {
-                combinations.push((task.clone(), baseline.to_string(), repeat));
+                for model in &options.model {
+                    for ablation in &options.ablations {
+                        combinations.push((
+                            task.clone(),
+                            baseline.to_string(),
+                            repeat,
+                            model.clone(),
+                            ablation.clone(),
+                        ));
+                    }
+                }
             }
         }
     }
     if options.schedule == "grouped" {
-        combinations.sort_by(|a, b| (&a.1, &a.0, a.2).cmp(&(&b.1, &b.0, b.2)));
+        combinations
+            .sort_by(|a, b| (&a.3, &a.4, &a.1, &a.0, a.2).cmp(&(&b.3, &b.4, &b.1, &b.0, b.2)));
     }
-    let config = json!({"version":crate::VERSION,"agent_sha256":goals::hash_file(&std::env::current_exe()?)?,"model":options.model,"baselines":baselines,"repeats":options.repeats,"concurrency":options.concurrency,"schedule":options.schedule,"fixtures":tasks.iter().map(|p|goals::fingerprint(p).map(|hash|json!({"task":p.file_name().unwrap().to_string_lossy(),"sha256":hash}))).collect::<Result<Vec<_>>>()?});
+    let config = json!({"version":crate::VERSION,"agent_sha256":goals::hash_file(&std::env::current_exe()?)?,"models":options.model,"ablations":options.ablations,"temperature":options.temperature,"seed":options.seed,"prices":prices,"baselines":baselines,"repeats":repeats,"concurrency":options.concurrency,"schedule":options.schedule,"fixtures":tasks.iter().map(|p|goals::fingerprint(p).map(|hash|json!({"task":p.file_name().unwrap().to_string_lossy(),"sha256":hash}))).collect::<Result<Vec<_>>>()?});
     let config_path = options.output.join("config.json");
     if config_path.is_file() && serde_json::from_slice::<Value>(&fs::read(&config_path)?)? != config
     {
@@ -376,17 +463,33 @@ pub async fn run(mut options: Options) -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
         signal.cancel();
     });
-    let mut queue = stream::iter(combinations.into_iter().map(|(task, baseline, repeat)| {
-        let options = &options;
-        let cancel = cancel.clone();
-        async move { one(options, &task, &baseline, repeat, cancel).await }
-    }))
+    let mut queue = stream::iter(combinations.into_iter().map(
+        |(task, baseline, repeat, model, ablation)| {
+            let options = &options;
+            let prices = &prices;
+            let cancel = cancel.clone();
+            async move {
+                one(
+                    options,
+                    &task,
+                    &baseline,
+                    repeat,
+                    (&model, &ablation),
+                    prices,
+                    cancel,
+                )
+                .await
+            }
+        },
+    ))
     .buffer_unordered(options.concurrency);
     let mut results = vec![];
     while let Some(record) = queue.next().await {
         let record = record?;
         println!(
-            "{} {} #{}: {}",
+            "{} {} {} {} #{}: {}",
+            record["model"].as_str().unwrap(),
+            record["ablation"].as_str().unwrap(),
             record["task"].as_str().unwrap(),
             record["baseline"].as_str().unwrap(),
             record["repeat"],
@@ -405,31 +508,29 @@ pub async fn run(mut options: Options) -> Result<()> {
         )?;
     }
     watcher.abort();
-    let mut summary = String::from(
-        "# MiniCode evaluation\n\n| Baseline | Pass / runs | Mean seconds | Mean input tokens |\n| --- | --- | --- | --- |\n",
-    );
-    for baseline in baselines {
-        let records = results
-            .iter()
-            .filter(|r| r["baseline"] == baseline)
-            .collect::<Vec<_>>();
-        let n = records.len() as f64;
-        summary.push_str(&format!(
-            "| {baseline} | {} / {} | {:.3} | {:.1} |\n",
-            records.iter().filter(|r| r["passed"] == true).count(),
-            records.len(),
-            records
-                .iter()
-                .map(|r| r["seconds"].as_f64().unwrap_or(0.0))
-                .sum::<f64>()
-                / n,
-            records
-                .iter()
-                .map(|r| r["input_tokens"].as_u64().unwrap_or(0) as f64)
-                .sum::<f64>()
-                / n
-        ));
-    }
-    util::atomic_write(&options.output.join("summary.md"), summary.as_bytes())?;
+    results.sort_by_key(|r| {
+        (
+            r["model"].as_str().unwrap_or_default().to_string(),
+            r["ablation"].as_str().unwrap_or_default().to_string(),
+            r["task"].as_str().unwrap_or_default().to_string(),
+            r["baseline"].as_str().unwrap_or_default().to_string(),
+            r["repeat"].as_u64().unwrap_or(0),
+        )
+    });
+    util::atomic_write(
+        &options.output.join("results.json"),
+        &serde_json::to_vec_pretty(
+            &json!({"run_count":results.len(),"passed":results.iter().filter(|r|r["passed"]==true).count(),"results":results}),
+        )?,
+    )?;
+    let statistics = crate::eval_stats::statistics(&results, &config);
+    util::atomic_write(
+        &options.output.join("statistics.json"),
+        &serde_json::to_vec_pretty(&statistics)?,
+    )?;
+    util::atomic_write(
+        &options.output.join("summary.md"),
+        crate::eval_stats::summary(&statistics).as_bytes(),
+    )?;
     Ok(())
 }

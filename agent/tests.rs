@@ -2096,6 +2096,15 @@ struct Harness {
 }
 
 #[tokio::test]
+async fn e3_disabled_delegation_cannot_be_called_directly() {
+    let mut h = Harness::new(json!({"turns":[{"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]},{"text":"done"}]})).await;
+    h.runtime.mechanisms.subagents = false;
+    h.run(Some("finish")).await.unwrap();
+    assert!(!h.event_types().contains(&"subagent_start".to_string()));
+    assert!(h.runtime.messages.iter().flat_map(|m| &m.content).any(|b| matches!(b, Block::ToolResult {is_error:true,content,..} if content.contains("disabled"))));
+}
+
+#[tokio::test]
 async fn r35_requirements_exclude_synthetic_messages_before_selecting_recent_inputs() {
     let mut h = Harness::new(json!({"turns":[
         {"tool_calls":[{"name":"delegate","arguments":{"kind":"explore","task":"inspect"}}]},
@@ -2188,6 +2197,9 @@ impl Harness {
             path: root.join("config.json"),
         };
         let settings = crate::runtime::Settings {
+            mechanisms: Default::default(),
+            temperature: None,
+            seed: None,
             model: "fake".into(),
             effort: "off".into(),
             mode: "bypass".into(),

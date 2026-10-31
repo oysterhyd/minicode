@@ -1235,10 +1235,18 @@ impl Catalog {
         }
     }
     pub fn prompt(&self, tools: &[String]) -> Result<String> {
+        self.prompt_with_template(tools, true)
+    }
+    pub fn prompt_with_template(&self, tools: &[String], enhanced: bool) -> Result<String> {
         let template = if cfg!(windows) {
             include_str!("assets/system-windows.txt")
         } else {
             include_str!("assets/system-posix.txt")
+        };
+        let template = if enhanced {
+            template
+        } else {
+            "You are a coding assistant. Complete the user's task in {{workspace}}. Available tools: {{tools}}. Preserve existing work and obey project instructions.\n"
         };
         let mut text = template
             .replace("{{workspace}}", &self.workspace.to_string_lossy())

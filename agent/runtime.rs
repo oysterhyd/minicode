@@ -26,8 +26,28 @@ use std::{
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Mechanisms {
+    pub compression: bool,
+    pub cache: bool,
+    pub subagents: bool,
+    pub prompt: bool,
+}
+impl Default for Mechanisms {
+    fn default() -> Self {
+        Self {
+            compression: true,
+            cache: true,
+            subagents: true,
+            prompt: true,
+        }
+    }
+}
 #[derive(Clone)]
 pub struct Settings {
+    pub mechanisms: Mechanisms,
+    pub temperature: Option<f64>,
+    pub seed: Option<u64>,
     pub model: String,
     pub effort: String,
     pub mode: String,
@@ -43,6 +63,9 @@ pub struct Settings {
 impl Settings {
     pub fn new(configuration: &Configuration) -> Result<Self> {
         Ok(Self {
+            mechanisms: Mechanisms::default(),
+            temperature: None,
+            seed: None,
             model: configuration.default_model()?,
             effort: "off".into(),
             mode: "default".into(),
@@ -240,6 +263,7 @@ pub struct Runtime {
     pub children: HashMap<(String, String), Box<Runtime>>,
     pub custom_prompt: Option<String>,
     pub compaction: bool,
+    pub mechanisms: Mechanisms,
     delegation_branch: bool,
     used_call_ids: HashSet<String>,
     /// Instruction and skill drift found on resume, reported by `prepare`.
@@ -509,7 +533,8 @@ impl Runtime {
             child: false,
             children: HashMap::new(),
             custom_prompt: None,
-            compaction: true,
+            compaction: settings.mechanisms.compression,
+            mechanisms: settings.mechanisms.clone(),
             delegation_branch: false,
             used_call_ids,
             instruction_changes,
@@ -713,6 +738,9 @@ impl Runtime {
     }
     fn tool_specs(&self, catalog: &Catalog, agents: &[Value]) -> Vec<crate::models::ToolSpec> {
         let mut specs = tools::specs(catalog, &self.mcp, agents, !self.child);
+        if !self.mechanisms.subagents {
+            specs.retain(|s| !["delegate", "review_delegate"].contains(&s.name.as_str()));
+        }
         if let Some(allowed) = &self.allowed {
             specs.retain(|s| allowed.contains(&s.name));
         }
@@ -728,8 +756,10 @@ impl Runtime {
         if let Some(system) = &self.frozen_system {
             return Ok(system.clone());
         }
-        let mut prompt =
-            catalog.prompt(&specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>())?;
+        let mut prompt = catalog.prompt_with_template(
+            &specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            self.mechanisms.prompt,
+        )?;
         if let Some(custom) = &self.custom_prompt {
             prompt.push_str(custom)
         }
@@ -1905,6 +1935,7 @@ impl Runtime {
                                 children,
                                 custom_prompt: self.custom_prompt.clone(),
                                 compaction: self.compaction,
+                                mechanisms: self.mechanisms.clone(),
                                 delegation_branch: true,
                                 used_call_ids: self.used_call_ids.clone(),
                                 instruction_changes: vec![],
@@ -2137,6 +2168,11 @@ impl Runtime {
         )?;
         if let Some(error) = input_error {
             return Ok(Some(Outcome::failure(error.clone())));
+        }
+        if !self.mechanisms.subagents && ["delegate", "review_delegate"].contains(&name.as_str()) {
+            return Ok(Some(Outcome::failure(
+                "subagents are disabled for this evaluation",
+            )));
         }
         if self
             .allowed
@@ -2934,6 +2970,7 @@ impl Runtime {
             child.permissions = self.permissions.clone();
             child.isolation = isolation;
             child.compaction = self.compaction;
+            child.mechanisms = self.mechanisms.clone();
             child.goal = None;
             child.files = self.files.clone();
             // A delegated task must see the same pinned project instructions

@@ -290,6 +290,9 @@ pub struct Provider {
     pub fake: Option<Value>,
     pub index: usize,
     pub call_counter: usize,
+    pub cache_enabled: bool,
+    pub temperature: Option<f64>,
+    pub seed: Option<u64>,
     client: reqwest::Client,
 }
 impl Provider {
@@ -299,6 +302,9 @@ impl Provider {
         previous: Option<&Self>,
     ) -> Result<Self> {
         let mut provider = Self::new(&settings.model, &settings.effort, configuration)?;
+        provider.cache_enabled = settings.mechanisms.cache;
+        provider.temperature = settings.temperature;
+        provider.seed = settings.seed;
         if let Some(previous) = previous
             && provider.identity().is_some()
             && provider.identity() == previous.identity()
@@ -369,6 +375,9 @@ impl Provider {
             fake: None,
             index: 0,
             call_counter: 0,
+            cache_enabled: true,
+            temperature: None,
+            seed: None,
             // No total request timeout: it would also cap the streamed body.
             // Reads are bounded by idle_timeout and the run by its deadline.
             client: reqwest::Client::builder()
@@ -1399,7 +1408,8 @@ impl Provider {
                     .saturating_add(1024),
             )
             .max(1);
-        let cache = self.style == "anthropic" && anthropic_prompt_cache_enabled();
+        let cache =
+            self.cache_enabled && self.style == "anthropic" && anthropic_prompt_cache_enabled();
         if self.style == "anthropic" {
             chat = normalize_anthropic(chat);
             if cache {
@@ -1483,6 +1493,15 @@ impl Provider {
             if !tools.is_empty() {
                 body["tools"]=json!(tools.iter().map(|s|json!({"type":"function","function":{"name":s.name,"description":s.description,"parameters":s.input_schema}})).collect::<Vec<_>>());
             }
+        }
+        if let Some(temperature) = self.temperature {
+            body["temperature"] = json!(temperature);
+        }
+        if let Some(seed) = self.seed {
+            if self.style == "anthropic" {
+                bail!("seed is not supported by the Anthropic API");
+            }
+            body["seed"] = json!(seed);
         }
         Ok(body)
     }
