@@ -1293,3 +1293,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 生产渲染器回归先复现Ink满高重绘发CSI 3J擦除原生回滚；修复原生模式保留1行，面板按实际显示行计高、长元数据截断，展开reasoning只布局有界尾部8行。native-scrollback.test.tsx使用非debug Ink+TTY流验证完成消息已输出且连续流/长reasoning展开不发CSI3J；1200条渲染计数仍通过。状态：已修复，原生选择复制不再被鼠标捕获或备用屏阻断。
 
+
+### L12 — persist unsubmitted ordinary input from single-task runs
+
+补充失败测试复现：审批期间普通待提交文本在单次run退出时被丢弃。修复：chat继续保留下一提示符；单次run将已消费普通输入持久化为暂停followUp并给出恢复命令，预输入斜杠命令明确报告未执行。真实进程测试验证当前码批准及steer/follow各一次，并在退出后通过Bridge恢复查询待提交消息。状态：已修复。
+

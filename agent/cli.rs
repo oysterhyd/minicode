@@ -604,7 +604,36 @@ async fn run(
     text: Option<String>,
     hooks: Hooks,
 ) -> Result<crate::models::RunResult> {
-    run_with_input(runtime, text, hooks, &mut console_input()).await
+    let mut input = console_input();
+    let result = run_with_input(runtime, text, hooks.clone(), &mut input).await;
+    let mut saved = 0;
+    for line in input.buffered.into_iter().flatten() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.trim_start().starts_with('/') {
+            eprintln!(
+                "单任务模式没有执行预输入命令：{}",
+                util::terminal_text(line.trim())
+            );
+            continue;
+        }
+        match runtime
+            .store
+            .enqueue_prompt(&runtime.session, "followUp", &line, &[])
+        {
+            Ok(_) => saved += 1,
+            Err(error) => eprintln!("未提交输入保存失败，请重新输入：{error}"),
+        }
+    }
+    if saved > 0 {
+        hooks.snapshot.lock().unwrap().queue_paused = true;
+        eprintln!(
+            "已保存 {saved} 条未提交输入；恢复会话 {} 后用 /queue resume 继续",
+            runtime.session
+        );
+    }
+    result
 }
 
 async fn run_with_input(
