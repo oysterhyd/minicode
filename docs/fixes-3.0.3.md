@@ -1203,3 +1203,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：stdin.read_line无编辑/历史/粘贴边界，空resume传空前缀。修复：TTY使用rustyline18.0.1（新增依赖用于跨平台行编辑/括号粘贴/文件补全，关闭非必要默认特性，仅file-history），Ctrl+J换行、命令Tab补全、持久历史；管道保留逐行脚本兼容。空/resume列出最近20会话与选择命令。回归：console单测多行历史/命令补全；cli-resume-list.test.mjs真实CLI列表，先失败后通过。状态：部分完成（真实Windows/POSIX PTY多行粘贴/方向键仍需自动化验收）。
 
+
+### L11 — handle interrupts during runs and idle input
+
+核查：run signal未来只监听一次且取消后禁用，idle不监听；编辑器Interrupted当读取失败。修复：运行和空闲均消费信号，首次取消/取消中第二次exit130；编辑器Interrupted同样取消，空闲两秒双Ctrl+C退出；单一stdin reader，运行中的普通输入保留到下个提示符。回归：l11_editor_interrupt_cancels_during_approval修复前completed、修复后cancelled。状态：部分完成（真实OS连续信号/PTY强退恢复仍需跨平台测试）。
+

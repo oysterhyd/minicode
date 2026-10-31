@@ -554,10 +554,28 @@ fn banner(runtime: &Runtime) {
         runtime.workspace.display()
     );
 }
-type ConsoleInput = tokio::sync::mpsc::UnboundedReceiver<io::Result<String>>;
+struct ConsoleInput {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<io::Result<String>>,
+    buffered: VecDeque<io::Result<String>>,
+}
+impl ConsoleInput {
+    fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<io::Result<String>>) -> Self {
+        Self {
+            receiver,
+            buffered: VecDeque::new(),
+        }
+    }
+    async fn recv(&mut self) -> Option<io::Result<String>> {
+        if let Some(line) = self.buffered.pop_front() {
+            Some(line)
+        } else {
+            self.receiver.recv().await
+        }
+    }
+}
 
 fn console_input() -> ConsoleInput {
-    crate::console::input()
+    ConsoleInput::new(crate::console::input())
 }
 
 async fn run(
@@ -589,15 +607,13 @@ async fn run_with_input(
     let cancel = hooks.cancel.clone();
     let running = runtime.run(text, vec![], hooks);
     tokio::pin!(running);
-    let signal = tokio::signal::ctrl_c();
-    tokio::pin!(signal);
     let mut cancelled = false;
     let mut input_open = true;
     let mut waiting = VecDeque::<String>::new();
     loop {
         tokio::select! {
             result = &mut running => return result,
-            _ = &mut signal, if !cancelled => { cancelled = true; cancel.cancel(); }
+            _ = tokio::signal::ctrl_c() => { if cancelled {std::process::exit(130)} cancelled = true; cancel.cancel(); }
             Some(event) = receiver.recv() => {
                 let id = event["approvalId"].as_str().unwrap_or_default().to_string();
                 if !input_open {
@@ -608,7 +624,13 @@ async fn run_with_input(
                     waiting.push_back(id);
                 }
             }
-            line = input.recv(), if input_open && !waiting.is_empty() => {
+            line = input.receiver.recv(), if input_open => {
+                if line.as_ref().is_some_and(|line|line.as_ref().is_err_and(|error|error.kind()==io::ErrorKind::Interrupted)) {
+                    if cancelled {std::process::exit(130)} cancelled=true;cancel.cancel();continue;
+                }
+                if waiting.is_empty() && let Some(Ok(line))=line {
+                    input.buffered.push_back(Ok(line));continue;
+                }
                 let (granted,remember) = match line {
                     Some(Ok(line)) => {let line=line.trim().to_lowercase();(matches!(line.as_str(),"y"|"yes"|"a"|"p"),line)},
                     other => {
@@ -641,12 +663,26 @@ async fn chat(mut runtime: Runtime, hooks: Hooks) -> Result<()> {
     banner(&runtime);
     println!("/help 查看命令 · Ctrl+C 取消 · Ctrl+D 退出");
     let mut input = console_input();
+    let mut interrupted_at: Option<std::time::Instant> = None;
     loop {
         print!("\n❯ ");
         io::stdout().flush()?;
-        let Some(line) = input.recv().await else {
+        let line = tokio::select! {line=input.recv()=>line,_=tokio::signal::ctrl_c()=>Some(Err(io::Error::from(io::ErrorKind::Interrupted)))};
+        let Some(line) = line else {
             break;
         };
+        if line
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::Interrupted)
+        {
+            if interrupted_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2)) {
+                break;
+            }
+            interrupted_at = Some(std::time::Instant::now());
+            println!("再按一次 Ctrl+C 退出");
+            continue;
+        }
+        interrupted_at = None;
         let text = line?.trim().to_string();
         if ["exit", "quit", "/exit", "/quit"].contains(&text.as_str()) {
             break;
@@ -1228,6 +1264,28 @@ mod stage7_tests {
         assert!(Cli::try_parse_from(["minicode"]).is_ok());
     }
     #[tokio::test]
+    async fn l11_editor_interrupt_cancels_during_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.db")).unwrap();
+        let options = RunOptions {
+            provider: "fake".into(),
+            workspace: Some(dir.path().into()),
+            ..RunOptions::default()
+        };
+        let (mut runtime, hooks) = prepare(&store, None, &options).await.unwrap();
+        runtime.set_script(json!({"turns":[{"tool_calls":[{"name":"write","arguments":{"path":"a","content":"a"}}]},{"text":"done"}]})).unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut input = ConsoleInput::new(receiver);
+        sender
+            .send(Err(io::Error::from(io::ErrorKind::Interrupted)))
+            .unwrap();
+        drop(sender);
+        let result = run_with_input(&mut runtime, Some("work".into()), hooks, &mut input)
+            .await
+            .unwrap();
+        assert_eq!(result.exit_reason, "cancelled");
+    }
+    #[tokio::test]
     async fn l15_resume_keeps_explicit_cli_budget() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("sessions.db")).unwrap();
@@ -1251,7 +1309,8 @@ mod stage7_tests {
             ..RunOptions::default()
         };
         let (mut runtime, hooks) = prepare(&store, Some(&first), &options).await.unwrap();
-        let (_tx, mut input) = tokio::sync::mpsc::unbounded_channel();
+        let (_tx, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut input = ConsoleInput::new(receiver);
         chat_command(
             &mut runtime,
             &hooks,
