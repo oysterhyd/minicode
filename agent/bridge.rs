@@ -39,6 +39,7 @@ pub const CAPABILITIES: &[&str] = &[
     "runIdentity",
     "asyncStart",
     "sessionSubscriptions",
+    "fileCompletion",
 ];
 pub struct Conversation {
     pub settings: Arc<Mutex<Settings>>,
@@ -1073,6 +1074,23 @@ impl Router {
                     .unwrap_or(100)
                     .min(100) as usize;
                 store.history_page(util::string(p, "sessionId")?, cursor, limit)
+            }
+            "listFiles" => {
+                let workspace = Self::workspace(p)?;
+                let query = p["query"].as_str().unwrap_or("").to_lowercase();
+                let mut files = ignore::WalkBuilder::new(&workspace)
+                    .hidden(false)
+                    .require_git(false)
+                    .filter_entry(|entry| entry.file_name() != ".git")
+                    .build()
+                    .take(50_000)
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                    .filter_map(|entry| entry.path().strip_prefix(&workspace).ok().map(|path| path.to_string_lossy().replace('\\', "/")))
+                    .filter(|path| path.to_lowercase().contains(&query))
+                    .collect::<Vec<_>>();
+                files.sort(); files.truncate(200);
+                Ok(json!(files))
             }
             "readArtifact" => store.artifact_page(
                 util::string(p, "sessionId")?,

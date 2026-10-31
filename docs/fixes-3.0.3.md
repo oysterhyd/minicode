@@ -1113,3 +1113,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：ToolLine 展开仅80行，artifactId 未使用。修复：Ctrl+F 完整输出查看器，调用现有 readArtifact；每次替换一页，按 Unicode 字符计算 offset，n/p 翻页、上下滚动、Esc关闭、r重试，失败保留当前页。回归：artifact-pages.test.ts Unicode分页/末页/后退/不存在错误，先失败后通过。状态：部分完成（超长单行的水平查看和真实桥接 UI 集成尚需补齐）。
 
+
+### T-UI6 — add history file completion and folded paste
+
+核查：无历史/文件候选/附件导入 UI，paste 直接进草稿。修复：首末行上下历史/草稿恢复，100ms防抖共享 listFiles，Tab 带引号路径；/attach 路径调用 importAttachments；长文本折叠 [paste:N]，/paste N 预览，/paste N cancel 取消，发送展开。回归：input-history.test.ts 历史/Unicode/10000行无损与取消；file-completion.test.mjs 共享接口、空格Unicode与ignore，均先失败。状态：部分完成（历史持久化、图片剪贴板自动提取、候选上下选择和附件队列隔离待验收）。
+
