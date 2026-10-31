@@ -1193,3 +1193,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：prepare与/resume全量events且后者覆盖CLI显式预算。修复：共享restored_budget使用Store.saved_budget按类型取最后值；RunOptions Option保留显式0，Settings记住显式覆盖，启动与/resume优先级相同。回归：l15_resume_keeps_explicit_cli_budget修复前999覆盖37；旧会话/无预算/保存值/显式0和37均覆盖。状态：已修复。
 
+
+### A3 — inject bounded environment and engineering guidance
+
+核查：Catalog.prompt已有根/全局项目约定与动态作用域注入，缺日期/OS版本/Git状态。修复：environment.rs注入日期、OS/version、shell/version、cwd、Git分支/改动布尔值；OS/shell进程内缓存、Git每工作区2秒缓存最多32项，不输出环境变量、文件列表或配置凭据。双平台同步工程行为，复用已有指令加载。回归：a3_prompt_has_environment_and_preserves_project_instructions修复前缺日期失败，验证环境/项目约定/不读.env。状态：已修复。
+

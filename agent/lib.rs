@@ -10,6 +10,7 @@ pub mod context;
 mod credentials;
 mod delegate_workspace;
 mod editing;
+mod environment;
 pub mod eval;
 mod extension_cache;
 pub mod extensions;

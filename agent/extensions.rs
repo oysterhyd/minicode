@@ -1247,6 +1247,7 @@ impl Catalog {
         {
             text = text.replace("{{shell_info}}", &crate::tools::windows_shell_guidance());
         }
+        text.push_str(&crate::environment::prompt(&self.workspace));
         let global = self
             .configuration
             .path
@@ -1279,6 +1280,33 @@ impl Catalog {
 fn catalog_scan_counts() -> &'static std::sync::Mutex<HashMap<PathBuf, usize>> {
     static COUNTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
     COUNTS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+mod stage7_environment_tests {
+    use super::*;
+    #[test]
+    fn a3_prompt_has_environment_and_preserves_project_instructions() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "Project-specific convention").unwrap();
+        std::fs::write(root.path().join(".env"), "stage7_fixture_private_value").unwrap();
+        let catalog = Catalog::scan(
+            root.path(),
+            Configuration {
+                path: root.path().join("config.json"),
+            },
+            false,
+        )
+        .unwrap();
+        let prompt = catalog.prompt(&[]).unwrap();
+        assert!(prompt.contains("日期："));
+        assert!(prompt.contains(std::env::consts::OS));
+        assert!(prompt.contains("Git："));
+        assert!(prompt.contains("Project-specific convention"));
+        assert!(!prompt.contains("stage7_fixture_private_value"));
+        assert!(prompt.contains("独立的只读"));
+        assert!(prompt.contains("用户已有"));
+    }
 }
 #[cfg(test)]
 fn record_catalog_scan(workspace: &Path) {
