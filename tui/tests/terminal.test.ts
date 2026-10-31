@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { enterTerminalScreen } from '../src/terminal.js'
+import { enterTerminalScreen, clearTranscript } from '../src/terminal.js'
+
+test('T-INK clear works on a stream without an Ink private renderer', () => {
+  const writes: string[] = []
+  clearTranscript({ write: (text: string) => { writes.push(text) } } as NodeJS.WriteStream)
+  assert.deepEqual(writes, ['\x1b[2J\x1b[H'])
+})
 
 test('terminal screen starts clear and restores the original buffer and input modes once', () => {
   const writes: string[] = []

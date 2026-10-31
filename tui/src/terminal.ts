@@ -67,32 +67,8 @@ export function enterTerminalScreen(stdout: NodeJS.WriteStream = process.stdout)
   return restore
 }
 
-type TranscriptRenderer = {
-  clear: () => void
-  fullStaticOutput: string
-  lastOutput: string
-  lastOutputToRender: string
-  lastOutputHeight: number
-  log: { sync: (output: string) => void }
-}
-
-// Ink's public clear() erases only the live area. Its fullscreen redraw path
-// replays fullStaticOutput even after <Static> remounts. Keep this required
-// cache reset isolated here and pin Ink's version so the contract is explicit.
-const { default: inkInstances } = await import(new URL('./instances.js', import.meta.resolve('ink')).href) as {
-  default: WeakMap<NodeJS.WriteStream, TranscriptRenderer>
-}
-
 export function clearTranscript(stdout: NodeJS.WriteStream) {
-  const renderer = inkInstances.get(stdout)
-  if (!renderer) throw new Error('Ink renderer is unavailable')
-  renderer.clear()
   stdout.write('\x1b[2J\x1b[H')
-  renderer.fullStaticOutput = ''
-  renderer.lastOutput = ''
-  renderer.lastOutputToRender = ''
-  renderer.lastOutputHeight = 0
-  renderer.log.sync('')
 }
 
 export function useTerminalSize() {

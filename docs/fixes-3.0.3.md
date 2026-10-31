@@ -1093,3 +1093,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 问题/根因：markdown.tsx::table 无条件输出冒号。修复：缺失/空表头只显示内容。回归：markdown.test.tsx 用超出表头数量的单元格触发窄布局，先失败后通过。状态：已修复。
 
+
+### T-INK — clear with controlled terminal output
+
+核查：terminal.ts::clearTranscript 动态导入 Ink instances.js 并修改五个私有状态。修复：受控 ANSI 清屏序列，无私有导入/状态变更。当前视口无 Static 缓存，后续滚屏实现须保持此约束。回归：terminal.test.ts 无 Ink renderer 的流先失败后通过。状态：已修复。
+
