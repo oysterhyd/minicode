@@ -1005,7 +1005,7 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 ## 阶段 5–6 最终验收报告
 
-基线 `52fcea1`，最终代码提交 `0bca0c7`。17 项均已修复，无跳过项、部分完成项或阻塞项；跨平台未执行的验证单独列出，不计作通过。共 17 个条目提交，另有 R3/R6 两个必要的生命周期复核提交；本报告为独立文档提交。未推送远端，原有两个 `.pending` 文件保留。
+基线 `52fcea1`，主体实现提交 `0bca0c7`；完成审计另将 C2 四个 Rust 回归移入配置模块，断言逐字保留。17 项均已修复，无跳过项、部分完成项或阻塞项；跨平台未执行的验证单独列出，不计作通过。共 17 个条目提交，另有 R3/R6 两个生命周期复核提交及 C2 测试布局复核提交；本报告为独立文档提交。未推送远端，原有两个 `.pending` 文件保留。
 
 下表中 Rust 文件相对 `agent/`，协议测试相对 `tests/agent/`；客户端文件使用仓库相对路径。各条目上文包含核查根因、先失败证据、实现、完整检查日志和兼容性记录。
 
@@ -1042,24 +1042,30 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 | R26 | 已修复 | `49ae077` | `permissions.rs`、`settings_file.rs`、runtime/tools/bridge/CLI 与 TUI/Desktop 审批：分层规则、deny 优先、命令/文件/MCP 范围、保守复合命令、单次/会话/项目授权；`permissions.test.mjs`、模块及客户端审批测试。 |
 | SEC2 | 已修复 | `21aad6e` | `sandbox.rs`、`sandbox_windows.rs`、runtime/tools/CLI：真实 OS 沙箱、强制隔离可写 child、独立不可记住的高危确认；`sandbox.test.mjs` 的 Windows 实机文件、TCP、环境、后台 PID 和 child 测试全部通过。 |
 | C1 | 已修复 | `432a593` | `credentials.rs`、`configuration.rs`、provider/bridge、Linux CI 启动脚本：OS 凭据存储、回读验证后迁移、无明文回退；Rust 迁移/失败保留测试和 `credentials.test.mjs` 的重启认证、换 Key、伪造引用/损坏拒绝。 |
-| C2 | 已修复 | `45b2cf5` | `configuration.rs`、`settings_file.rs`、bridge/extensions、Desktop 类型/编辑：完整事务锁、version CAS、条目 revision、一次写入；`tests/configuration_transactions.rs` 和 `config-transactions.test.mjs` 覆盖锁等待、失败/panic 恢复和两进程保留全部修改。 |
+| C2 | 已修复 | `45b2cf5` | `configuration.rs`、`settings_file.rs`、bridge/extensions、Desktop 类型/编辑：完整事务锁、version CAS、条目 revision、一次写入；`configuration.rs::tests` 和 `config-transactions.test.mjs` 覆盖锁等待、失败/panic 恢复和两进程保留全部修改。测试布局复核见下文。 |
 | C3 | 已修复 | `0bca0c7` | configuration/provider/bridge/CLI、Desktop settings/fixture/localization：删除自动第三方读取，先披露后确认，统一安全存储；`credential-import.test.mjs`、`desktop/native/credential_import_test.go`，并已查看实际界面预览。 |
 
 ### 最终测试与评测证据
 
-代码最终全套命令为 `output/check-5.ps1 -Item C3-final -Desktop`。对应 `output/5-C3-final-*.log` 保留完整输出，没有真实模型 API 调用；协议/HTTP/MCP 均使用本地受控 mock。
+完成审计后的最终全套命令为 `output/check-5.ps1 -Item completion-audit -Desktop`，另执行 CI 的 `desktop/native/build.ps1`。对应 `output/5-completion-audit-*.log` 保留完整输出，没有真实模型 API 调用；协议/HTTP/MCP 均使用本地受控 mock。原 `C3-final` 完整结果仍保留，只有 Rust 测试位置发生调整。
 
 | 检查 | 最终结果 |
 | --- | --- |
 | Rust fmt / Clippy `--locked --all-targets -- -D warnings` / build | 全通过 |
-| Rust `cargo test --locked` | 212 单元 + 4 配置事务集成通过；2 个既有手动基准忽略 |
+| Rust `cargo test --locked` | 216 单元通过（含移入模块的 4 个配置事务回归）；2 个既有手动基准忽略 |
 | Node 全协议 | 292 通过、0 失败、3 跳过：Unix FIFO、Unix MCP 进程组、本就可选的 200 秒长流 |
 | 任务生成 / trace / Git 生成文件差异 | 通过，无生成文件差异 |
 | b0/b1/b2 主任务和场景 | 60 次主任务、9 次场景符合预期验收结果；`verify-results.mjs` 通过 |
 | TUI npm ci / build / test，启用真实 Rust Bridge 测试 | 全通过；122 个测试通过 |
-| Desktop go test / vet / vendor UI | 全通过；包含子任务进度、审批范围、配置编辑和显式导入 |
+| Desktop go test / vet / vendor UI / Windows executable build | 全通过；包含子任务进度、审批范围、配置编辑和显式导入；已生成 `output/native/MiniCode.exe` |
 
 `counter_retry` 的 b0/b1 按评测定义失败、b2 成功，这是 verifier 接受的预期结果，不能把“预期验收结果保持一致”改述为所有 baseline 场景均成功。首轮 C2 的 r27 修复配置路径回归已修复并通过最终全测。历史 Windows 并发原子编辑波动及一次 Desktop 分页时序波动的失败/复跑记录保留在对应条目，没有将它们声称为本轮已修复的独立问题。
+
+#### 完成审计补充：C2 测试布局
+
+- 重新读取原始任务后发现四个 C2 Rust 回归原先位于 `tests/configuration_transactions.rs`，不符合任务规定的 `agent/tests.rs` 或模块 `#[cfg(test)]` 布局。已将四个测试完整移入 `agent/configuration.rs::tests` 并删除原独立文件；逐字比对确认测试体和断言不变，仅导入改为 `super::Configuration`，运行时实现不变。
+- 四项模块聚焦回归通过（`output/6-C2-audit-focused.log`）。随后完整 `completion-audit` 检查通过：Rust 216 单元/2 个既有忽略、协议 292 通过/3 个既有条件跳过、60 次任务和 9 个场景符合预期、TUI 122 通过、Desktop test/vet/vendor UI 通过；额外执行 CI 的 Windows executable build 成功，输出 `output/native/MiniCode.exe`。
+- 已核对 17 项的对应源代码、测试断言、独立提交和检查证据；各条目均保留完整检查日志。R26 最终日志采用 `R26-final-code`，避免把中间 `R26-verified` 缺少的 Desktop vet/UI 日志误认为最终证据。最终源代码之后的报告更新仅修改文档，不增加未验证实现。
 
 ### 兼容性、安全边界与回滚
 
