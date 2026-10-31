@@ -936,7 +936,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
             {attachments.length ? <Text dimColor>附件：{attachments.map(file => file.name).join(', ')} · /attach "路径" 导入</Text> : null}
             {files.length ? <Text dimColor>Tab 补全：{files.slice(0, 5).join(' · ')}</Text> : null}
             {menuOpen ? <SlashMenu items={matches} selected={slashIndex} title={menuTitle} />
-              : shortcutsOpen ? <ShortcutPanel /> : <StatusLine state={agent} />}
+              : shortcutsOpen ? <ShortcutPanel /> : <StatusLine state={agent} elapsed={feed.startedAt ? now - feed.startedAt : 0} />}
           </>
         )}
         {connecting ? <Text dimColor>正在连接运行核心…</Text> : null}

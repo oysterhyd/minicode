@@ -16,13 +16,26 @@ function contextLabel(state: AgentState, columns: number): string {
 
 // The footer under the prompt: mode hint on the left, model and context on
 // the right. The model always survives narrow terminals; the hint goes first.
-export function StatusLine({ state }: { state: AgentState }) {
+export function statusFields(state: AgentState, fields: string[], columns: number, elapsed: number): string {
+  const values: Record<string, string> = {
+    model: state.model || '未选择模型', effort: state.effort === 'off' ? '' : EFFORT_LABELS[state.effort] || state.effort,
+    context: contextLabel(state, columns), turns: `${state.rounds} 轮`,
+    budget: state.budget.max_total_tokens ? `预算 ${formatTokens(state.budget.max_total_tokens)}` : '预算 不限',
+    cost: state.statistics?.cost == null ? '费用 不可用' : `费用 ${state.statistics.cost}`,
+    branch: state.branch ? `分支 ${state.branch}` : '分支 不可用',
+    elapsed: `${Math.max(0, Math.floor(elapsed / 1000))}s`,
+  }
+  return fields.map(field => values[field]).filter(Boolean).join(' · ')
+}
+
+export function StatusLine({ state, elapsed = 0 }: { state: AgentState; elapsed?: number }) {
   const { columns } = useTerminalSize()
   const effort = state.effort && state.effort !== 'off' ? ` · ${EFFORT_LABELS[state.effort] || state.effort}` : ''
   const suffix = `${effort} · ${contextLabel(state, columns)}`
   const width = Math.max(0, columns - 2)
   const model = truncateWidth(terminalText(state.model || '未选择模型'), Math.max(4, width - displayWidth(suffix)))
-  const right = `${model}${suffix}`
+  const configured = process.env.MINICODE_STATUS_FIELDS?.split(',').map(value => value.trim())
+  const right = configured ? truncateWidth(terminalText(statusFields(state, configured, columns, elapsed)), width) : `${model}${suffix}`
   const mode = state.permissionMode
   const pending = state.taskPending && !state.running ? ' · /continue 继续任务' : ''
   const left = mode === 'accept_edits' ? `⏵⏵ 自动接受编辑${pending}`

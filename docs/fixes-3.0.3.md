@@ -1123,3 +1123,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：Esc 仅审批/菜单，无运行取消和编辑。修复：审批/菜单优先，运行Esc只取消一次，空闲400ms双Esc复制上一用户消息到草稿，重发追加历史；取消中第二次Ctrl+C退出。回归：stage7-keys.test.tsx Esc两次仅一次取消、完成后双Esc不自动重发。状态：已修复。App.tsx 同时含 T-UI6 输入接线与 TU7，提交中明确此直接依赖。
 
+
+### TU8 — configure status fields with safe fallbacks
+
+核查：StatusLine 固定模型/effort/context。修复：MINICODE_STATUS_FIELDS 逗号配置 model,effort,context,turns,budget,cost,branch,elapsed，默认保留既有三字段，缺失费用/分支明确不可用，窄屏按显示宽度截断。统计复用AgentState，耗时复用run开始时间。回归：status-fields.test.ts 缺失、未知字段与自定义组合，先失败后通过。状态：已修复（当前服务端无定价则费用不可用，不推算虚构价格）。
+
