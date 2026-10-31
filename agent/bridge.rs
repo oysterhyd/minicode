@@ -893,6 +893,15 @@ impl Router {
         let store = &self.store;
         match method {
             "getConfiguration" => self.configuration.public(),
+            "getCredentialImportInfo" => {
+                if p["source"] != "commandcode" {
+                    bail!("unsupported credential import source")
+                }
+                Ok(crate::configuration::commandcode_import_info())
+            }
+            "importCommandCode" => self
+                .configuration
+                .import_commandcode(p["confirmed"] == true),
             "listModels" => Ok(json!(self.configuration.models()?)),
             "saveService" => self.configuration.save_service(&p["service"]),
             "saveAgent" => Ok(json!(self.configuration.save_agent(&p["agent"])?)),

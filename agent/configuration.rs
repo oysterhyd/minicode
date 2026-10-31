@@ -192,7 +192,7 @@ impl Configuration {
         if key.is_empty() {
             key = match s["id"].as_str().unwrap_or_default() {
                 "anthropic" => std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-                "commandcode" => discover_commandcode()
+                "commandcode" => commandcode_environment()
                     .map(|(_, key)| key)
                     .unwrap_or_default(),
                 _ => String::new(),
@@ -367,6 +367,49 @@ impl Configuration {
         })?;
         self.public()
     }
+    pub fn import_commandcode(&self, confirmed: bool) -> Result<Value> {
+        // No stat, open, scan or read of the foreign file before explicit consent.
+        if !confirmed {
+            bail!("请先确认来源、读取数据和系统安全存储说明（explicit consent required）")
+        }
+        use std::io::Read;
+        let path = commandcode_import_path();
+        if !fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+            bail!("Command Code 配置必须是可读取的普通文件")
+        }
+        let file =
+            fs::File::open(path).map_err(|_| anyhow::anyhow!("无法读取 Command Code 配置文件"))?;
+        if !file.metadata()?.is_file() {
+            bail!("Command Code 配置必须是普通文件")
+        }
+        let mut bytes = Vec::new();
+        file.take(1_000_001)
+            .read_to_end(&mut bytes)
+            .map_err(|_| anyhow::anyhow!("无法读取 Command Code 配置文件"))?;
+        if bytes.len() > 1_000_000 {
+            bail!("Command Code 配置超过大小限制")
+        }
+        let data: Value =
+            serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes))
+                .map_err(|_| anyhow::anyhow!("Command Code 配置不是有效 JSON"))?;
+        let provider = data["config"]["providerConfigRules"]["providerRules"]
+            .as_array()
+            .and_then(|rules| rules.iter().find(|r| r["providerName"] == "Command Code"))
+            .context("配置中没有 Command Code 服务；不会导入其他服务")?;
+        if provider["config"]["api"]["type"] != "openai-chat-completions" {
+            bail!("Command Code 接口类型不受支持")
+        }
+        let url = provider["config"]["api"]["baseUrl"]
+            .as_str()
+            .context("Command Code 接口地址缺失")?;
+        let key = provider["config"]["access"]["apiKey"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .context("Command Code API Key 缺失")?;
+        // The normal C1/C2 entry point validates the endpoint, verifies secure storage,
+        // then commits one transaction. The source file is never modified.
+        self.save_service(&json!({"name":"Command Code (imported)","baseUrl":url,"apiStyle":"openai","apiKey":key,"enabled":true,"models":[]}))
+    }
     pub fn agents(&self) -> Result<Vec<Value>> {
         let data = self.read()?;
         Self::agents_from(&data)
@@ -483,7 +526,7 @@ pub fn capabilities(v: &Value) -> Result<Value> {
     }
     Ok(result)
 }
-pub fn discover_commandcode() -> Option<(String, String)> {
+pub fn commandcode_environment() -> Option<(String, String)> {
     if let Ok(key) = std::env::var("COMMANDCODE_API_KEY")
         && !key.trim().is_empty()
     {
@@ -493,27 +536,17 @@ pub fn discover_commandcode() -> Option<(String, String)> {
             .unwrap_or("https://api.commandcode.ai/provider/v1".into());
         return Some((url.trim().trim_end_matches('/').into(), key.trim().into()));
     }
-    let data: Value = serde_json::from_slice(
-        &fs::read(util::home().join(".zcode/v2/provider_config.json")).ok()?,
-    )
-    .ok()?;
-    let rules = data["config"]["providerConfigRules"]["providerRules"].as_array()?;
-    let chosen = rules
-        .iter()
-        .find(|r| r["providerName"] == "Command Code")
-        .or_else(|| {
-            rules
-                .iter()
-                .find(|r| r["config"]["api"]["type"] == "openai-chat-completions")
-        })?;
-    let url = chosen["config"]["api"]["baseUrl"]
-        .as_str()?
-        .trim()
-        .trim_end_matches('/');
-    let key = chosen["config"]["access"]["apiKey"].as_str()?.trim();
-    if url.is_empty() || key.is_empty() {
-        None
-    } else {
-        Some((url.into(), key.into()))
-    }
+    None
+}
+fn commandcode_import_path() -> PathBuf {
+    util::home()
+        .join(".zcode")
+        .join("v2")
+        .join("provider_config.json")
+}
+pub fn commandcode_import_info() -> Value {
+    // This constructs a disclosure only, including when the file does not exist.
+    json!({"source":"commandcode","sourcePath":commandcode_import_path(),
+        "dataDescription":"仅读取 Command Code 服务的接口地址和 API Key，不读取其他服务或会话。",
+        "storageDescription":"API Key 保存到系统安全存储（Windows 当前用户 DPAPI / macOS Keychain / Linux Secret Service）；MiniCode 配置只保存引用，原文件保持不变。"})
 }

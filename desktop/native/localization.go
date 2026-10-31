@@ -664,5 +664,11 @@ Agent bridge 不可用|Agent bridge unavailable
 。可输入 /continue 继续|. Enter /continue to resume
 任务已结束|Task finished
 已取消暂存|Unstaged
+从 Command Code 导入|Import from Command Code
+确认读取并导入|Read and import
+取消导入|Cancel import
+已安全导入服务。请编辑服务并添加模型 ID。|Service imported securely. Edit it to add model IDs.
+仅读取 Command Code 服务的接口地址和 API Key，不读取其他服务或会话。|Read only the Command Code endpoint and API key. Other providers and sessions are excluded.
+API Key 保存到系统安全存储（Windows 当前用户 DPAPI / macOS Keychain / Linux Secret Service）；MiniCode 配置只保存引用，原文件保持不变。|Store the API key in the OS credential store (Windows user DPAPI / macOS Keychain / Linux Secret Service). MiniCode saves only a reference. The source file stays unchanged.
 \n...[文件预览已截断，使用 Agent 的 read 工具分页查看]|\n...[Preview truncated. Use the agent's read tool to view additional pages.]
 `

@@ -28,6 +28,13 @@ type settingsState struct {
 	Instructions                          *instructionsDraft
 	NavQuery                              string
 	Extensions                            *extensionsSettingsState
+	CredentialImport                      *credentialImportInfo
+}
+
+type credentialImportInfo struct {
+	SourcePath         string `json:"sourcePath"`
+	DataDescription    string `json:"dataDescription"`
+	StorageDescription string `json:"storageDescription"`
 }
 
 var settingsTabs = []struct{ ID, Icon, Label string }{
@@ -655,10 +662,45 @@ func (d *desktop) modelSettings(c *ui.Context, p palette, s *settingsState) {
 
 func (d *desktop) serviceSettings(c *ui.Context, p palette, s *settingsState) {
 	section(c, p, fmt.Sprintf(tr("AI 服务 · %d"), len(d.config.Services)), tr("配置接口与模型，新服务从空白开始。"), func() {
+		if s.Status != "" {
+			muted(c, p, localizeNotice(s.Status)).FontSize(p.font(11.2))
+		}
+		if s.CredentialImport != nil {
+			info := s.CredentialImport
+			ui.Column(c).FillWidth().Gap(8).Children(func() {
+				ui.Text(c, tr("从 Command Code 导入")).FontWeight(600)
+				ui.Text(c, info.SourcePath).FontSize(p.font(11)).TextColor(p.Text2)
+				ui.Text(c, tr(info.DataDescription)).FontSize(p.font(11)).LineHeight(1.5)
+				ui.Text(c, tr(info.StorageDescription)).FontSize(p.font(11)).LineHeight(1.5)
+				ui.Row(c).Gap(8).Children(func() {
+					if button(c, p, tr("确认读取并导入"), "Download", true).Disabled(s.Working).Clicked() {
+						d.configAction(s, "importCommandCode", map[string]any{"confirmed": true}, func() {
+							s.CredentialImport = nil
+							s.Status = tr("已安全导入服务。请编辑服务并添加模型 ID。")
+						})
+					}
+					if button(c, p, tr("取消导入"), "", false).Disabled(s.Working).Clicked() {
+						s.CredentialImport = nil
+					}
+				})
+			})
+		} else if button(c, p, tr("从 Command Code 导入"), "Download", false).AlignSelf(ui.Start).Disabled(s.Working).Clicked() {
+			s.Working, s.Error, s.Status = true, "", ""
+			var info credentialImportInfo
+			d.request(d.current(), "getCredentialImportInfo", map[string]any{"source": "commandcode"}, &info, func(err error) {
+				s.Working = false
+				if err != nil {
+					s.Error = err.Error()
+					return
+				}
+				s.CredentialImport = &info
+			})
+		}
 		if len(d.config.Services) == 0 {
 			empty(c, p, tr("尚未添加 AI 服务。填写接口地址、密钥和模型 ID，从零配置你的模型。"))
 		}
-		if button(c, p, tr("添加服务"), "Plus", true).AlignSelf(ui.Start).Clicked() {
+		if button(c, p, tr("添加服务"), "Plus", true).AlignSelf(ui.Start).Disabled(s.Working).Clicked() {
+			s.CredentialImport = nil
 			s.Service = &model.Service{APIStyle: "openai", Enabled: true, Models: []model.ServiceModel{}}
 			s.Found = nil
 			s.Status = ""

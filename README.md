@@ -45,6 +45,9 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
    Key 使用系统安全存储（Windows 当前用户 DPAPI、macOS Keychain、Linux Secret Service），配置只保存引用。
    Linux 需安装 `libsecret-tools` 并解锁桌面 Secret Service；不可用时保存明确失败，不回退明文。
    旧明文配置首次读取时自动迁移，安全存储写入和回读验证成功后才替换原配置。备份请同时保留系统凭据：单独复制 JSON 引用不能迁移 Key。
+   MiniCode 不会自动读取其他应用的凭据。需要导入 Command Code 时，在“模型与预算”中点击“从 Command Code 导入”，查看来源和保存方式后确认；
+   终端也可运行 `minicode config import-commandcode`（脚本显式同意时加 `--yes`）。仅读取 `~/.zcode/v2/provider_config.json` 中 Command Code 的接口地址和 API Key，
+   使用同一系统安全存储入口，原文件保持不变；导入后编辑服务添加模型 ID。`COMMANDCODE_API_KEY` / `COMMANDCODE_BASE_URL` 等显式环境配置继续可用。
 3. 打开本地项目，输入任务描述。按提示审查修改或命令，并查看执行结果。
 
 安装版适用于 **Windows 10/11 x64**，内置 Rust Agent、Git、Node.js 和桌面端/终端界面依赖，

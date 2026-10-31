@@ -1,6 +1,6 @@
 use crate::{
     attachments::Attachments,
-    configuration::{Configuration, catalog_model, discover_commandcode},
+    configuration::{Configuration, catalog_model, commandcode_environment},
     context,
     models::{Block, Message, Response, ToolSpec, Usage},
     tools::Sink,
@@ -404,7 +404,7 @@ impl Provider {
                 p.url = std::env::var("ANTHROPIC_BASE_URL")
                     .unwrap_or("https://api.anthropic.com".into());
                 p.key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-            } else if let Some((url, key)) = discover_commandcode() {
+            } else if let Some((url, key)) = commandcode_environment() {
                 p.url = url;
                 p.key = key;
             }

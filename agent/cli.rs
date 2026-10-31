@@ -91,6 +91,11 @@ enum Commands {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// 配置服务；第三方凭据必须显式导入。
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
@@ -138,6 +143,15 @@ struct RunOptions {
 #[derive(Subcommand)]
 enum SessionCommand {
     List,
+}
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// 显示来源/读取字段/安全存储说明，经确认后从 Command Code 导入。
+    ImportCommandcode {
+        /// 已同意读取 ~/.zcode/v2/provider_config.json 的接口地址和 API Key，保存到系统安全存储。
+        #[arg(long)]
+        yes: bool,
+    },
 }
 #[derive(Subcommand)]
 enum PluginCommand {
@@ -355,6 +369,33 @@ pub async fn main() -> Result<()> {
                     );
                 }
             }
+            Ok(())
+        }
+        Commands::Config {
+            command: ConfigCommand::ImportCommandcode { yes },
+        } => {
+            let info = crate::configuration::commandcode_import_info();
+            println!(
+                "从 Command Code 导入\n来源：{}\n{}\n{}",
+                info["sourcePath"].as_str().unwrap_or_default(),
+                info["dataDescription"].as_str().unwrap_or_default(),
+                info["storageDescription"].as_str().unwrap_or_default()
+            );
+            let confirmed = if yes {
+                true
+            } else {
+                print!("确认读取并导入？[y/N] ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes")
+            };
+            if !confirmed {
+                println!("已取消，未读取第三方配置。");
+                return Ok(());
+            }
+            Configuration::default().import_commandcode(true)?;
+            println!("已安全导入服务。请在设置中添加模型 ID 并选择模型。");
             Ok(())
         }
         Commands::Memory { command } => memory(&Store::open(path)?, command),

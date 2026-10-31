@@ -39,6 +39,14 @@ func (f *fixtureClient) Request(_ context.Context, method string, params any, ta
 		result = f.Models
 	case "getConfiguration":
 		result = f.Config
+	case "getCredentialImportInfo":
+		result = credentialImportInfo{SourcePath: "~/.zcode/v2/provider_config.json", DataDescription: "读取 Command Code 的接口地址和 API Key。", StorageDescription: "API Key 保存到系统安全存储（DPAPI / Keychain / Secret Service），配置只保存引用。"}
+	case "importCommandCode":
+		if !model.Bool(p["confirmed"]) {
+			return fmt.Errorf("explicit consent required")
+		}
+		f.Config.Services = append(f.Config.Services, model.Service{ID: "imported-fixture", Name: "Command Code (imported)", BaseURL: "https://example.test/v1", APIStyle: "openai", HasAPIKey: true, Enabled: true, Models: []model.ServiceModel{}})
+		result = f.Config
 	case "getInstructions":
 		result = f.Instructions
 	case "saveInstructions":
