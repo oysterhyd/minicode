@@ -1263,3 +1263,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 原历史分页清屏回归仍验证同样的迟到响应不恢复旧视图/不panic，调用迁移后的/cls；不减弱断言。TestClearWhileHistoryPageLoadsDoesNotRestoreOrPanic通过。
 
+
+### L7 — synchronize CLI fixture database initialization
+
+新CLI输出测试等待Bridge完成数据库初始化后再启动第二进程，避免既有首次建库并发迁移竞争；输出界限与verbose断言保持。
+

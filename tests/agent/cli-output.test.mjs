@@ -6,6 +6,7 @@ import path from 'node:path'
 import {fixture,executable} from './helpers.mjs'
 test('L7 CLI defaults to bounded output and verbose preserves the full result', async t=>{
  const f=await fixture(t,[{tool_calls:[{name:'read',arguments:{path:'long.txt'}}]},{text:'done'}])
+ await f.request('listSessions')
  fs.writeFileSync(path.join(f.workspace,'long.txt'), Array.from({length:300},(_,i)=>`ROW_${i}`).join('\n'))
  const options={cwd:f.workspace,env:{...process.env,HOME:f.root,USERPROFILE:f.root,MINICODE_DB_PATH:f.db,MINICODE_FAKE_SCRIPT:f.script},encoding:'utf8',timeout:15000}
  const args=['run','inspect','--script',f.script,'--workspace',f.workspace]
