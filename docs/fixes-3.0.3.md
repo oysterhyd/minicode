@@ -1321,6 +1321,12 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 # MiniCode 3.0.3：阶段7最终状态
 
+### E1 — centralize provider construction and script recovery (8A)
+
+核查：Bridge/CLI/Runtime 仍分散调用 Provider::new，并重复按脚本身份复制游标；Runtime 初始化与 set_script 各自校验恢复身份。根因是构造与恢复职责分散。修复：生产入口统一 Provider::for_settings，集中保留同身份脚本进度；Provider::restore_script_progress 统一处理旧事件、拒绝响应的 provider_progress、子任务事件和已使用工具 ID。set_script 重置游标，再由 Runtime 从持久事件恢复；评测也走 Runtime::set_script。保留 Provider::new 低层 API、既有脚本身份和存储格式。
+
+测试：agent/tests.rs::e1_provider_settings_and_script_progress_share_one_entry 先因缺入口编译失败，修复后验证 Settings、相同脚本切换、旧事件/进度上界以及更换脚本归零；现有 recovery/providers 协议测试覆盖恢复和模型切换。完整 CI 检查记录于 output/stage8a-e1/。
+
 本节是阶段7的最终状态，取代上文实施过程中的“部分完成”中间记录。26项的核查、根因、实施和回归见各ID条目；完整证据、提交清单、执行顺序、测试/性能与风险见[阶段7完成报告](stage7-completion.md)，实际交互以[交互规范](interaction-spec.md)为准。
 
 | 批次 | ID | 最终状态 |

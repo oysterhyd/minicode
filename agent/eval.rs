@@ -228,11 +228,9 @@ async fn one(
     )
     .await?;
     if model == "fake" {
-        runtime
-            .provider
-            .set_script(serde_json::from_slice(&fs::read(
-                task.join("script.json"),
-            )?)?)?;
+        runtime.set_script(serde_json::from_slice(&fs::read(
+            task.join("script.json"),
+        )?)?)?;
     }
     runtime.compaction = baseline != "b0";
     let hooks = Hooks {

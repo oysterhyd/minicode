@@ -974,14 +974,18 @@ async fn chat_command(
                 }
                 (settings.model.as_str(), arg)
             };
-            let mut provider = crate::provider::Provider::new(model, effort, &config)?;
+            let provider = crate::provider::Provider::for_settings(
+                &Settings {
+                    model: model.into(),
+                    effort: effort.into(),
+                    ..settings.clone()
+                },
+                &config,
+                Some(&runtime.provider),
+            )?;
             if verb.eq_ignore_ascii_case("/effort") && effort != "off" && provider.effort != effort
             {
                 bail!("当前模型不支持 reasoning effort");
-            }
-            if provider.identity().is_some() && provider.identity() == runtime.provider.identity() {
-                provider.index = runtime.provider.index;
-                provider.call_counter = runtime.provider.call_counter;
             }
             runtime.store.update(
                 &runtime.session,

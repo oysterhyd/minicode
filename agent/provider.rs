@@ -293,6 +293,63 @@ pub struct Provider {
     client: reqwest::Client,
 }
 impl Provider {
+    pub fn for_settings(
+        settings: &crate::runtime::Settings,
+        configuration: &Configuration,
+        previous: Option<&Self>,
+    ) -> Result<Self> {
+        let mut provider = Self::new(&settings.model, &settings.effort, configuration)?;
+        if let Some(previous) = previous
+            && provider.identity().is_some()
+            && provider.identity() == previous.identity()
+        {
+            provider.index = previous.index;
+            provider.call_counter = previous.call_counter;
+        }
+        Ok(provider)
+    }
+
+    pub fn restore_script_progress(
+        &mut self,
+        events: &[crate::models::Event],
+        used: &HashSet<String>,
+    ) {
+        if !events
+            .iter()
+            .find(|e| e.r#type == "session_start")
+            .and_then(|e| e.data["provider_resume_identity"].as_str())
+            .is_some_and(|id| self.identity().as_deref() == Some(id))
+        {
+            return;
+        }
+        self.index = events
+            .iter()
+            .filter(|e| e.r#type == "assistant_message")
+            .count();
+        self.call_counter = used
+            .iter()
+            .filter_map(|id| id.strip_prefix("fake_tool_")?.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        for event in events {
+            if let Some(n) = event.data["call_id"]
+                .as_str()
+                .and_then(|id| id.strip_prefix("fake_tool_"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                self.call_counter = self.call_counter.max(n);
+            }
+            if let Some(progress) = event.data.get("provider_progress") {
+                self.index = self
+                    .index
+                    .max(progress["index"].as_u64().unwrap_or(0) as usize);
+                self.call_counter = self
+                    .call_counter
+                    .max(progress["call_counter"].as_u64().unwrap_or(0) as usize);
+            }
+        }
+    }
+
     pub fn new(model: &str, effort: &str, configuration: &Configuration) -> Result<Self> {
         let mut p = Self {
             name: "commandcode".into(),
@@ -478,6 +535,8 @@ impl Provider {
     pub fn set_script(&mut self, script: Value) -> Result<()> {
         validate_fake(&script)?;
         self.fake = Some(script);
+        self.index = 0;
+        self.call_counter = 0;
         self.prompt_anchor = None;
         Ok(())
     }

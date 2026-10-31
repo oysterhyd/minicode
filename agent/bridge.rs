@@ -561,8 +561,14 @@ impl Router {
             .filter(|m| !m.is_empty())
             .unwrap_or(&settings.model)
             .to_string();
-        let provider =
-            crate::provider::Provider::new(&model, &settings.effort, &self.configuration)?;
+        let provider = crate::provider::Provider::for_settings(
+            &Settings {
+                model: model.clone(),
+                ..settings.clone()
+            },
+            &self.configuration,
+            None,
+        )?;
         let selected = owner.snapshot.lock().unwrap().session.clone();
         let requested = params["sessionId"].as_str().or(selected.as_deref());
         let mut new_session = false;
@@ -1346,10 +1352,13 @@ impl Router {
                 if model.is_empty() {
                     model = c.settings.lock().unwrap().model.clone();
                 }
-                let provider = crate::provider::Provider::new(
-                    &model,
-                    &c.settings.lock().unwrap().effort,
+                crate::provider::Provider::for_settings(
+                    &Settings {
+                        model: model.clone(),
+                        ..c.settings.lock().unwrap().clone()
+                    },
                     &self.configuration,
+                    None,
                 )?;
                 let busy = c.busy();
                 {
@@ -1359,13 +1368,14 @@ impl Router {
                 }
                 if !busy && let Some(runtime) = &c.runtime {
                     let mut r = runtime.lock().await;
-                    let mut provider = provider;
-                    if provider.identity().is_some() && provider.identity() == r.provider.identity()
-                    {
-                        provider.index = r.provider.index;
-                        provider.call_counter = r.provider.call_counter;
-                    }
-                    r.provider = provider;
+                    r.provider = crate::provider::Provider::for_settings(
+                        &Settings {
+                            model: model.clone(),
+                            ..c.settings.lock().unwrap().clone()
+                        },
+                        &self.configuration,
+                        Some(&r.provider),
+                    )?;
                     store.update(
                         &r.session,
                         &json!({"model":model,"provider":r.provider.name}),
@@ -1384,8 +1394,15 @@ impl Router {
                 let provider = if model.is_empty() {
                     None
                 } else {
-                    let provider =
-                        crate::provider::Provider::new(&model, &effort, &self.configuration)?;
+                    let provider = crate::provider::Provider::for_settings(
+                        &Settings {
+                            model: model.clone(),
+                            effort: effort.clone(),
+                            ..c.settings.lock().unwrap().clone()
+                        },
+                        &self.configuration,
+                        None,
+                    )?;
                     if effort != "off" && provider.effort != effort {
                         bail!("当前模型不支持 reasoning effort");
                     }
@@ -1626,10 +1643,13 @@ impl Router {
                     if model.contains("::") {
                         bail!("请在设置中配置、启用并选择一个可用的 AI 模型");
                     }
-                    crate::provider::Provider::new(
-                        &model,
-                        &c.settings.lock().unwrap().effort,
+                    crate::provider::Provider::for_settings(
+                        &Settings {
+                            model: model.clone(),
+                            ..c.settings.lock().unwrap().clone()
+                        },
                         &self.configuration,
+                        None,
                     )?;
                 }
                 self.ensure(c, &workspace, p["sessionId"].as_str(), Some(&model))
@@ -1637,10 +1657,13 @@ impl Router {
                 {
                     let mut r = c.runtime.as_ref().unwrap().lock().await;
                     if r.provider.configuration_id != model {
-                        r.provider = crate::provider::Provider::new(
-                            &model,
-                            &c.settings.lock().unwrap().effort,
+                        r.provider = crate::provider::Provider::for_settings(
+                            &Settings {
+                                model: model.clone(),
+                                ..c.settings.lock().unwrap().clone()
+                            },
                             &self.configuration,
+                            Some(&r.provider),
                         )?;
                         store.update(
                             &r.session,

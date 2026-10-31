@@ -281,7 +281,14 @@ impl Runtime {
         if !workspace.is_dir() {
             bail!("workspace no longer exists")
         }
-        let provider = Provider::new(model, &settings.effort, &catalog.configuration)?;
+        let provider = Provider::for_settings(
+            &Settings {
+                model: model.into(),
+                ..settings.clone()
+            },
+            &catalog.configuration,
+            None,
+        )?;
         let permission_settings = catalog
             .configuration
             .path
@@ -575,12 +582,6 @@ impl Runtime {
             .filter_map(|e| e.data["child_session_id"].as_str())
             .map(str::to_owned)
             .collect::<HashSet<_>>();
-        let resume_fake = runtime.provider.fake.is_some()
-            && events
-                .iter()
-                .find(|e| e.r#type == "session_start")
-                .and_then(|e| e.data["provider_resume_identity"].as_str())
-                .is_some_and(|id| Some(id.to_string()) == runtime.provider.identity());
         let mut recovered_usage = Usage::default();
         for event in events.iter().filter(|e| {
             matches!(
@@ -643,64 +644,24 @@ impl Runtime {
                 &json!({"usage_available":runtime.usage.available}),
             )?;
         }
-        if resume_fake {
-            runtime.restore_script_progress(&recovery_events);
-        }
+        runtime
+            .provider
+            .restore_script_progress(&recovery_events, &runtime.used_call_ids);
         Ok(runtime)
-    }
-    fn restore_script_progress(&mut self, events: &[Event]) {
-        self.provider.index = events
-            .iter()
-            .filter(|e| e.r#type == "assistant_message")
-            .count();
-        self.provider.call_counter = self
-            .used_call_ids
-            .iter()
-            .filter_map(|id| {
-                id.strip_prefix("fake_tool_")
-                    .and_then(|s| s.parse::<usize>().ok())
-            })
-            .max()
-            .unwrap_or(0);
-        for event in events {
-            if let Some(n) = event.data["call_id"]
-                .as_str()
-                .and_then(|id| id.strip_prefix("fake_tool_"))
-                .and_then(|s| s.parse::<usize>().ok())
-            {
-                self.provider.call_counter = self.provider.call_counter.max(n);
-            }
-            if let Some(progress) = event.data.get("provider_progress") {
-                self.provider.index = self
-                    .provider
-                    .index
-                    .max(progress["index"].as_u64().unwrap_or(0) as usize);
-                self.provider.call_counter = self
-                    .provider
-                    .call_counter
-                    .max(progress["call_counter"].as_u64().unwrap_or(0) as usize);
-            }
-        }
     }
     pub fn set_script(&mut self, script: Value) -> Result<()> {
         self.provider.set_script(script)?;
         let mut events = self.store.recovery_events(&self.session)?;
-        if events
+        let children = events
             .iter()
-            .find(|e| e.r#type == "session_start")
-            .and_then(|e| e.data["provider_resume_identity"].as_str())
-            .is_some_and(|id| Some(id.to_string()) == self.provider.identity())
-        {
-            let children = events
-                .iter()
-                .filter(|e| e.r#type == "subagent_start")
-                .filter_map(|e| e.data["child_session_id"].as_str().map(str::to_string))
-                .collect::<HashSet<_>>();
-            for id in children {
-                events.extend(self.store.recovery_events(&id)?);
-            }
-            self.restore_script_progress(&events);
+            .filter(|e| e.r#type == "subagent_start")
+            .filter_map(|e| e.data["child_session_id"].as_str().map(str::to_string))
+            .collect::<HashSet<_>>();
+        for id in children {
+            events.extend(self.store.recovery_events(&id)?);
         }
+        self.provider
+            .restore_script_progress(&events, &self.used_call_ids);
         Ok(())
     }
     pub fn event(&self, hooks: &Hooks, kind: &str, data: Value) -> Result<Event> {
@@ -1483,12 +1444,7 @@ impl Runtime {
             )?;
             if settings.pending_model || settings.model != self.provider.configuration_id {
                 let config = self.catalog.lock().await.configuration.clone();
-                let mut next = Provider::new(&settings.model, &settings.effort, &config)?;
-                if next.identity().is_some() && next.identity() == self.provider.identity() {
-                    next.index = self.provider.index;
-                    next.call_counter = self.provider.call_counter;
-                }
-                self.provider = next;
+                self.provider = Provider::for_settings(&settings, &config, Some(&self.provider))?;
                 hooks.settings.lock().unwrap().pending_model = false;
                 self.store.update(
                     &self.session,
@@ -3249,7 +3205,15 @@ impl Runtime {
                 .as_str()
                 .map(str::to_string);
             let provider = match model {
-                Some(model) => Provider::new(&model, "off", &config),
+                Some(model) => Provider::for_settings(
+                    &Settings {
+                        model,
+                        effort: "off".into(),
+                        ..hooks.settings.lock().unwrap().clone()
+                    },
+                    &config,
+                    None,
+                ),
                 None => Ok(self.provider.clone()),
             };
             if let Ok(mut provider) = provider {

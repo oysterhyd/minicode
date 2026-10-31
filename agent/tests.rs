@@ -12,6 +12,57 @@ use crate::{
 use serde_json::json;
 use std::{collections::BTreeMap, fs, sync::Arc};
 use tokio_util::sync::CancellationToken;
+
+#[test]
+fn e1_provider_settings_and_script_progress_share_one_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Configuration {
+        path: dir.path().join("config.json"),
+    };
+    let mut settings = crate::runtime::Settings::new(&config).unwrap();
+    settings.model = "fake".into();
+    settings.effort = "high".into();
+    let mut first = crate::provider::Provider::for_settings(&settings, &config, None).unwrap();
+    first
+        .set_script(json!({"turns":[{"text":"one"},{"text":"two"}]}))
+        .unwrap();
+    let identity = first.identity().unwrap();
+    let event = |kind: &str, data| crate::models::Event {
+        seq: 0,
+        r#type: kind.into(),
+        timestamp: String::new(),
+        data,
+    };
+    let events = vec![
+        event(
+            "session_start",
+            json!({"provider_resume_identity":identity}),
+        ),
+        event(
+            "assistant_message",
+            json!({"provider_progress":{"index":2,"call_counter":3}}),
+        ),
+        event("tool_call_start", json!({"call_id":"fake_tool_7"})),
+    ];
+    first.restore_script_progress(
+        &events,
+        &std::collections::HashSet::from(["fake_tool_9".into()]),
+    );
+    assert_eq!((first.index, first.call_counter), (2, 9));
+    assert_eq!(first.effort, "high");
+    // A changed script must start from zero; reapplying a script is idempotent.
+    first
+        .set_script(json!({"turns":[{"text":"different"}]}))
+        .unwrap();
+    first.restore_script_progress(&events, &Default::default());
+    assert_eq!((first.index, first.call_counter), (0, 0));
+    let mut same = crate::provider::Provider::for_settings(&settings, &config, None).unwrap();
+    same.index = 4;
+    same.call_counter = 8;
+    let replaced =
+        crate::provider::Provider::for_settings(&settings, &config, Some(&same)).unwrap();
+    assert_eq!((replaced.index, replaced.call_counter), (4, 8));
+}
 fn empty_catalog(workspace: &std::path::Path, configuration: Configuration) -> Catalog {
     Catalog {
         workspace: workspace.into(),
