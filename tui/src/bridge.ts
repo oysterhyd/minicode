@@ -41,6 +41,8 @@ export class BridgeClient implements BridgeApi {
   private nextId = 1
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   private events = new EventEmitter()
+  private delta: DesktopEvent | null = null
+  private deltaTimer?: ReturnType<typeof setTimeout>
   private closed = false
   private failure: Error | null = null
   private closePromise?: Promise<void>
@@ -100,6 +102,21 @@ export class BridgeClient implements BridgeApi {
       }
     })
     return () => { this.events.off('event', listener) }
+  }
+  private flushDelta() {
+    clearTimeout(this.deltaTimer)
+    this.deltaTimer = undefined
+    const delta = this.delta
+    this.delta = null
+    if (delta) this.events.emit('event', delta)
+  }
+  private deliver(event: DesktopEvent) {
+    if (event.event === 'text_delta' || event.event === 'reasoning_delta') {
+      const current = this.delta
+      if (current && current.event === event.event && current.runId === event.runId && current.sessionId === event.sessionId && (current.text?.length || 0) < 65536) current.text = (current.text || '') + (event.text || '')
+      else { this.flushDelta(); this.delta = { ...event } }
+      this.deltaTimer ??= setTimeout(() => this.flushDelta(), 16)
+    } else { this.flushDelta(); this.events.emit('event', event) }
   }
 
   close(): Promise<void> {
@@ -192,9 +209,10 @@ export class BridgeClient implements BridgeApi {
         return
       }
       if (message.event === 'log') { this.logDiagnostic(`[log] ${message.text}\n`); return }
-      this.events.emit('event', message)
+      this.deliver(message as DesktopEvent)
       return
     }
+    this.flushDelta()
     const pending = this.pending.get(message.id as number)
     if (!pending) return
     this.pending.delete(message.id as number)

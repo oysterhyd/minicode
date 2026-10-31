@@ -118,7 +118,7 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
   }
   if (event.sessionId && state.sessionId && event.sessionId !== state.sessionId) return state
   if (event.sessionId && !state.sessionId) state = { ...state, sessionId: event.sessionId }
-  if (event.event === 'run_started') return { ...state, runId: event.runId, awaitingRun: false, busy: true, reasoning: '', liveUsage: undefined }
+  if (event.event === 'run_started') return { ...state, runId: event.runId, awaitingRun: false, busy: true, startedAt: state.startedAt || Date.now(), reasoning: '', liveUsage: undefined }
   if (event.event === 'reasoning_delta' && event.text) return { ...state, reasoning: (state.reasoning || '') + event.text }
   if (event.event === 'usage_delta') return { ...state, liveUsage: event.usage }
   if (event.event === 'warning') return { ...state, items: [...state.items, { id: `warning-${state.items.length}`, kind: 'notice', tone: 'warning', text: event.text }] }

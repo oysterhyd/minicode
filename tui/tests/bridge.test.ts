@@ -7,6 +7,19 @@ import { spawn } from 'node:child_process'
 import { BridgeClient, protocolProblem } from '../src/bridge.js'
 import { bridgeLaunch } from '../src/launch.js'
 
+test('T-UI12 high frequency reasoning is batched and flushed before the terminal event', async () => {
+  const script = `require('node:readline').createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);for(let i=0;i<1000;i++)process.stdout.write(JSON.stringify({event:'reasoning_delta',text:'x',runId:'r'})+'\\n');process.stdout.write(JSON.stringify({event:'run_done',runId:'r'})+'\\n');process.stdout.write(JSON.stringify({id:m.id,result:true})+'\\n')})`
+  const child=spawn(process.execPath,['-e',script],{stdio:['pipe','pipe','pipe']})
+  const client=new BridgeClient(child),events: any[]=[]
+  client.onEvent(event=>events.push(event))
+  try {
+    await client.request('stream')
+    assert.equal(events.filter(event=>event.event==='reasoning_delta').map(event=>event.text).join(''),'x'.repeat(1000))
+    assert.ok(events.filter(event=>event.event==='reasoning_delta').length<100)
+    assert.equal(events.at(-1).event,'run_done')
+  } finally {await client.close()}
+})
+
 test('packaged launch uses the native agent and writable cwd', () => {
   const environment = { Path: 'system-tools', ANTHROPIC_API_KEY: 'test-key' }
   const launch = bridgeLaunch({ resourcesPath: '/installed/resources', userData: '/profile', environment })
