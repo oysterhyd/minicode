@@ -1002,3 +1002,78 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 导入边界：确认检查在文件路径和文件操作之前，仅读取固定来源的普通文件并限制 1 MB、兼容 BOM；仅选 providerName=Command Code 且 OpenAI chat 类型，不取其他提供商作回退。复用 C1/C2 save_service 做端点校验、系统存储写入/回读和一次原子事务，返回值仅含空 apiKey/hasApiKey，不暴露引用或密钥。源文件从不修改，导入的模型列表为空，用户之后自行添加模型，避免错误推断第三方模型元数据。
 - 回归：普通配置/provider 不使用第三方 Key、显式环境变量保持可用、来源文件不存在时仍能展示说明且拒绝授权不访问/保存、授权导入仅保存安全引用、源文件不变、CLI 拒绝/同意、拒绝无关提供商和畸形敏感 JSON、Desktop 展示说明→取消→再次确认流程。聚焦 Node 5 通过/1 个 Unix-only FIFO 跳过（`output/6-C3-focused.log`）、Desktop 聚焦通过（`output/6-C3-desktop-focused.log`）。Unix FIFO 回归通过阻塞文件检测未授权 open/read，本机 Windows 不支持此用例，留给 Linux CI，不能标为实测通过。Windows 来源路径分隔符的聚焦断言首次失败后已在产品路径构造中统一，最终聚焦通过。
 - 最终完整验证：`output/check-5.ps1 -Item C3-final -Desktop` 全部通过，日志前缀 `output/5-C3-final-`：fmt、Clippy、Rust 216 通过/2 个既有忽略（212 单元+4 配置事务集成）、build、协议 292 通过/3 个跳过、生成文件无差异、60 次主任务与 9 个场景保持预期、npm ci/build、TUI 122 通过、Desktop test/vet/vendor UI。三个协议跳过分别为本机不适用的 Unix FIFO/Unix MCP 进程组，以及既有 200 秒长流可选测试；Rust 忽略项仍为两个手动性能基准。导入界面预览 `output/native/credential-import-dark-1x.png` 已实际查看，来源/读取字段/安全存储说明和确认/取消按钮均可见，无裁切。最终检查包含前面 16 项的所有适用回归。
+
+## 阶段 5–6 最终验收报告
+
+基线 `52fcea1`，最终代码提交 `0bca0c7`。17 项均已修复，无跳过项、部分完成项或阻塞项；跨平台未执行的验证单独列出，不计作通过。共 17 个条目提交，另有 R3/R6 两个必要的生命周期复核提交；本报告为独立文档提交。未推送远端，原有两个 `.pending` 文件保留。
+
+下表中 Rust 文件相对 `agent/`，协议测试相对 `tests/agent/`；客户端文件使用仓库相对路径。各条目上文包含核查根因、先失败证据、实现、完整检查日志和兼容性记录。
+
+### 5A 状态、实现与提交
+
+| 条目 | 状态 | 提交 | 主要实现与回归证据 |
+| --- | --- | --- | --- |
+| R3 | 已修复 | `676bdb5`、`8509e25` | `background.rs`、`runtime.rs`、`bridge.rs`、`cli.rs`：会话级任务、增量输出、终止、持久通知与确定清理；`background.test.mjs` 和 Rust 生命周期用例覆盖跨回合 dev server、重复终止、EOF/取消及无效 continue。 |
+| R6 | 已修复 | `a83aa27`、`d4393e9` | `mcp.rs`、`mcp_dispatch.rs`、`runtime.rs`、`bridge.rs`：会话复用、增量重连、独立 reader/demux、资源 owner 和 SessionLock；`mcp-lifecycle.test.mjs`、`session-cache.test.mjs` 覆盖五轮复用、并发、七 owner 和跨进程删除保护。 |
+| EXT1 | 已修复 | `f5fea26` | `extension_cache.rs`、`extensions.rs`：32 项共享 Catalog 缓存和文件/目录/缺失路径依赖失效；模块 Rust 测试通过计数及新增/修改/删除/链接验证。 |
+| EXT2 | 已修复 | `650e1a7` | 同上：128 项元数据依赖的指纹缓存，嵌套变化失效、删除及链接拒绝；模块 Rust 测试验证重复调用仅哈希一次和改变后的拒绝。 |
+| MC4 | 已修复 | `44aaf90` | `mcp.rs`、`mcp_dispatch.rs`：响应半帧持续读取，请求写中断使连接失效并重建；`mcp-recovery.test.mjs` 和 Rust 取消用例覆盖超时、迟到帧、损坏帧及后续请求。 |
+| MC5 | 已修复 | `786f389` | 同上及 Cargo serde_json feature：按原始十进制文本归一化 ID，避免 f64 舍入；`mcp-ids.test.mjs` 与模块测试覆盖字符串/整数/小数/指数及无效、溢出、重复 ID。 |
+
+5A 完整阶段复核日志为 `output/5-5A-final-*`，其后所有阶段完整检查继续包含上述回归。
+
+### 5B 状态、实现与提交
+
+| 条目 | 状态 | 提交 | 主要实现与回归证据 |
+| --- | --- | --- | --- |
+| R31 | 已修复 | `a46a37a` | `subagent_result.rs`、`runtime.rs`、工具定义、`store.rs`：child 专用 submit_result、结构校验和裸/围栏/周边文本 JSON 回退；`subagent-results.test.mjs` 覆盖成功、非法和恢复幂等。 |
+| R31b | 已修复 | `3feef9c` | `tools.rs`、`runtime.rs`、`models.rs`、`subagent_result.rs`：仅以真实原生文件工具结果记录观察路径；`subagent-evidence.test.mjs` 覆盖 grep 实际命中、相对路径/位置后缀及伪造引用拒绝。 |
+| R33 | 已修复 | `3ecb720` | `runtime.rs`、`tui/src/child-progress.ts`/ToolLine、Desktop feed/state/child_progress：父回合转发安全摘要、排序去重及折叠；协议 `subagent-progress.test.mjs`、TUI 和 Desktop 专项测试。 |
+| R35 | 已修复 | `1ba52c4` | `runtime.rs`、`mcp.rs`、`configuration.rs`：借用父 Catalog/获准 MCP 连接、独立所有权、真实用户 requirements 上限 16,384 UTF-8 字节；`mcp-lifecycle.test.mjs`、`audit.test.mjs` 和 Rust 测试验证权限不扩大及合成消息排除。 |
+| R43 | 已修复 | `edf0d34` | `runtime.rs`：实际新建/恢复 child 统一继承父 compaction；Rust 串行开关/恢复和真实 HTTP 双 child 并行测试覆盖 true/false。 |
+| A4 | 已修复 | `b610b72` | `delegate_workspace.rs`、`runtime.rs`、`store.rs`、工具/代理定义：默认只读、隔离副本、持久 diff 审阅、独立批准、冲突预检、失败回滚/取消清理；`subagent-isolation.test.mjs` 和 Rust 文件系统测试。Shell 的实际 OS 隔离由 SEC2 补齐。 |
+
+5B 各条目完整日志前缀为 `output/5-R31-*`、`5-R31b-*`、`5-R33-*`、`5-R35-*`、`5-R43-*`、`5-A4-*`；最终全套继续覆盖。
+
+### 阶段 6 状态、实现与提交
+
+| 条目 | 状态 | 提交 | 主要实现与回归证据 |
+| --- | --- | --- | --- |
+| R26 | 已修复 | `49ae077` | `permissions.rs`、`settings_file.rs`、runtime/tools/bridge/CLI 与 TUI/Desktop 审批：分层规则、deny 优先、命令/文件/MCP 范围、保守复合命令、单次/会话/项目授权；`permissions.test.mjs`、模块及客户端审批测试。 |
+| SEC2 | 已修复 | `21aad6e` | `sandbox.rs`、`sandbox_windows.rs`、runtime/tools/CLI：真实 OS 沙箱、强制隔离可写 child、独立不可记住的高危确认；`sandbox.test.mjs` 的 Windows 实机文件、TCP、环境、后台 PID 和 child 测试全部通过。 |
+| C1 | 已修复 | `432a593` | `credentials.rs`、`configuration.rs`、provider/bridge、Linux CI 启动脚本：OS 凭据存储、回读验证后迁移、无明文回退；Rust 迁移/失败保留测试和 `credentials.test.mjs` 的重启认证、换 Key、伪造引用/损坏拒绝。 |
+| C2 | 已修复 | `45b2cf5` | `configuration.rs`、`settings_file.rs`、bridge/extensions、Desktop 类型/编辑：完整事务锁、version CAS、条目 revision、一次写入；`tests/configuration_transactions.rs` 和 `config-transactions.test.mjs` 覆盖锁等待、失败/panic 恢复和两进程保留全部修改。 |
+| C3 | 已修复 | `0bca0c7` | configuration/provider/bridge/CLI、Desktop settings/fixture/localization：删除自动第三方读取，先披露后确认，统一安全存储；`credential-import.test.mjs`、`desktop/native/credential_import_test.go`，并已查看实际界面预览。 |
+
+### 最终测试与评测证据
+
+代码最终全套命令为 `output/check-5.ps1 -Item C3-final -Desktop`。对应 `output/5-C3-final-*.log` 保留完整输出，没有真实模型 API 调用；协议/HTTP/MCP 均使用本地受控 mock。
+
+| 检查 | 最终结果 |
+| --- | --- |
+| Rust fmt / Clippy `--locked --all-targets -- -D warnings` / build | 全通过 |
+| Rust `cargo test --locked` | 212 单元 + 4 配置事务集成通过；2 个既有手动基准忽略 |
+| Node 全协议 | 292 通过、0 失败、3 跳过：Unix FIFO、Unix MCP 进程组、本就可选的 200 秒长流 |
+| 任务生成 / trace / Git 生成文件差异 | 通过，无生成文件差异 |
+| b0/b1/b2 主任务和场景 | 60 次主任务、9 次场景符合预期验收结果；`verify-results.mjs` 通过 |
+| TUI npm ci / build / test，启用真实 Rust Bridge 测试 | 全通过；122 个测试通过 |
+| Desktop go test / vet / vendor UI | 全通过；包含子任务进度、审批范围、配置编辑和显式导入 |
+
+`counter_retry` 的 b0/b1 按评测定义失败、b2 成功，这是 verifier 接受的预期结果，不能把“预期验收结果保持一致”改述为所有 baseline 场景均成功。首轮 C2 的 r27 修复配置路径回归已修复并通过最终全测。历史 Windows 并发原子编辑波动及一次 Desktop 分页时序波动的失败/复跑记录保留在对应条目，没有将它们声称为本轮已修复的独立问题。
+
+### 兼容性、安全边界与回滚
+
+- 会话/协议：保留既有 NDJSON 协议版本和旧会话读取，新工具/事件/关联字段均增量加入；老历史缺少 child call_id 时走兼容展示。后台任务只在同一进程的会话间保留，不按旧 PID 跨重启接管进程。
+- 子代理：默认只读；显式 writable 才创建隔离快照，保留父工作区原有脏修改。inspect 后再独立批准才能合并，冲突先拒绝，应用失败仅回滚自身写入并报告外部冲突。MCP readOnlyHint 是已信任服务的声明，不代表远程工具受本地内核沙箱控制。
+- 权限/沙箱：deny 不能被批准覆盖。高危确认不可记住，静态识别不声称能理解任意解释器；有文件 deny 时保守阻止任意 Shell。普通父 Shell 沙箱默认关闭、可显式启用，可写 child 强制开启；不可用则拒绝，不回退无隔离。Windows 仅 network=false，Git Bash/MSYS 在 AppContainer 不可启动时要求改用 PowerShell；Linux/macOS 行为详见 permissions 文档。
+- 配置：旧无 version/revision 文档视为 0；新客户端需保留返回的 revision，过期整项编辑明确冲突。纯字段动作在锁内修改当前值，不覆盖整份旧配置；JSON 有效但字段无效时可用带版本的完整替换修复。原子提交失败保留旧文件，不把残留临时文件当成恢复来源。
+- 凭据：明文迁移先写安全存储并回读验证，所有项准备完毕才替换配置；失败保留原字节并明确报错。配置备份只含引用，不能当作可移植 Key 备份。保留旧引用对应的安全条目，避免保存失败时破坏仍有效凭据。第三方导入必须显式确认，原文件不修改，导入不推测模型 ID。
+
+### 剩余风险、保守决策与后续建议
+
+1. 本机实际验证为 Windows。Linux 的 bubblewrap/Secret Service、CI 临时 D-Bus/keyring 启动、Unix FIFO/进程组，以及 macOS Seatbelt/Keychain 未在对应平台执行，仍需平台 CI/实机覆盖；macOS sandbox-exec 已被系统弃用，不将未来可用性视为保证。优先补 macOS 测试和 Linux 沙箱/凭据 CI 实测。
+2. Windows 宿主整体硬杀可能留下没有活动进程的随机 AppContainer profile/ACE；正常结束和取消已清理，Job Object 回收活动进程。后续优先做启动恢复时按所有权清理残留 profile/ACL，而非扩大沙箱权限。
+3. 安全凭据条目在失败保存/替换后可能成为孤立条目；本轮选择保留，避免误删旧配置仍引用的凭据。后续实现引用感知、可审阅的凭据清理和受控备份/迁移，不提供明文回退。
+4. 继续跟踪既有 Windows 并发文件替换和 Desktop 分页负载时序波动，建立确定性压力回归；无需修改本轮已经通过的权限/凭据协议来掩盖它们。持有活资源的 owner 可超过普通六 owner 缓存上限，后续可增加显式资源预算和状态展示。
+
+上述保守决策均已按任务的安全默认值实施，不需要额外阻塞当前交付；本轮没有部署、远端推送或真实第三方凭据导入。
