@@ -33,12 +33,14 @@ function replaceItem(items: FeedItem[], index: number, update: (item: FeedItem) 
   return next
 }
 
+let streamSequence = 0
+
 function upsertAssistant(items: FeedItem[], text: string): FeedItem[] {
   const index = items.findLastIndex(item => item.kind === 'assistant' && item.pending)
   if (index >= 0) {
     return replaceItem(items, index, item => ({ ...item, text: (item.text || '') + text }))
   }
-  return [...items, { id: `stream-${items.length}`, kind: 'assistant', text, pending: true }]
+  return [...items, { id: `stream-${++streamSequence}`, kind: 'assistant', text, pending: true }]
 }
 
 function sealAssistant(items: FeedItem[]): FeedItem[] {
