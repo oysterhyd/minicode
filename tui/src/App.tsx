@@ -117,6 +117,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const [attachments, setAttachments] = useState<Array<{ asset_id: string; name: string }>>([])
   const [serverQueued, setServerQueued] = useState<Array<{ id: string; mode: string; text: string }>>([])
   const serverQueueRef = useRef(false)
+  const [tasks, setTasks] = useState<Array<{ task_id: string; title: string; status: string }>>([])
   const attachmentsRef = useRef<Array<{ asset_id: string; name: string }>>([])
   const [approvalChoice, setApprovalChoice] = useState(0)
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -203,6 +204,14 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       if (activeRef.current && session === sessionRef.current) setServerQueued(queue)
     } catch { /* a transport error is reported by the request that changed the queue */ }
   }
+  async function refreshTasks() {
+    const session = sessionRef.current
+    if (!session) { setTasks([]); return }
+    try {
+      const rows = await client.request<Array<{ task_id: string; title: string; status: string }>>('listTasks', { sessionId: session })
+      if (activeRef.current && session === sessionRef.current) setTasks(rows)
+    } catch { /* old agents may not expose tasks */ }
+  }
   async function enqueue(text: string, mode: 'steer' | 'followUp') {
     try {
       await client.request('enqueuePrompt', { sessionId: sessionRef.current, text, mode, attachments: attachmentsRef.current })
@@ -232,6 +241,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       if (event.event === 'agent_event' && event.item?.type === 'approval_decision') approvalRef.current = null
       if (event.event === 'run_done' || event.event === 'run_error') {
         void refreshQueue()
+        void refreshTasks()
         const cancelled = cancelPendingRef.current
         cancelPendingRef.current = false
         approvalRef.current = null
@@ -244,6 +254,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         void refreshState()
       }
       if (event.event === 'queue_changed' || event.event === 'agent_event' && event.item?.type === 'queue_consumed') void refreshQueue()
+      if (event.event === 'agent_event' && event.item?.type === 'tool_call_result' && String(event.item.data.name || '').startsWith('task_')) void refreshTasks()
     })
     void (async () => {
       try {
@@ -323,6 +334,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   }
 
   function resetScreen(items: FeedItem[] = []) {
+    setTasks([])
     historyRef.current = null
     transcriptRef.current?.returnToLatest()
     clearTranscript(stdout)
@@ -469,6 +481,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         const items = historyItems(detail)
         historyRef.current = { detail, count: items.length }
         updateFeed(current => ({ ...bindFeedSession(current, result.sessionId!), items, busy: Boolean(state.running), runId: state.runId, awaitingRun: false, error: '', startedAt: null }))
+        void refreshTasks()
         if (detail.cursor && (detail.cursor.messages !== null || detail.cursor.events !== null)) addNotice('已加载最近历史；/history 加载更早记录')
         try {
           const capabilities = await client.request<Capabilities>('getCapabilities', { workspace: workspaceRef.current })
@@ -948,6 +961,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         <Text>{artifactView.loading ? '加载中…' : terminalText(artifactView.text).split('\n').slice(artifactView.line, artifactView.line + Math.max(1, terminal.rows - 9)).join('\n')}</Text>
         {artifactView.error ? <Text color={theme.error}>{artifactView.error}</Text> : null}</Box> : null}
       <Box flexDirection="column" flexShrink={0}>
+        {tasks.length ? <Box flexDirection="column"><Text bold>任务 {tasks.filter(task => task.status === 'done').length}/{tasks.length}</Text>
+          {tasks.slice(0, 4).map(task => <Text key={task.task_id} wrap="truncate-end">{task.status === 'done' ? '✓' : task.status === 'running' ? '▶' : '○'} {task.title} · {task.status}</Text>)}</Box> : null}
         {feed.busy && !waiting ? (
           <Spinner
             startedAt={feed.startedAt || now}

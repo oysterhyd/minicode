@@ -67,3 +67,13 @@ func TestD7DesktopBoundsRequestGoroutines(t *testing.T) {
 	close(b.release)
 	r.settle()
 }
+
+func TestTU6TasksRemainVisibleInConversation(t *testing.T) {
+	r := newTestRig(t, "conversation")
+	r.d.preferences.RightCollapsed = true
+	r.d.current().Tasks = []model.Task{{Title: "Persistent task", Status: "running"}}
+	r.ui.Frame()
+	if _, ok := r.ui.Find("Persistent task"); !ok {
+		t.Fatal("task only exists in the hidden work tab")
+	}
+}

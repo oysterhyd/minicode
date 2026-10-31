@@ -1139,6 +1139,14 @@ func recentTrace(events []model.Event) []model.Event {
 }
 
 func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
+	if event.Type == "tool_call_result" && strings.HasPrefix(model.String(event.Data["name"]), "task_") {
+		var tasks []model.Task
+		d.request(v, "listTasks", nil, &tasks, func(err error) {
+			if err == nil {
+				v.Tasks = tasks
+			}
+		})
+	}
 	v.Trace = append(v.Trace, event)
 	if len(v.Trace) > 300 {
 		v.Trace[0] = model.Event{} // Release maps in the discarded backing slot.

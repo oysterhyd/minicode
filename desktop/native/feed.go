@@ -34,6 +34,13 @@ const feedWidth = 800
 func (d *desktop) feed(c *ui.Context, p palette) {
 	v := d.current()
 	ui.Column(c).Fill().Children(func() {
+		if len(v.Tasks) > 0 {
+			ui.Column(c).Padding(8, 32).Gap(4).Children(func() {
+				for _, task := range v.Tasks[:min(4, len(v.Tasks))] {
+					ui.Text(c, task.Title).SingleLine().FontSize(p.font(11.48)).TextColor(p.Text2)
+				}
+			})
+		}
 		if v.Loading {
 			ui.Row(c).Grow(1).Center().Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在恢复会话…")) })
 			return

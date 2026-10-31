@@ -1148,3 +1148,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：App busy 分支仅客户端排队。修复：messageQueue能力存在时普通输入steer、/follow文本followUp、/steer显式插话，/queue列出ID、/queue cancel ID删除、/queue resume继续暂停队列；关闭客户端drain，能力缺失沿用旧客户端队列。回归：stage7-keys.test.tsx capable bridge 两模式且run_done后不重复sendPrompt，先失败后通过。状态：已修复。
 
+
+### TU6 — keep task progress visible in conversation
+
+核查：TUI仅普通task工具，Desktop任务仅work页。修复：两端对话常驻最多4条真实任务卡，TUI显示状态/完成数；task_*结果刷新现有listTasks，无transcript重建；恢复/结束刷新。沿用task_id/title/status，无虚构G4接口。回归：tasks-card.test.tsx工具事件刷新；Desktop TestTU6TasksRemainVisibleInConversation 隐藏work页仍可见，先失败后通过。状态：部分完成（Desktop常驻卡还需状态文字与超过4条的展开入口）。
+
