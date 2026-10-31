@@ -35,6 +35,8 @@ import { UserBubble } from './components/UserBubble.js'
 import { TranscriptViewport, type TranscriptScroll } from './components/TranscriptViewport.js'
 import { TranscriptLog } from './components/TranscriptLog.js'
 import { ArtifactPages } from './artifact-pages.js'
+import path from 'node:path'
+import { InputHistory, PasteStore, fileMention } from './input-history.js'
 import { lastExpandableTool, layoutTranscript, type LayoutItem } from './transcript.js'
 import type {
   AgentState,
@@ -109,6 +111,11 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const [reasoningOpen, setReasoningOpen] = useState(false)
   const [artifactView, setArtifactView] = useState<{ text: string; line: number; loading: boolean; error?: string } | null>(null)
   const artifactRef = useRef<ArtifactPages | null>(null)
+  const inputHistory = useRef(new InputHistory())
+  const pasteStore = useRef(new PasteStore())
+  const [files, setFiles] = useState<string[]>([])
+  const [attachments, setAttachments] = useState<Array<{ asset_id: string; name: string }>>([])
+  const attachmentsRef = useRef<Array<{ asset_id: string; name: string }>>([])
   const [approvalChoice, setApprovalChoice] = useState(0)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const approvalChoiceRef = useRef({ id: '', choice: 0 })
@@ -129,6 +136,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const readyRef = useRef(false)
   const stateRevision = useRef(0)
   const ctrlCRef = useRef(0)
+  const escapeRef = useRef(0)
   const approvalRef = useRef<string | null>(null)
   const drainAllowedRef = useRef(false)
   const cancelPendingRef = useRef(false)
@@ -275,6 +283,16 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
     () => slashSuggestions(draft, { commands, models, sessions, skills }),
     [commands, draft, models, sessions, skills],
   )
+  useEffect(() => {
+    const mention = fileMention(draft.slice(0, caret))
+    if (!mention || !ready) { setFiles([]); return }
+    let active = true
+    const timer = setTimeout(() => {
+      void client.request<string[]>('listFiles', { workspace: workspaceRef.current, query: mention.query })
+        .then(rows => { if (active) setFiles(rows) }).catch(() => { if (active) setFiles([]) })
+    }, 100)
+    return () => { active = false; clearTimeout(timer) }
+  }, [draft, caret, ready, client])
 
   function addNotice(text: string, tone: FeedItem['tone'] = 'info') {
     updateFeed(current => ({
@@ -329,6 +347,21 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   }
 
   async function runSlash(text: string) {
+    if (text.startsWith('/attach ')) {
+      const source = text.slice(8).trim().replace(/^"(.*)"$/, '$1')
+      try {
+        const imported = await client.request<Array<{ asset_id: string; name: string }>>('importAttachments', { paths: [path.resolve(workspaceRef.current, source)] })
+        attachmentsRef.current = [...attachmentsRef.current, ...imported]
+        setAttachments(attachmentsRef.current)
+      } catch (error) { addNotice(cleanError(error), 'error'); replaceDraft(text) }
+      return
+    }
+    if (text.startsWith('/paste ')) {
+      const id = Number(text.split(/\s+/)[1])
+      if (text.endsWith(' cancel')) pasteStore.current.cancel(id)
+      else addNotice(pasteStore.current.preview(id) || '粘贴不存在')
+      return
+    }
     if (text === '/history') { await loadEarlierHistory(); return }
     if (operationRef.current) { addNotice('上一条命令仍在处理，请稍后重试'); return }
     if (busyRef.current && !LIVE_SLASH.test(text)) {
@@ -429,12 +462,14 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   }
 
   async function send(text: string) {
-    const trimmed = text.trim()
-    if (!trimmed) return
+    let trimmed = text.trim()
+    if (!trimmed && !attachmentsRef.current.length) return
     if (trimmed.startsWith('/')) {
       await runSlash(trimmed)
       return
     }
+    inputHistory.current.add(trimmed)
+    try { trimmed = pasteStore.current.expand(trimmed) } catch (error) { addNotice(cleanError(error), 'error'); replaceDraft(text); return }
     if (busyRef.current || operationRef.current) {
       updateQueue([...queuedRef.current, trimmed])
       return
@@ -462,8 +497,11 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         sessionId: sessionRef.current,
         model: agentRef.current.model,
         asyncStart: true,
+        attachments: attachmentsRef.current,
       })
       if (!activeRef.current) return
+      attachmentsRef.current = []
+      setAttachments([])
       updateFeed(current => ({ ...bindFeedSession(current, result.sessionId), runId: result.runId, awaitingRun: false }))
     } catch (error) {
       if (error instanceof BridgeRequestTimeout) {
@@ -581,12 +619,16 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
     }
 
     if (pasted) {
-      if (readyRef.current) replaceDraft(insertAt(text, at, input), at + input.length)
+      if (readyRef.current) {
+        const folded = pasteStore.current.fold(input)
+        replaceDraft(insertAt(text, at, folded), at + folded.length)
+      }
       return
     }
 
     if (key.ctrl && input === 'c') {
       if (busyRef.current) {
+        if (cancelPendingRef.current) { exit(); return }
         cancelPendingRef.current = true
         drainAllowedRef.current = false
         void client.request('cancelTurn', { sessionId: sessionRef.current, workspace: workspaceRef.current }).catch(error => addNotice(cleanError(error), 'error'))
@@ -647,6 +689,21 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         return
       }
       if (text.startsWith('/')) replaceDraft('')
+      else if (busyRef.current) {
+        if (!cancelPendingRef.current) {
+          cancelPendingRef.current = true
+          drainAllowedRef.current = false
+          void client.request('cancelTurn', { sessionId: sessionRef.current, workspace: workspaceRef.current }).catch(error => addNotice(cleanError(error), 'error'))
+        }
+      } else {
+        const previous = escapeRef.current
+        escapeRef.current = Date.now()
+        if (previous && Date.now() - previous <= 400) {
+          escapeRef.current = 0
+          const last = feedRef.current.items.findLast(item => item.kind === 'user')
+          if (last?.text) replaceDraft(last.text)
+        }
+      }
       return
     }
     if (waiting?.approvalId) {
@@ -710,6 +767,11 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       void cyclePermission()
       return
     }
+    if (key.tab && files.length) {
+      const mention = fileMention(text.slice(0, at))
+      if (mention) replaceDraft(text.slice(0, mention.start) + '@' + JSON.stringify(files[0]) + text.slice(at))
+      return
+    }
     if (key.tab && matches.length) {
       pick(matches[Math.min(slashIndex, matches.length - 1)], true)
       return
@@ -721,7 +783,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         setSlashIndex(slashIndexRef.current)
         return
       }
-      moveCaret(moveVertical(text, at, -1))
+      if (!text.slice(0, at).includes('\n')) replaceDraft(inputHistory.current.previous(text))
+      else moveCaret(moveVertical(text, at, -1))
       return
     }
     if (key.downArrow) {
@@ -731,7 +794,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         setSlashIndex(slashIndexRef.current)
         return
       }
-      moveCaret(moveVertical(text, at, 1))
+      if (!text.slice(at).includes('\n')) replaceDraft(inputHistory.current.next())
+      else moveCaret(moveVertical(text, at, 1))
       return
     }
     if (key.leftArrow) {
@@ -869,6 +933,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
           <>
             <Prompt value={draft} caret={caret} busy={feed.busy}
               queued={queued.length ? `> ${queued[0].split('\n')[0]}  (已排队 ${queued.length} 条${!feed.busy ? ' · Enter 发送' : ''})` : undefined} />
+            {attachments.length ? <Text dimColor>附件：{attachments.map(file => file.name).join(', ')} · /attach "路径" 导入</Text> : null}
+            {files.length ? <Text dimColor>Tab 补全：{files.slice(0, 5).join(' · ')}</Text> : null}
             {menuOpen ? <SlashMenu items={matches} selected={slashIndex} title={menuTitle} />
               : shortcutsOpen ? <ShortcutPanel /> : <StatusLine state={agent} />}
           </>
