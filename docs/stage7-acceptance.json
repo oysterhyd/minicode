@@ -1,0 +1,249 @@
+{
+  "schema": 1,
+  "version": "3.0.3",
+  "source_commit": "a4b12107f0a89c59f533a713c29bceaf9bc3d823",
+  "baseline": "de0301b",
+  "recorded_at": "2026-10-31T08:44:07.4831224Z",
+  "platform": "Windows 11 10.0.26200.9711 amd64",
+  "tools": {
+    "pywinpty": "2.0.10",
+    "rustc": "1.99.0",
+    "go": "1.27.1",
+    "python": "3.12.4",
+    "pwsh": "7.6.9",
+    "node": "22.22.0"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": "cargo fmt --check",
+      "exit": 0,
+      "seconds": 0.81,
+      "log": "output/stage7/release-acceptance/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "clippy",
+      "command": "cargo clippy --locked --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 4.92,
+      "log": "output/stage7/release-acceptance/clippy.log",
+      "sha256": "03e0448ac06ca77f44f7791c229a877f23754168867cfcd4f9eb59818039f84c"
+    },
+    {
+      "name": "rust-tests",
+      "command": "cargo test --locked",
+      "exit": 0,
+      "seconds": 25.02,
+      "log": "output/stage7/release-acceptance/rust-tests.log",
+      "sha256": "6609d184544d6592fbc4b31eceb24e5556cfb78b45fb1e0ad661c29369b96836"
+    },
+    {
+      "name": "build",
+      "command": "cargo build --locked",
+      "exit": 0,
+      "seconds": 13.78,
+      "log": "output/stage7/release-acceptance/build.log",
+      "sha256": "00a831743d71375575427aa22996427b6713ed4681576d01661c1a9dcb000f66"
+    },
+    {
+      "name": "protocol",
+      "command": "node --test tests/agent/*.test.mjs",
+      "exit": 1,
+      "seconds": 92.4,
+      "log": "output/stage7/release-acceptance/protocol.log",
+      "sha256": "99c5b8d67117cd3ae371f414bc43cf71eac2b0bd3b9b4fc3ba3b93cbae1fd5d0"
+    },
+    {
+      "name": "generate",
+      "command": "node evals/generate-tasks.mjs --verify",
+      "exit": 0,
+      "seconds": 5.68,
+      "log": "output/stage7/release-acceptance/generate.log",
+      "sha256": "9038bc37227778d5ece96c1539eddbd323b05516ad78d9ae883802645664ea92"
+    },
+    {
+      "name": "trace",
+      "command": "node evals/scenarios/generate-trace.mjs",
+      "exit": 0,
+      "seconds": 0.06,
+      "log": "output/stage7/release-acceptance/trace.log",
+      "sha256": "a883ed83afaa8bab91f7b60bdc4c69d3ce923a617d151151b7b3221cc0a79b7c"
+    },
+    {
+      "name": "fixtures",
+      "command": "git diff --exit-code -- evals/tasks evals/scenarios/log_context/repo/trace.log",
+      "exit": 0,
+      "seconds": 0.09,
+      "log": "output/stage7/release-acceptance/fixtures.log",
+      "sha256": "63eb49dd997c8cbb6f858275fbe2c836268f61e8822bb6f69729d75d38677b85"
+    },
+    {
+      "name": "eval",
+      "command": "& $env:MINICODE_AGENT eval --baselines b0,b1,b2 --concurrency 3 --output output/stage7/release-acceptance-eval",
+      "exit": 0,
+      "seconds": 144.1,
+      "log": "output/stage7/release-acceptance/eval.log",
+      "sha256": "bebb12975cb4b1a8913bfd916f4d09ea65d4a8ccf8e99bf70d23663d7da5d0ff"
+    },
+    {
+      "name": "scenarios",
+      "command": "& $env:MINICODE_AGENT eval --tasks-dir evals/scenarios --baselines b0,b1,b2 --concurrency 3 --output output/stage7/release-acceptance-scenarios",
+      "exit": 0,
+      "seconds": 18.68,
+      "log": "output/stage7/release-acceptance/scenarios.log",
+      "sha256": "9fecec0825683c3ed4132a02037ef4290d945750127865d0d90b48fbcb23a24c"
+    },
+    {
+      "name": "verify",
+      "command": "node evals/verify-results.mjs output/stage7/release-acceptance-eval output/stage7/release-acceptance-scenarios",
+      "exit": 0,
+      "seconds": 0.07,
+      "log": "output/stage7/release-acceptance/verify.log",
+      "sha256": "d7e8d71794584e51095681c97f246c933192b5c998f79f00f3aca3d9a909d24d"
+    },
+    {
+      "name": "npm-ci",
+      "command": "npm ci --prefix tui",
+      "exit": 0,
+      "seconds": 6.73,
+      "log": "output/stage7/release-acceptance/npm-ci.log",
+      "sha256": "1352d87e8354ee1c6701bcb92090ad8d8939970cf11f81dfb190ae13c8b4110d"
+    },
+    {
+      "name": "tui-build",
+      "command": "npm run build --prefix tui",
+      "exit": 0,
+      "seconds": 2.33,
+      "log": "output/stage7/release-acceptance/tui-build.log",
+      "sha256": "f431bbe56834d86af303912e43ee0e42a56feb9f88f2212a56c428f485ab7212"
+    },
+    {
+      "name": "tui-tests",
+      "command": "npm test --prefix tui",
+      "exit": 0,
+      "seconds": 12.23,
+      "log": "output/stage7/release-acceptance/tui-tests.log",
+      "sha256": "bd66a67679acf5983865c601ce2a9a4c951ef380dfd6c2e8a49bc581c7000e36"
+    },
+    {
+      "name": "go-tests",
+      "command": "go -C desktop/native test -count=1 ./...",
+      "exit": 0,
+      "seconds": 47.32,
+      "log": "output/stage7/release-acceptance/go-tests.log",
+      "sha256": "88b412bba01bc313542aa7c507a0fbbcbbea3438589d8f841f659d7af8af0745"
+    },
+    {
+      "name": "go-vet",
+      "command": "go -C desktop/native vet ./...",
+      "exit": 0,
+      "seconds": 0.87,
+      "log": "output/stage7/release-acceptance/go-vet.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "go-vendor",
+      "command": "go -C desktop/native test -count=1 ./vendor/github.com/egoist/mygo/ui",
+      "exit": 0,
+      "seconds": 0.24,
+      "log": "output/stage7/release-acceptance/go-vendor.log",
+      "sha256": "796c6b02d4a0058c37d669f19789f042f5ed3347586b193a28931a6e64c68f27"
+    },
+    {
+      "name": "desktop-build",
+      "command": "& ./desktop/native/build.ps1",
+      "exit": 0,
+      "seconds": 0.42,
+      "log": "output/stage7/release-acceptance/desktop-build.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "pty",
+      "command": "python tests/agent/cli-pty.py",
+      "exit": 0,
+      "seconds": 5.29,
+      "log": "output/stage7/release-acceptance/pty.log",
+      "sha256": "a9992e77f059943810de1f4c45b41ff930b1a7d58b0510af3714b0013167852a"
+    },
+    {
+      "name": "benchmark",
+      "command": "& ./tui/node_modules/.bin/tsx.cmd --tsconfig tui/tsconfig.json tui/tests/transcript-bench.tsx",
+      "exit": 0,
+      "seconds": 6.95,
+      "log": "output/stage7/release-acceptance/benchmark.log",
+      "sha256": "d27615003e793aee46fc0ed2d8b6952ed67658d018813853d6189de0592b6840"
+    }
+  ],
+  "protocol_additional_attempts": [
+    {
+      "name": "protocol-retry",
+      "command": "node --test tests/agent/*.test.mjs",
+      "exit": 1,
+      "seconds": 98.38,
+      "log": "output/stage7/release-acceptance/protocol-retry.log",
+      "sha256": "bb2c0df5042fbad8bdcad6133d6942465524420c7f031b6b93a86e920c50b918"
+    },
+    {
+      "name": "protocol-isolated",
+      "command": "node --test tests/agent/*.test.mjs",
+      "exit": 0,
+      "seconds": 83.14,
+      "log": "output/stage7/release-acceptance/protocol-isolated.log",
+      "sha256": "bac629e8592e52df50b29aa0d9a7f1f19377891ec0cfd8d20032b7c5fa479068"
+    }
+  ],
+  "totals": {
+    "eval": {
+      "pass": 60,
+      "total": 60
+    },
+    "scenarios": {
+      "expected": true,
+      "total": 9,
+      "pass": 7
+    },
+    "pty": {
+      "pass": 4,
+      "fail": 0
+    },
+    "rust": {
+      "pass": 226,
+      "ignored": 2
+    },
+    "protocol_final": {
+      "fail": 0,
+      "skip": 3,
+      "pass": 307
+    },
+    "tui": {
+      "pass": 142,
+      "fail": 0
+    }
+  },
+  "benchmark": {
+    "rows": 1200,
+    "updates": 20,
+    "fullTreeMs": 100.276415,
+    "activeTreeMs": 0.23261999999999716,
+    "paste": {
+      "lines": 10000,
+      "rawPromptMs": 194.333035,
+      "foldedPromptMs": 0.020939999999973223,
+      "referenceLength": 9
+    },
+    "node": "v22.22.0",
+    "platform": "win32"
+  },
+  "artifact_sha256": {
+    "desktop": "d2244278b8b2cbc278e834505fec2137d25a1f90d0f2bad1b5a807a38b264ebf",
+    "agent": "ac86eec5f35b39056cf06543b6013f6434d9bdfd34361895f1ec29cc48971a69"
+  },
+  "known_failure": "Earlier protocol attempts failed during concurrent first-open SQLite initialization; final isolated whole-suite run passed. Store::open remains unchanged; this race is not fixed.",
+  "limits": [
+    "Native POSIX PTY not executed",
+    "No manual mouse clipboard acceptance",
+    "No paid live-model language evaluation",
+    "Full CI was run at integration, not before every earlier item commit"
+  ]
+}
