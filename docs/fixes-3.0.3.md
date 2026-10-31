@@ -1253,3 +1253,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 集成回归发现旧R17协议测试禁止text-only截断payload出现工具调用一词。新增行为指引语义不变，措辞改为独立的只读操作，保留旧断言且无需减弱测试。真实provider截断回归通过。
 
+
+### L15 — place budget regression tests after implementation
+
+完整Clippy要求测试模块位于实现之后；移动budget_tests到commands.rs末尾，测试及实现不变。cargo clippy --locked --all-targets -- -D warnings复核通过。
+

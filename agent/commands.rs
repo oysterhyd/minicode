@@ -14,27 +14,6 @@ pub fn restored_budget(store: &Store, session: Option<&str>, explicit: Option<i6
         .unwrap_or(0))
 }
 
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-    #[test]
-    fn l15_old_sessions_missing_and_explicit_zero() {
-        let store = Store::open(":memory:").unwrap();
-        let id = store.create(".", "fake", "fake").unwrap();
-        assert_eq!(restored_budget(&store, Some(&id), None).unwrap(), 0);
-        store
-            .event(
-                &id,
-                "session_start",
-                &json!({"budget":{"max_total_tokens":123}}),
-            )
-            .unwrap();
-        assert_eq!(restored_budget(&store, Some(&id), None).unwrap(), 123);
-        assert_eq!(restored_budget(&store, Some(&id), Some(0)).unwrap(), 0);
-        assert_eq!(restored_budget(&store, Some(&id), Some(37)).unwrap(), 37);
-    }
-}
-
 pub fn skill_argument(arg: &str) -> Result<Option<(bool, &str)>> {
     let words = arg.split_whitespace().collect::<Vec<_>>();
     match words.as_slice() {
@@ -167,4 +146,25 @@ pub fn information(
         _ => unreachable!(),
     };
     Ok(Some(text))
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn l15_old_sessions_missing_and_explicit_zero() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store.create(".", "fake", "fake").unwrap();
+        assert_eq!(restored_budget(&store, Some(&id), None).unwrap(), 0);
+        store
+            .event(
+                &id,
+                "session_start",
+                &json!({"budget":{"max_total_tokens":123}}),
+            )
+            .unwrap();
+        assert_eq!(restored_budget(&store, Some(&id), None).unwrap(), 123);
+        assert_eq!(restored_budget(&store, Some(&id), Some(0)).unwrap(), 0);
+        assert_eq!(restored_budget(&store, Some(&id), Some(37)).unwrap(), 37);
+    }
 }
