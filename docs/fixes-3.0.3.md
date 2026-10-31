@@ -1303,3 +1303,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 默认普通终端模式快捷键帮助指向终端原生回滚；嵌入式旧视口仍显示PgUp/PgDn。保留相同操作语义，避免提示用户用只翻活动区的按键寻找已完成历史。TypeScript构建通过；交互规范同步列出平台按键映射。
 
+
+### T-UI6 — benchmark large pasted input layout
+
+补充可重复基准：transcript-bench.tsx同时测量10000行原始草稿与折叠引用的promptRows布局（各20次），输出JSON；不设依赖硬件的脆弱时间断言，另由input-ui.test.tsx验证完整粘贴/发送路径。具体本机数值见阶段7验收报告与stage7-acceptance.json。
+
