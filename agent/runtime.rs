@@ -57,6 +57,8 @@ impl Settings {
 }
 
 pub struct Snapshot {
+    pub queued_id: Option<String>,
+    pub queue_paused: bool,
     pub session: Option<String>,
     pub run_id: Option<String>,
     pub phase: String,
@@ -71,6 +73,8 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            queued_id: None,
+            queue_paused: false,
             session: None,
             run_id: None,
             phase: "idle".into(),
@@ -1144,6 +1148,39 @@ impl Runtime {
         self.message_revision = Some(self.store.message_revision(&self.session)?);
         Ok(())
     }
+    fn consume_queued(&mut self, item: &Value, hooks: &Hooks) -> Result<()> {
+        let state = hooks.snapshot.lock().unwrap();
+        if state.queue_paused
+            || !self
+                .store
+                .queued_prompts(&self.session)?
+                .iter()
+                .any(|queued| queued["id"] == item["id"])
+        {
+            return Ok(());
+        }
+        let mut content: Vec<Block> =
+            serde_json::from_value(item["attachments"].clone()).unwrap_or_default();
+        content.push(Block::text(util::string(item, "text")?));
+        let message = Message {
+            role: "user".into(),
+            content,
+        };
+        self.message_revision = None;
+        let event = self.store.checkpoint(
+            &self.session,
+            "queue_consumed",
+            &json!({"id":item["id"],"mode":item["mode"]}),
+            Some(&message),
+            None,
+            None,
+        )?;
+        self.messages.push(message);
+        self.message_revision = Some(self.store.message_revision(&self.session)?);
+        drop(state);
+        (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
+        Ok(())
+    }
     pub async fn run(
         &mut self,
         text: Option<String>,
@@ -1297,6 +1334,9 @@ impl Runtime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.running = false;
+            if self.pending {
+                s.queue_paused = true;
+            }
             s.phase = if self.pending { "paused" } else { "idle" }.into();
         }
         if panicked || !failures.is_empty() {
@@ -1382,10 +1422,28 @@ impl Runtime {
         if let Some(text) = text {
             let mut content = attachments;
             content.push(Block::text(text));
-            self.append(Message {
+            let message = Message {
                 role: "user".into(),
                 content,
-            })?;
+            };
+            let queued_id = hooks.snapshot.lock().unwrap().queued_id.clone();
+            if let Some(id) = queued_id {
+                self.message_revision = None;
+                let event = self.store.checkpoint(
+                    &self.session,
+                    "queue_consumed",
+                    &json!({"id":id}),
+                    Some(&message),
+                    None,
+                    None,
+                )?;
+                self.messages.push(message);
+                self.message_revision = Some(self.store.message_revision(&self.session)?);
+                hooks.snapshot.lock().unwrap().queued_id = None;
+                (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
+            } else {
+                self.append(message)?;
+            }
             self.pending = true;
             if let Some(goal) = &mut self.goal {
                 goal.attempts = 0;
@@ -1994,6 +2052,16 @@ impl Runtime {
                 role: "user".into(),
                 content: results,
             })?;
+            Self::check(hooks)?;
+            for queued in self
+                .store
+                .queued_prompts(&self.session)?
+                .into_iter()
+                .filter(|item| item["mode"] == "steer")
+            {
+                Self::check(hooks)?;
+                self.consume_queued(&queued, hooks)?;
+            }
             self.sync_dynamic_context().await?;
             self.event(hooks, "round_end", json!({"round":self.rounds}))?;
             if self.child && self.submitted_result.is_some() {

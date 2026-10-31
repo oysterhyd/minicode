@@ -40,6 +40,7 @@ pub const CAPABILITIES: &[&str] = &[
     "asyncStart",
     "sessionSubscriptions",
     "fileCompletion",
+    "messageQueue",
 ];
 pub struct Conversation {
     pub settings: Arc<Mutex<Settings>>,
@@ -436,47 +437,101 @@ impl Router {
         }
         let task_run_id = run_id.clone();
         let driver = tokio::runtime::Handle::current();
+        let store = self.store.clone();
+        let base_sink = self.event_sink(&c.listeners);
         c.running = Some(tokio::task::spawn_blocking(move || {
             driver.block_on(async move {
-                // Runtime::run catches panics in its loop; this guard covers a
-                // panic anywhere else in the run so the session never stays
-                // "running" and its jobs and MCP servers are stopped.
-                let run = std::panic::AssertUnwindSafe(async {
-                    let mut r = runtime.lock().await;
-                    r.run(text, attachments, hooks.clone()).await
-                })
-                .catch_unwind()
-                .await;
-                let error = match run {
-                    Ok(Ok(result)) => {
+                let mut hooks = hooks;
+                let mut current_run = task_run_id;
+                let mut text = text;
+                let mut attachments = attachments;
+                loop {
+                    let event_sink = base_sink.clone();
+                    let event_run = current_run.clone();
+                    hooks.sink = Arc::new(move |mut event| {
+                        event["runId"] = json!(event_run);
+                        event_sink(event);
+                    });
+                    let sink = hooks.sink.clone();
+                    let run = std::panic::AssertUnwindSafe(async {
+                        let mut runtime = runtime.lock().await;
+                        runtime
+                            .run(text.take(), std::mem::take(&mut attachments), hooks.clone())
+                            .await
+                    })
+                    .catch_unwind()
+                    .await;
+                    let result = match run {
+                        Ok(Ok(result)) => result,
+                        failure => {
+                            hooks.cancel.cancel();
+                            let runtime = runtime.lock().await;
+                            let _ = runtime.close_resources(&hooks).await;
+                            runtime.mcp.close().await;
+                            hooks
+                                .approvals
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clear();
+                            let error = match failure {
+                                Ok(Err(error)) => error.to_string(),
+                                Err(panic) => {
+                                    format!("internal panic: {}", util::panic_message(&*panic))
+                                }
+                                _ => unreachable!(),
+                            };
+                            let mut state = hooks
+                                .snapshot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if state.run_id.as_deref() == Some(&current_run) {
+                                state.running = false;
+                                state.pending = true;
+                                state.queue_paused = true;
+                                state.queued_id = None;
+                                state.phase = "paused".into();
+                            }
+                            drop(state);
+                            sink(json!({"event":"run_error","sessionId":session,"error":error}));
+                            return;
+                        }
+                    };
+                    let next = if result.exit_reason == "completed"
+                        && !hooks.cancel.is_cancelled()
+                        && !hooks.snapshot.lock().unwrap().queue_paused
+                    {
+                        store
+                            .queued_prompts(&session)
+                            .ok()
+                            .and_then(|items| items.into_iter().next())
+                    } else {
+                        None
+                    };
+                    if let Some(next) = next {
+                        let mut state = hooks.snapshot.lock().unwrap();
+                        if state.run_id.as_deref() != Some(&current_run) {
+                            drop(state);
+                            sink(json!({"event":"run_done","sessionId":session,"result":result}));
+                            return;
+                        }
+                        current_run = util::id();
+                        state.run_id = Some(current_run.clone());
+                        state.queued_id = next["id"].as_str().map(str::to_string);
+                        state.running = true;
+                        state.phase = "preparing".into();
+                        drop(state);
+                        sink(json!({"event":"run_done","sessionId":session,"result":result}));
+                        base_sink(
+                            json!({"event":"run_started","sessionId":session,"runId":current_run}),
+                        );
+                        text = next["text"].as_str().map(str::to_string);
+                        attachments =
+                            serde_json::from_value(next["attachments"].clone()).unwrap_or_default();
+                    } else {
                         sink(json!({"event":"run_done","sessionId":session,"result":result}));
                         return;
                     }
-                    Ok(Err(error)) => error.to_string(),
-                    Err(panic) => {
-                        hooks.cancel.cancel();
-                        let r = runtime.lock().await;
-                        let _ = r.close_resources(&hooks).await;
-                        r.mcp.close().await;
-                        hooks
-                            .approvals
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clear();
-                        format!("internal panic: {}", util::panic_message(&*panic))
-                    }
-                };
-                let mut s = hooks
-                    .snapshot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if s.run_id.as_deref() == Some(&task_run_id) {
-                    s.running = false;
-                    s.pending = true;
-                    s.phase = "paused".into();
                 }
-                drop(s);
-                sink(json!({"event":"run_error","sessionId":session,"error":error}));
             })
         }));
         Ok(json!({"sessionId":returned_session,"runId":run_id}))
@@ -670,6 +725,65 @@ impl Router {
                 .or_else(|| routes.clients.get(&key).cloned())
         };
         let mut owner = { lookup(&self.routes.read().unwrap()) };
+        if ["enqueuePrompt", "listQueue", "deleteQueuedPrompt"].contains(&method) {
+            let owner = owner.as_ref().context("请先开始或恢复会话")?;
+            let mut snapshot = owner.snapshot.lock().unwrap();
+            let id = snapshot.session.clone().context("请先开始或恢复会话")?;
+            if session.is_some_and(|requested| requested != id) {
+                bail!("会话不匹配");
+            }
+            let queue = self.store.queued_prompts(&id)?;
+            if method == "listQueue" {
+                return Ok(json!(queue));
+            }
+            let result = if method == "deleteQueuedPrompt" {
+                let queued_id = util::string(params, "id")?;
+                if snapshot.queued_id.as_deref() == Some(queued_id) {
+                    return Ok(json!(false));
+                }
+                if !queue.iter().any(|item| item["id"] == queued_id) {
+                    return Ok(json!(false));
+                }
+                self.store
+                    .event(&id, "queue_deleted", &json!({"id":queued_id}))?;
+                json!(true)
+            } else {
+                let mode = params["mode"].as_str().unwrap_or("followUp");
+                if !["steer", "followUp"].contains(&mode) {
+                    bail!("mode must be steer or followUp");
+                }
+                let text = util::string(params, "text")?.trim();
+                if text.is_empty() {
+                    bail!("请输入任务内容");
+                }
+                if queue.len() >= 100 {
+                    bail!("队列最多100条消息");
+                }
+                let assets = Attachments {
+                    root: self.store.root().join("attachments"),
+                };
+                let blocks = params["attachments"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|file| assets.get(util::string(file, "asset_id")?))
+                    .collect::<Result<Vec<_>>>()?;
+                if blocks.len() > 10 {
+                    bail!("附件超过10个");
+                }
+                let item = json!({"id":util::id(),"mode":mode,"text":text,"attachments":blocks});
+                self.store.event(&id, "prompt_queued", &item)?;
+                if !snapshot.running {
+                    snapshot.queue_paused = true;
+                }
+                item
+            };
+            let queued = self.store.queued_prompts(&id)?;
+            (self.event_sink(&owner.listeners))(
+                json!({"event":"queue_changed","sessionId":id,"queue":queued,"paused":!snapshot.running}),
+            );
+            return Ok(result);
+        }
         if ["cancelTurn", "resolveApproval"].contains(&method) {
             let Some(owner) = owner else {
                 return Ok(json!(false));
@@ -1086,10 +1200,17 @@ impl Router {
                     .take(50_000)
                     .filter_map(Result::ok)
                     .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-                    .filter_map(|entry| entry.path().strip_prefix(&workspace).ok().map(|path| path.to_string_lossy().replace('\\', "/")))
+                    .filter_map(|entry| {
+                        entry
+                            .path()
+                            .strip_prefix(&workspace)
+                            .ok()
+                            .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    })
                     .filter(|path| path.to_lowercase().contains(&query))
                     .collect::<Vec<_>>();
-                files.sort(); files.truncate(200);
+                files.sort();
+                files.truncate(200);
                 Ok(json!(files))
             }
             "readArtifact" => store.artifact_page(
@@ -1508,6 +1629,38 @@ impl Router {
                     c.settings.lock().unwrap().model = model;
                 }
                 self.start(c, Some(text), blocks).await
+            }
+            "resumeQueue" => {
+                if c.busy() {
+                    bail!("当前任务仍在运行");
+                }
+                let workspace = Self::workspace(p)?;
+                self.ensure(c, &workspace, p["sessionId"].as_str(), None)
+                    .await?;
+                let id = c
+                    .snapshot
+                    .lock()
+                    .unwrap()
+                    .session
+                    .clone()
+                    .context("没有会话")?;
+                let next = self
+                    .store
+                    .queued_prompts(&id)?
+                    .into_iter()
+                    .next()
+                    .context("队列为空")?;
+                {
+                    let mut state = c.snapshot.lock().unwrap();
+                    state.queue_paused = false;
+                    state.queued_id = next["id"].as_str().map(str::to_string);
+                }
+                self.start(
+                    c,
+                    next["text"].as_str().map(str::to_string),
+                    serde_json::from_value(next["attachments"].clone())?,
+                )
+                .await
             }
             "runSlash" => self.slash(c, p).await,
             _ => bail!("未知请求：{method}"),

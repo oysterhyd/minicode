@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {fixture} from './helpers.mjs'
+test('B6 server accepts steer during tool approval and runs follow-up after completion', async t => {
+  const f = await fixture(t, [{tool_calls:[{id:'edit',name:'write',arguments:{path:'new.txt',content:'ok'}}]}, {text:'steered'}, {text:'followed'}])
+  const run = await f.request('sendPrompt', {workspace:f.workspace,model:'fake',text:'first'})
+  const approval = await f.wait(e => e.event === 'approval')
+  const steer = await f.request('enqueuePrompt', {sessionId:run.sessionId,mode:'steer',text:'change direction'})
+  const follow = await f.request('enqueuePrompt', {sessionId:run.sessionId,mode:'followUp',text:'then follow'})
+  assert.notEqual(steer.id, follow.id)
+  assert.equal((await f.request('listQueue', {sessionId:run.sessionId})).length, 2)
+  await f.request('resolveApproval', {sessionId:run.sessionId,approvalId:approval.approvalId,granted:true})
+  await f.wait(e => e.event === 'run_done' && e.runId !== run.runId)
+  const detail = await f.request('getSession', {sessionId:run.sessionId})
+  const texts = detail.messages.flatMap(m => m.content.filter(b=>b.type==='text').map(b=>b.text))
+  assert.equal(texts.filter(s=>s==='change direction').length, 1)
+  assert.equal(texts.filter(s=>s==='then follow').length, 1)
+  assert.deepEqual(await f.request('listQueue', {sessionId:run.sessionId}), [])
+  const injected = detail.events.find(e => e.type === 'queue_consumed' && e.data.id === steer.id)
+  const tool = detail.events.find(e => e.type === 'tool_call_result')
+  assert.ok(injected.seq > tool.seq)
+})
+test('B6 cancellation retains queued input and deletion is explicit', async t => {
+  const f = await fixture(t, [{tool_calls:[{id:'a',name:'write',arguments:{path:'x',content:'x'}}]}])
+  const run = await f.request('sendPrompt', {workspace:f.workspace,model:'fake',text:'first'})
+  await f.wait(e => e.event === 'approval')
+  const queued = await f.request('enqueuePrompt', {sessionId:run.sessionId,mode:'steer',text:'keep me'})
+  await f.request('cancelTurn', {sessionId:run.sessionId})
+  await f.wait(e=>e.event==='run_done')
+  assert.equal((await f.request('listQueue', {sessionId:run.sessionId}))[0].id, queued.id)
+  assert.equal(await f.request('deleteQueuedPrompt', {sessionId:run.sessionId,id:queued.id}), true)
+  assert.deepEqual(await f.request('listQueue', {sessionId:run.sessionId}), [])
+})

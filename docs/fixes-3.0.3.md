@@ -1128,3 +1128,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：StatusLine 固定模型/effort/context。修复：MINICODE_STATUS_FIELDS 逗号配置 model,effort,context,turns,budget,cost,branch,elapsed，默认保留既有三字段，缺失费用/分支明确不可用，窄屏按显示宽度截断。统计复用AgentState，耗时复用run开始时间。回归：status-fields.test.ts 缺失、未知字段与自定义组合，先失败后通过。状态：已修复（当前服务端无定价则费用不可用，不推算虚构价格）。
 
+
+### B6 — persist steering and follow-up queues
+
+核查：sendPrompt忙时拒绝，无服务端队列。修复：可选messageQueue能力；enqueuePrompt/listQueue/deleteQueuedPrompt/resumeQueue，最多100条；接受/消费/删除持久化事件。steer在工具结果后原子提交用户消息+queue_consumed；正常结束自动链式followUp，无工具边界的steer转下一run。每run独立ID；取消/失败暂停保留队列。旧sendPrompt拒绝忙时行为保留。回归：queue.test.mjs 真实Bridge审批边界、消费顺序/一次执行、followUp自动启动、取消保留与删除，先失败后通过。状态：部分完成（跨进程恢复与删除/消费并发测试需补齐）。
+

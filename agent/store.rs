@@ -412,6 +412,13 @@ impl Store {
     pub fn saved_budget(&self, id: &str) -> Result<Option<i64>> {
         self.with(|c| Ok(c.query_row("SELECT json_extract(data,'$.budget.max_total_tokens') FROM events WHERE session_id=? AND type IN ('budget_changed','session_start') ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).optional()?.flatten()))
     }
+    pub fn queued_prompts(&self, id: &str) -> Result<Vec<Value>> {
+        self.with(|c| {
+            let mut query = c.prepare("SELECT q.data FROM events q WHERE q.session_id=? AND q.type='prompt_queued' AND NOT EXISTS (SELECT 1 FROM events d WHERE d.session_id=q.session_id AND d.type IN ('queue_consumed','queue_deleted') AND json_extract(d.data,'$.id')=json_extract(q.data,'$.id')) ORDER BY q.seq")?;
+            let rows = query.query_map([id], |r| r.get::<_, String>(0))?;
+            rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        })
+    }
     pub fn replace_messages(&self, id: &str, messages: &[Message]) -> Result<()> {
         let (id, messages) = (id.to_owned(), messages.to_vec());
         self.transaction(move |c| {
