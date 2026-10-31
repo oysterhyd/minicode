@@ -1042,7 +1042,7 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 | R26 | 已修复 | `49ae077` | `permissions.rs`、`settings_file.rs`、runtime/tools/bridge/CLI 与 TUI/Desktop 审批：分层规则、deny 优先、命令/文件/MCP 范围、保守复合命令、单次/会话/项目授权；`permissions.test.mjs`、模块及客户端审批测试。 |
 | SEC2 | 已修复 | `21aad6e` | `sandbox.rs`、`sandbox_windows.rs`、runtime/tools/CLI：真实 OS 沙箱、强制隔离可写 child、独立不可记住的高危确认；`sandbox.test.mjs` 的 Windows 实机文件、TCP、环境、后台 PID 和 child 测试全部通过。 |
 | C1 | 已修复 | `432a593` | `credentials.rs`、`configuration.rs`、provider/bridge、Linux CI 启动脚本：OS 凭据存储、回读验证后迁移、无明文回退；Rust 迁移/失败保留测试和 `credentials.test.mjs` 的重启认证、换 Key、伪造引用/损坏拒绝。 |
-| C2 | 已修复 | `45b2cf5` | `configuration.rs`、`settings_file.rs`、bridge/extensions、Desktop 类型/编辑：完整事务锁、version CAS、条目 revision、一次写入；`configuration.rs::tests` 和 `config-transactions.test.mjs` 覆盖锁等待、失败/panic 恢复和两进程保留全部修改。测试布局复核见下文。 |
+| C2 | 已修复 | `45b2cf5`、`1f7ff32` | `configuration.rs`、`settings_file.rs`、bridge/extensions、Desktop 类型/编辑：完整事务锁、version CAS、条目 revision、一次写入；`configuration.rs::tests` 和 `config-transactions.test.mjs` 覆盖锁等待、失败/panic 恢复和两进程保留全部修改。测试布局复核见下文。 |
 | C3 | 已修复 | `0bca0c7` | configuration/provider/bridge/CLI、Desktop settings/fixture/localization：删除自动第三方读取，先披露后确认，统一安全存储；`credential-import.test.mjs`、`desktop/native/credential_import_test.go`，并已查看实际界面预览。 |
 
 ### 最终测试与评测证据
