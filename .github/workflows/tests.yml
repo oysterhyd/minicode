@@ -39,6 +39,7 @@ jobs:
           MINICODE_AGENT: ${{ github.workspace }}/target/debug/minicode${{ runner.os == 'Windows' && '.exe' || '' }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
+          node scripts/check-doc-paths.mjs
           node --test tests/agent/*.test.mjs
           node evals/generate-tasks.mjs --verify
           node evals/scenarios/generate-trace.mjs

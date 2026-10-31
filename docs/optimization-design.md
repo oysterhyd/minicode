@@ -1,7 +1,7 @@
 # minicode 探索与优化方案
 
 > 日期：2026-09-22。代码基线：`2572fb0`。
-> 状态：设计基线；§7 的 A–D 阶段及后续稳定性迭代已实现。具体边界见 §10。
+> 状态：历史设计（Python 基线），不代表 3.0.3 当前实现。当前入口映射见 §2；功能与验证以 [README](../README.md)、[架构说明](architecture.md)、[修复记录](fixes-3.0.3.md) 为准。
 > 阅读范围：README、原始 plan、架构说明，以及 CLI、Runtime、Provider、工具、上下文、
 > 存储、任务、TUI 和相关测试。没有调用真实模型，也没有测量真实网关的缓存收益。
 
@@ -19,20 +19,22 @@
 继续使用 Python、asyncio、SQLite 作为 Agent Runtime；终端 UI 使用 React + Ink。现有问题不足以支持把 loop / tools / 存储 / MCP 重写成 TypeScript。
 或立即建设插件市场。多代理也应通过可并行任务上的实测决定是否继续扩展。
 
-## 2. 现状与代码阅读入口
+## 2. 历史能力描述与当前入口映射
+
+本表链接已映射到 Rust 文件；函数名和能力描述保留设计当时的观察，不应用作当前功能清单。Task 工具现已通过 tools::execute 接入 Store 的依赖/认领/完成接口；当前评测支持真实模型与重复运行，历史实测见 [2026-09-23 报告](evaluation-20260923.md)。
 
 | 阅读顺序 | 入口 | 已实现能力及边界 |
 | --- | --- | --- |
-| 1 | [cli.py](../src/minicode/cli.py)：`_build_services`、`_new_runtime` | 装配工具、权限、归档、后台命令和可选验收；前端还承担 provider 选择与 REPL 命令 |
-| 2 | [core/models.py](../src/minicode/core/models.py) | 消息、工具调用/结果、Usage、预算、事件和退出原因；消息目前是文本及工具块 |
-| 3 | [runtime/loop.py](../src/minicode/runtime/loop.py)：`run_turn` | 流式调用模型、串行工具、结果回填、压缩、验收与收尾 |
-| 4 | [tools/registry.py](../src/minicode/tools/registry.py) | 注册 read、bash、edit、write、ls、grep 六个工具；没有子代理或归档读取工具 |
-| 5 | [context/compact.py](../src/minicode/context/compact.py) | 确定性归档、缩短结果、结构化摘要；配对保护已有，约束保留和超限兜底不足 |
-| 6 | [providers/commandcode.py](../src/minicode/providers/commandcode.py)、[Anthropic 适配器](../src/minicode/providers/anthropic_provider.py) | 两种真实 provider；缓存 usage 解析已有，策略和记账尚不完整 |
-| 7 | [storage/sqlite_store.py](../src/minicode/storage/sqlite_store.py)、[artifacts.py](../src/minicode/storage/artifacts.py) | 消息、事件、会话及验收基线；压缩会替换消息表，输出归档有宿主读取接口 |
-| 8 | [tasks/taskstore.py](../src/minicode/tasks/taskstore.py)、[background.py](../src/minicode/tasks/background.py) | 依赖/事务认领是独立模块；后台命令已接入且随用户回合结束清理 |
+| 1 | [cli.py](../agent/cli.rs)：`_build_services`、`_new_runtime` | 装配工具、权限、归档、后台命令和可选验收；前端还承担 provider 选择与 REPL 命令 |
+| 2 | [core/models.py](../agent/models.rs) | 消息、工具调用/结果、Usage、预算、事件和退出原因；消息目前是文本及工具块 |
+| 3 | [runtime/loop.py](../agent/runtime.rs)：`run_turn` | 流式调用模型、串行工具、结果回填、压缩、验收与收尾 |
+| 4 | [tools/registry.py](../agent/tools.rs) | 注册 read、bash、edit、write、ls、grep 六个工具；没有子代理或归档读取工具 |
+| 5 | [context/compact.py](../agent/context.rs) | 确定性归档、缩短结果、结构化摘要；配对保护已有，约束保留和超限兜底不足 |
+| 6 | [providers/commandcode.py](../agent/provider.rs)、[Anthropic 适配器](../agent/provider.rs) | 两种真实 provider；缓存 usage 解析已有，策略和记账尚不完整 |
+| 7 | [storage/sqlite_store.py](../agent/store.rs)、[artifacts.py](../agent/store.rs) | 消息、事件、会话及验收基线；压缩会替换消息表，输出归档有宿主读取接口 |
+| 8 | [tasks/taskstore.py](../agent/store.rs)、[background.py](../agent/background.rs) | 依赖/事务认领是独立模块；后台命令已接入且随用户回合结束清理 |
 | 9 | [tui/](../tui/) | React + Ink transcript：用户盒、工具一行、底部 Prompt、inline 审批 |
-| 10 | [evals/run_eval.py](../evals/run_eval.py) | 20 个 FakeProvider 任务；b1=b0，b2 是 runner 外层验收续跑 |
+| 10 | [agent/eval.rs](../agent/eval.rs) | 20 个 FakeProvider 任务；b1=b0，b2 是 runner 外层验收续跑 |
 
 基线时 Subagents、Skills、MCP、Plugins 均为空缺；当前已实现 C 阶段的本地 Skills 与单层只读子任务。`TaskStore` 的存在不代表已有任务调度，
 `ArtifactStore.read` 的存在也不代表模型可以回读归档。原 README 对这些能力存在过度描述，

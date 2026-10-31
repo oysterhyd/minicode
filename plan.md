@@ -1,6 +1,6 @@
 # Mini Claude Code 项目方案
 
-> 原始日期：2026-09-07；状态核对：2026-09-23（对应提交 `9494137`）。本文件保留最初的设计目标、阶段划分与验收设想，不是当前功能清单；里程碑实际进度见 §8。
+> 原始日期：2026-09-07；状态核对：2026-09-23（对应提交 `9494137`）。本文件保留最初的设计目标、阶段划分与验收设想，不是当前功能清单；§8 是 2026-09-23 历史快照；下列差异已于 3.0.3 核对。
 > 基于本地 `learn-claude-code/` 新版 s01–s17 教学主线制定。以下工期、指标及尚未落地的机制均为计划，不代表已有成果。
 > 当前实际实现以 [README](README.md)、[架构说明](docs/architecture.md) 为准；后续建议见 [探索与优化方案](docs/optimization-design.md)。
 
@@ -9,9 +9,9 @@
 - P0 最小闭环与 P1 的分层压缩与归档、会话恢复、Goal 验收、后台命令、20 任务离线评测、HTML 报告、终端 TUI 均已实现。当前 TUI 已迁移至 React + Ink，旧实现已移除。
 - 优化方案 A–D 阶段（可靠上下文与测量、TUI 与有界只读并发、项目指令 / Skills / 一层只读子任务、stdio MCP 与本地 Plugins）已实现。
 - 模型回读入口已提供：`read_artifact` 按字符 offset/limit 分页读取本会话归档，不再只是“原文保留”。
-- 任务依赖存储 `TaskStore` 有独立实现和测试，但未接入 Runtime 或交互入口，不能视为已有任务图调度。
-- 离线评测为 FakeProvider 脚本重放，b1 已接入分层压缩与归档；b2 是 runner 外层验收续跑，未装配运行时 Goal 门。每任务只运行一次，尚未完成下文设计的真实模型消融与重复运行。
-- 项目长期记忆、多 worker worktree 协作、可续跑 workflow、定时任务与 Web 界面仍未提供；ADR、失败复盘与 CI 尚未落地（见 §8 与 §10）。
+- 任务依赖/事务认领已通过 `agent/tools.rs` 的 task_create / task_claim / task_complete / task_list 接入 `agent/store.rs` 和 Runtime 工具循环；这不等同于自动多 worker 调度。
+- CI 保留 FakeProvider 离线脚本回放：B1 加压缩，B2 加宿主验收失败续跑。`agent/eval.rs` 已有真实模型与 --repeats / --schedule 入口；[历史真实模型评测](docs/evaluation-20260923.md) 有单模型 120 次运行，不能将 CI 单次回放误认为全部评测。多模型与机制消融见 [评测说明](evals/README.md)。
+- 项目长期记忆、多 worker worktree 协作、可续跑 workflow、定时任务与 Web 界面仍未提供；原方案的 ADR 与作品集材料另见 §8 与 §10（历史）；CI 已有 `.github/workflows/tests.yml`，故障记录见 `docs/fixes-3.0.3.md`。
 
 ## 1. 项目定位与范围
 
@@ -193,6 +193,7 @@ SQLite 保存消息、工具执行记录、预算和验收状态；大产物先�
 
 以下目录为未来实现建议；现有教学目录保留为阅读参考，不直接修改其源码。
 
+<!-- historical-paths:start -->
 ```text
 miniclaudecode/
 ├── plan.md
@@ -215,6 +216,7 @@ miniclaudecode/
 ├── examples/                  # 演示仓库、任务与录屏脚本
 └── docs/                      # 架构、ADR、评测结果、故障复盘
 ```
+<!-- historical-paths:end -->
 下列 CLI 已在实现中落地；实际可用命令与选项以 [README](README.md) 为准（`eval` 实际使用 `--tasks-dir` / `--task` / `--baselines`，无 `--suite`）：
 规划中的 CLI（实现前不应宣称已经可运行）：
 
@@ -230,7 +232,9 @@ minicode eval --suite core --output ./reports
 
 一次执行依次呈现：目标与工作区 → 工具动作和必要审批 → 测试状态 → 最终 diff 摘要与证据 → 用量及停止原因。默认只展示关键进度，详细事件写入报告。报告展示可观察动作和结果，不以获取或展示模型隐藏思维链为目标。
 
-## 8. 实施里程碑与验收
+## 8. 实施里程碑与验收（历史快照）
+
+本节保留原里程碑状态，不是当前缺口清单。真实模型的单模型重复评测已见 [实测报告](docs/evaluation-20260923.md)；当前实现与 CI 以 README 为准。
 
 | 阶段 | 工期与内容 | 完成标准 | 实际状态（2026-09-23） |
 | --- | --- | --- | --- |
@@ -238,7 +242,7 @@ minicode eval --suite core --output ./reports
 | M1：最小编码闭环 | 第 1 周后半–第 2 周；CLI、真实 Provider、基础工具、权限、预算、取消 | 完成至少一个真实修复任务并留下 trace；越界拒绝、命令超时、错误回填有测试 | **已完成**。`cli.py` 提供 run / chat；provider 为 CommandCode、Anthropic、Fake 三种；内置工具 `read`/`bash`/`edit`/`write`/`ls`/`grep`/`read_artifact`；ALLOW/ASK/DENY 权限门、命令超时、错误回填均有测试。离线端到端修复任务可复现；**真实模型修复任务尚未记录 trace**。 |
 | M2：状态与恢复 | 第 3 周；SQLite、产物、恢复、结构化报告 | 注入三类崩溃后恢复符合规则；未知副作用不自动重放；旧结果可追溯 | **已完成（机制层）**。SQLite schema v4 持久化消息/事件/用量；`ArtifactStore` 归档；`resume` + `/continue`；只读悬空调用重执行、写与 Shell 标记 `SIDE_EFFECT_UNKNOWN` 不重放，见 `tests/test_runtime_p1.py`、`tests/test_runtime_regressions.py`。**尚缺**：按 §6.3 三处崩溃点（执行前 / 落库前 / 落库后）的系统性注入测试集。 |
 | M3：长任务与验收 | 第 4 周；上下文压缩、Goal、证据失效 | 长日志任务可继续；工具配对不破坏；模型自述“通过”不能绕过真实验收 | **已完成**。四步分层压缩（归档 → 交互组归档 → 缩短旧结果 → 结构化摘要）保留 tool_use/tool_result 配对与用户约束；`goals/` 三类检查项 + `EvidenceLedger` 绑定工作区指纹，代码变更即失效；`--acceptance` 下模型自述不跳过验收，见 `tests/test_goals.py`。 |
-| M4：受控任务执行 | 第 5 周；任务图、后台命令 | 依赖与认领测试通过；取消传递有效 | **部分完成**。后台命令已接入 Runtime（job id、完成事件、暂停/取消终止进程树、`BACKGROUND_JOB_LOST`）；取消沿父子链传递。`TaskStore` 的依赖与事务认领有实现和测试，但**未接入 Runtime**，取消传递仅在子任务层验证。 |
+| M4：受控任务执行 | 第 5 周；任务图、后台命令 | 依赖与认领测试通过；取消传递有效 | **部分完成**。后台命令已接入 Runtime（job id、完成事件、暂停/取消终止进程树、`BACKGROUND_JOB_LOST`）；取消沿父子链传递。`TaskStore` 的依赖与事务认领有实现和测试，此处为历史状态；3.0.3 已通过 `agent/tools.rs` 接入 Runtime，取消传递和后台清理另有回归测试。 |
 | M5：面试展示版 | 第 6 周；20 个任务、对照评测、HTML 报告、README、录屏 | 新环境按文档可复现；发布真实结果及失败样例；演示有离线回放备份 | **未完成**。已具备：20 任务离线评测集、HTML 报告、完整 README、FakeProvider 离线回放。**缺口**：真实模型对照评测（每任务 ≥3 次重复）、失败样例记录、录屏、ADR 与失败复盘。 |
 | M6：差异化扩展 | 第 7–8 周；选择真实 MCP，加 Skills，或深化 worktree/workflow | 所选功能有真实端到端案例与失败测试，明确未实现范围 | **大部分完成**。MCP 采用官方 Python SDK 2.2.0 接入本地 stdio server，工具注册为 `mcp__server__tool`；Skills 与项目指令按需加载；本地 Plugins 支持版本、指纹与锁文件。**未完成**：worktree / workflow 方向未启动；MCP 仅本地 stdio，无 Resources/Prompts、远程 HTTP、OAuth。 |
 

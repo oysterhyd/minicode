@@ -1361,3 +1361,10 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 最终Rust226通过/2忽略，TUI142通过，Windows原生ConPTY4通过，Go测试/vet/vendor与Desktop构建通过；离线任务60/60，场景7/9符合预期基线。协议最后独立整轮307通过/3跳过；之前两个整轮分别3项、1项因既有首次建库竞争失败，日志保留，不声称已修复该竞争。1200条树渲染100.276415ms→0.232620ms；10000行输入布局194.333035ms→0.020940ms，仅代表隔离布局基准。
 
 保留G3/G4/S3边界；Desktop文件树继续用原有全量缓存，TUI用共享listFiles；图片通过路径导入；无定价不编造费用。Linux/macOS原生PTY、真实鼠标复制与付费模型语言表现未在本机验证。每项进行了定向回归，但早期历史提交前未逐次重复完整CI，完整检查集中在集成阶段，这一过程差异如实记录。未push/建PR，两份原始.pending用户文件未改动。
+
+
+### E2 — mark historical plans and verify source references (8A)
+
+核查：两份设计文档引用已删除的 src/minicode 和 evals/run_eval.py；plan.md 的当前差异与 M4 仍声称 TaskStore 未接 Runtime，并误导读者把离线 CI 当成全部评测。当前 task 工具已在 agent/tools.rs 接入 Store。修复：明确历史快照范围、映射 Rust/Ink 当前入口、更新任务与真实评测状态；旧目录树仅在显式 historical-paths 块内保留。新增 scripts/check-doc-paths.mjs，校验这三份设计文档的链接与内联代码路径，CI 显式运行。
+
+测试：tests/agent/doc-paths.test.mjs 先复现缺检查入口，检查器再对原文报出旧路径/缺失链接；修复后覆盖有效路径、失效链接、失效内联路径和显式历史块。完整 CI 结果见 output/stage8a-e2/。

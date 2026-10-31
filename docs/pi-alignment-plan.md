@@ -1,7 +1,7 @@
 # minicode 对齐 Pi Agent 的工具输出与运行预算方案
 
 > 日期：2026-09-23  
-> 状态：方案，尚未实施  
+> 状态：历史方案（Python 基线），下文“当前行为”和“尚未实施”只指当时版本；3.0.3 的实际行为见 [README](../README.md) 与 [修复记录](fixes-3.0.3.md)  
 > 范围：文件读取、搜索、列目录、命令输出、TUI 展示、上下文压缩和子代理预算
 
 ## 目标
@@ -54,6 +54,6 @@
 ## 参考实现与代码位置
 
 - Pi Agent：[文本截断规则](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/truncate.ts)、[read](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/read.ts)、[grep](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/grep.ts)、[ls](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/ls.ts)、[bash](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/bash.ts)、[上下文压缩说明](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/compaction.md)。
-- minicode：`src/minicode/tools/base.py`、`files.py`、`search.py`、`command.py`；`src/minicode/runtime/loop.py`；`src/minicode/context/compact.py`、`estimate.py`；`src/minicode/core/models.py`、`catalog.py`；`src/minicode/ui/app.py`。
+- 当前 Rust/Ink 入口：`agent/tools.rs`、`agent/paging.rs`、`agent/runtime.rs`、`agent/context.rs`、`agent/models.rs`、`agent/configuration.rs`、`tui/src/App.tsx`。
 
 本文件只记录方案；代码、配置和测试尚未修改。
