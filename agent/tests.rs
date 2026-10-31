@@ -2141,6 +2141,7 @@ impl Harness {
             effort: "off".into(),
             mode: "bypass".into(),
             budget: crate::models::Budget::default(),
+            token_budget_override: None,
             acceptance: None,
             always_allow: Default::default(),
             pending_model: false,

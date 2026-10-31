@@ -123,8 +123,8 @@ struct RunOptions {
     script: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
     max_rounds: u64,
-    #[arg(long, default_value_t = 0)]
-    max_tokens: i64,
+    #[arg(long)]
+    max_tokens: Option<i64>,
     #[arg(long, default_value_t = 0.0)]
     max_seconds: f64,
     #[arg(long)]
@@ -474,22 +474,13 @@ async fn prepare(
     settings.mode = if options.yes { "bypass" } else { "default" }.into();
     settings.budget = Budget {
         max_rounds: options.max_rounds,
-        max_total_tokens: options.max_tokens,
+        max_total_tokens: options.max_tokens.unwrap_or(0),
         max_seconds: options.max_seconds,
     };
     settings.acceptance = options.acceptance.clone();
-    if let Some(id) = session
-        && settings.budget.max_total_tokens == 0
-        && let Some(saved) = store
-            .events(id, -1)?
-            .iter()
-            .rev()
-            .find(|e| ["budget_changed", "session_start"].contains(&e.r#type.as_str()))
-    {
-        settings.budget.max_total_tokens = saved.data["budget"]["max_total_tokens"]
-            .as_i64()
-            .unwrap_or(0);
-    }
+    settings.token_budget_override = options.max_tokens;
+    settings.budget.max_total_tokens =
+        crate::commands::restored_budget(store, session, settings.token_budget_override)?;
     let mut runtime = Runtime::new(
         &workspace,
         &settings.model,
@@ -853,17 +844,11 @@ async fn chat_command(
                 .unwrap_or(runtime.workspace.clone());
             if let Some(summary) = &summary {
                 settings.model = util::string(summary, "model")?.into();
-                if let Some(saved) = runtime
-                    .store
-                    .events(session.as_deref().unwrap(), -1)?
-                    .iter()
-                    .rev()
-                    .find(|e| ["budget_changed", "session_start"].contains(&e.r#type.as_str()))
-                {
-                    settings.budget.max_total_tokens = saved.data["budget"]["max_total_tokens"]
-                        .as_i64()
-                        .unwrap_or(0);
-                }
+                settings.budget.max_total_tokens = crate::commands::restored_budget(
+                    &runtime.store,
+                    session.as_deref(),
+                    settings.token_budget_override,
+                )?;
             }
             let mut next = Runtime::new(
                 &workspace,
@@ -1175,7 +1160,7 @@ async fn review(
         model: Some(model.into()),
         provider: "auto".into(),
         max_rounds: 8,
-        max_tokens: 80_000,
+        max_tokens: Some(80_000),
         max_seconds: 300.0,
         ..RunOptions::default()
     };
@@ -1251,5 +1236,40 @@ mod stage7_tests {
     #[test]
     fn l1_no_subcommand_is_accepted() {
         assert!(Cli::try_parse_from(["minicode"]).is_ok());
+    }
+    #[tokio::test]
+    async fn l15_resume_keeps_explicit_cli_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("sessions.db")).unwrap();
+        let first = store
+            .create(&dir.path().to_string_lossy(), "fake", "fake")
+            .unwrap();
+        let second = store
+            .create(&dir.path().to_string_lossy(), "fake", "fake")
+            .unwrap();
+        store
+            .event(
+                &second,
+                "budget_changed",
+                &json!({"budget":{"max_total_tokens":999}}),
+            )
+            .unwrap();
+        let options = RunOptions {
+            provider: "fake".into(),
+            workspace: Some(dir.path().into()),
+            max_tokens: Some(37),
+            ..RunOptions::default()
+        };
+        let (mut runtime, hooks) = prepare(&store, Some(&first), &options).await.unwrap();
+        let (_tx, mut input) = tokio::sync::mpsc::unbounded_channel();
+        chat_command(
+            &mut runtime,
+            &hooks,
+            &format!("/resume {second}"),
+            &mut input,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hooks.settings.lock().unwrap().budget.max_total_tokens, 37);
     }
 }

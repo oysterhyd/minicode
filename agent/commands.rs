@@ -3,6 +3,38 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::{fs, io::Write, path::Path};
 
+pub fn restored_budget(store: &Store, session: Option<&str>, explicit: Option<i64>) -> Result<i64> {
+    if let Some(value) = explicit {
+        return Ok(value);
+    }
+    Ok(session
+        .map(|id| store.saved_budget(id))
+        .transpose()?
+        .flatten()
+        .unwrap_or(0))
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn l15_old_sessions_missing_and_explicit_zero() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store.create(".", "fake", "fake").unwrap();
+        assert_eq!(restored_budget(&store, Some(&id), None).unwrap(), 0);
+        store
+            .event(
+                &id,
+                "session_start",
+                &json!({"budget":{"max_total_tokens":123}}),
+            )
+            .unwrap();
+        assert_eq!(restored_budget(&store, Some(&id), None).unwrap(), 123);
+        assert_eq!(restored_budget(&store, Some(&id), Some(0)).unwrap(), 0);
+        assert_eq!(restored_budget(&store, Some(&id), Some(37)).unwrap(), 37);
+    }
+}
+
 pub fn skill_argument(arg: &str) -> Result<Option<(bool, &str)>> {
     let words = arg.split_whitespace().collect::<Vec<_>>();
     match words.as_slice() {

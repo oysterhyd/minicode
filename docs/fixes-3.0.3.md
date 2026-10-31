@@ -1188,3 +1188,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：两平台模板强制中文总结。修复：使用用户语言，明确指定输出语言优先，保留简洁改动/验证总结。回归：prompt-language.test.mjs 同时验证两平台无硬性中文并要求用户语言/显式偏好，先失败后通过。状态：已修复（离线测试验证提示契约，不声称fake provider能验证真实模型语言遵循）。
 
+
+### L15 — restore budgets through indexed saved state
+
+核查：prepare与/resume全量events且后者覆盖CLI显式预算。修复：共享restored_budget使用Store.saved_budget按类型取最后值；RunOptions Option保留显式0，Settings记住显式覆盖，启动与/resume优先级相同。回归：l15_resume_keeps_explicit_cli_budget修复前999覆盖37；旧会话/无预算/保存值/显式0和37均覆盖。状态：已修复。
+
