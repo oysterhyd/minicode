@@ -13,7 +13,7 @@ test('A6 clear resets context and cls keeps the original display-only action', a
 })
 test('A6 shared diagnostic commands report actual state and init never overwrites', async t => {
  const f=await fixture(t,[{text:'done'}]);await f.run()
- for(const text of ['/cost','/context','/doctor','/agents','/mcp','/memory']) {
+ for(const text of ['/cost','/context','/doctor','/agents','/mcp','/memory','/tasks']) {
   assert.ok((await f.request('runSlash',{text,workspace:f.workspace})).message)
  }
  await f.request('runSlash',{text:'/init',workspace:f.workspace})

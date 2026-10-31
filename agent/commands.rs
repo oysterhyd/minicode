@@ -59,6 +59,17 @@ pub fn information(
     state: &Value,
     store: &Store,
 ) -> Result<Option<String>> {
+    if verb == "/tasks" {
+        if !arg.is_empty() {
+            bail!("/tasks 不接受参数")
+        };
+        return Ok(Some(serde_json::to_string_pretty(
+            &session
+                .map(|id| store.tasks(id))
+                .transpose()?
+                .unwrap_or_default(),
+        )?));
+    }
     if ![
         "/cost", "/context", "/doctor", "/init", "/agents", "/mcp", "/memory", "/export", "/undo",
         "/rewind", "/fork",

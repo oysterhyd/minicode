@@ -1243,3 +1243,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充端到端回归：input-ui.test.tsx真实Ink输入10000行bracketed paste只显示短引用，发送内容包含末尾换行且无损；带空格图片路径通过importAttachments进入下一请求。发送失败恢复折叠引用；异步发送只移除本次附件，保留后来导入项；/attach clear取消导入。Down在未浏览历史时不清空普通草稿。状态更新：已修复；图片使用可移植的路径导入，未假定终端支持二进制剪贴板。
 
+
+### TU6 — show task status and expose the full task list
+
+补充任务卡验收：Desktop常驻卡复用真实任务状态，显示完成/进行中/失败/待执行，多于4条提示/tasks；共享/tasks通过现有Store.tasks提供全部任务供三端查看，不引入G4编辑接口。Desktop隐藏work页测试新增状态可见断言；共享命令协议回归覆盖/tasks。状态更新：已修复。
+

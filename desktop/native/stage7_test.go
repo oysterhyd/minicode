@@ -109,6 +109,9 @@ func TestTU6TasksRemainVisibleInConversation(t *testing.T) {
 	if _, ok := r.ui.Find("Persistent task"); !ok {
 		t.Fatal("task only exists in the hidden work tab")
 	}
+	if _, ok := r.ui.Find("进行中"); !ok {
+		t.Fatal("persistent task has no visible status")
+	}
 }
 
 type prioritizedRequests struct {

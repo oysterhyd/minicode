@@ -37,7 +37,14 @@ func (d *desktop) feed(c *ui.Context, p palette) {
 		if len(v.Tasks) > 0 {
 			ui.Column(c).Padding(8, 32).Gap(4).Children(func() {
 				for _, task := range v.Tasks[:min(4, len(v.Tasks))] {
-					ui.Text(c, task.Title).SingleLine().FontSize(p.font(11.48)).TextColor(p.Text2)
+					ui.Row(c).Gap(8).Children(func() {
+						ui.Text(c, task.Title).Grow(1).SingleLine().FontSize(p.font(11.48)).TextColor(p.Text2)
+						status := map[string]string{"done": tr("完成"), "running": tr("进行中"), "failed": tr("失败"), "pending": tr("待执行")}[task.Status]
+						ui.Text(c, status).FontSize(p.font(10.36)).TextColor(p.Text3)
+					})
+				}
+				if len(v.Tasks) > 4 {
+					ui.Text(c, fmt.Sprintf("+%d · /tasks", len(v.Tasks)-4)).FontSize(p.font(10.36)).TextColor(p.Text3)
 				}
 			})
 		}
