@@ -339,6 +339,9 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 					chip.Children(func() {
 						icon(c, "Clock", 14, p.Text3)
 						muted(c, p, tr("排队中")).NoWrap().Shrink(0).FontSize(p.font(11.2))
+						if prompt.Mode != "" {
+							ui.Text(c, prompt.Mode).NoWrap().FontSize(p.font(10.36)).TextColor(p.Text3)
+						}
 						text := prompt.Text
 						if len(prompt.Attachments) > 0 {
 							text += fmt.Sprintf(tr(" · %d 个附件"), len(prompt.Attachments))
@@ -350,7 +353,7 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 					})
 				}
 				if remove >= 0 {
-					v.Queue = append(v.Queue[:remove], v.Queue[remove+1:]...)
+					d.deleteQueuedPrompt(v, remove)
 				}
 			})
 		}

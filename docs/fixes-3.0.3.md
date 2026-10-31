@@ -1228,3 +1228,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充回归先复现：16个普通请求阻塞时cancelTurn也被排队。修复：保留独立2个控制请求名额，普通仍16，两个等待队列各128且deadline包含排队；总活动请求上限18。TestD7CancellationBypassesSaturatedNormalRequests验证取消不会被普通请求饿死，原80请求峰值断言仍通过。状态：已修复。
 
+
+### B6 — adopt server-owned prompt queues in capable clients
+
+补充Desktop接线：握手messageQueue能力存在时运行输入enqueuePrompt(steer)，/follow区分followUp，listQueue刷新卡片，删除按服务端ID；/queue resume显式继续，关闭完成后的客户端重发；旧Agent保留本地队列。queue_changed/queue_consumed刷新，响应按会话与revision丢弃过期数据。TestB6DesktopUsesServerQueueWithoutClientResubmission验证服务端队列显示且完成不重复sendPrompt。状态：已修复（共享核心持久化恢复进一步验证见B6集成记录）。
+

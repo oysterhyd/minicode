@@ -2,12 +2,45 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/egoist/mygo/ui"
+	"minicode.desktop/internal/bridge"
 	"minicode.desktop/internal/model"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type queueRequester struct{ calls chan string }
+
+func (q *queueRequester) Request(_ context.Context, method string, _ any, target any) error {
+	q.calls <- method
+	if method == "listQueue" {
+		data := []byte(`[{"id":"queued","mode":"steer","text":"direction"}]`)
+		return json.Unmarshal(data, target)
+	}
+	return nil
+}
+func TestB6DesktopUsesServerQueueWithoutClientResubmission(t *testing.T) {
+	r := newTestRig(t, "home")
+	q := &queueRequester{calls: make(chan string, 16)}
+	r.d.client = q
+	r.d.messageQueue = true
+	v := r.d.current()
+	v.Busy = true
+	v.SessionID = "session"
+	r.d.send("direction", v)
+	r.settle()
+	if len(v.Queue) != 1 || v.Queue[0].ID != "queued" {
+		t.Fatal("server queue was not displayed")
+	}
+	r.d.finish(v, bridge.Event{Event: "run_done", Result: []byte(`{"exit_reason":"completed"}`)})
+	for len(q.calls) > 0 {
+		if method := <-q.calls; method == "sendPrompt" {
+			t.Fatal("client resubmitted server-owned message")
+		}
+	}
+}
 
 func TestD6ApprovalShortcutOnlyDecidesFirstPendingCard(t *testing.T) {
 	r := newTestRig(t, "conversation")

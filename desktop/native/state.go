@@ -34,6 +34,8 @@ type fileService interface {
 }
 
 type queuedPrompt struct {
+	ID          string `json:"id"`
+	Mode        string `json:"mode"`
 	Text        string
 	Attachments []model.Attachment
 }
@@ -41,6 +43,7 @@ type queuedPrompt struct {
 type conversation struct {
 	approvalCallID                string
 	sendGeneration                uint64
+	queueRevision                 uint64
 	AwaitingRun                   bool
 	History                       *model.Detail
 	HistoryCount                  int
@@ -87,6 +90,7 @@ type artifact struct {
 }
 
 type desktop struct {
+	messageQueue                           bool
 	requestActive                          int
 	requestPending                         []func()
 	requestControlActive                   int
@@ -294,6 +298,7 @@ func (d *desktop) initialize() {
 	var result struct {
 		ProtocolVersion   int             `json:"protocolVersion"`
 		MinClientProtocol int             `json:"minClientProtocol"`
+		Capabilities      []string        `json:"capabilities"`
 		Sessions          []model.Session `json:"sessions"`
 		Models            []model.Model   `json:"models"`
 		Commands          []model.Command `json:"commands"`
@@ -316,6 +321,7 @@ func (d *desktop) initialize() {
 			d.toast(tr("协议版本不匹配"), message, tone)
 		}
 		d.sessions, d.models, d.commands = result.Sessions, result.Models, result.Commands
+		d.messageQueue = slices.Contains(result.Capabilities, "messageQueue")
 		v.State = result.State
 		v.Loaded = true
 		if v.Workspace != "" {
@@ -395,6 +401,43 @@ func (d *desktop) refresh(v *conversation, full bool) {
 			}
 		})
 	}()
+}
+
+func (d *desktop) refreshServerQueue(v *conversation) {
+	if !d.messageQueue || v.SessionID == "" {
+		return
+	}
+	v.queueRevision++
+	revision, session := v.queueRevision, v.SessionID
+	var queued []queuedPrompt
+	d.request(v, "listQueue", nil, &queued, func(err error) {
+		if err == nil && revision == v.queueRevision && session == v.SessionID {
+			v.Queue = queued
+		}
+	})
+}
+func (d *desktop) enqueuePrompt(v *conversation, text, mode string, attachments []model.Attachment) {
+	d.request(v, "enqueuePrompt", map[string]any{"text": text, "mode": mode, "attachments": attachments}, nil, func(err error) {
+		if err != nil {
+			d.error(v, err)
+			if v.Draft == "" {
+				v.Draft = text
+				v.Attachments = attachments
+			}
+			return
+		}
+		d.refreshServerQueue(v)
+	})
+}
+func (d *desktop) deleteQueuedPrompt(v *conversation, index int) {
+	if index < 0 || index >= len(v.Queue) {
+		return
+	}
+	if !d.messageQueue {
+		v.Queue = append(v.Queue[:index], v.Queue[index+1:]...)
+		return
+	}
+	d.request(v, "deleteQueuedPrompt", map[string]any{"id": v.Queue[index].ID}, nil, func(err error) { d.error(v, err); d.refreshServerQueue(v) })
 }
 
 func (d *desktop) refreshState(v *conversation) {
@@ -679,6 +722,10 @@ func (d *desktop) sendAttached(text string, v *conversation, attachments []model
 		return
 	}
 	if v.Busy {
+		if d.messageQueue {
+			d.enqueuePrompt(v, text, "steer", attachments)
+			return
+		}
 		v.Queue = append(v.Queue, queuedPrompt{Text: text, Attachments: attachments})
 		return
 	}
@@ -773,6 +820,10 @@ func (d *desktop) submit() {
 	text := v.Draft
 	attachments := slices.Clone(v.Attachments)
 	if strings.TrimSpace(text) == "" && len(attachments) == 0 && len(v.Queue) > 0 && !v.Busy {
+		if d.messageQueue {
+			d.request(v, "resumeQueue", nil, nil, func(err error) { d.error(v, err); d.refreshServerQueue(v) })
+			return
+		}
 		text = v.Queue[0].Text
 		attachments = v.Queue[0].Attachments
 		v.Queue = v.Queue[1:]
@@ -842,6 +893,26 @@ func (d *desktop) slash(text string, v *conversation) {
 		return
 	}
 	switch command[0] {
+	case "/steer", "/follow":
+		if !d.messageQueue {
+			v.Error = "Agent does not support message queues"
+			return
+		}
+		mode := "steer"
+		if command[0] == "/follow" {
+			mode = "followUp"
+		}
+		d.enqueuePrompt(v, strings.TrimSpace(strings.TrimPrefix(text, command[0])), mode, nil)
+		return
+	case "/queue":
+		if len(command) == 3 && command[1] == "cancel" {
+			d.request(v, "deleteQueuedPrompt", map[string]any{"id": command[2]}, nil, func(err error) { d.error(v, err); d.refreshServerQueue(v) })
+		} else if len(command) == 2 && command[1] == "resume" {
+			d.request(v, "resumeQueue", nil, nil, func(err error) { d.error(v, err); d.refreshServerQueue(v) })
+		} else {
+			d.refreshServerQueue(v)
+		}
+		return
 	case "/cls":
 		v.Items = nil
 		v.History = nil
@@ -1047,6 +1118,8 @@ func (d *desktop) handleEvent(event bridge.Event) {
 		}
 	}
 	switch event.Event {
+	case "queue_changed":
+		d.refreshServerQueue(v)
 	case "bridge_error":
 		if event.Fatal {
 			event.Event = "run_error"
@@ -1149,6 +1222,12 @@ func recentTrace(events []model.Event) []model.Event {
 }
 
 func (d *desktop) runtimeEvent(v *conversation, event model.Event) {
+	if event.Type == "queue_consumed" {
+		if text := model.String(event.Data["text"]); text != "" {
+			v.append(&model.FeedItem{ID: "queued-" + model.String(event.Data["id"]), Kind: "user", Text: text})
+		}
+		d.refreshServerQueue(v)
+	}
 	if event.Type == "tool_call_result" && strings.HasPrefix(model.String(event.Data["name"]), "task_") {
 		var tasks []model.Task
 		d.request(v, "listTasks", nil, &tasks, func(err error) {
@@ -1351,7 +1430,10 @@ func (d *desktop) finish(v *conversation, event bridge.Event) {
 	if event.Event != "bridge_error" {
 		d.signal(v, "任务已结束", v.title(d.sessions))
 	}
-	if ok && !cancelled && len(v.Queue) > 0 {
+	if d.messageQueue {
+		d.refreshServerQueue(v)
+	}
+	if !d.messageQueue && ok && !cancelled && len(v.Queue) > 0 {
 		next := v.Queue[0]
 		v.Queue = v.Queue[1:]
 		d.sendAttached(next.Text, v, next.Attachments)
