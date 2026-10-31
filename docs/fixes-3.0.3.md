@@ -1278,3 +1278,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充Windows原生终端验收：tests/agent/cli-pty.py使用本机pywinpty2.0.10/ConPTY；helper仅附着测试console写真实Ctrl键记录，不改系统剪贴板。4项：方向键/光标修正/多行历史，首次run后空闲双Ctrl+C退出，运行中取消，取消中双Ctrl+C以130强退。TERM=xterm-256color匹配交互终端（宿主TERM=dumb会主动降级为无编辑模式）。修复editor.readline空prompt导致提示符被清除。4项均通过；L11/L13状态更新：已修复。POSIX原生PTY未在本Windows执行。
 
+
+### UX1 — preserve selection when reset arguments are invalid
+
+补充回归先复现：/clear extra在Bridge校验前已分离视图，使getState丢失当前会话。修复：仅完整无参数重置命令可detach；Desktop同样先拒绝多余参数。commands-stage7.test.mjs保证异常命令后ID不变。运行中cost/context/tasks使用快照与存储读取。
+

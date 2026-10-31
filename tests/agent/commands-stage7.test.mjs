@@ -23,3 +23,8 @@ test('A6 shared diagnostic commands report actual state and init never overwrite
  await assert.rejects(f.request('runSlash',{text:'/rewind',workspace:f.workspace}),/G3/)
  await assert.rejects(f.request('runSlash',{text:'/clear surprise',workspace:f.workspace}),/参数/)
 })
+test('UX1 an invalid clear command preserves the current session selection', async t=>{
+ const f=await fixture(t,[{text:'done'}]),run=await f.run()
+ await assert.rejects(f.request('runSlash',{text:'/clear extra',workspace:f.workspace}),/参数/)
+ assert.equal((await f.request('getState')).sessionId,run.id)
+})

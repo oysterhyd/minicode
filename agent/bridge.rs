@@ -864,6 +864,7 @@ impl Router {
             || (method == "runSlash"
                 && params["text"]
                     .as_str()
+                    .filter(|text| text.split_whitespace().count() == 1)
                     .and_then(|s| s.split_whitespace().next())
                     .is_some_and(|s| {
                         s.eq_ignore_ascii_case("/new") || s.eq_ignore_ascii_case("/clear")
@@ -1724,6 +1725,9 @@ impl Router {
                 "/steer",
                 "/follow",
                 "/queue",
+                "/cost",
+                "/context",
+                "/tasks",
             ]
             .contains(&verb.as_str())
         {

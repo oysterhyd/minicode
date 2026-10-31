@@ -892,6 +892,10 @@ func (d *desktop) slash(text string, v *conversation) {
 	if len(command) == 0 {
 		return
 	}
+	if slices.Contains([]string{"/clear", "/new", "/cls"}, strings.ToLower(command[0])) && len(command) != 1 {
+		v.Error = command[0] + " 不接受参数"
+		return
+	}
 	switch command[0] {
 	case "/steer", "/follow":
 		if !d.messageQueue {
