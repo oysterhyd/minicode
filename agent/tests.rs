@@ -1224,11 +1224,58 @@ fn config_credentials_are_redacted() {
     let public=configuration.save_service(&json!({"name":"test","baseUrl":"https://example.test/v1","apiStyle":"openai","apiKey":"placeholder-only","enabled":true,"models":[{"modelId":"test","contextWindow":200000,"maxOutputTokens":8192}]})).unwrap();
     assert_eq!(public["services"][0]["apiKey"], "");
     assert_eq!(public["services"][0]["hasApiKey"], true);
+    let persisted = fs::read_to_string(&configuration.path).unwrap();
+    assert!(!persisted.contains("placeholder-only"));
+    let stored = configuration.read().unwrap();
+    assert!(stored["services"][0]["apiKey"].is_null());
+    assert!(stored["services"][0]["credentialRef"].is_string());
+    assert!(public["services"][0]["credentialRef"].is_null());
     assert_eq!(
-        configuration.read().unwrap()["services"][0]["apiKey"],
+        configuration.credentials(&stored["services"][0]).unwrap().1,
         "placeholder-only"
     );
     assert!(configuration.save_service(&json!({"name":"bad","baseUrl":"https://key@example.test/v1","apiStyle":"openai","models":[]})).is_err());
+}
+#[test]
+fn plaintext_credentials_migrate_once_without_changing_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let configuration = Configuration {
+        path: dir.path().join("config.json"),
+    };
+    fs::write(&configuration.path, serde_json::to_vec(&json!({"services":[{"id":"legacy","models":[],"apiKey":"migration-placeholder"}],"agents":[]})).unwrap()).unwrap();
+    let migrated = configuration.read().unwrap();
+    assert!(migrated["services"][0]["apiKey"].is_null());
+    assert!(migrated["services"][0]["credentialRef"].is_string());
+    assert_eq!(migrated["services"][0]["id"], "legacy");
+    assert_eq!(
+        configuration
+            .credentials(&migrated["services"][0])
+            .unwrap()
+            .1,
+        "migration-placeholder"
+    );
+    let bytes = fs::read(&configuration.path).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("migration-placeholder"));
+    assert_eq!(configuration.read().unwrap(), migrated);
+    assert_eq!(fs::read(&configuration.path).unwrap(), bytes);
+}
+#[cfg(windows)]
+#[test]
+fn failed_secure_migration_preserves_original_bytes_and_redacts_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let configuration = Configuration {
+        path: dir.path().join("config.json"),
+    };
+    let bytes = serde_json::to_vec(&json!({"services":[{"id":"legacy","models":[],"apiKey":"do-not-log-this-placeholder"}],"agents":[]})).unwrap();
+    fs::write(&configuration.path, &bytes).unwrap();
+    fs::write(configuration.path.with_extension("credentials"), b"blocked").unwrap();
+    let error = configuration
+        .read()
+        .expect_err("unavailable secure store must fail");
+    assert!(!format!("{error:#}").contains("do-not-log-this-placeholder"));
+    assert_eq!(fs::read(&configuration.path).unwrap(), bytes);
+    fs::remove_file(configuration.path.with_extension("credentials")).unwrap();
+    assert!(configuration.read().unwrap()["services"][0]["credentialRef"].is_string());
 }
 #[test]
 fn strict_capabilities() {

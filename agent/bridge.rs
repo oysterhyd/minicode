@@ -1783,7 +1783,9 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
         .unwrap_or(json!({}));
     let mut service = existing.clone();
     for (k, v) in draft.as_object().context("service must be an object")? {
-        service[k] = v.clone();
+        if k != "credentialRef" {
+            service[k] = v.clone();
+        }
     }
     if service["apiKey"]
         .as_str()
@@ -1793,7 +1795,7 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
     {
         service["apiKey"] = existing["apiKey"].clone();
     }
-    let (url, key) = configuration.credentials(&service);
+    let (url, key) = configuration.credentials(&service)?;
     if key.is_empty() {
         bail!("请填写 API 密钥")
     };

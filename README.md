@@ -42,6 +42,9 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
    `MiniCode-Setup-<版本>-win-x64.exe`，运行安装向导。
 2. 打开 **MiniCode**，在 **设置 → 模型与预算** 中添加 AI 服务，填写服务地址、
    API key 和模型 ID，测试连接并选择默认模型。
+   Key 使用系统安全存储（Windows 当前用户 DPAPI、macOS Keychain、Linux Secret Service），配置只保存引用。
+   Linux 需安装 `libsecret-tools` 并解锁桌面 Secret Service；不可用时保存明确失败，不回退明文。
+   旧明文配置首次读取时自动迁移，安全存储写入和回读验证成功后才替换原配置。备份请同时保留系统凭据：单独复制 JSON 引用不能迁移 Key。
 3. 打开本地项目，输入任务描述。按提示审查修改或命令，并查看执行结果。
 
 安装版适用于 **Windows 10/11 x64**，内置 Rust Agent、Git、Node.js 和桌面端/终端界面依赖，

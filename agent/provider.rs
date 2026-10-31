@@ -364,7 +364,7 @@ impl Provider {
                     p.parameter_compat[name] = value.clone();
                 }
             }
-            let (url, key) = configuration.credentials(&service);
+            let (url, key) = configuration.credentials(&service)?;
             p.url = url;
             p.key = key;
             p.window = m["contextWindow"]

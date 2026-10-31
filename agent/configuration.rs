@@ -1,4 +1,4 @@
-use crate::util;
+use crate::{credentials, util};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
@@ -44,6 +44,23 @@ impl Default for Configuration {
 }
 impl Configuration {
     pub fn read(&self) -> Result<Value> {
+        let mut value = self.read_raw()?;
+        if value["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.get("apiKey").is_some())
+        {
+            crate::settings_file::update(&self.path, |current| {
+                // The lock covers re-reading and migration, so another migration cannot replace refs.
+                self.secure_credentials(current)?;
+                value = current.clone();
+                Ok(())
+            })?;
+        }
+        Ok(value)
+    }
+    fn read_raw(&self) -> Result<Value> {
         if !self.path.exists() {
             return Ok(json!({"services":[],"agents":[],"disabledAgents":[],"defaultModel":""}));
         }
@@ -87,11 +104,30 @@ impl Configuration {
             .map(std::time::Duration::from_secs_f64))
     }
     pub fn write(&self, data: &Value) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(data)?;
+        let mut data = data.clone();
+        self.secure_credentials(&mut data)?;
+        let bytes = serde_json::to_vec_pretty(&data)?;
         if bytes.len() > 4_000_000 {
             bail!("harness configuration exceeds the size limit");
         }
         util::atomic_write(&self.path, &bytes)
+    }
+    fn secure_credentials(&self, data: &mut Value) -> Result<()> {
+        for service in data["services"]
+            .as_array_mut()
+            .context("invalid services")?
+        {
+            let key = service["apiKey"].as_str().unwrap_or_default().trim();
+            if !key.is_empty() {
+                let reference = credentials::store(&self.path, key)?;
+                service["credentialRef"] = json!(reference);
+            }
+            service
+                .as_object_mut()
+                .context("invalid service")?
+                .remove("apiKey");
+        }
+        Ok(())
     }
     pub fn model_key(service: &Value, model: &Value) -> String {
         let name = model["modelId"].as_str().unwrap_or_default();
@@ -101,7 +137,7 @@ impl Configuration {
             format!("{}::{name}", service["id"].as_str().unwrap_or_default())
         }
     }
-    pub fn credentials(&self, s: &Value) -> (String, String) {
+    pub fn credentials(&self, s: &Value) -> Result<(String, String)> {
         let url = s["baseUrl"]
             .as_str()
             .unwrap_or_default()
@@ -109,6 +145,11 @@ impl Configuration {
             .trim_end_matches('/')
             .to_string();
         let mut key = s["apiKey"].as_str().unwrap_or_default().trim().to_string();
+        if key.is_empty()
+            && let Some(reference) = s["credentialRef"].as_str()
+        {
+            key = credentials::load(&self.path, reference)?;
+        }
         if key.is_empty() {
             key = match s["id"].as_str().unwrap_or_default() {
                 "anthropic" => std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
@@ -118,12 +159,13 @@ impl Configuration {
                 _ => String::new(),
             };
         }
-        (url, key.trim().to_string())
+        Ok((url, key.trim().to_string()))
     }
     pub fn public(&self) -> Result<Value> {
         let mut data = self.read()?;
         for s in data["services"].as_array_mut().unwrap() {
-            s["hasApiKey"] = json!(!self.credentials(s).1.is_empty());
+            s["hasApiKey"] = json!(!self.credentials(s)?.1.is_empty());
+            s.as_object_mut().unwrap().remove("credentialRef");
             s["apiKey"] = json!("");
             if let Some(models) = s["models"].as_array_mut() {
                 for m in models {
@@ -138,8 +180,9 @@ impl Configuration {
         let data = self.read()?;
         let mut models = vec![];
         for s in data["services"].as_array().unwrap() {
+            let available = s["enabled"] == true && !self.credentials(s)?.1.is_empty();
             for m in s["models"].as_array().context("invalid service models")? {
-                models.push(json!({"id":Self::model_key(s,m),"name":m.get("name").filter(|v|v.as_str()!=Some("")).unwrap_or(&m["modelId"]),"modelId":m["modelId"],"serviceId":s["id"],"provider":s["name"],"supportsEffort":m["supportsEffort"],"contextWindow":m["contextWindow"],"maxOutputTokens":m["maxOutputTokens"],"capabilities":capabilities(&m["capabilities"])?,"available":s["enabled"]==true && !self.credentials(s).1.is_empty()}));
+                models.push(json!({"id":Self::model_key(s,m),"name":m.get("name").filter(|v|v.as_str()!=Some("")).unwrap_or(&m["modelId"]),"modelId":m["modelId"],"serviceId":s["id"],"provider":s["name"],"supportsEffort":m["supportsEffort"],"contextWindow":m["contextWindow"],"maxOutputTokens":m["maxOutputTokens"],"capabilities":capabilities(&m["capabilities"])?,"available":available}));
             }
         }
         Ok(models)
@@ -180,6 +223,11 @@ impl Configuration {
             .iter()
             .find(|s| s["id"] == draft["id"]);
         let mut s = draft.clone();
+        // A client can replace a key, but cannot select another service's secret by reference.
+        s.as_object_mut().unwrap().remove("credentialRef");
+        if let Some(reference) = existing.and_then(|s| s.get("credentialRef")) {
+            s["credentialRef"] = reference.clone();
+        }
         s["id"] = existing
             .map(|s| s["id"].clone())
             .unwrap_or_else(|| json!(util::id()));

@@ -20,7 +20,8 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Value) -> Result<()>) -> Res
         .open(path.with_extension("json.lock"))?;
     lock.lock_exclusive()?;
     let mut value = if path.try_exists()? {
-        serde_json::from_slice(&fs::read(path)?)?
+        let bytes = fs::read(path)?;
+        serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes))?
     } else {
         Value::Null
     };

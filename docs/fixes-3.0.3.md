@@ -974,3 +974,13 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - Linux/macOS：Linux 由固定系统位置的 bubblewrap 创建新的 mount/pid/network 等 namespace，系统运行库只读，仅工作区和私有临时目录可写；macOS 由固定系统位置的 sandbox-exec 使用 deny-default Seatbelt profile。可配置额外只读工具链/缓存；网络默认关闭。清除任意继承环境，只保留系统/locale/PATH 等运行必要项和私有 HOME/TEMP，避免把 API 凭据带入命令。不得从工作区 PATH 找到一个同名假沙箱程序。缺少程序、namespace/profile 不可用或启动失败都不回退无隔离执行；Unix 启动握手无法验证时报告副作用未知，不宣称命令从未开始。
 - 回归：9 项真实 Bridge 场景覆盖 bypass+allow 的独立高危审批、deny 无审批、危险确认不能记住、内写/外写拒绝、外部私有文件读取拒绝、真实 TCP 服务零连接、环境密钥未继承、Windows 不支持网络配置的真实保护状态、隔离 child 自动受限及 idle 后台取消后实际 PID 已退出。3 项 Rust 场景覆盖危险形式、Windows 参数引用、CreateProcess 失败不能产生启动标记。Windows 文件/网络/后台及子代理场景已实际执行，不依赖字符串过滤冒充 OS 边界。
 - 最终验证：`output/check-5.ps1 -Item SEC2-complete -Desktop` 全部通过，日志前缀 `output/5-SEC2-complete-`：fmt、Clippy、Rust 210 通过/2 个既有忽略、build、协议 283 通过/2 个既有跳过、生成文件无差异、60 次主任务和 9 个场景保持预期、npm ci/build、TUI 122 通过、Desktop test/vet/vendor UI。Windows AppContainer 启动、访问检查、零 TCP 连接、私有环境和实际进程回收均已在本机执行；Linux/macOS 后端代码尚未在对应系统运行，不标记为已验证。
+
+### C1 API Key 系统安全存储与可重试迁移
+
+- 核查：Configuration.write/save_service 直接序列化 apiKey，read 不迁移。新保存和旧配置两个失败回归见 `output/6-C1-red.log`。
+- 实现：新增 credentials 统一入口，Windows 用当前用户 DPAPI 加密独立 blob，保存在配置旁同名 `.credentials` 目录；不使用 machine scope。macOS 原生 Security.framework generic-password Keychain API，Linux 固定 `/usr/bin/secret-tool` 通过 libsecret/Secret Service，密钥仅经 stdin，15 秒超时并回收子进程。没有明文、环境变量或测试专用存储回退，不新增 crate；只开启已有 windows-sys 的 Cryptography feature。Linux CI 配置真实临时 D-Bus/keyring 并先回读探测；其启动脚本尚未在本机执行。
+- 配置：仅保存随机不可变 credentialRef；public/getConfiguration 删除引用并保留兼容的空 apiKey/hasApiKey。新建/替换均先存储再回读逐字验证；失败保留旧配置和旧引用。read 对旧配置执行锁内迁移，所有 Key 准备成功才原子替换配置，重试不反复更换已迁移引用；BOM 仍兼容。不可变引用保证保存失败不会覆盖旧 Key，但失败或替换可能遗留安全存储条目，暂不自动回收，避免误删仍被旧配置引用的凭据。
+- 边界：普通服务保存和连接探测忽略客户端提供的 credentialRef，只可沿用服务 ID 对应的已有引用；空 Key 编辑保留已有 Key。系统存储不可用、blob 损坏或引用非法明确报错，不静默改用其他凭据。错误只含操作状态，不回显密钥或底层 stderr。第三方自动发现将在下一条 C3 单独移除，未混入本次变更。
+- 回归：新配置无明文/引用不出 UI、迁移后可取回原 Key、重复迁移无变化、真实 DPAPI 失败后逐字保留原文件并可重试、进程重启后认证、空编辑保留/换 Key 生效、伪造引用拒绝、损坏 blob 拒绝、事件/错误无测试密钥。聚焦成功见 `output/6-C1-focused.log`；平台实际执行仅 Windows，macOS/Linux 需对应系统验证。Keychain/Secret Service 的解锁和授权交互由系统负责，移动配置文件不保证引用可移植。
+- 原生 API 依据：[DPAPI](https://learn.microsoft.com/en-us/windows/win32/seccrypto/example-c-program-using-cryptprotectdata)、[Apple Keychain](https://developer.apple.com/documentation/security/seckeychainfindgenericpassword(_:_:_:_:_:_:_:_:))、[libsecret secret-tool](https://manpages.ubuntu.com/manpages/noble/man1/secret-tool.1.html)。
+- 完整验证：`output/check-5.ps1 -Item C1 -Desktop` 全部通过，日志前缀 `output/5-C1-`：fmt、Clippy、Rust 212 通过/2 个既有忽略、build、协议 284 通过/2 个既有跳过、生成文件无差异、60 次任务和 9 个场景保持预期、npm ci/build、TUI 122 通过、Desktop test/vet/vendor UI。随后新增的 C2 回归单独记录在 C2 日志，未计入 C1 通过结果。
