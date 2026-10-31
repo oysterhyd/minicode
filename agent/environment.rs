@@ -42,7 +42,7 @@ pub fn git_summary(workspace: &Path) -> (String, bool) {
             "status",
             "--porcelain",
             "--branch",
-            "--untracked-files=no",
+            "--untracked-files=normal",
         ],
         Some(workspace),
     )
@@ -110,4 +110,21 @@ pub fn prompt(workspace: &Path) -> String {
         branch,
         if dirty { "有" } else { "无或不可用" }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a3_environment_counts_untracked_work_without_disclosing_names() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(command_line("git", &["init", "-q"], Some(workspace.path())).is_some());
+        let private_value = "environment-fixture-private-value";
+        std::fs::write(workspace.path().join(".env"), private_value).unwrap();
+        let text = prompt(workspace.path());
+        assert!(text.contains("未提交改动：有"), "{text}");
+        assert!(!text.contains(".env"));
+        assert!(!text.contains(private_value));
+    }
 }

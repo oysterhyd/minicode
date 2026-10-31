@@ -1315,3 +1315,6 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 ### UX1 — reject malformed Desktop queue controls
 
 核查/失败回归：Desktop `/queue extra`、缺ID、额外参数静默刷新列表，而TUI/Bridge报用法错误。修复：请求前统一参数计数与子命令校验，不发送无效请求。`desktop/native/stage7_test.go::TestUX1QueueRejectsMalformedControls`先复现缺错误，再验证四种非法输入；队列正常路径回归仍通过，完整Go检查通过。状态：已修复。
+### A3 — include untracked work in environment status
+
+核查/失败回归：Git使用--untracked-files=no，只有新文件时误报无改动。修复：使用normal，只将是否有改动写入环境提示，不输出文件名或内容，保留2秒缓存。`agent/environment.rs::tests::a3_environment_counts_untracked_work_without_disclosing_names`先失败后通过，验证未跟踪.env使状态为有且不泄露名称/内容；最终Rust226通过、2项手工基准忽略，Clippy通过。状态：已修复。
