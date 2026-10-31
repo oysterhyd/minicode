@@ -215,8 +215,9 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   }
   async function enqueue(text: string, mode: 'steer' | 'followUp') {
     try {
-      await client.request('enqueuePrompt', { sessionId: sessionRef.current, text, mode, attachments: attachmentsRef.current })
-      attachmentsRef.current = []; setAttachments([])
+      const submitted = attachmentsRef.current
+      await client.request('enqueuePrompt', { sessionId: sessionRef.current, text: pasteStore.current.expand(text), mode, attachments: submitted })
+      attachmentsRef.current = attachmentsRef.current.filter(file => !submitted.includes(file)); setAttachments(attachmentsRef.current)
       await refreshQueue()
     } catch (error) { addNotice(cleanError(error), 'error'); replaceDraft(text) }
   }
@@ -381,6 +382,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   }
 
   async function runSlash(text: string) {
+    if (text === '/attach clear') { attachmentsRef.current = []; setAttachments([]); return }
     if (text.startsWith('/follow ') || text.startsWith('/steer ')) {
       if (!serverQueueRef.current) { addNotice('Agent 不支持服务端队列'); return }
       await enqueue(text.slice(text.indexOf(' ') + 1), text.startsWith('/follow ') ? 'followUp' : 'steer')
@@ -510,6 +512,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   }
 
   async function send(text: string) {
+    const original = text.trim()
     let trimmed = text.trim()
     if (!trimmed && !attachmentsRef.current.length) return
     if (trimmed.startsWith('/')) {
@@ -517,12 +520,14 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       return
     }
     inputHistory.current.add(trimmed)
-    try { trimmed = pasteStore.current.expand(trimmed) } catch (error) { addNotice(cleanError(error), 'error'); replaceDraft(text); return }
     if (busyRef.current || operationRef.current) {
       if (serverQueueRef.current) { await enqueue(trimmed, 'steer'); return }
+      if (attachmentsRef.current.length) { addNotice('旧 Agent 不支持带附件排队，请在回合结束后发送'); replaceDraft(original); return }
       updateQueue([...queuedRef.current, trimmed])
       return
     }
+    try { trimmed = pasteStore.current.expand(trimmed) } catch (error) { addNotice(cleanError(error), 'error'); replaceDraft(text); return }
+    const submitted = attachmentsRef.current
     operationRef.current = true
     drainAllowedRef.current = false
     stateRevision.current += 1
@@ -537,7 +542,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       busy: true,
       awaitingRun: true,
       startedAt: started,
-      items: [...current.items, { id: userId, kind: 'user', text: trimmed, startedAt: started }],
+      items: [...current.items, { id: userId, kind: 'user', text: original, startedAt: started }],
     }))
     try {
       const result = await client.request<{ sessionId: string; runId?: string }>('sendPrompt', {
@@ -546,11 +551,11 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         sessionId: sessionRef.current,
         model: agentRef.current.model,
         asyncStart: true,
-        attachments: attachmentsRef.current,
+        attachments: submitted,
       })
       if (!activeRef.current) return
-      attachmentsRef.current = []
-      setAttachments([])
+      attachmentsRef.current = attachmentsRef.current.filter(file => !submitted.includes(file))
+      setAttachments(attachmentsRef.current)
       updateFeed(current => ({ ...bindFeedSession(current, result.sessionId), runId: result.runId, awaitingRun: false }))
     } catch (error) {
       if (error instanceof BridgeRequestTimeout) {
@@ -566,7 +571,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         } catch { addNotice('发送状态尚未确认，正在等待 Agent 状态', 'warning'); return }
       }
       updateFeed(current => ({ ...current, items: current.items.filter(item => item.id !== userId), busy: false, awaitingRun: false, startedAt: null, error: cleanError(error) }))
-      replaceDraft(draftRef.current ? `${trimmed}\n${draftRef.current}` : trimmed)
+      replaceDraft(draftRef.current ? `${original}\n${draftRef.current}` : original)
     } finally {
       operationRef.current = false
       if (cancelPendingRef.current && busyRef.current && activeRef.current) {
@@ -843,7 +848,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         setSlashIndex(slashIndexRef.current)
         return
       }
-      if (!text.slice(at).includes('\n')) replaceDraft(inputHistory.current.next())
+      if (!text.slice(at).includes('\n')) replaceDraft(inputHistory.current.next(text))
       else moveCaret(moveVertical(text, at, 1))
       return
     }

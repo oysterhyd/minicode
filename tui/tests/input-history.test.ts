@@ -9,6 +9,7 @@ test('T-UI6 history restores the draft and ignores duplicate empty entries', () 
   assert.equal(history.previous('two'), 'one')
   assert.equal(history.next(), 'two')
   assert.equal(history.next(), 'draft')
+  assert.equal(history.next('ordinary draft'), 'ordinary draft')
 })
 test('T-UI6 10000-line paste stays compact, expands losslessly and cancels', () => {
   const store = new PasteStore()

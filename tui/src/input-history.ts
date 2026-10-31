@@ -12,7 +12,8 @@ export class InputHistory {
     this.index = Math.max(0, this.index - 1)
     return this.entries[this.index] ?? draft
   }
-  next() {
+  next(current?: string) {
+    if (this.index === this.entries.length && current !== undefined) return current
     this.index = Math.min(this.entries.length, this.index + 1)
     return this.entries[this.index] ?? this.draft
   }

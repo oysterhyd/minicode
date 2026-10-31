@@ -1238,3 +1238,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充核心/CLI验收：Store.enqueue_prompt统一验证与持久化；CLI运行中/steer、/follow及普通输入使用同一队列事件/工具边界，完成后自动处理follow-up，/queue支持列出/删除/恢复。Bridge runSlash同名命令复用控制入口。消费事件含text用于两端会话记录；恢复非空队列默认暂停，避免恢复后隐式重放。queue.test.mjs新增跨Bridge进程重启后保留/显式恢复/一次消费；CLI实际进程同时steer和follow后各消息恰好一次。5项集成通过。状态更新：已修复。
 
+
+### T-UI6 — preserve compact paste drafts and pending attachments
+
+补充端到端回归：input-ui.test.tsx真实Ink输入10000行bracketed paste只显示短引用，发送内容包含末尾换行且无损；带空格图片路径通过importAttachments进入下一请求。发送失败恢复折叠引用；异步发送只移除本次附件，保留后来导入项；/attach clear取消导入。Down在未浏览历史时不清空普通草稿。状态更新：已修复；图片使用可移植的路径导入，未假定终端支持二进制剪贴板。
+
