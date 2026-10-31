@@ -1143,3 +1143,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：state.go::request 每请求一个goroutine无上限。修复：最多16个活动请求、128个等待闭包，队列满明确报错；35秒deadline包含排队时间，完成/错误均在UI调度释放后启动下一项，不为等待项创建goroutine。回归：stage7_test.go 80请求原峰值80，修复后不超过16。状态：已修复。
 
+
+### T-UI3 — use server steering and follow-up queues
+
+核查：App busy 分支仅客户端排队。修复：messageQueue能力存在时普通输入steer、/follow文本followUp、/steer显式插话，/queue列出ID、/queue cancel ID删除、/queue resume继续暂停队列；关闭客户端drain，能力缺失沿用旧客户端队列。回归：stage7-keys.test.tsx capable bridge 两模式且run_done后不重复sendPrompt，先失败后通过。状态：已修复。
+

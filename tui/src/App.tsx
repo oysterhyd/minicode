@@ -115,6 +115,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const pasteStore = useRef(new PasteStore())
   const [files, setFiles] = useState<string[]>([])
   const [attachments, setAttachments] = useState<Array<{ asset_id: string; name: string }>>([])
+  const [serverQueued, setServerQueued] = useState<Array<{ id: string; mode: string; text: string }>>([])
+  const serverQueueRef = useRef(false)
   const attachmentsRef = useRef<Array<{ asset_id: string; name: string }>>([])
   const [approvalChoice, setApprovalChoice] = useState(0)
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -169,6 +171,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
     if (activeRef.current) setQueued(next)
   }
   function drainQueue() {
+    if (serverQueueRef.current) return
     if (!activeRef.current || !drainAllowedRef.current || busyRef.current || operationRef.current) return
     const [next, ...rest] = queuedRef.current
     if (!next) return
@@ -192,6 +195,21 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       if (activeRef.current) setSessions(rows)
     } catch { /* suggestions can continue using the last successful list */ }
   }
+  async function refreshQueue() {
+    if (!serverQueueRef.current || !sessionRef.current) return
+    const session = sessionRef.current
+    try {
+      const queue = await client.request<Array<{ id: string; mode: string; text: string }>>('listQueue', { sessionId: session })
+      if (activeRef.current && session === sessionRef.current) setServerQueued(queue)
+    } catch { /* a transport error is reported by the request that changed the queue */ }
+  }
+  async function enqueue(text: string, mode: 'steer' | 'followUp') {
+    try {
+      await client.request('enqueuePrompt', { sessionId: sessionRef.current, text, mode, attachments: attachmentsRef.current })
+      attachmentsRef.current = []; setAttachments([])
+      await refreshQueue()
+    } catch (error) { addNotice(cleanError(error), 'error'); replaceDraft(text) }
+  }
 
   useEffect(() => {
     if (!feed.busy) return
@@ -213,6 +231,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       }
       if (event.event === 'agent_event' && event.item?.type === 'approval_decision') approvalRef.current = null
       if (event.event === 'run_done' || event.event === 'run_error') {
+        void refreshQueue()
         const cancelled = cancelPendingRef.current
         cancelPendingRef.current = false
         approvalRef.current = null
@@ -224,10 +243,12 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       if (event.event === 'agent_event' && event.item && ['assistant_message', 'subagent_result', 'context_compacted'].includes(event.item.type)) {
         void refreshState()
       }
+      if (event.event === 'queue_changed' || event.event === 'agent_event' && event.item?.type === 'queue_consumed') void refreshQueue()
     })
     void (async () => {
       try {
         const initial = await client.request<InitializeResult>('initialize', { workspace: workspaceRef.current })
+        serverQueueRef.current = Boolean(initial.capabilities?.includes('messageQueue'))
         if (!active) return
         const protocol = protocolProblem(initial)
         if (protocol) addNotice(protocol.message, protocol.level)
@@ -347,6 +368,19 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   }
 
   async function runSlash(text: string) {
+    if (text.startsWith('/follow ') || text.startsWith('/steer ')) {
+      if (!serverQueueRef.current) { addNotice('Agent 不支持服务端队列'); return }
+      await enqueue(text.slice(text.indexOf(' ') + 1), text.startsWith('/follow ') ? 'followUp' : 'steer')
+      return
+    }
+    if (text === '/queue' || text.startsWith('/queue ')) {
+      const [, action, id] = text.split(/\s+/)
+      if (action === 'cancel' && id) await client.request('deleteQueuedPrompt', { sessionId: sessionRef.current, id })
+      else if (action === 'resume') await client.request('resumeQueue', { sessionId: sessionRef.current, workspace: workspaceRef.current })
+      await refreshQueue()
+      if (!action) addNotice(serverQueued.map(item => `${item.id} · ${item.mode} · ${item.text.slice(0, 100)}`).join('\n') || '队列为空')
+      return
+    }
     if (text.startsWith('/attach ')) {
       const source = text.slice(8).trim().replace(/^"(.*)"$/, '$1')
       try {
@@ -471,6 +505,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
     inputHistory.current.add(trimmed)
     try { trimmed = pasteStore.current.expand(trimmed) } catch (error) { addNotice(cleanError(error), 'error'); replaceDraft(text); return }
     if (busyRef.current || operationRef.current) {
+      if (serverQueueRef.current) { await enqueue(trimmed, 'steer'); return }
       updateQueue([...queuedRef.current, trimmed])
       return
     }
@@ -934,6 +969,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
             <Prompt value={draft} caret={caret} busy={feed.busy}
               queued={queued.length ? `> ${queued[0].split('\n')[0]}  (已排队 ${queued.length} 条${!feed.busy ? ' · Enter 发送' : ''})` : undefined} />
             {attachments.length ? <Text dimColor>附件：{attachments.map(file => file.name).join(', ')} · /attach "路径" 导入</Text> : null}
+            {serverQueued.length ? <Text dimColor>已排队 {serverQueued.length} 条 · {serverQueued[0].mode}：{serverQueued[0].text.split('\n')[0]} · /queue 管理 · /follow 完成后继续</Text> : null}
             {files.length ? <Text dimColor>Tab 补全：{files.slice(0, 5).join(' · ')}</Text> : null}
             {menuOpen ? <SlashMenu items={matches} selected={slashIndex} title={menuTitle} />
               : shortcutsOpen ? <ShortcutPanel /> : <StatusLine state={agent} elapsed={feed.startedAt ? now - feed.startedAt : 0} />}
