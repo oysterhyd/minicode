@@ -11,6 +11,8 @@ export type FeedState = {
   sessionId: string | null
   abandonedSessions?: ReadonlySet<string>
   approvalCallId?: string
+  reasoning?: string
+  liveUsage?: { input_tokens?: number; output_tokens?: number }
 }
 
 export const emptyFeed = (): FeedState => ({
@@ -116,7 +118,9 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
   }
   if (event.sessionId && state.sessionId && event.sessionId !== state.sessionId) return state
   if (event.sessionId && !state.sessionId) state = { ...state, sessionId: event.sessionId }
-  if (event.event === 'run_started') return { ...state, runId: event.runId, awaitingRun: false, busy: true }
+  if (event.event === 'run_started') return { ...state, runId: event.runId, awaitingRun: false, busy: true, reasoning: '', liveUsage: undefined }
+  if (event.event === 'reasoning_delta' && event.text) return { ...state, reasoning: (state.reasoning || '') + event.text }
+  if (event.event === 'usage_delta') return { ...state, liveUsage: event.usage }
   if (event.event === 'warning') return { ...state, items: [...state.items, { id: `warning-${state.items.length}`, kind: 'notice', tone: 'warning', text: event.text }] }
   if (event.event === 'run_done' || event.event === 'run_error') return finishRun(state, event)
   if (event.event === 'text_delta' && event.text) {

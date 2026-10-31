@@ -929,6 +929,7 @@ impl Provider {
                         Some("message_start") => {
                             let initial = &value["message"]["usage"];
                             usage = parse_usage(initial, "anthropic");
+                            emit(json!({"event":"usage_delta","usage":usage}));
                         }
                         Some("content_block_start") => {
                             let index = value["index"]
@@ -1023,13 +1024,15 @@ impl Provider {
                             let u = parse_usage(&value["usage"], "anthropic");
                             usage.output_tokens = u.output_tokens;
                             usage.available |= u.available;
+                            emit(json!({"event":"usage_delta","usage":usage}));
                         }
                         Some("message_stop") => ended = true,
                         _ => {}
                     }
                 } else {
                     if value["usage"].is_object() {
-                        usage = parse_usage(&value["usage"], "openai")
+                        usage = parse_usage(&value["usage"], "openai");
+                        emit(json!({"event":"usage_delta","usage":usage}));
                     }
                     if let Some(choice) = value["choices"].as_array().and_then(|v| v.first()) {
                         if let Some(reason) = choice["finish_reason"].as_str() {

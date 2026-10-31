@@ -105,6 +105,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [scrolled, setScrolled] = useState(false)
   const [screenEpoch, setScreenEpoch] = useState(0)
+  const [reasoningOpen, setReasoningOpen] = useState(false)
   const [approvalChoice, setApprovalChoice] = useState(0)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const approvalChoiceRef = useRef({ id: '', choice: 0 })
@@ -582,6 +583,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       return
     }
     if (key.ctrl && input === 'q') { exit(); return }
+    if (key.ctrl && input === 'r') { setReasoningOpen(value => !value); return }
     if (key.pageUp || key.pageDown) {
       transcriptRef.current?.scrollBy((key.pageUp ? -1 : 1) * Math.max(1, terminal.rows - 5))
       return
@@ -813,10 +815,12 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         {feed.busy && !waiting ? (
           <Spinner
             startedAt={feed.startedAt || now}
-            tokens={Math.max(0, (agent.usage?.output_tokens || 0) - outputStart)}
+            tokens={feed.liveUsage?.output_tokens ?? Math.max(0, (agent.usage?.output_tokens || 0) - outputStart)}
             hint={Boolean(lastExpandableTool(feed.items, lastUserIndex(feed.items)))}
           />
         ) : null}
+        {feed.reasoning ? <Box flexDirection="column"><Text dimColor>思考 {reasoningOpen ? '▾' : '▸'} · ctrl+r {reasoningOpen ? '折叠' : '展开'}</Text>
+          {reasoningOpen ? <Text dimColor>{terminalText(feed.reasoning.split('\n').slice(-Math.max(1, Math.min(8, terminal.rows - 10))).join('\n'))}</Text> : null}</Box> : null}
         {scrolled ? (
           <Box justifyContent="center" flexShrink={0}>
             <Box ref={returnButtonRef}>

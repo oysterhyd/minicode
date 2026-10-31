@@ -1103,3 +1103,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：App/TranscriptViewport 全量 Yoga 树与备用屏、鼠标捕获导致 O(N) 重绘。修复：默认启动器用 TranscriptLog，公开 renderToString/useStdout.write 一次输出完成条目，无 Static 的私有缓存重放；实时视口限制未完成条目数，嵌入 App 保留原视口模式。终端默认仅 bracketed paste，不捕获鼠标、不进备用屏。Desktop 已有 AppendFeed 与 ui.List，重建仅结构变化，未重复重写。回归：1200 条目一次渲染，10 次更新计数不变；terminal.test.ts 输入模式。基准：transcript-bench.tsx Windows/Node22，1200条/20次，102.05ms→0.20ms 活动树；只衡量 Ink 树渲染，不包含网络和首次回放。状态：已修复（原生终端人工选择/复制仍需人工验收）。
 
+
+### T-UI12 — display collapsible reasoning and streamed usage
+
+核查：feed.ts 忽略 reasoning_delta；Provider 只在结束统计 usage。修复：独立 reasoning 状态，Ctrl+R 折叠/展开末尾8行，保持 transcript 身份；Provider 在可用时发可选 usage_delta，Spinner 使用实际输出 tokens，缺失时回退。回归：stage7-feed.test.ts 仅 reasoning、多 delta、新 run 重置，先失败后通过。状态：部分完成（尚需高频批处理及真实 SSE/可折叠 UI 集成回归）。
+

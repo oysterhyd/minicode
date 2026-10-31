@@ -67,7 +67,8 @@ export type ApprovalRequestData = { tool_name: string; arguments: Record<string,
 export type DesktopEvent = {
   clientKey?: string
   runId?: string
-  event: 'run_started' | 'agent_event' | 'text_delta' | 'reasoning_delta' | 'approval' | 'approval_auto' | 'run_done' | 'run_error' | 'bridge_error' | 'log' | 'warning'
+  event: 'run_started' | 'agent_event' | 'text_delta' | 'reasoning_delta' | 'usage_delta' | 'approval' | 'approval_auto' | 'run_done' | 'run_error' | 'bridge_error' | 'log' | 'warning'
+  usage?: { input_tokens?: number; output_tokens?: number }
   sessionId?: string
   item?: AgentEvent
   text?: string
