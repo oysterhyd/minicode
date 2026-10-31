@@ -152,6 +152,12 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const { stdout } = useStdout()
   const terminal = useTerminalSize()
   const artifactLines = useMemo(() => artifactRows(artifactView?.text || '', Math.max(1, terminal.columns - 2)), [artifactView?.text, terminal.columns])
+  const reasoningRows = useMemo(() => {
+    if (!reasoningOpen || !feed.reasoning) return []
+    let tail = feed.reasoning.slice(-Math.max(256, terminal.columns * 64))
+    if (tail.charCodeAt(0) >= 0xdc00 && tail.charCodeAt(0) <= 0xdfff) tail = tail.slice(1)
+    return artifactRows(tail, terminal.columns).slice(-Math.max(1, Math.min(8, terminal.rows - 10)))
+  }, [feed.reasoning, reasoningOpen, terminal.columns, terminal.rows])
   const sendRef = useRef<(text: string) => Promise<void>>(async () => {})
 
   // Event handlers can run several times before React commits. These refs are
@@ -957,10 +963,12 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
     ? approvalRows(waiting, choice, terminal.columns).length
     : promptHeight + menuHeight + footerHeight + (feed.busy ? 3 : 0)
   const extraHeight = (tasks.length ? Math.min(4, tasks.length) + 1 : 0)
-    + (feed.reasoning ? 1 + (reasoningOpen ? Math.min(8, feed.reasoning.split('\n').length) : 0) : 0)
+    + (feed.reasoning ? 1 + reasoningRows.length : 0)
     + (serverQueued.length ? 1 : 0) + (attachments.length ? 1 : 0) + (files.length ? 1 : 0)
     + (artifactView && !waiting ? Math.max(1, Math.min(artifactLines.length, terminal.rows - 9)) + 1 + (artifactView.error ? 1 : 0) : 0)
-  const liveHeight = Math.max(0, terminal.rows - bottomHeight - extraHeight - (connecting ? 1 : 0) - (scrolled ? 1 : 0))
+  // Ink erases scrollback when its live region fills the terminal. Reserve a
+  // row in native mode so ordinary updates always use its line-diff path.
+  const liveHeight = Math.max(0, terminal.rows - bottomHeight - extraHeight - (connecting ? 1 : 0) - (scrolled ? 1 : 0) - (scrollback ? 1 : 0))
   const recent = sessions.filter(row => row.session_id !== feed.sessionId).map(row => row.title || row.session_id.slice(0, 8))
 
   return (
@@ -976,7 +984,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         {feed.error && feed.items.at(-1)?.text !== feed.error ? <Notice text={feed.error} tone="error" /> : null}
       </TranscriptViewport>
       {scrollback && expandedTool ? <ToolLine item={expandedTool} now={now} expanded /> : null}
-      {artifactView && !waiting ? <Box flexDirection="column"><Text bold>完整工具输出 · ↑↓ 滚动 · n/p 下一页/上一页 · r 重试 · Esc 关闭</Text>
+      {artifactView && !waiting ? <Box flexDirection="column"><Text bold wrap="truncate-end">完整工具输出 · ↑↓ 滚动 · n/p 下一页/上一页 · r 重试 · Esc 关闭</Text>
         <Text>{artifactView.loading ? '加载中…' : artifactLines.slice(artifactView.line, artifactView.line + Math.max(1, terminal.rows - 9)).join('\n')}</Text>
         {artifactView.error ? <Text color={theme.error}>{artifactView.error}</Text> : null}</Box> : null}
       <Box flexDirection="column" flexShrink={0}>
@@ -989,8 +997,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
             hint={Boolean(lastExpandableTool(feed.items, lastUserIndex(feed.items)))}
           />
         ) : null}
-        {feed.reasoning ? <Box flexDirection="column"><Text dimColor>思考 {reasoningOpen ? '▾' : '▸'} · ctrl+r {reasoningOpen ? '折叠' : '展开'}</Text>
-          {reasoningOpen ? <Text dimColor>{terminalText(feed.reasoning.split('\n').slice(-Math.max(1, Math.min(8, terminal.rows - 10))).join('\n'))}</Text> : null}</Box> : null}
+        {feed.reasoning ? <Box flexDirection="column"><Text dimColor wrap="truncate-end">思考 {reasoningOpen ? '▾ · 最近8行' : '▸'} · ctrl+r {reasoningOpen ? '折叠' : '展开'}</Text>
+          {reasoningOpen ? <Text dimColor>{reasoningRows.join('\n')}</Text> : null}</Box> : null}
         {scrolled ? (
           <Box justifyContent="center" flexShrink={0}>
             <Box ref={returnButtonRef}>
@@ -1002,9 +1010,9 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
           <>
             <Prompt value={draft} caret={caret} busy={feed.busy}
               queued={queued.length ? `> ${queued[0].split('\n')[0]}  (已排队 ${queued.length} 条${!feed.busy ? ' · Enter 发送' : ''})` : undefined} />
-            {attachments.length ? <Text dimColor>附件：{attachments.map(file => file.name).join(', ')} · /attach "路径" 导入</Text> : null}
-            {serverQueued.length ? <Text dimColor>已排队 {serverQueued.length} 条 · {serverQueued[0].mode}：{serverQueued[0].text.split('\n')[0]} · /queue 管理 · /follow 完成后继续</Text> : null}
-            {files.length ? <Text dimColor>Tab 补全：{files.slice(0, 5).join(' · ')}</Text> : null}
+            {attachments.length ? <Text dimColor wrap="truncate-end">附件：{attachments.map(file => file.name).join(', ')} · /attach "路径" 导入</Text> : null}
+            {serverQueued.length ? <Text dimColor wrap="truncate-end">已排队 {serverQueued.length} 条 · {serverQueued[0].mode}：{serverQueued[0].text.split('\n')[0]} · /queue 管理 · /follow 完成后继续</Text> : null}
+            {files.length ? <Text dimColor wrap="truncate-end">Tab 补全：{files.slice(0, 5).join(' · ')}</Text> : null}
             {menuOpen ? <SlashMenu items={matches} selected={slashIndex} title={menuTitle} />
               : shortcutsOpen ? <ShortcutPanel /> : <StatusLine state={agent} elapsed={feed.startedAt ? now - feed.startedAt : 0} />}
           </>

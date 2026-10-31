@@ -17,7 +17,7 @@ export function TranscriptLog<T extends object>({ items, epoch, columns, renderI
       const key = typeof row.id === 'string' ? row.id : `${row.kind || 'row'}-${index}`
       seen.add(key)
       const previous = cursor.current.printed.get(key)
-      if (!previous || Object.keys(item).some(field => row[field] !== (previous as Record<string, unknown>)[field])) pending.push({ item, index })
+      if (!previous || previous !== item && (Object.keys(previous).length !== Object.keys(item).length || Object.keys(item).some(field => row[field] !== (previous as Record<string, unknown>)[field]))) pending.push({ item, index })
       cursor.current.printed.set(key, item)
     })
     for (const key of cursor.current.printed.keys()) if (!seen.has(key)) cursor.current.printed.delete(key)
