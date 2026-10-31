@@ -2197,6 +2197,7 @@ impl Harness {
             path: root.join("config.json"),
         };
         let settings = crate::runtime::Settings {
+            observability: Default::default(),
             mechanisms: Default::default(),
             temperature: None,
             seed: None,

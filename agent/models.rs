@@ -169,7 +169,7 @@ impl Outcome {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Response {
     pub blocks: Vec<Block>,
     pub stop_reason: String,

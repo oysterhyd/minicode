@@ -7,7 +7,7 @@ use crate::{
     util,
 };
 use anyhow::{Context, Result, bail};
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -34,6 +34,7 @@ pub enum ProviderError {
         message: String,
     },
     Network(reqwest::Error),
+    RecordedNetwork,
     Timeout {
         idle: Duration,
     },
@@ -49,7 +50,9 @@ impl ProviderError {
             Self::Http { status, .. } => {
                 *status == 408 || *status == 429 || (500..600).contains(status)
             }
-            Self::Network(_) | Self::Timeout { .. } | Self::Interrupted => true,
+            Self::Network(_) | Self::RecordedNetwork | Self::Timeout { .. } | Self::Interrupted => {
+                true
+            }
             Self::Stream { kind, .. } => matches!(
                 kind.as_str(),
                 "overloaded"
@@ -97,7 +100,7 @@ impl fmt::Display for ProviderError {
             Self::Stream { kind, message } => {
                 write!(f, "provider stream error ({kind}): {message}")
             }
-            Self::Network(_) => write!(f, "provider connection failed"),
+            Self::Network(_) | Self::RecordedNetwork => write!(f, "provider connection failed"),
             Self::Timeout { idle } => write!(
                 f,
                 "provider stream idle timeout: no data for {}s",
@@ -263,7 +266,7 @@ fn append_openai_tool_delta(
     *last = Some(index);
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PromptAnchor {
     messages: usize,
     fingerprint: String,
@@ -293,6 +296,8 @@ pub struct Provider {
     pub cache_enabled: bool,
     pub temperature: Option<f64>,
     pub seed: Option<u64>,
+    pub trace: std::sync::Arc<crate::observability::Trace>,
+    pub observation_context: crate::observability::Context,
     client: reqwest::Client,
 }
 impl Provider {
@@ -301,7 +306,16 @@ impl Provider {
         configuration: &Configuration,
         previous: Option<&Self>,
     ) -> Result<Self> {
-        let mut provider = Self::new(&settings.model, &settings.effort, configuration)?;
+        let trace = settings.observability.open()?;
+        let metadata = trace.metadata(&settings.model)?;
+        let mut provider = Self::build(
+            &settings.model,
+            &settings.effort,
+            configuration,
+            metadata.as_ref(),
+        )?;
+        trace.add_secret(&provider.key);
+        provider.trace = trace;
         provider.cache_enabled = settings.mechanisms.cache;
         provider.temperature = settings.temperature;
         provider.seed = settings.seed;
@@ -357,6 +371,14 @@ impl Provider {
     }
 
     pub fn new(model: &str, effort: &str, configuration: &Configuration) -> Result<Self> {
+        Self::build(model, effort, configuration, None)
+    }
+    fn build(
+        model: &str,
+        effort: &str,
+        configuration: &Configuration,
+        replay: Option<&Value>,
+    ) -> Result<Self> {
         let mut p = Self {
             name: "commandcode".into(),
             model: model.into(),
@@ -378,12 +400,37 @@ impl Provider {
             cache_enabled: true,
             temperature: None,
             seed: None,
+            trace: crate::observability::Trace::disabled(),
+            observation_context: Default::default(),
             // No total request timeout: it would also cap the streamed body.
             // Reads are bounded by idle_timeout and the run by its deadline.
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(20))
                 .build()?,
         };
+        if let Some(metadata) = replay {
+            p.name = metadata["name"]
+                .as_str()
+                .context("recording missing provider name")?
+                .into();
+            p.model = metadata["model"]
+                .as_str()
+                .context("recording missing provider model")?
+                .into();
+            p.style = metadata["style"]
+                .as_str()
+                .context("recording missing API style")?
+                .into();
+            p.window = metadata["window"]
+                .as_u64()
+                .context("recording missing context window")?;
+            p.max_output = metadata["max_output"]
+                .as_u64()
+                .context("recording missing output limit")?;
+            p.modalities = serde_json::from_value(metadata["modalities"].clone())?;
+            p.parameter_compat = metadata["parameter_compat"].clone();
+            return Ok(p);
+        }
         if model == "fake" {
             p.name = "fake".into();
             p.modalities = vec!["image".into(), "pdf".into(), "audio".into(), "video".into()];
@@ -619,26 +666,67 @@ impl Provider {
         attachments: &Attachments,
         emit: &Sink,
     ) -> Result<(Response, Value)> {
-        let result = self
-            .stream_inner(system, messages, specs, attachments, emit)
-            .await
-            .map_err(|error| {
+        let mut call = if self.trace.active() {
+            Some(self.trace.begin(&self.observation_context,
+                json!({"name":self.name,"model":self.model,"configuration_id":self.configuration_id,"style":self.style,"window":self.window,"max_output":self.max_output,"modalities":self.modalities,"parameter_compat":self.parameter_compat}),
+                json!({"system":system,"messages":messages,"tools":specs,"effort":self.effort,"temperature":self.temperature,"seed":self.seed,"cache":self.cache_enabled}))?)
+        } else {
+            None
+        };
+        if let Some(call) = &mut call {
+            let replayed = call.replay(emit);
+            let progress = call.progress();
+            self.index = progress["index"].as_u64().unwrap_or(self.index as u64) as usize;
+            self.call_counter = progress["call_counter"]
+                .as_u64()
+                .unwrap_or(self.call_counter as u64) as usize;
+            if let Some(scale) = progress["prompt_scale"].as_f64() {
+                self.prompt_scale = scale;
+            }
+            if progress.get("prompt_anchor").is_some() {
+                self.prompt_anchor = serde_json::from_value(progress["prompt_anchor"].clone())?;
+            }
+            if let Some(result) = replayed? {
+                return Ok(result);
+            }
+        }
+        let captured = call.as_ref().map(|call| call.sink(emit));
+        let result = match std::panic::AssertUnwindSafe(self.stream_inner(
+                system,
+                messages,
+                specs,
+                attachments,
+                captured.as_ref().unwrap_or(emit),
+            )).catch_unwind().await {
+                Ok(result)=>result,
+                Err(panic)=>{
+                    if let Some(call)=call {
+                        let _=call.finish_panic(&util::panic_message(&*panic), json!({"index":self.index,"call_counter":self.call_counter,"prompt_scale":self.prompt_scale,"prompt_anchor":self.prompt_anchor}));
+                    }
+                    std::panic::resume_unwind(panic)
+                }
+            }.map_err(|error| {
                 if error.downcast_ref::<ProviderError>().is_some() {
                     error
                 } else {
                     ProviderError::Protocol(format!("{error:#}")).into()
                 }
-            })?;
+            });
         // Fake defaults are fixed fixtures, not measurements of the prompt.
-        if self.fake.as_ref().is_none_or(|script| {
-            script["turns"]
-                .as_array()
-                .and_then(|turns| turns.get(self.index.saturating_sub(1)))
-                .is_some_and(|turn| turn["input_tokens"].as_u64().is_some())
-        }) {
-            self.observe_prompt(system, messages, specs, &result.0.usage);
+        if let Ok((response, _)) = &result
+            && self.fake.as_ref().is_none_or(|script| {
+                script["turns"]
+                    .as_array()
+                    .and_then(|turns| turns.get(self.index.saturating_sub(1)))
+                    .is_some_and(|turn| turn["input_tokens"].as_u64().is_some())
+            })
+        {
+            self.observe_prompt(system, messages, specs, &response.usage);
         }
-        Ok(result)
+        if let Some(call) = call {
+            call.finish(&result, json!({"index":self.index,"call_counter":self.call_counter,"prompt_scale":self.prompt_scale,"prompt_anchor":self.prompt_anchor}))?;
+        }
+        result
     }
 
     /// A separate, tool-free request: never advances the task's fake replay.

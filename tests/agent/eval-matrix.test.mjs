@@ -36,7 +36,7 @@ test('E3 two models and four independent ablations repeat with statistics and co
   fs.writeFileSync(path.join(task, 'task.yaml'), JSON.stringify({prompt:'finish', allowed_paths:[], protected_paths:[], items:[], budget:{max_rounds:2, max_seconds:10}, max_fix_attempts:0}))
   const prices = path.join(f.root, 'prices.json')
   fs.writeFileSync(prices, JSON.stringify(Object.fromEntries(models.map(m => [m,{input:1, output:2, cache_read:0.1, cache_write:1.25}]))))
-  const args = ['eval','--tasks-dir',tasks,'--baselines','b1','--model',models.join(','),'--ablations','full,no-compression,no-cache,no-subagents,no-prompt','--temperature','0','--prices',prices,'--output',output]
+  const args = ['eval','--record','--tasks-dir',tasks,'--baselines','b1','--model',models.join(','),'--ablations','full,no-compression,no-cache,no-subagents,no-prompt','--temperature','0','--prices',prices,'--output',output]
   const result = await run(args, f)
   assert.equal(result.code, 0, result.stderr)
   const records = JSON.parse(fs.readFileSync(path.join(output, 'results.json')))
@@ -52,6 +52,11 @@ test('E3 two models and four independent ablations repeat with statistics and co
     assert.equal(group.cache_hit_rate, 0.4); assert.ok(Math.abs(group.cost_usd.mean - 0.000084) < 1e-10)
   }
   assert.ok(records.results.every(r => r.mechanisms && r.model && r.ablation && r.cost_usd > 0))
+  for (const record of records.results) {
+    assert.ok(fs.existsSync(record.provider_recording))
+    const entries=fs.readFileSync(record.provider_recording,'utf8').trim().split('\n').map(JSON.parse)
+    assert.ok(entries.some(e => e.kind==='provider_call' && e.session_id===record.session_id))
+  }
   const resumed = await run(args, f); assert.equal(resumed.code, 0, resumed.stderr); assert.equal(payloads.length, 30)
   const invalid = await run([...args, '--repeats','1'], f); assert.notEqual(invalid.code, 0); assert.match(invalid.stderr, /at least 3/)
   assert.equal(compareReports([output,output]).rows.length, 20)

@@ -1634,6 +1634,7 @@ impl Router {
                     .map(str::to_string)
                     .unwrap_or(c.settings.lock().unwrap().model.clone());
                 if model != "fake"
+                    && c.settings.lock().unwrap().observability.replay.is_none()
                     && !self
                         .configuration
                         .models()?

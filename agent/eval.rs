@@ -44,6 +44,9 @@ pub struct Options {
     /// Model-keyed USD per million input/output/cache_read/cache_write tokens.
     #[arg(long)]
     prices: Option<PathBuf>,
+    /// Save redacted provider calls, tool outcomes and structured events per run.
+    #[arg(long)]
+    record: bool,
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
     #[arg(long, default_value = "alternating", value_parser = ["alternating", "grouped"])]
@@ -238,6 +241,14 @@ async fn one(
     let before = snapshot(&workspace)?;
     let started = Instant::now();
     let settings = Settings {
+        observability: if options.record {
+            crate::observability::Options::recording(
+                run_dir.join("provider.jsonl"),
+                run_dir.join("events.jsonl"),
+            )
+        } else {
+            crate::observability::Options::from_env()
+        },
         model: model.into(),
         mechanisms: mechanisms.clone(),
         temperature: options.temperature,
@@ -357,7 +368,7 @@ async fn one(
     } else {
         None
     };
-    let record = json!({"task":id,"task_id":id,"baseline":baseline,"repeat":repeat,"model":model,"ablation":ablation,"mechanisms":mechanisms,"cache_control":cache_control,"cost_usd":cost,"usage_complete":usage_complete,"provider_error":result.error,"fixture_sha256":fixture,"passed":failures.is_empty(),"hidden_pass":hidden_pass,"exit_reason":result.exit_reason,"attempts":attempts,"rounds":runtime.rounds,"usage":runtime.usage,"input_tokens":runtime.usage.input_tokens,"output_tokens":runtime.usage.output_tokens,"seconds":started.elapsed().as_secs_f64(),"error":if failures.is_empty(){Value::Null}else{json!(failures.join("; "))},"session_id":runtime.session,"compactions":events.iter().filter(|e|e.r#type=="context_compacted").count()});
+    let record = json!({"task":id,"task_id":id,"baseline":baseline,"repeat":repeat,"model":model,"ablation":ablation,"mechanisms":mechanisms,"cache_control":cache_control,"provider_recording":if options.record{json!(run_dir.join("provider.jsonl"))}else{Value::Null},"cost_usd":cost,"usage_complete":usage_complete,"provider_error":result.error,"fixture_sha256":fixture,"passed":failures.is_empty(),"hidden_pass":hidden_pass,"exit_reason":result.exit_reason,"attempts":attempts,"rounds":runtime.rounds,"usage":runtime.usage,"input_tokens":runtime.usage.input_tokens,"output_tokens":runtime.usage.output_tokens,"seconds":started.elapsed().as_secs_f64(),"error":if failures.is_empty(){Value::Null}else{json!(failures.join("; "))},"session_id":runtime.session,"compactions":events.iter().filter(|e|e.r#type=="context_compacted").count()});
     util::atomic_write(&record_path, &serde_json::to_vec_pretty(&record)?)?;
     Ok(record)
 }
@@ -450,7 +461,7 @@ pub async fn run(mut options: Options) -> Result<()> {
         combinations
             .sort_by(|a, b| (&a.3, &a.4, &a.1, &a.0, a.2).cmp(&(&b.3, &b.4, &b.1, &b.0, b.2)));
     }
-    let config = json!({"version":crate::VERSION,"agent_sha256":goals::hash_file(&std::env::current_exe()?)?,"models":options.model,"ablations":options.ablations,"temperature":options.temperature,"seed":options.seed,"prices":prices,"baselines":baselines,"repeats":repeats,"concurrency":options.concurrency,"schedule":options.schedule,"fixtures":tasks.iter().map(|p|goals::fingerprint(p).map(|hash|json!({"task":p.file_name().unwrap().to_string_lossy(),"sha256":hash}))).collect::<Result<Vec<_>>>()?});
+    let config = json!({"version":crate::VERSION,"agent_sha256":goals::hash_file(&std::env::current_exe()?)?,"models":options.model,"ablations":options.ablations,"temperature":options.temperature,"seed":options.seed,"prices":prices,"record":options.record,"baselines":baselines,"repeats":repeats,"concurrency":options.concurrency,"schedule":options.schedule,"fixtures":tasks.iter().map(|p|goals::fingerprint(p).map(|hash|json!({"task":p.file_name().unwrap().to_string_lossy(),"sha256":hash}))).collect::<Result<Vec<_>>>()?});
     let config_path = options.output.join("config.json");
     if config_path.is_file() && serde_json::from_slice::<Value>(&fs::read(&config_path)?)? != config
     {

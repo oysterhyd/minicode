@@ -1376,3 +1376,15 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 测试：tests/agent/eval-matrix.test.mjs 先因缺 --ablations 失败，修复后以两种 Anthropic HTTP 模拟模型 × 五机制 × 三次验证 30 次运行、真实请求字段、项目指令保留、样本量/方差、缓存量与费用、同配置恢复不重复请求、失败保留分母、旧离线命令和趋势；Rust e3_disabled_delegation_cannot_be_called_directly 先复现模型绕过工具列表启动子助手，再补执行端拦截；eval_stats 单测覆盖样本方差与未知值。完整检查见 output/stage8a-e3/。
 
 取舍：OpenAI 服务端自动缓存不可关闭，no-cache 仅控制显式缓存并在记录说明能力；采样参数可选且必须由模型支持；重复三次是最小描述样本，不能证明统计显著性或把未触发机制归因为性能收益。真实网关费用/多模型质量比较需另行配置模型与单价后运行，不使用本机账户自动发起付费请求。
+
+### G5 — structured logs and redacted provider recording/replay (8A)
+
+核查：Provider::stream 直接发请求，Runtime 仅有会话事件和面向 UI 的 sink，没有结构化日志文件或 provider 录制入口；先运行 observability.test.mjs 复现失败后没有录制文件。根因是 UI、存储事件与请求诊断没有独立、可复用的记录边界。
+
+修复：新增 observability 模块，按 session/run/provider call 或 tool call 关联 JSONL；默认关闭，通过 MINICODE_LOG_FILE / MINICODE_PROVIDER_RECORD / MINICODE_PROVIDER_REPLAY 开启。语义录制覆盖请求、响应、部分流输出、重试类型、用量、校准/脚本进度、工具结果、共享 ledger、验收与 run 起始状态。追加加锁并同步关键记录，处理取消/超时 future 丢弃、未完成请求和截断尾行；损坏的已提交行/未知版本拒绝。脱敏覆盖当前密钥、已知环境凭据、嵌套字段、Bearer 和含空格的引号值；跨分片文本先合并。Windows 文件锁需要可读句柄，回归中复现并修正。
+
+新增 minicode replay，可从录制文件选择最后一个根 run 或 --run-id，在新目录创建会话和 result.json，恢复上下文、机制与预算，匹配请求指纹；不调用网络、MCP、工具、子代理或验收命令。E3 增加 --record，逐 run 隔离录制并在报告中给出路径；旧协议、会话与配置不迁移，无新增依赖。
+
+测试：observability.test.mjs 的七项端到端回归覆盖 HTTP 429→工具→流错误、跨片脱敏、修改原文件后仍回放原结果、请求不匹配拒绝、独立 CLI replay（含 reasoning effort）、验收命令不重执行和新任务尝试重置、子代理用量、真实网络截止时间、追加文件选择早期 run、录制 I/O 失败无副作用，以及 provider panic 的类型保留。子代理用量回放先复现 200→100 token 丢失，再通过 ledger 快照修复。Rust g5_* 覆盖错误/Retry-After 类型往返、取消/截止 future 落盘、8 线程追加完整性、脱敏、截断与未知 schema；含空格密钥测试先失败再修复。eval-matrix.test.mjs 验证两模型 × 五机制 × 三次均有独立录制。完整检查见 output/stage8a-g5-complete/；早期既有建库竞争、插件缓存与并发编辑测试的失败日志保留于 output/stage8a-g5*/。
+
+边界与待确认：这是脱敏后的语义回放，不包含原始网络分片，也不重建文件副作用；首次请求前的启动故障、录制 I/O 失败和不完整机器崩溃无法保证完整 Runtime 重现。未知私人文本无法自动匿名化，须主动开启录制；具体命令、限制与隐私边界见 [可观测与回放](observability.md)。本轮未发起付费真实模型评测；保留阶段 7 已知首次建库竞争，不在本批修复。

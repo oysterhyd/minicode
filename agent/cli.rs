@@ -108,6 +108,14 @@ enum Commands {
         #[command(flatten)]
         options: crate::eval::Options,
     },
+    /// Replay a recorded run offline in a new output directory; never execute tools.
+    Replay {
+        recording: PathBuf,
+        #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long, default_value = "output/replay")]
+        output: PathBuf,
+    },
 }
 #[derive(Args, Clone, Default)]
 struct RunOptions {
@@ -412,6 +420,15 @@ pub async fn main() -> Result<()> {
                 },
         } => review(&workspace, &output, &check, &model, retry_unknown).await,
         Commands::Eval { options } => crate::eval::run(options).await,
+        Commands::Replay {
+            recording,
+            run_id,
+            output,
+        } => {
+            let result = Runtime::replay_recording(&recording, run_id.as_deref(), &output).await?;
+            println!("{}", serde_json::to_string(&result)?);
+            Ok(())
+        }
     }
 }
 fn resolve(store: &Store, prefix: &str) -> Result<String> {

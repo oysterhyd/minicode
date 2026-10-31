@@ -21,6 +21,7 @@ pub mod goals;
 pub mod mcp;
 mod mcp_dispatch;
 pub mod models;
+pub mod observability;
 pub mod paging;
 pub mod permissions;
 pub mod provider;

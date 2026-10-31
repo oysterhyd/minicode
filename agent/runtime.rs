@@ -26,6 +26,84 @@ use std::{
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+impl Runtime {
+    pub async fn replay_recording(
+        recording: &Path,
+        run_id: Option<&str>,
+        output: &Path,
+    ) -> Result<RunResult> {
+        let recording = util::canonical(recording)?;
+        let observation =
+            crate::observability::Options::replaying(recording, output.join("events.jsonl"));
+        let trace = observation.open()?;
+        let (start, request) = trace.select_run(run_id)?;
+        let model = request["provider"]["configuration_id"]
+            .as_str()
+            .context("recording missing model")?;
+        let messages: Vec<Message> =
+            serde_json::from_value(request["request"]["messages"].clone())?;
+        let config = Configuration {
+            path: output.join("config.json"),
+        };
+        let settings = Settings {
+            model: model.into(),
+            mode: "bypass".into(),
+            observability: observation,
+            mechanisms: serde_json::from_value(start["data"]["mechanisms"].clone())?,
+            budget: serde_json::from_value(start["data"]["budget"].clone())?,
+            temperature: request["request"]["temperature"].as_f64(),
+            seed: request["request"]["seed"].as_u64(),
+            effort: request["request"]["effort"]
+                .as_str()
+                .context("recording missing effort")?
+                .into(),
+            ..Settings::new(&config)?
+        };
+        if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::create_dir(output).context("replay output must be a new directory")?;
+        let workspace = output.join("workspace");
+        std::fs::create_dir(&workspace)?;
+        let store = Store::open(output.join("session.db"))?;
+        let mut runtime = Self::new(&workspace, model, None, store, config, &settings).await?;
+        for message in messages {
+            runtime.append(message)?;
+        }
+        runtime.used_call_ids = serde_json::from_value(start["data"]["used_call_ids"].clone())?;
+        runtime.pending = true;
+        runtime.rounds = start["data"]["rounds"].as_u64().unwrap_or(0);
+        runtime.usage = serde_json::from_value(start["data"]["usage"].clone())?;
+        runtime.frozen_system = Some(
+            request["request"]["system"]
+                .as_str()
+                .context("recording missing system prompt")?
+                .into(),
+        );
+        if !start["data"]["goal"].is_null() {
+            runtime.goal = Some(Goal::restore(&start["data"]["goal"], &runtime.workspace)?);
+            if start["data"]["input"].is_string() {
+                runtime.goal.as_mut().unwrap().attempts = 0;
+            }
+        }
+        let hooks = Hooks {
+            settings: Arc::new(Mutex::new(settings)),
+            snapshot: Default::default(),
+            approvals: Default::default(),
+            approval_sequence: Default::default(),
+            sink: Arc::new(|_| {}),
+            cancel: CancellationToken::new(),
+            shared: Default::default(),
+        };
+        let result = runtime.run(None, vec![], hooks).await?;
+        util::atomic_write(
+            &output.join("result.json"),
+            &serde_json::to_vec_pretty(&result)?,
+        )?;
+        Ok(result)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Mechanisms {
     pub compression: bool,
@@ -45,6 +123,7 @@ impl Default for Mechanisms {
 }
 #[derive(Clone)]
 pub struct Settings {
+    pub observability: crate::observability::Options,
     pub mechanisms: Mechanisms,
     pub temperature: Option<f64>,
     pub seed: Option<u64>,
@@ -63,6 +142,7 @@ pub struct Settings {
 impl Settings {
     pub fn new(configuration: &Configuration) -> Result<Self> {
         Ok(Self {
+            observability: crate::observability::Options::from_env(),
             mechanisms: Mechanisms::default(),
             temperature: None,
             seed: None,
@@ -691,8 +771,36 @@ impl Runtime {
     }
     pub fn event(&self, hooks: &Hooks, kind: &str, data: Value) -> Result<Event> {
         let event = self.store.event(&self.session, kind, &data)?;
+        if self.provider.trace.active() {
+            self.provider.trace.log(
+                &self.observation_context(hooks),
+                kind,
+                data["call_id"].as_str(),
+                data.clone(),
+            );
+        }
         (hooks.sink)(json!({"event":"agent_event","sessionId":self.session,"item":event}));
         Ok(event)
+    }
+    fn observation_context(&self, hooks: &Hooks) -> crate::observability::Context {
+        crate::observability::Context {
+            session_id: self.session.clone(),
+            run_id: hooks
+                .snapshot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .run_id
+                .clone()
+                .unwrap_or_default(),
+            workspace: self.workspace.to_string_lossy().into_owned(),
+            purpose: "task".into(),
+            cancel: Some(hooks.cancel.clone()),
+            deadline: hooks
+                .shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .deadline,
+        }
     }
     pub fn phase(hooks: &Hooks, phase: &str) {
         hooks.snapshot.lock().unwrap().phase = phase.into();
@@ -737,7 +845,11 @@ impl Runtime {
         Ok(())
     }
     fn tool_specs(&self, catalog: &Catalog, agents: &[Value]) -> Vec<crate::models::ToolSpec> {
-        let mut specs = tools::specs(catalog, &self.mcp, agents, !self.child);
+        let mut specs = self
+            .provider
+            .trace
+            .tool_specs(&self.provider.configuration_id, &self.session)
+            .unwrap_or_else(|| tools::specs(catalog, &self.mcp, agents, !self.child));
         if !self.mechanisms.subagents {
             specs.retain(|s| !["delegate", "review_delegate"].contains(&s.name.as_str()));
         }
@@ -766,6 +878,9 @@ impl Runtime {
         Ok(prompt)
     }
     async fn sync_dynamic_context(&mut self) -> Result<()> {
+        if self.provider.trace.is_replay() {
+            return Ok(());
+        }
         let (entries, active) = {
             let catalog = self.catalog.lock().await;
             let global = catalog
@@ -872,6 +987,9 @@ impl Runtime {
         Ok(())
     }
     async fn connect_mcp(&mut self, hooks: &Hooks) -> Result<()> {
+        if self.provider.trace.is_replay() {
+            return Ok(());
+        }
         if self.child
             && self
                 .allowed
@@ -1225,6 +1343,12 @@ impl Runtime {
                 None
             };
         }
+        self.provider.observation_context = self.observation_context(&hooks);
+        self.provider.trace.boundary(
+            &self.provider.observation_context,
+            "run_start",
+            json!({"model":self.provider.configuration_id,"input":text,"attachments":attachments,"budget":budget,"mechanisms":self.mechanisms,"child":self.child,"rounds":self.rounds,"usage":self.usage,"used_call_ids":self.used_call_ids,"goal":self.goal.as_ref().map(|g|json!({"spec":g.spec,"baseline":{"digests":g.protected,"unresolvable":g.unresolved},"attempts":g.attempts,"evidence":g.evidence}))}),
+        )?;
         // A panic in the loop is caught so the teardown below still runs; it
         // is then reported as a run failure. Persisted history stays the
         // source of truth for the next run.
@@ -1276,6 +1400,9 @@ impl Runtime {
             } else {
                 approvals.clear();
             }
+        }
+        if self.provider.trace.is_replay() {
+            self.usage = hooks.shared.lock().unwrap().usage.clone();
         }
         let (reason, error) = match result {
             Ok(reason) => (reason, None),
@@ -1336,6 +1463,7 @@ impl Runtime {
             }
             s.phase = if self.pending { "paused" } else { "idle" }.into();
         }
+        if let Err(error) = self.provider.trace.boundary(&self.observation_context(&hooks), "run_end", json!({"exit_reason":reason,"error":error,"usage":self.usage,"teardown_errors":failures})) { failures.push(format!("recording run end: {error}")); }
         if panicked || !failures.is_empty() {
             if let Err(error) = self.stop_resources(&hooks, false).await {
                 failures.push(format!("background jobs: {error}"));
@@ -1606,6 +1734,7 @@ impl Runtime {
                 // the wire is the provider's idle timeout, so long streams that
                 // keep producing bytes are never cut off.
                 let deadline = hooks.shared.lock().unwrap().deadline;
+                self.provider.observation_context = self.observation_context(hooks);
                 let request =
                     self.provider
                         .stream(&system, &self.messages, &specs, &attachments, &delta);
@@ -1793,8 +1922,23 @@ impl Runtime {
             if calls.is_empty() {
                 Self::phase(hooks, "finishing");
                 let ctx = self.context(hooks, None);
+                let observation = self.observation_context(hooks);
                 if let Some(goal) = &mut self.goal {
-                    let report = goal.check(&ctx).await?;
+                    let report = if self.provider.trace.is_replay() {
+                        let report = self.provider.trace.goal(&observation, None)?;
+                        if report["passed"] == true {
+                            goal.evidence = Some(report.clone());
+                        } else {
+                            goal.attempts += 1;
+                            goal.evidence = None;
+                        }
+                        goal.save(&self.store, &self.session)?;
+                        report
+                    } else {
+                        self.provider
+                            .trace
+                            .goal(&observation, Some(goal.check(&ctx).await?))?
+                    };
                     let passed = report["passed"] == true;
                     let attempts_exceeded = goal.attempts >= goal.spec.max_fix_attempts;
                     self.event(hooks, "goal_check", report.clone())?;
@@ -2456,7 +2600,35 @@ impl Runtime {
         }
         Ok(())
     }
+    fn replay_tool(&self, call: &Block, hooks: &Hooks) -> Result<Option<Outcome>> {
+        if !self.provider.trace.is_replay() {
+            return Ok(None);
+        }
+        let Some((outcome, saved)) = self
+            .provider
+            .trace
+            .replay_tool(&self.observation_context(hooks), call)?
+        else {
+            return Ok(None);
+        };
+        let usage: Usage = serde_json::from_value(saved["usage"].clone())?;
+        let mut ledger = hooks.shared.lock().unwrap();
+        ledger.usage.input_tokens = ledger.usage.input_tokens.max(usage.input_tokens);
+        ledger.usage.output_tokens = ledger.usage.output_tokens.max(usage.output_tokens);
+        ledger.usage.cache_read_tokens =
+            ledger.usage.cache_read_tokens.max(usage.cache_read_tokens);
+        ledger.usage.cache_write_tokens = ledger
+            .usage
+            .cache_write_tokens
+            .max(usage.cache_write_tokens);
+        ledger.usage.available |= usage.available;
+        ledger.rounds = ledger.rounds.max(saved["rounds"].as_u64().unwrap_or(0));
+        Ok(Some(outcome))
+    }
     async fn invoke_read(&self, call: Block, hooks: &Hooks, recovered: bool) -> Result<Block> {
+        if let Some(outcome) = self.replay_tool(&call, hooks)? {
+            return self.record_result(&call, outcome, hooks, recovered, 0.0);
+        }
         let started = Instant::now();
         if let Some(outcome) = self.preflight(&call, hooks, recovered).await? {
             return self.record_result(
@@ -2556,6 +2728,9 @@ impl Runtime {
         Ok(result)
     }
     async fn invoke(&mut self, call: Block, hooks: &Hooks, recovered: bool) -> Result<Block> {
+        if let Some(outcome) = self.replay_tool(&call, hooks)? {
+            return self.record_result(&call, outcome, hooks, recovered, 0.0);
+        }
         if let Block::ToolUse { name, input, .. } = &call
             && name == "review_delegate"
             && !self.child
@@ -2677,6 +2852,16 @@ impl Runtime {
             outcome.artifact_id = Some(artifact);
             outcome.truncated = true;
         }
+        let ledger = {
+            let ledger = hooks.shared.lock().unwrap();
+            json!({"usage":ledger.usage,"rounds":ledger.rounds})
+        };
+        self.provider.trace.record_tool(
+            &self.observation_context(hooks),
+            call,
+            &outcome,
+            ledger,
+        )?;
         let content = if let Some(error) = &outcome.error {
             if outcome.output.is_empty() {
                 error.clone()
@@ -3254,6 +3439,8 @@ impl Runtime {
                 None => Ok(self.provider.clone()),
             };
             if let Ok(mut provider) = provider {
+                provider.observation_context = self.observation_context(hooks);
+                provider.observation_context.purpose = "summary".into();
                 let attachments = Attachments {
                     root: self.store.root().join("attachments"),
                 };
