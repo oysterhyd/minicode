@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod background;
 pub mod bridge;
 pub mod cli;
+mod cli_approval;
 mod cli_output;
 mod command_process;
 mod commands;

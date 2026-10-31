@@ -578,6 +578,27 @@ fn console_input() -> ConsoleInput {
     ConsoleInput::new(crate::console::input())
 }
 
+struct CliApproval {
+    id: String,
+    nonce: String,
+    request: Value,
+}
+fn show_approval(approval: &CliApproval) {
+    println!(
+        "\n审批：{}",
+        util::terminal_text(approval.request["summary"].as_str().unwrap_or_default())
+    );
+    println!("确认码：{}", approval.nonce);
+    if let Some(rule) = approval.request["grant_rule"].as_str() {
+        println!(
+            "规则：{}\n仅本次 y CODE / 本会话 a CODE / 写入项目规则 p CODE / 拒绝 n",
+            util::terminal_text(rule)
+        );
+    } else {
+        println!("仅本次 y CODE / 拒绝 n（此操作不可记住）");
+    }
+}
+
 async fn run(
     runtime: &mut Runtime,
     text: Option<String>,
@@ -609,7 +630,7 @@ async fn run_with_input(
     tokio::pin!(running);
     let mut cancelled = false;
     let mut input_open = true;
-    let mut waiting = VecDeque::<String>::new();
+    let mut waiting = VecDeque::<CliApproval>::new();
     loop {
         tokio::select! {
             result = &mut running => return result,
@@ -619,9 +640,9 @@ async fn run_with_input(
                 if !input_open {
                     if let Some((_, tx)) = approvals.lock().unwrap().remove(&id) { let _ = tx.send(false); }
                 } else {
-                    println!("\n审批：{}", event["request"]["summary"].as_str().unwrap_or_default());
-                    if let Some(rule)=event["request"]["grant_rule"].as_str() {println!("规则：{rule}\n仅本次 y / 本会话此前缀 a / 写入项目规则 p / 拒绝 N");}else{println!("仅本次 y / 拒绝 N（此操作不可记住）");}
-                    waiting.push_back(id);
+                    let approval=CliApproval{id,nonce:util::short_id(&util::id()).into(),request:event["request"].clone()};
+                    if waiting.is_empty() {show_approval(&approval);}
+                    waiting.push_back(approval);
                 }
             }
             line = input.receiver.recv(), if input_open => {
@@ -632,15 +653,23 @@ async fn run_with_input(
                     input.buffered.push_back(Ok(line));continue;
                 }
                 let (granted,remember) = match line {
-                    Some(Ok(line)) => {let line=line.trim().to_lowercase();(matches!(line.as_str(),"y"|"yes"|"a"|"p"),line)},
+                    Some(Ok(line)) => {
+                        let current=waiting.front().unwrap();
+                        let Some(decision)=crate::cli_approval::reply(&line,&current.nonce,current.request["grant_rule"].as_str().is_some_and(|rule|!rule.is_empty())) else {
+                            input.buffered.push_back(Ok(line));
+                            eprintln!("非审批输入已保留到下一提示符；批准必须输入当前确认码。");
+                            continue;
+                        };
+                        (decision.granted,decision.remember.to_string())
+                    },
                     other => {
                         input_open = false;
                         if let Some(Err(error)) = other { eprintln!("读取输入失败：{error}"); }
                         (false,String::new())
                     }
                 };
-                if let Some(id) = waiting.pop_front()
-                    && let Some((scope, tx)) = approvals.lock().unwrap().remove(&id) {
+                if let Some(approval) = waiting.pop_front()
+                    && let Some((scope, tx)) = approvals.lock().unwrap().remove(&approval.id) {
                     let mut granted=granted;
                     if granted && matches!(remember.as_str(),"a"|"p") && let Ok(scope)=serde_json::from_str::<Value>(&scope) {
                         let rule=scope["rule"].as_str().unwrap_or_default();
@@ -649,9 +678,10 @@ async fn run_with_input(
                     }
                     let _ = tx.send(granted);
                 }
+                if let Some(next)=waiting.front() {show_approval(next);}
                 if !input_open {
-                    for id in waiting.drain(..) {
-                        if let Some((_, tx)) = approvals.lock().unwrap().remove(&id) { let _ = tx.send(false); }
+                    for approval in waiting.drain(..) {
+                        if let Some((_, tx)) = approvals.lock().unwrap().remove(&approval.id) { let _ = tx.send(false); }
                     }
                 }
             }

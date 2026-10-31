@@ -1208,3 +1208,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：run signal未来只监听一次且取消后禁用，idle不监听；编辑器Interrupted当读取失败。修复：运行和空闲均消费信号，首次取消/取消中第二次exit130；编辑器Interrupted同样取消，空闲两秒双Ctrl+C退出；单一stdin reader，运行中的普通输入保留到下个提示符。回归：l11_editor_interrupt_cancels_during_approval修复前completed、修复后cancelled。状态：部分完成（真实OS连续信号/PTY强退恢复仍需跨平台测试）。
 
+
+### L12 — require request-specific approval confirmation
+
+核查：预输入y会被后来审批消费并允许写文件；真实CLI测试已复现。修复：每审批生成随机确认码，y/a/p必须携带当前码，n安全拒绝；仅第一待处理审批显示与消费，普通输入保留到后续提示符；EOF拒绝所有等待。不可记住的审批拒绝a/p。选用带码确认而非裸单键，是为了管道和TTY均不丢失预输入且不可自动批准。回归：cli_approval单测预输入/错误码/多参数/remember边界；cli-approval-boundary.test.mjs真实CLI预输入y不写、当前码写成功。测试同步等待Bridge数据库初始化，避免既有并发建库迁移竞争。状态：已修复。
+
