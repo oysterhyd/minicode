@@ -74,6 +74,11 @@ func TestRealBridgeConcurrentRequestsAndConfiguration(t *testing.T) {
 	agent := map[string]any{"name": "native-review", "label": "Native reviewer", "description": "Review changes", "instructions": "Read files and report evidence.", "tools": []string{"read", "grep"}, "inheritTools": false}
 	var agents []map[string]any
 	request(t, c, "saveAgent", map[string]any{"agent": agent}, &agents)
+	for _, saved := range agents {
+		if saved["name"] == agent["name"] {
+			agent["revision"] = saved["revision"]
+		}
+	}
 	agent["originalName"] = "native-review"
 	agent["name"] = "native-review-edited"
 	agent["instructions"] = "Read files and verify tests."
@@ -96,6 +101,7 @@ func TestRealBridgeConcurrentRequestsAndConfiguration(t *testing.T) {
 			ID, Name  string
 			APIKey    string `json:"apiKey"`
 			HasAPIKey bool   `json:"hasApiKey"`
+			Revision  uint64 `json:"revision"`
 		} `json:"services"`
 	}
 	service := map[string]any{"name": "Native test service", "baseUrl": "https://example.test/v1", "apiStyle": "openai", "apiKey": "native-integration-placeholder", "enabled": true, "models": []map[string]any{{"modelId": "test-model", "name": "Test model", "contextWindow": 200000, "maxOutputTokens": 8192, "supportsEffort": true}}}
@@ -104,6 +110,7 @@ func TestRealBridgeConcurrentRequestsAndConfiguration(t *testing.T) {
 	for _, s := range config.Services {
 		if s.Name == "Native test service" {
 			id = s.ID
+			service["revision"] = s.Revision
 			if s.APIKey != "" || !s.HasAPIKey {
 				t.Fatal("service response did not redact the credential")
 			}

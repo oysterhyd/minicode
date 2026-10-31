@@ -42,6 +42,7 @@ type ServiceModel struct {
 }
 
 type Service struct {
+	Revision  uint64         `json:"revision,omitempty"`
 	ID        string         `json:"id"`
 	Name      string         `json:"name"`
 	BaseURL   string         `json:"baseUrl"`
@@ -83,6 +84,7 @@ type Attachment struct {
 }
 
 type Agent struct {
+	Revision     uint64   `json:"revision,omitempty"`
 	OriginalName string   `json:"originalName,omitempty"`
 	Name         string   `json:"name"`
 	Label        string   `json:"label"`
@@ -95,6 +97,7 @@ type Agent struct {
 }
 
 type Configuration struct {
+	Version      uint64    `json:"version,omitempty"`
 	Services     []Service `json:"services"`
 	Agents       []Agent   `json:"agents"`
 	DefaultModel string    `json:"defaultModel"`

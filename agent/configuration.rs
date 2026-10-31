@@ -44,32 +44,36 @@ impl Default for Configuration {
 }
 impl Configuration {
     pub fn read(&self) -> Result<Value> {
-        let mut value = self.read_raw()?;
+        let value = self.read_raw()?;
         if value["services"]
             .as_array()
             .unwrap()
             .iter()
             .any(|s| s.get("apiKey").is_some())
         {
-            crate::settings_file::update(&self.path, |current| {
-                // The lock covers re-reading and migration, so another migration cannot replace refs.
-                self.secure_credentials(current)?;
-                value = current.clone();
-                Ok(())
-            })?;
+            return self.update(|_| Ok(()));
         }
         Ok(value)
     }
     fn read_raw(&self) -> Result<Value> {
-        if !self.path.exists() {
+        Self::validate(self.read_document()?)
+    }
+    fn read_document(&self) -> Result<Value> {
+        if !self.path.try_exists()? {
             return Ok(json!({"services":[],"agents":[],"disabledAgents":[],"defaultModel":""}));
         }
         if self.path.metadata()?.len() > 4_000_000 {
             bail!("harness configuration exceeds the size limit")
         }
         let bytes = fs::read(&self.path)?;
+        if bytes.len() > 4_000_000 {
+            bail!("harness configuration exceeds the size limit")
+        }
         let value: Value =
             serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes))?;
+        Ok(value)
+    }
+    fn validate(value: Value) -> Result<Value> {
         if !value.is_object() || !value["services"].is_array() || !value["agents"].is_array() {
             bail!("harness configuration must contain services and agents lists")
         }
@@ -96,6 +100,7 @@ impl Configuration {
                 timeout_seconds(timeout)?;
             }
         }
+        version(&value, "version")?;
         Ok(value)
     }
     pub fn tool_timeout(&self, name: &str) -> Result<Option<std::time::Duration>> {
@@ -104,13 +109,47 @@ impl Configuration {
             .map(std::time::Duration::from_secs_f64))
     }
     pub fn write(&self, data: &Value) -> Result<()> {
-        let mut data = data.clone();
-        self.secure_credentials(&mut data)?;
-        let bytes = serde_json::to_vec_pretty(&data)?;
-        if bytes.len() > 4_000_000 {
-            bail!("harness configuration exceeds the size limit");
-        }
-        util::atomic_write(&self.path, &bytes)
+        self.update_version(Some(version(data, "version")?), |current| {
+            *current = data.clone();
+            Ok(())
+        })
+        .map(|_| ())
+    }
+    pub fn update(&self, change: impl FnOnce(&mut Value) -> Result<()>) -> Result<Value> {
+        self.update_version(None, change)
+    }
+    fn update_version(
+        &self,
+        expected: Option<u64>,
+        change: impl FnOnce(&mut Value) -> Result<()>,
+    ) -> Result<Value> {
+        crate::settings_file::locked(&self.path, || {
+            // An explicit versioned replacement may repair a syntactically valid but invalid
+            // document. Field updates still require a valid current configuration.
+            let mut data = if expected.is_some() {
+                self.read_document()?
+            } else {
+                self.read_raw()?
+            };
+            let current = version(&data, "version")?;
+            if expected.is_some_and(|expected| expected != current) {
+                bail!("configuration conflict; reload the configuration and retry")
+            }
+            change(&mut data)?;
+            let mut data = Self::validate(data)?;
+            self.secure_credentials(&mut data)?;
+            data["version"] = json!(
+                current
+                    .checked_add(1)
+                    .context("configuration version exhausted")?
+            );
+            let bytes = serde_json::to_vec_pretty(&data)?;
+            if bytes.len() > 4_000_000 {
+                bail!("harness configuration exceeds the size limit")
+            }
+            util::atomic_write(&self.path, &bytes)?;
+            Ok(data)
+        })
     }
     fn secure_credentials(&self, data: &mut Value) -> Result<()> {
         for service in data["services"]
@@ -173,11 +212,14 @@ impl Configuration {
                 }
             }
         }
-        data["agents"] = json!(self.agents()?);
+        data["agents"] = json!(Self::agents_from(&data)?);
         Ok(data)
     }
     pub fn models(&self) -> Result<Vec<Value>> {
         let data = self.read()?;
+        self.models_from(&data)
+    }
+    pub fn models_from(&self, data: &Value) -> Result<Vec<Value>> {
         let mut models = vec![];
         for s in data["services"].as_array().unwrap() {
             let available = s["enabled"] == true && !self.credentials(s)?.1.is_empty();
@@ -216,102 +258,120 @@ impl Configuration {
         if !draft.is_object() {
             bail!("service must be an object")
         }
-        let mut data = self.read()?;
-        let existing = data["services"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|s| s["id"] == draft["id"]);
-        let mut s = draft.clone();
-        // A client can replace a key, but cannot select another service's secret by reference.
-        s.as_object_mut().unwrap().remove("credentialRef");
-        if let Some(reference) = existing.and_then(|s| s.get("credentialRef")) {
-            s["credentialRef"] = reference.clone();
-        }
-        s["id"] = existing
-            .map(|s| s["id"].clone())
-            .unwrap_or_else(|| json!(util::id()));
-        s["builtin"] = json!(existing.is_some_and(|s| s["builtin"] == true));
-        s["apiKey"] = json!(s["apiKey"].as_str().unwrap_or_default().trim());
-        if s["apiKey"].as_str().unwrap_or_default().is_empty() {
-            s["apiKey"] = existing.map(|s| s["apiKey"].clone()).unwrap_or(json!(""));
-        }
-        s.as_object_mut()
-            .context("service must be an object")?
-            .remove("hasApiKey");
-        let name = util::string(&s, "name")?.trim().to_string();
-        let url = util::string(&s, "baseUrl")?
-            .trim()
-            .trim_end_matches('/')
-            .to_string();
-        let parsed =
-            reqwest::Url::parse(&url).context("请填写服务名称和有效的 HTTP(S) 接口地址")?;
-        if name.is_empty()
-            || !["http", "https"].contains(&parsed.scheme())
-            || parsed.host_str().is_none()
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-        {
-            bail!("请填写服务名称和有效的 HTTP(S) 接口地址")
-        }
-        s["name"] = json!(name);
-        s["baseUrl"] = json!(url);
-        let style = s["apiStyle"].as_str().unwrap_or_default().to_string();
-        if !["openai", "anthropic"].contains(&style.as_str()) {
-            bail!("不支持的接口格式")
-        }
-        let mut seen = std::collections::HashSet::new();
-        for m in s["models"]
-            .as_array_mut()
-            .context("models must be an array")?
-        {
-            let id = util::string(m, "modelId")?.trim().to_string();
-            if id.is_empty() || !seen.insert(id.clone()) {
-                bail!("模型 ID 不能为空或重复")
-            }
-            m["modelId"] = json!(id);
-            let window = m["contextWindow"]
-                .as_u64()
-                .context("invalid contextWindow")?;
-            let output = m["maxOutputTokens"]
-                .as_u64()
-                .context("invalid maxOutputTokens")?;
-            if output == 0 || output >= window {
-                bail!("输出上限必须大于 0 且小于上下文窗口")
-            }
-            m["supportsEffort"] = json!(m["supportsEffort"] == true);
-            m["capabilities"] = capabilities(&m["capabilities"])?;
-            if style == "anthropic"
-                && (m["capabilities"]["audio"] == true || m["capabilities"]["video"] == true)
-            {
-                bail!("Anthropic Messages 可配置图片与 PDF；音频、视频需要支持这些输入的兼容接口")
-            }
-        }
-        s["enabled"] = json!(s.get("enabled").map(|x| x == true).unwrap_or(true));
-        data["services"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|other| other["id"] != s["id"]);
-        data["services"].as_array_mut().unwrap().push(s);
-        self.write(&data)?;
-        let models = self.models()?;
-        if !models
-            .iter()
-            .any(|m| m["id"] == data["defaultModel"] && m["available"] == true)
-        {
-            data["defaultModel"] = models
+        self.update(|data| {
+            let existing = data["services"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .find(|m| m["available"] == true)
-                .map(|m| m["id"].clone())
-                .unwrap_or(json!(""));
-            self.write(&data)?;
-        }
+                .find(|s| s["id"] == draft["id"]);
+            let mut s = draft.clone();
+            if let Some(existing) = existing {
+                check_revision(existing, draft)?;
+            } else if draft["id"].as_str().is_some_and(|id| !id.is_empty()) {
+                bail!("service conflict; the service was deleted; reload and retry")
+            }
+            s["revision"] = json!(
+                existing
+                    .map(|s| version(s, "revision"))
+                    .transpose()?
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .context("service revision exhausted")?
+            );
+            // A client can replace a key, but cannot select another service's secret by reference.
+            s.as_object_mut().unwrap().remove("credentialRef");
+            if let Some(reference) = existing.and_then(|s| s.get("credentialRef")) {
+                s["credentialRef"] = reference.clone();
+            }
+            s["id"] = existing
+                .map(|s| s["id"].clone())
+                .unwrap_or_else(|| json!(util::id()));
+            s["builtin"] = json!(existing.is_some_and(|s| s["builtin"] == true));
+            s["apiKey"] = json!(s["apiKey"].as_str().unwrap_or_default().trim());
+            if s["apiKey"].as_str().unwrap_or_default().is_empty() {
+                s["apiKey"] = existing.map(|s| s["apiKey"].clone()).unwrap_or(json!(""));
+            }
+            s.as_object_mut()
+                .context("service must be an object")?
+                .remove("hasApiKey");
+            let name = util::string(&s, "name")?.trim().to_string();
+            let url = util::string(&s, "baseUrl")?
+                .trim()
+                .trim_end_matches('/')
+                .to_string();
+            let parsed =
+                reqwest::Url::parse(&url).context("请填写服务名称和有效的 HTTP(S) 接口地址")?;
+            if name.is_empty()
+                || !["http", "https"].contains(&parsed.scheme())
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                bail!("请填写服务名称和有效的 HTTP(S) 接口地址")
+            }
+            s["name"] = json!(name);
+            s["baseUrl"] = json!(url);
+            let style = s["apiStyle"].as_str().unwrap_or_default().to_string();
+            if !["openai", "anthropic"].contains(&style.as_str()) {
+                bail!("不支持的接口格式")
+            }
+            let mut seen = std::collections::HashSet::new();
+            for m in s["models"]
+                .as_array_mut()
+                .context("models must be an array")?
+            {
+                let id = util::string(m, "modelId")?.trim().to_string();
+                if id.is_empty() || !seen.insert(id.clone()) {
+                    bail!("模型 ID 不能为空或重复")
+                }
+                m["modelId"] = json!(id);
+                let window = m["contextWindow"]
+                    .as_u64()
+                    .context("invalid contextWindow")?;
+                let output = m["maxOutputTokens"]
+                    .as_u64()
+                    .context("invalid maxOutputTokens")?;
+                if output == 0 || output >= window {
+                    bail!("输出上限必须大于 0 且小于上下文窗口")
+                }
+                m["supportsEffort"] = json!(m["supportsEffort"] == true);
+                m["capabilities"] = capabilities(&m["capabilities"])?;
+                if style == "anthropic"
+                    && (m["capabilities"]["audio"] == true || m["capabilities"]["video"] == true)
+                {
+                    bail!(
+                        "Anthropic Messages 可配置图片与 PDF；音频、视频需要支持这些输入的兼容接口"
+                    )
+                }
+            }
+            s["enabled"] = json!(s.get("enabled").map(|x| x == true).unwrap_or(true));
+            data["services"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|other| other["id"] != s["id"]);
+            data["services"].as_array_mut().unwrap().push(s);
+            let models = self.models_from(data)?;
+            if !models
+                .iter()
+                .any(|m| m["id"] == data["defaultModel"] && m["available"] == true)
+            {
+                data["defaultModel"] = models
+                    .iter()
+                    .find(|m| m["available"] == true)
+                    .map(|m| m["id"].clone())
+                    .unwrap_or(json!(""));
+            }
+            Ok(())
+        })?;
         self.public()
     }
     pub fn agents(&self) -> Result<Vec<Value>> {
         let data = self.read()?;
+        Self::agents_from(&data)
+    }
+    pub fn agents_from(data: &Value) -> Result<Vec<Value>> {
         let builtins: Vec<Value> = serde_json::from_str(include_str!("assets/agents.json"))?;
         let mut result = vec![];
         for (builtin, items) in [
@@ -332,17 +392,20 @@ impl Configuration {
         Ok(result)
     }
     pub fn save_agent(&self, draft: &Value) -> Result<Vec<Value>> {
-        let mut data = self.read()?;
+        self.update(|data| {
         let name = util::string(draft, "name")?.trim();
         if !regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")?.is_match(name)
-            || self
-                .agents()?
+            || Self::agents_from(data)?
                 .iter()
                 .any(|a| a["builtin"] == true && a["name"] == name)
         {
             bail!("名称需为 1–64 位字母、数字、连字符或下划线，不能与内置子助手重复")
         }
         let original = draft["originalName"].as_str();
+        let existing = data["agents"].as_array().unwrap().iter().find(|a| a["name"].as_str() == original);
+        if let Some(existing) = existing { check_revision(existing, draft)?; }
+        else if original.is_some() { bail!("agent conflict; the agent was deleted; reload and retry") }
+        let revision = existing.map(|a| version(a, "revision")).transpose()?.unwrap_or(0).checked_add(1).context("agent revision exhausted")?;
         if data["agents"]
             .as_array()
             .unwrap()
@@ -377,7 +440,7 @@ impl Configuration {
         }) {
             bail!("未知工具")
         }
-        let a = json!({"name":name,"label":draft.get("label").filter(|v|v.as_str()!=Some("")).unwrap_or(&draft["name"]),"description":description,"instructions":instructions,"tools":tools,"inheritTools":draft["inheritTools"]==true});
+        let a = json!({"name":name,"label":draft.get("label").filter(|v|v.as_str()!=Some("")).unwrap_or(&draft["name"]),"description":description,"instructions":instructions,"tools":tools,"inheritTools":draft["inheritTools"]==true,"revision":revision});
         data["agents"]
             .as_array_mut()
             .unwrap()
@@ -386,9 +449,23 @@ impl Configuration {
         if let Some(names) = data["disabledAgents"].as_array_mut() {
             names.retain(|a| a.as_str() != original);
         }
-        self.write(&data)?;
+        Ok(())
+        })?;
         self.agents()
     }
+}
+fn version(value: &Value, key: &str) -> Result<u64> {
+    value
+        .get(key)
+        .map(|v| v.as_u64().context("invalid configuration version"))
+        .transpose()
+        .map(|v| v.unwrap_or(0))
+}
+pub fn check_revision(existing: &Value, draft: &Value) -> Result<()> {
+    if version(existing, "revision")? != version(draft, "revision")? {
+        bail!("configuration conflict; reload the edited item and retry")
+    }
+    Ok(())
 }
 pub fn capabilities(v: &Value) -> Result<Value> {
     let mut result = json!({"images":false,"pdf":false,"audio":false,"video":false});

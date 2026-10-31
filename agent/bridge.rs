@@ -897,69 +897,101 @@ impl Router {
             "saveService" => self.configuration.save_service(&p["service"]),
             "saveAgent" => Ok(json!(self.configuration.save_agent(&p["agent"])?)),
             "deleteService" => {
-                let mut data = self.configuration.read()?;
-                data["services"]
-                    .as_array_mut()
-                    .unwrap()
-                    .retain(|s| s["id"] != p["id"]);
-                self.configuration.write(&data)?;
-                if !self
-                    .configuration
-                    .models()?
-                    .iter()
-                    .any(|m| m["id"] == data["defaultModel"])
-                {
-                    data["defaultModel"] = json!("");
-                    self.configuration.write(&data)?;
-                }
+                self.configuration.update(|data| {
+                    if p.get("revision").is_some()
+                        && let Some(existing) = data["services"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|s| s["id"] == p["id"])
+                    {
+                        crate::configuration::check_revision(existing, p)?;
+                    }
+                    data["services"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|s| s["id"] != p["id"]);
+                    if !self
+                        .configuration
+                        .models_from(data)?
+                        .iter()
+                        .any(|m| m["id"] == data["defaultModel"])
+                    {
+                        data["defaultModel"] = json!("");
+                    }
+                    Ok(())
+                })?;
                 self.configuration.public()
             }
             "setDefaultModel" => {
                 let model = util::string(p, "model")?;
-                if !model.is_empty()
-                    && !self
-                        .configuration
-                        .models()?
-                        .iter()
-                        .any(|m| m["id"] == model && m["available"] == true)
-                {
-                    bail!("请先配置并启用该模型的服务")
-                };
-                let mut data = self.configuration.read()?;
-                data["defaultModel"] = json!(model);
-                self.configuration.write(&data)?;
+                self.configuration.update(|data| {
+                    if !model.is_empty()
+                        && !self
+                            .configuration
+                            .models_from(data)?
+                            .iter()
+                            .any(|m| m["id"] == model && m["available"] == true)
+                    {
+                        bail!("请先配置并启用该模型的服务")
+                    };
+                    data["defaultModel"] = json!(model);
+                    Ok(())
+                })?;
                 self.configuration.public()
             }
             "setAgentEnabled" | "deleteAgent" => {
                 let name = util::string(p, "name")?;
-                let mut data = self.configuration.read()?;
-                if method == "deleteAgent" {
-                    data["agents"]
-                        .as_array_mut()
-                        .unwrap()
-                        .retain(|a| a["name"] != name);
-                    if let Some(a) = data["disabledAgents"].as_array_mut() {
-                        a.retain(|a| a != name);
-                    }
-                } else {
-                    if !self
-                        .configuration
-                        .agents()?
-                        .iter()
-                        .any(|a| a["name"] == name)
+                self.configuration.update(|data| {
+                    if p.get("revision").is_some()
+                        && let Some(existing) = data["agents"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|a| a["name"] == name)
                     {
-                        bail!("找不到子助手")
-                    };
-                    if !data["disabledAgents"].is_array() {
-                        data["disabledAgents"] = json!([]);
+                        crate::configuration::check_revision(existing, p)?;
                     }
-                    let names = data["disabledAgents"].as_array_mut().unwrap();
-                    names.retain(|n| n != name);
-                    if p["enabled"] != true {
-                        names.push(json!(name));
+                    if method == "deleteAgent" {
+                        data["agents"]
+                            .as_array_mut()
+                            .unwrap()
+                            .retain(|a| a["name"] != name);
+                        if let Some(a) = data["disabledAgents"].as_array_mut() {
+                            a.retain(|a| a != name);
+                        }
+                    } else {
+                        if !Configuration::agents_from(data)?
+                            .iter()
+                            .any(|a| a["name"] == name)
+                        {
+                            bail!("找不到子助手")
+                        };
+                        if !data["disabledAgents"].is_array() {
+                            data["disabledAgents"] = json!([]);
+                        }
+                        let names = data["disabledAgents"].as_array_mut().unwrap();
+                        names.retain(|n| n != name);
+                        if p["enabled"] != true {
+                            names.push(json!(name));
+                        }
+                        if let Some(agent) = data["agents"]
+                            .as_array_mut()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|a| a["name"] == name)
+                        {
+                            agent["revision"] = json!(
+                                agent["revision"]
+                                    .as_u64()
+                                    .unwrap_or(0)
+                                    .checked_add(1)
+                                    .context("agent revision exhausted")?
+                            );
+                        }
                     }
-                }
-                self.configuration.write(&data)?;
+                    Ok(())
+                })?;
                 Ok(json!(self.configuration.agents()?))
             }
             "getInstructions" | "saveInstructions" => {

@@ -500,26 +500,34 @@ impl Catalog {
     /// Trusts (or revokes) plugins at the fingerprints the user reviewed. A
     /// plugin that changed since then is refused rather than trusted blind.
     pub fn set_trust(&self, reviewed: &[(String, String)], trusted: bool) -> Result<()> {
-        let mut store = self.trust_store();
-        let workspace = self.workspace.to_string_lossy().into_owned();
-        if !store["workspaces"][&workspace]["plugins"].is_object() {
-            store["workspaces"][&workspace] = json!({"plugins":{}});
-        }
-        for (name, digest) in reviewed {
-            let Some(plugin) = self.plugins.iter().find(|p| p["name"] == name.as_str()) else {
-                bail!("unknown plugin: {name}")
-            };
-            if trusted {
-                if plugin["sha256"] != digest.as_str() {
-                    bail!("plugin {name} changed since it was reviewed; review it again")
-                }
-                store["workspaces"][&workspace]["plugins"][name] = json!(digest);
-            } else if let Some(plugins) = store["workspaces"][&workspace]["plugins"].as_object_mut()
-            {
-                plugins.remove(name);
+        crate::settings_file::update(&self.trust_path(), |store| {
+            if store.is_null() {
+                *store = json!({"workspaces":{}});
             }
-        }
-        util::atomic_write(&self.trust_path(), &serde_json::to_vec_pretty(&store)?)
+            if !store["workspaces"].is_object() {
+                bail!("invalid plugin trust store")
+            }
+            let workspace = self.workspace.to_string_lossy().into_owned();
+            if !store["workspaces"][&workspace]["plugins"].is_object() {
+                store["workspaces"][&workspace] = json!({"plugins":{}});
+            }
+            for (name, digest) in reviewed {
+                let Some(plugin) = self.plugins.iter().find(|p| p["name"] == name.as_str()) else {
+                    bail!("unknown plugin: {name}")
+                };
+                if trusted {
+                    if plugin["sha256"] != digest.as_str() {
+                        bail!("plugin {name} changed since it was reviewed; review it again")
+                    }
+                    store["workspaces"][&workspace]["plugins"][name] = json!(digest);
+                } else if let Some(plugins) =
+                    store["workspaces"][&workspace]["plugins"].as_object_mut()
+                {
+                    plugins.remove(name);
+                }
+            }
+            Ok(())
+        })
     }
     pub fn write_lock(&self) -> Result<PathBuf> {
         let mut lock = json!({"fingerprint_format":2,"plugins":{}});
@@ -1099,12 +1107,15 @@ impl Catalog {
         if enabled && entry["supported"] != true {
             bail!("resource is incompatible with MiniCode")
         }
-        let mut data = self.configuration.read()?;
-        if !data["localExtensions"].is_object() {
-            data["localExtensions"] = json!({});
-        }
-        data["localExtensions"][key] = json!(enabled);
-        self.configuration.write(&data)
+        self.configuration
+            .update(|data| {
+                if !data["localExtensions"].is_object() {
+                    data["localExtensions"] = json!({});
+                }
+                data["localExtensions"][key] = json!(enabled);
+                Ok(())
+            })
+            .map(|_| ())
     }
     pub fn reload_instructions(&mut self) -> Result<Vec<Value>> {
         let global = self

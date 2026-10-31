@@ -984,3 +984,12 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 - 回归：新配置无明文/引用不出 UI、迁移后可取回原 Key、重复迁移无变化、真实 DPAPI 失败后逐字保留原文件并可重试、进程重启后认证、空编辑保留/换 Key 生效、伪造引用拒绝、损坏 blob 拒绝、事件/错误无测试密钥。聚焦成功见 `output/6-C1-focused.log`；平台实际执行仅 Windows，macOS/Linux 需对应系统验证。Keychain/Secret Service 的解锁和授权交互由系统负责，移动配置文件不保证引用可移植。
 - 原生 API 依据：[DPAPI](https://learn.microsoft.com/en-us/windows/win32/seccrypto/example-c-program-using-cryptprotectdata)、[Apple Keychain](https://developer.apple.com/documentation/security/seckeychainfindgenericpassword(_:_:_:_:_:_:_:_:))、[libsecret secret-tool](https://manpages.ubuntu.com/manpages/noble/man1/secret-tool.1.html)。
 - 完整验证：`output/check-5.ps1 -Item C1 -Desktop` 全部通过，日志前缀 `output/5-C1-`：fmt、Clippy、Rust 212 通过/2 个既有忽略、build、协议 284 通过/2 个既有跳过、生成文件无差异、60 次任务和 9 个场景保持预期、npm ci/build、TUI 122 通过、Desktop test/vet/vendor UI。随后新增的 C2 回归单独记录在 C2 日志，未计入 C1 通过结果。
+
+### C2 配置事务、版本冲突与原子提交
+
+- 核查：C1 的迁移已有锁，但普通保存仍在锁外读改写，save_service/deleteService 各可写两次。两个真实 Bridge 并发新增触发 Windows replacement error 1176，旧草稿无条件覆盖；另两项 Rust 回归确认 write 不等待锁、过期快照仍成功，失败证据为 `output/6-C2-red.log`、`output/6-C2-rust-red.log`。
+- 修复：扩展 R26 settings_file 的跨进程锁，canonical 路径统一锁文件，拒绝链接锁。Configuration.update 将读取、校验、修改、凭据准备、版本递增、序列化和 atomic_write 放在同一排他锁内；服务/代理新增编辑、删除、默认模型、启停和本地资源状态均使用该事务，服务默认模型修复同次提交。权限规则原有 update 与插件信任库使用同一通用锁语义，信任不同工作区不再覆盖整份旧快照。无新增依赖。
+- 冲突：配置 version 在一次事务成功后递增；直接 write 是按读到的 version 做 compare-and-swap，过期整份快照明确拒绝。服务和自定义代理使用各自 revision，编辑草稿必须回传；不同服务可独立提交，同一旧草稿、删除后的草稿、编辑期间被禁用的代理都不会覆盖新状态。Desktop 类型和操作保留 revision，冲突保留编辑内容并提示刷新；旧无版本配置视为 0，可正常迁移，旧客户端若丢弃新返回的 revision，后续整项编辑会被明确拒绝，避免盲写。按名称启停/按 ID 删除仍兼容无 revision 的显式动作，升级客户端会回传 revision 检测过期动作。
+- 文件语义：继续使用既有同目录临时文件、内容 sync、Windows ReplaceFile/MoveFileEx 和 Unix rename+父目录 sync。错误或 panic 不提交并由 RAII 释放锁；不自动采用遗留临时文件。版本化整份替换允许修复 JSON 语法有效但字段无效的文档；普通字段事务拒绝当前无效配置，避免静默抹除内容。首轮全测发现原 r27 修复配置用例被过严的旧值校验阻止，已保留此恢复路径并聚焦验证成功，记录在 `output/5-C2-test.log`、`output/6-C2-repair-focused.log`。
+- 回归：两个进程同时新增 12 服务全部保留且恰好 12 次版本递增；旧服务/代理编辑、并发禁用、删除后重建冲突；直接旧快照 CAS、真实锁等待、超限失败保留原文件、事务拒绝/panic 后字节不变并可继续写入。聚焦通过见 `output/6-C2-focused.log`、`output/6-C2-protocol-focused.log`；Windows 实机执行，Unix 依靠对应平台 CI 验证。
+- 完整验证：`output/check-5.ps1 -Item C2-complete -Desktop` 全部通过，日志前缀 `output/5-C2-complete-`：fmt、Clippy、Rust 216 通过/2 个既有忽略（212 单元+4 事务集成）、build、协议 287 通过/2 个既有跳过、生成文件无差异、60 次任务和 9 个场景保持预期、npm ci/build、TUI 122 通过、Desktop test/vet/vendor UI。C3 的独立失败测试随后单独记录，未计入本次通过结果。

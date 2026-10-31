@@ -691,7 +691,7 @@ func (d *desktop) serviceSettings(c *ui.Context, p palette, s *settingsState) {
 				ui.Row(c).Gap(8).Children(func() {
 					muted(c, p, tr("删除此服务配置？"))
 					if button(c, p, tr("删除"), "", false).Clicked() {
-						d.configAction(s, "deleteService", map[string]any{"id": service.ID}, func() { s.DeleteService = "" })
+						d.configAction(s, "deleteService", map[string]any{"id": service.ID, "revision": service.Revision}, func() { s.DeleteService = "" })
 					}
 					if button(c, p, tr("取消"), "", false).Clicked() {
 						s.DeleteService = ""
@@ -939,7 +939,7 @@ func (d *desktop) agentSettings(c *ui.Context, p palette, s *settingsState) {
 				on := agent.Enabled
 				if toggle(c, p, &on, tr("启用 ")+agent.Label).Changed() {
 					var agents []model.Agent
-					d.request(d.current(), "setAgentEnabled", map[string]any{"name": agent.Name, "enabled": on}, &agents, func(err error) {
+					d.request(d.current(), "setAgentEnabled", map[string]any{"name": agent.Name, "enabled": on, "revision": agent.Revision}, &agents, func(err error) {
 						if err != nil {
 							s.Error = err.Error()
 						} else {
@@ -963,7 +963,7 @@ func (d *desktop) agentSettings(c *ui.Context, p palette, s *settingsState) {
 			if s.DeleteAgent == agent.Name {
 				if button(c, p, tr("确认删除子助手"), "Trash2", false).AlignSelf(ui.Start).Clicked() {
 					var agents []model.Agent
-					d.request(d.current(), "deleteAgent", map[string]any{"name": agent.Name}, &agents, func(err error) {
+					d.request(d.current(), "deleteAgent", map[string]any{"name": agent.Name, "revision": agent.Revision}, &agents, func(err error) {
 						if err != nil {
 							s.Error = err.Error()
 						} else {
