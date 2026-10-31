@@ -1088,3 +1088,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 问题/根因：feed.ts::upsertAssistant 以数组长度构造 key，清屏/截断后复用。修复：进程内单调计数，delta 保留同一条目 ID。回归：stage7-feed.test.ts 截断、多轮及追加；先失败后通过。状态：已修复。
 
+
+### TU4 — omit empty narrow table headings
+
+问题/根因：markdown.tsx::table 无条件输出冒号。修复：缺失/空表头只显示内容。回归：markdown.test.tsx 用超出表头数量的单元格触发窄布局，先失败后通过。状态：已修复。
+

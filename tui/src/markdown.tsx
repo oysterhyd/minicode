@@ -129,7 +129,7 @@ function codeBlock(token: Tokens.Code) {
   )
 }
 
-function table(token: Tokens.Table, columns: number) {
+export function table(token: Tokens.Table, columns: number) {
   const header = token.header.map(cell => cellText(cell))
   const rows = token.rows.map(row => row.map(cell => cellText(cell)))
   const widths = header.map((cell, index) => Math.max(
@@ -141,7 +141,7 @@ function table(token: Tokens.Table, columns: number) {
       <Box flexDirection="column" marginY={1}>
         {rows.map((row, index) => (
           <Box key={index} flexDirection="column" marginBottom={1}>
-            {row.map((cell, cellIndex) => <Text key={cellIndex}><Text bold>{header[cellIndex]}: </Text>{cell}</Text>)}
+            {row.map((cell, cellIndex) => <Text key={cellIndex}>{header[cellIndex] ? <Text bold>{header[cellIndex]}: </Text> : null}{cell}</Text>)}
           </Box>
         ))}
       </Box>

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import React from 'react'
 import { render } from 'ink-testing-library'
-import { MarkdownView } from '../src/markdown.js'
+import { MarkdownView, table } from '../src/markdown.js'
+import type { Tokens } from 'marked'
+import stripAnsi from 'strip-ansi'
 
 test('markdown renders headings, bold, code, tables and math', () => {
   const source = [
@@ -34,4 +36,13 @@ test('markdown renders headings, bold, code, tables and math', () => {
   } finally {
     unmount()
   }
+})
+
+test('TU4 narrow tables omit an empty header prefix', () => {
+  const cell = (text: string) => ({ text, tokens: [{ type: 'text', text }] })
+  const view = render(table({ header: [cell('Very long heading')], rows: [[cell('one'), cell('value')]], align: [] } as unknown as Tokens.Table, 10))
+  try {
+    assert.match(view.lastFrame() || '', /value/)
+    assert.doesNotMatch(stripAnsi(view.lastFrame() || ''), /: value/)
+  } finally { view.unmount() }
 })
