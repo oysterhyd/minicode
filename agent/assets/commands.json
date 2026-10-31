@@ -22,7 +22,7 @@
   {
     "name": "/clear",
     "usage": "/clear",
-    "summary": "清空屏幕显示（保留会话上下文）"
+    "summary": "重置上下文并开启新会话（原清屏命令改为 /cls）"
   },
   {
     "name": "/new",
@@ -46,7 +46,7 @@
   },
   {
     "name": "/resume",
-    "usage": "/resume <会话ID8>",
+    "usage": "/resume [会话ID或唯一前缀]",
     "summary": "恢复一个历史会话"
   },
   {
@@ -58,5 +58,65 @@
     "name": "/exit",
     "usage": "/exit",
     "summary": "退出（或 Ctrl+Q / Ctrl+C 两次）"
+  },
+  {
+    "name": "/cls",
+    "usage": "/cls",
+    "summary": "只清屏，保留会话上下文"
+  },
+  {
+    "name": "/cost",
+    "usage": "/cost",
+    "summary": "查看实际用量与可用费用"
+  },
+  {
+    "name": "/context",
+    "usage": "/context",
+    "summary": "查看上下文估算和组成"
+  },
+  {
+    "name": "/doctor",
+    "usage": "/doctor",
+    "summary": "检查本地环境与配置状态"
+  },
+  {
+    "name": "/init",
+    "usage": "/init",
+    "summary": "安全创建项目 AGENTS.md"
+  },
+  {
+    "name": "/agents",
+    "usage": "/agents",
+    "summary": "列出可用助手"
+  },
+  {
+    "name": "/mcp",
+    "usage": "/mcp",
+    "summary": "查看 MCP 配置或连接诊断"
+  },
+  {
+    "name": "/memory",
+    "usage": "/memory",
+    "summary": "列出现有工作区记忆"
+  },
+  {
+    "name": "/export",
+    "usage": "/export [文件路径]",
+    "summary": "导出会话 JSON，不覆盖已有文件"
+  },
+  {
+    "name": "/undo",
+    "usage": "/undo",
+    "summary": "尚不可用：依赖 G3 检查点"
+  },
+  {
+    "name": "/rewind",
+    "usage": "/rewind",
+    "summary": "尚不可用：依赖 G3 检查点"
+  },
+  {
+    "name": "/fork",
+    "usage": "/fork",
+    "summary": "尚不可用：依赖 G3 会话分支"
   }
 ]

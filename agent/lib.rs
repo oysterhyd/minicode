@@ -3,6 +3,7 @@ pub mod background;
 pub mod bridge;
 pub mod cli;
 mod command_process;
+mod commands;
 pub mod configuration;
 pub mod context;
 mod credentials;

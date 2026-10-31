@@ -860,7 +860,9 @@ impl Router {
                 && params["text"]
                     .as_str()
                     .and_then(|s| s.split_whitespace().next())
-                    .is_some_and(|s| s.eq_ignore_ascii_case("/new")));
+                    .is_some_and(|s| {
+                        s.eq_ignore_ascii_case("/new") || s.eq_ignore_ascii_case("/clear")
+                    }));
         if detach && let Some(previous) = &owner {
             let mut previous = previous.conversation.lock().await;
             if previous.busy() {
@@ -1685,6 +1687,26 @@ impl Router {
         let (verb, arg) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
         let verb = verb.to_lowercase();
         let arg = arg.trim();
+        if [
+            "/clear", "/new", "/cls", "/cost", "/context", "/doctor", "/init", "/agents", "/mcp",
+        ]
+        .contains(&verb.as_str())
+            && !arg.is_empty()
+        {
+            bail!("{verb} 不接受参数");
+        }
+        let session = c.snapshot.lock().unwrap().session.clone();
+        let state = c.state(&self.store)?;
+        if let Some(message) = crate::commands::information(
+            &verb,
+            arg,
+            &Self::workspace(p)?,
+            session.as_deref(),
+            &state,
+            &self.store,
+        )? {
+            return Ok(json!({"message":message}));
+        }
         if c.busy()
             && !["/help", "/?", "/model", "/effort", "/permissions", "/skill"]
                 .contains(&verb.as_str())
@@ -1700,8 +1722,8 @@ impl Router {
                 )
             }
             "/exit" | "/quit" => Ok(json!({"action":"exit"})),
-            "/clear" => Ok(json!({"action":"clear","message":"已清屏，会话上下文保留。"})),
-            "/new" => {
+            "/cls" => Ok(json!({"action":"clear","message":"已清屏，会话上下文保留。"})),
+            "/new" | "/clear" => {
                 c.runtime = None;
                 *c.snapshot.lock().unwrap() = Snapshot::default();
                 self.reset_settings(c);

@@ -720,6 +720,26 @@ async fn chat_command(
 ) -> Result<()> {
     let (verb, arg) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
     let arg = arg.trim();
+    let verb = verb.to_lowercase();
+    if ["/clear", "/new", "/cls"].contains(&verb.as_str()) && !arg.is_empty() {
+        bail!("{verb} 不接受参数");
+    }
+    runtime.refresh_snapshot(hooks).await?;
+    let state = {
+        let snapshot = hooks.snapshot.lock().unwrap();
+        json!({"model":hooks.settings.lock().unwrap().model,"contextTokens":snapshot.breakdown.as_object().map(|values|values.values().filter_map(Value::as_u64).sum::<u64>()).unwrap_or(0),"contextWindow":snapshot.window,"contextBreakdown":snapshot.breakdown})
+    };
+    if let Some(message) = crate::commands::information(
+        &verb,
+        arg,
+        &runtime.workspace,
+        Some(&runtime.session),
+        &state,
+        &runtime.store,
+    )? {
+        println!("{}", util::terminal_text(&message));
+        return Ok(());
+    }
     match verb.to_lowercase().as_str() {
         "/continue" => {
             if !runtime.pending {
@@ -738,7 +758,7 @@ async fn chat_command(
                 }
             );
         }
-        "/clear" => print!("\x1b[2J\x1b[H"),
+        "/cls" => print!("\x1b[2J\x1b[H"),
         "/help" | "/?" => {
             for c in serde_json::from_str::<Vec<Value>>(include_str!("assets/commands.json"))? {
                 println!(
@@ -817,7 +837,7 @@ async fn chat_command(
                 )?;
             }
         }
-        "/new" | "/resume" => {
+        "/new" | "/clear" | "/resume" => {
             let mut settings = hooks.settings.lock().unwrap().clone();
             settings.always_allow.clear();
             settings.pending_model = false;

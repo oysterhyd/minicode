@@ -836,13 +836,17 @@ func (d *desktop) slash(text string, v *conversation) {
 		return
 	}
 	switch command[0] {
-	case "/clear":
+	case "/cls":
 		v.Items = nil
 		v.History = nil
 		v.HistoryCount = 0
 		v.rebuildRows()
 		return
-	case "/new":
+	case "/new", "/clear":
+		if v.Busy {
+			v.Error = "当前回合结束后才能执行命令"
+			return
+		}
 		d.newSession(v.Workspace)
 		return
 	case "/sessions":

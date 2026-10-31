@@ -1158,3 +1158,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：CLI/Bridge各自prefix匹配，Bridge空resume无列表内容。修复：Store::resolve_session 精确ID优先、非空唯一前缀、歧义明确报错；CLI/Bridge共享，Desktop通过Bridge；空resume提供最近完整ID列表。interaction-spec.md 定义恢复/取消/审批/清屏/队列/编辑。回归：interaction.test.mjs真实Bridge空参数列表、5位前缀与不存在，先失败后通过。状态：部分完成（三端清空/队列/CLI信号由后续条目落实，最终文档需复核）。
 
+
+### A6 — unify context reset and supported slash commands
+
+核查：/clear仅清屏，常用诊断命令缺失。修复：三端/clear=/new，原能力/cls；共享commands.rs实现/cost、/context、/doctor、/init、/agents、/mcp配置、/memory现有存储列表、/export JSON(create_new不覆盖)；/undo、/rewind、/fork明确G3依赖。帮助同步，拒绝无参数命令的多余参数。回归：commands-stage7.test.mjs真实Bridge清屏保留/重置上下文/历史仍可恢复、诊断、init不覆盖及G3错误，先失败后通过。状态：已修复（费用无可核实定价时不可用；高级memory编辑仍留S3）。
+
