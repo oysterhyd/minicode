@@ -1163,3 +1163,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：/clear仅清屏，常用诊断命令缺失。修复：三端/clear=/new，原能力/cls；共享commands.rs实现/cost、/context、/doctor、/init、/agents、/mcp配置、/memory现有存储列表、/export JSON(create_new不覆盖)；/undo、/rewind、/fork明确G3依赖。帮助同步，拒绝无参数命令的多余参数。回归：commands-stage7.test.mjs真实Bridge清屏保留/重置上下文/历史仍可恢复、诊断、init不覆盖及G3错误，先失败后通过。状态：已修复（费用无可核实定价时不可用；高级memory编辑仍留S3）。
 
+
+### L1 — launch TUI when no subcommand is provided
+
+核查：Cli.command必填导致subcommand required。修复：子命令可选，缺省走现有TUI启动器；显式子命令不变。回归：cli::stage7_tests::l1_no_subcommand_is_accepted。状态：已修复。
+

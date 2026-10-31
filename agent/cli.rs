@@ -32,7 +32,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 #[derive(Subcommand)]
 enum Commands {
@@ -223,7 +223,7 @@ pub async fn main() -> Result<()> {
         .db
         .or_else(|| std::env::var_os("MINICODE_DB_PATH").map(PathBuf::from))
         .unwrap_or(util::data_dir().join("sessions.db"));
-    match cli.command {
+    match cli.command.unwrap_or(Commands::Tui { args: vec![] }) {
         #[cfg(windows)]
         Commands::SandboxWorker {
             profile,
@@ -1249,4 +1249,11 @@ async fn review(
         output.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod stage7_tests {
+    use super::*;
+    #[test]
+    fn l1_no_subcommand_is_accepted() { assert!(Cli::try_parse_from(["minicode"]).is_ok()); }
 }
