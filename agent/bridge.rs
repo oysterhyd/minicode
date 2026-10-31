@@ -1786,8 +1786,8 @@ impl Router {
                 if arg.is_empty() {
                     return Ok(json!({"action":"skills"}));
                 }
-                let active = !arg.starts_with("off ");
-                let name = arg.strip_prefix("off ").unwrap_or(arg);
+                let (active, name) = crate::commands::skill_argument(arg)?
+                    .context("用法：/skill [名称 | off 名称]")?;
                 let mut params = p.clone();
                 params["name"] = json!(name);
                 params["active"] = json!(active);

@@ -816,16 +816,19 @@ async fn chat_command(
             let mut catalog = runtime.catalog.lock().await;
             if arg.is_empty() {
                 println!("{}", catalog.listing());
-            } else if let Some(name) = arg.strip_prefix("off ") {
-                catalog.unload(name)?;
-                runtime.event(hooks, "skill_deactivated", json!({"name":name}))?;
             } else {
-                let s = catalog.load(arg)?;
-                runtime.event(
-                    hooks,
-                    "skill_activated",
-                    json!({"name":arg,"sha256":s.digest,"path":s.path}),
-                )?;
+                let (active, name) = crate::commands::skill_argument(arg)?.unwrap();
+                if !active {
+                    catalog.unload(name)?;
+                    runtime.event(hooks, "skill_deactivated", json!({"name":name}))?;
+                } else {
+                    let source = catalog.load(name)?;
+                    runtime.event(
+                        hooks,
+                        "skill_activated",
+                        json!({"name":name,"sha256":source.digest,"path":source.path}),
+                    )?;
+                }
             }
         }
         "/new" | "/clear" | "/resume" => {

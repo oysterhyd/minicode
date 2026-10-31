@@ -3,6 +3,22 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::{fs, io::Write, path::Path};
 
+pub fn skill_argument(arg: &str) -> Result<Option<(bool, &str)>> {
+    let words = arg.split_whitespace().collect::<Vec<_>>();
+    match words.as_slice() {
+        [] => Ok(None),
+        [name] if !name.eq_ignore_ascii_case("off") && !name.eq_ignore_ascii_case("on") => {
+            Ok(Some((true, name)))
+        }
+        [command, name]
+            if command.eq_ignore_ascii_case("off") || command.eq_ignore_ascii_case("on") =>
+        {
+            Ok(Some((!command.eq_ignore_ascii_case("off"), name)))
+        }
+        _ => bail!("用法：/skill [名称 | on 名称 | off 名称]"),
+    }
+}
+
 pub fn information(
     verb: &str,
     arg: &str,

@@ -1173,3 +1173,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：prepare sink 全量打印output_detail。修复：默认10行/2000字符摘要，独立附加错误保证截断不丢错误；-v/--verbose完整输出，保留终端控制过滤。回归：cli_output单测1000行+尾部错误；cli-output.test.mjs真实CLI默认/verbose对比，先失败后通过。状态：已修复。
 
+
+### L14 — normalize and validate skill subcommands
+
+核查：Bridge/CLI通过off空格前缀判断，off缺名称被当skill。修复：共享split_whitespace解析，名称简写与on/off子命令，显式校验数量，大小写仅作用子命令。回归：skill-arguments.test.mjs缺名称/多参数/Tab/多空格/激活停用，先失败后通过。状态：已修复。
+
