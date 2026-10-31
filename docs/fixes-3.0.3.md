@@ -1133,3 +1133,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：sendPrompt忙时拒绝，无服务端队列。修复：可选messageQueue能力；enqueuePrompt/listQueue/deleteQueuedPrompt/resumeQueue，最多100条；接受/消费/删除持久化事件。steer在工具结果后原子提交用户消息+queue_consumed；正常结束自动链式followUp，无工具边界的steer转下一run。每run独立ID；取消/失败暂停保留队列。旧sendPrompt拒绝忙时行为保留。回归：queue.test.mjs 真实Bridge审批边界、消费顺序/一次执行、followUp自动启动、取消保留与删除，先失败后通过。状态：部分完成（跨进程恢复与删除/消费并发测试需补齐）。
 
+
+### D6 — scope approval shortcuts to first pending card
+
+核查：每张审批卡独立注册Shortcut；现有库消费部分按键能避免同时动作，但焦点路由未保证第一张。修复：首待处理卡唯一注册快捷键，处理中阻止落到下一张；按钮保留单卡操作。回归：stage7_test.go 多卡与Deciding阻止fallthrough；UI测试覆盖同键不影响第二卡。状态：已修复。
+

@@ -578,6 +578,18 @@ func logText(c *ui.Context, p palette, source string, maxHeight float32) {
 	})
 }
 
+func approvalShortcutTarget(items []*model.FeedItem) *model.FeedItem {
+	for _, item := range items {
+		if item.Kind == "approval" && item.ApprovalID != "" {
+			if item.Deciding {
+				return nil
+			}
+			return item
+		}
+	}
+	return nil
+}
+
 func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 	if item.ApprovalID == "" {
 		label := tr("已拒绝")
@@ -664,6 +676,9 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 			}
 		})
 	})
+	if approvalShortcutTarget(d.current().Items) != item {
+		return
+	}
 	if card.Shortcut(0, ui.KeyY) {
 		d.decide(item, true, false)
 	}
