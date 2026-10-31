@@ -1138,3 +1138,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：每张审批卡独立注册Shortcut；现有库消费部分按键能避免同时动作，但焦点路由未保证第一张。修复：首待处理卡唯一注册快捷键，处理中阻止落到下一张；按钮保留单卡操作。回归：stage7_test.go 多卡与Deciding阻止fallthrough；UI测试覆盖同键不影响第二卡。状态：已修复。
 
+
+### D7 — bound bridge request workers and pending work
+
+核查：state.go::request 每请求一个goroutine无上限。修复：最多16个活动请求、128个等待闭包，队列满明确报错；35秒deadline包含排队时间，完成/错误均在UI调度释放后启动下一项，不为等待项创建goroutine。回归：stage7_test.go 80请求原峰值80，修复后不超过16。状态：已修复。
+

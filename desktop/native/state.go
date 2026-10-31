@@ -87,6 +87,8 @@ type artifact struct {
 }
 
 type desktop struct {
+	requestActive                          int
+	requestPending                         []func()
 	bridgeFailed                           bool
 	bridgeError                            string
 	navigationVersion                      uint64
@@ -218,12 +220,36 @@ func (d *desktop) request(v *conversation, method string, extra map[string]any, 
 		return
 	}
 	params := d.params(v, extra)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-		defer cancel()
-		err := d.client.Request(ctx, method, params, target)
-		d.schedule(func() { done(err) })
-	}()
+	deadline := time.Now().Add(35 * time.Second)
+	start := func() {
+		d.requestActive++
+		go func() {
+			ctx, cancel := context.WithDeadline(context.Background(), deadline)
+			defer cancel()
+			err := ctx.Err()
+			if err == nil {
+				err = d.client.Request(ctx, method, params, target)
+			}
+			d.schedule(func() {
+				d.requestActive--
+				if len(d.requestPending) > 0 {
+					next := d.requestPending[0]
+					d.requestPending = d.requestPending[1:]
+					next()
+				}
+				done(err)
+			})
+		}()
+	}
+	if d.requestActive >= 16 {
+		if len(d.requestPending) >= 128 {
+			done(fmt.Errorf("Bridge request queue is full"))
+			return
+		}
+		d.requestPending = append(d.requestPending, start)
+	} else {
+		start()
+	}
 }
 
 func (d *desktop) error(v *conversation, err error) {
