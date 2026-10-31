@@ -6,10 +6,29 @@ import (
 	"github.com/egoist/mygo/ui"
 	"minicode.desktop/internal/bridge"
 	"minicode.desktop/internal/model"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestUX1QueueRejectsMalformedControls(t *testing.T) {
+	r := newTestRig(t, "home")
+	q := &queueRequester{calls: make(chan string, 16)}
+	r.d.client = q
+	r.d.messageQueue = true
+	v := r.d.current()
+	for _, text := range []string{"/queue extra", "/queue cancel", "/queue resume extra", "/queue cancel id extra"} {
+		v.Error = ""
+		r.d.slash(text, v)
+		if !strings.Contains(v.Error, "用法") {
+			t.Fatalf("%q did not report usage: %q", text, v.Error)
+		}
+	}
+	if len(q.calls) != 0 {
+		t.Fatal("invalid queue command issued a request")
+	}
+}
 
 type queueRequester struct{ calls chan string }
 

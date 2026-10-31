@@ -909,6 +909,10 @@ func (d *desktop) slash(text string, v *conversation) {
 		d.enqueuePrompt(v, strings.TrimSpace(strings.TrimPrefix(text, command[0])), mode, nil)
 		return
 	case "/queue":
+		if !(len(command) == 1 || len(command) == 2 && command[1] == "resume" || len(command) == 3 && command[1] == "cancel") {
+			v.Error = "用法：/queue [resume | cancel ID]"
+			return
+		}
 		if len(command) == 3 && command[1] == "cancel" {
 			d.request(v, "deleteQueuedPrompt", map[string]any{"id": command[2]}, nil, func(err error) { d.error(v, err); d.refreshServerQueue(v) })
 		} else if len(command) == 2 && command[1] == "resume" {

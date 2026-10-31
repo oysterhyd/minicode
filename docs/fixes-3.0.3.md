@@ -1312,3 +1312,6 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 最终核查的两项失败测试：预算8轮/300秒但tokens=0显示“预算不限”；initialize.state.branch缺失。根因是状态栏只看token上限，且可选branch未接Rust状态。修复：显示全部正值预算约束；Snapshot增加可选branch，复用2秒Git缓存，规范化未有提交的分支名，在初始化、run刷新、延迟恢复、新上下文分离/重置时保持正确。`tui/tests/status-fields.test.ts`覆盖无token限制/有限时间轮数和token限制；`tests/agent/status-fields.test.mjs`覆盖新Git仓库、运行、reset、deferRuntime恢复、/clear；先失败后通过。协议仍为2，旧客户端忽略新增字段。状态：已修复。
 
+### UX1 — reject malformed Desktop queue controls
+
+核查/失败回归：Desktop `/queue extra`、缺ID、额外参数静默刷新列表，而TUI/Bridge报用法错误。修复：请求前统一参数计数与子命令校验，不发送无效请求。`desktop/native/stage7_test.go::TestUX1QueueRejectsMalformedControls`先复现缺错误，再验证四种非法输入；队列正常路径回归仍通过，完整Go检查通过。状态：已修复。
