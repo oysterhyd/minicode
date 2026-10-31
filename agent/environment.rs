@@ -52,6 +52,8 @@ pub fn git_summary(workspace: &Path) -> (String, bool) {
             .next()
             .unwrap_or_default()
             .trim_start_matches("## ")
+            .trim_start_matches("No commits yet on ")
+            .trim_start_matches("Initial commit on ")
             .split("...")
             .next()
             .unwrap_or_default()
@@ -67,6 +69,10 @@ pub fn git_summary(workspace: &Path) -> (String, bool) {
     }
     cache.insert(workspace.into(), (Instant::now(), value.clone()));
     value
+}
+pub fn git_branch(workspace: &Path) -> Option<String> {
+    let (branch, _) = git_summary(workspace);
+    (branch != "unavailable" && !branch.is_empty()).then_some(branch)
 }
 pub fn prompt(workspace: &Path) -> String {
     static OS: OnceLock<String> = OnceLock::new();

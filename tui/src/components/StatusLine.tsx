@@ -17,10 +17,15 @@ function contextLabel(state: AgentState, columns: number): string {
 // The footer under the prompt: mode hint on the left, model and context on
 // the right. The model always survives narrow terminals; the hint goes first.
 export function statusFields(state: AgentState, fields: string[], columns: number, elapsed: number): string {
+  const budget = [
+    state.budget.max_total_tokens > 0 ? `${formatTokens(state.budget.max_total_tokens)} tokens` : '',
+    state.budget.max_rounds > 0 ? `${state.budget.max_rounds} 轮` : '',
+    state.budget.max_seconds > 0 ? `${state.budget.max_seconds}s` : '',
+  ].filter(Boolean)
   const values: Record<string, string> = {
     model: state.model || '未选择模型', effort: state.effort === 'off' ? '' : EFFORT_LABELS[state.effort] || state.effort,
     context: contextLabel(state, columns), turns: `${state.rounds} 轮`,
-    budget: state.budget.max_total_tokens ? `预算 ${formatTokens(state.budget.max_total_tokens)}` : '预算 不限',
+    budget: `预算 ${budget.join('/') || '不限'}`,
     cost: state.statistics?.cost == null ? '费用 不可用' : `费用 ${state.statistics.cost}`,
     branch: state.branch ? `分支 ${state.branch}` : '分支 不可用',
     elapsed: `${Math.max(0, Math.floor(elapsed / 1000))}s`,

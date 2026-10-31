@@ -69,6 +69,7 @@ pub struct Snapshot {
     pub rounds: u64,
     pub usage: Option<Usage>,
     pub active_model: String,
+    pub branch: Option<String>,
     pub window: u64,
     pub breakdown: Value,
 }
@@ -85,6 +86,7 @@ impl Default for Snapshot {
             rounds: 0,
             usage: None,
             active_model: String::new(),
+            branch: None,
             window: 200_000,
             breakdown: json!({"system":0,"tools":0,"messages":0}),
         }
@@ -714,7 +716,9 @@ impl Runtime {
         let agents = catalog.configuration.agents()?;
         let specs = self.tool_specs(&catalog, &agents);
         let system = self.system(&catalog, &specs)?;
+        let branch = crate::environment::git_branch(&self.workspace);
         let mut s = hooks.snapshot.lock().unwrap();
+        s.branch = branch;
         s.session = Some(self.session.clone());
         s.pending = self.pending;
         s.rounds = self.rounds;

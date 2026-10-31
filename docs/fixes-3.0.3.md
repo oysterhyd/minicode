@@ -1308,3 +1308,7 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充可重复基准：transcript-bench.tsx同时测量10000行原始草稿与折叠引用的promptRows布局（各20次），输出JSON；不设依赖硬件的脆弱时间断言，另由input-ui.test.tsx验证完整粘贴/发送路径。具体本机数值见阶段7验收报告与stage7-acceptance.json。
 
+### TU8 — supply real branch and complete budget constraints
+
+最终核查的两项失败测试：预算8轮/300秒但tokens=0显示“预算不限”；initialize.state.branch缺失。根因是状态栏只看token上限，且可选branch未接Rust状态。修复：显示全部正值预算约束；Snapshot增加可选branch，复用2秒Git缓存，规范化未有提交的分支名，在初始化、run刷新、延迟恢复、新上下文分离/重置时保持正确。`tui/tests/status-fields.test.ts`覆盖无token限制/有限时间轮数和token限制；`tests/agent/status-fields.test.mjs`覆盖新Git仓库、运行、reset、deferRuntime恢复、/clear；先失败后通过。协议仍为2，旧客户端忽略新增字段。状态：已修复。
+

@@ -26,7 +26,7 @@ export type AgentState = {
   budget: { max_rounds: number; max_total_tokens: number; max_seconds: number }
   acceptance: string
   alwaysAllow?: string[]
-  branch?: string
+  branch?: string | null
   statistics?: { cost?: number | null; [key: string]: unknown }
 }
 

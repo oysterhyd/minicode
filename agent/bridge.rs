@@ -122,7 +122,7 @@ fn snapshot_state(
     let mut always = settings.always_allow.iter().cloned().collect::<Vec<_>>();
     always.sort();
     Ok(
-        json!({"protocolVersion":PROTOCOL_VERSION,"model":settings.model,"runId":snapshot.run_id,"phase":snapshot.phase,"running":snapshot.running,"activeModel":if snapshot.active_model.is_empty(){&settings.model}else{&snapshot.active_model},"pendingSettings":settings.pending_model||settings.registry_dirty,"effort":settings.effort,"permissionMode":settings.mode,"sessionId":snapshot.session,"taskPending":snapshot.pending,"rounds":snapshot.rounds,"contextTokens":snapshot.breakdown.as_object().map(|m|m.values().filter_map(Value::as_u64).sum::<u64>()).unwrap_or(0),"contextBreakdown":snapshot.breakdown,"contextWindow":snapshot.window,"usage":snapshot.usage,"statistics":stats,"budget":settings.budget,"acceptance":settings.acceptance.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"alwaysAllow":always}),
+        json!({"protocolVersion":PROTOCOL_VERSION,"model":settings.model,"runId":snapshot.run_id,"phase":snapshot.phase,"running":snapshot.running,"activeModel":if snapshot.active_model.is_empty(){&settings.model}else{&snapshot.active_model},"pendingSettings":settings.pending_model||settings.registry_dirty,"effort":settings.effort,"permissionMode":settings.mode,"sessionId":snapshot.session,"taskPending":snapshot.pending,"rounds":snapshot.rounds,"contextTokens":snapshot.breakdown.as_object().map(|m|m.values().filter_map(Value::as_u64).sum::<u64>()).unwrap_or(0),"contextBreakdown":snapshot.breakdown,"contextWindow":snapshot.window,"branch":snapshot.branch,"usage":snapshot.usage,"statistics":stats,"budget":settings.budget,"acceptance":settings.acceptance.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"alwaysAllow":always}),
     )
 }
 // Controls never acquire the async conversation lock.
@@ -875,6 +875,7 @@ impl Router {
                 bail!("当前任务仍在运行")
             }
             let mut next = Conversation::new(&self.configuration)?;
+            next.snapshot.lock().unwrap().branch = previous.snapshot.lock().unwrap().branch.clone();
             let mut settings = previous.settings.lock().unwrap().clone();
             settings.always_allow.clear();
             settings.pending_model = false;
@@ -1148,6 +1149,8 @@ impl Router {
                 )
             }
             "initialize" => {
+                c.snapshot.lock().unwrap().branch =
+                    crate::environment::git_branch(&Self::workspace(p)?);
                 let model = c.settings.lock().unwrap().model.clone();
                 Ok(
                     json!({"protocolVersion":PROTOCOL_VERSION,"minClientProtocol":MIN_CLIENT_PROTOCOL,"capabilities":CAPABILITIES,"sessions":store.sessions()?,"models":self.configuration.models()?,"defaultModel":model,"commands":serde_json::from_str::<Value>(include_str!("assets/commands.json"))?,"state":c.state(store)?}),
@@ -1240,6 +1243,10 @@ impl Router {
                         settings.budget.max_total_tokens = store.saved_budget(id)?.unwrap_or(0);
                     }
                     *c.snapshot.lock().unwrap() = Snapshot {
+                        branch: crate::environment::git_branch(Path::new(util::string(
+                            &summary,
+                            "workspace",
+                        )?)),
                         queue_paused: !store.queued_prompts(id)?.is_empty(),
                         session: Some(id.into()),
                         pending: summary["status"] != "completed",
@@ -1280,7 +1287,13 @@ impl Router {
                 c.runtime = None;
                 c.catalog = None;
                 c.workspace = None;
-                *c.snapshot.lock().unwrap() = Snapshot::default();
+                let mut snapshot = c.snapshot.lock().unwrap();
+                let branch = snapshot.branch.clone();
+                *snapshot = Snapshot {
+                    branch,
+                    ..Snapshot::default()
+                };
+                drop(snapshot);
                 self.reset_settings(c);
                 c.state(store)
             }
@@ -1773,7 +1786,13 @@ impl Router {
             "/cls" => Ok(json!({"action":"clear","message":"已清屏，会话上下文保留。"})),
             "/new" | "/clear" => {
                 c.runtime = None;
-                *c.snapshot.lock().unwrap() = Snapshot::default();
+                let mut snapshot = c.snapshot.lock().unwrap();
+                let branch = snapshot.branch.clone();
+                *snapshot = Snapshot {
+                    branch,
+                    ..Snapshot::default()
+                };
+                drop(snapshot);
                 self.reset_settings(c);
                 Ok(json!({"action":"new","message":"已开启新会话。"}))
             }
