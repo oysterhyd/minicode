@@ -1,4 +1,9 @@
 import type { BridgeApi } from './bridge.js'
+import { promptRows } from './caret.js'
+import { terminalText } from './format.js'
+export function artifactRows(text: string, columns: number): string[] {
+  return promptRows(terminalText(text), 0, Math.max(1, columns)).rows.map(row => row.text)
+}
 export type ArtifactPage = { text: string; hasMore: boolean; total: number | null }
 
 export class ArtifactPages {

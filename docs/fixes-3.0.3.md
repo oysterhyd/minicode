@@ -1218,3 +1218,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充验收：BridgeClient以16ms/64KiB窗口合并同run/session同类型delta，在事件类型切换、run终止和RPC响应前flush，避免高频reasoning触发逐token状态更新。新run恢复startedAt以保证follow-up耗时实时。bridge.test.ts 1000个reasoning delta先复现1000回调，修复后少于100且字节内容/终止顺序不变。状态更新：已修复；真实模型仅提供最终usage时仍明确降级。
 
+
+### TU5 — keep long artifact lines readable within the viewport
+
+补充验收：归档页按终端列宽拆成可滚动的Unicode显示行，超长单行不再在Text内部不可访问；覆盖2000个emoji/中文的无损重组。活动视口扣除reasoning/任务/附件/归档面板高度，审批隐藏低优先级归档查看器。状态更新：已修复，单页仍受Bridge 20000字符上限，历史页只保留当前内容与offset栈。
+

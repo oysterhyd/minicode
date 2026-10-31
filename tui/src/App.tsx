@@ -34,7 +34,7 @@ import { ThoughtLine, ToolLine } from './components/ToolLine.js'
 import { UserBubble } from './components/UserBubble.js'
 import { TranscriptViewport, type TranscriptScroll } from './components/TranscriptViewport.js'
 import { TranscriptLog } from './components/TranscriptLog.js'
-import { ArtifactPages } from './artifact-pages.js'
+import { ArtifactPages, artifactRows } from './artifact-pages.js'
 import path from 'node:path'
 import { InputHistory, PasteStore, fileMention } from './input-history.js'
 import { lastExpandableTool, layoutTranscript, type LayoutItem } from './transcript.js'
@@ -149,6 +149,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const slashNavigatedRef = useRef(false)
   const { stdout } = useStdout()
   const terminal = useTerminalSize()
+  const artifactLines = useMemo(() => artifactRows(artifactView?.text || '', Math.max(1, terminal.columns - 2)), [artifactView?.text, terminal.columns])
   const sendRef = useRef<(text: string) => Promise<void>>(async () => {})
 
   // Event handlers can run several times before React commits. These refs are
@@ -661,7 +662,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       if (input === 'n') { void artifactPage('next'); return }
       if (input === 'p') { void artifactPage('previous'); return }
       if (input === 'r') { void artifactPage('first'); return }
-      if (key.downArrow || key.pageDown) setArtifactView(view => view && ({ ...view, line: Math.min(Math.max(0, view.text.split('\n').length - 1), view.line + (key.pageDown ? 10 : 1)) }))
+      if (key.downArrow || key.pageDown) setArtifactView(view => view && ({ ...view, line: Math.min(Math.max(0, artifactLines.length - 1), view.line + (key.pageDown ? 10 : 1)) }))
       if (key.upArrow || key.pageUp) setArtifactView(view => view && ({ ...view, line: Math.max(0, view.line - (key.pageUp ? 10 : 1)) }))
       return
     }
@@ -941,7 +942,11 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const bottomHeight = waiting
     ? approvalRows(waiting, choice, terminal.columns).length
     : promptHeight + menuHeight + footerHeight + (feed.busy ? 3 : 0)
-  const liveHeight = Math.max(0, terminal.rows - bottomHeight - (connecting ? 1 : 0) - (scrolled ? 1 : 0))
+  const extraHeight = (tasks.length ? Math.min(4, tasks.length) + 1 : 0)
+    + (feed.reasoning ? 1 + (reasoningOpen ? Math.min(8, feed.reasoning.split('\n').length) : 0) : 0)
+    + (serverQueued.length ? 1 : 0) + (attachments.length ? 1 : 0) + (files.length ? 1 : 0)
+    + (artifactView && !waiting ? Math.max(1, Math.min(artifactLines.length, terminal.rows - 9)) + 1 + (artifactView.error ? 1 : 0) : 0)
+  const liveHeight = Math.max(0, terminal.rows - bottomHeight - extraHeight - (connecting ? 1 : 0) - (scrolled ? 1 : 0))
   const recent = sessions.filter(row => row.session_id !== feed.sessionId).map(row => row.title || row.session_id.slice(0, 8))
 
   return (
@@ -957,8 +962,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         {feed.error && feed.items.at(-1)?.text !== feed.error ? <Notice text={feed.error} tone="error" /> : null}
       </TranscriptViewport>
       {scrollback && expandedTool ? <ToolLine item={expandedTool} now={now} expanded /> : null}
-      {artifactView ? <Box flexDirection="column"><Text bold>完整工具输出 · ↑↓ 滚动 · n/p 下一页/上一页 · r 重试 · Esc 关闭</Text>
-        <Text>{artifactView.loading ? '加载中…' : terminalText(artifactView.text).split('\n').slice(artifactView.line, artifactView.line + Math.max(1, terminal.rows - 9)).join('\n')}</Text>
+      {artifactView && !waiting ? <Box flexDirection="column"><Text bold>完整工具输出 · ↑↓ 滚动 · n/p 下一页/上一页 · r 重试 · Esc 关闭</Text>
+        <Text>{artifactView.loading ? '加载中…' : artifactLines.slice(artifactView.line, artifactView.line + Math.max(1, terminal.rows - 9)).join('\n')}</Text>
         {artifactView.error ? <Text color={theme.error}>{artifactView.error}</Text> : null}</Box> : null}
       <Box flexDirection="column" flexShrink={0}>
         {tasks.length ? <Box flexDirection="column"><Text bold>任务 {tasks.filter(task => task.status === 'done').length}/{tasks.length}</Text>

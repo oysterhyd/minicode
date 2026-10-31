@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ArtifactPages } from '../src/artifact-pages.js'
+import { ArtifactPages, artifactRows } from '../src/artifact-pages.js'
 import { FakeBridge } from './fake-bridge.js'
 
 test('TU5 artifact pages replace content and use Unicode character offsets', async () => {
@@ -14,4 +14,11 @@ test('TU5 artifact pages replace content and use Unicode character offsets', asy
   client.handlers.set('readArtifact', () => { throw Error('artifact missing') })
   await assert.rejects(pages.next(), /artifact missing/)
   assert.equal(pages.page.text, '😀一')
+})
+test('TU5 a long Unicode line remains fully readable in bounded rows', () => {
+  const text = '😀中'.repeat(1000)
+  const rows = artifactRows(text, 20)
+  assert.equal(rows.join(''), text)
+  assert.ok(rows.length > 100)
+  assert.ok(rows.every(row => [...row].length <= 20))
 })
