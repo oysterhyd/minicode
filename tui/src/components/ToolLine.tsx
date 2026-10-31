@@ -127,6 +127,7 @@ export function ToolLine({
       {item.childSessionId ? <OutputRows lines={[childSummary(item) + (expanded ? '' : ' (ctrl+o 展开)')]} columns={columns} /> : null}
       {expanded && item.childProgress?.length ? <OutputRows lines={item.childProgress.map(step => `${step.name} · ${childStatusLabel(step.status)}`).slice(-EXPANDED)} columns={columns} /> : null}
       {body}
+      {item.artifactId ? <Text dimColor>{INDENT}ctrl+f 查看全部（分页）</Text> : null}
     </Box>
   )
 }

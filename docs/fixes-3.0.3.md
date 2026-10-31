@@ -1108,3 +1108,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：feed.ts 忽略 reasoning_delta；Provider 只在结束统计 usage。修复：独立 reasoning 状态，Ctrl+R 折叠/展开末尾8行，保持 transcript 身份；Provider 在可用时发可选 usage_delta，Spinner 使用实际输出 tokens，缺失时回退。回归：stage7-feed.test.ts 仅 reasoning、多 delta、新 run 重置，先失败后通过。状态：部分完成（尚需高频批处理及真实 SSE/可折叠 UI 集成回归）。
 
+
+### TU5 — read complete tool artifacts by page
+
+核查：ToolLine 展开仅80行，artifactId 未使用。修复：Ctrl+F 完整输出查看器，调用现有 readArtifact；每次替换一页，按 Unicode 字符计算 offset，n/p 翻页、上下滚动、Esc关闭、r重试，失败保留当前页。回归：artifact-pages.test.ts Unicode分页/末页/后退/不存在错误，先失败后通过。状态：部分完成（超长单行的水平查看和真实桥接 UI 集成尚需补齐）。
+

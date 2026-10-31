@@ -34,6 +34,7 @@ import { ThoughtLine, ToolLine } from './components/ToolLine.js'
 import { UserBubble } from './components/UserBubble.js'
 import { TranscriptViewport, type TranscriptScroll } from './components/TranscriptViewport.js'
 import { TranscriptLog } from './components/TranscriptLog.js'
+import { ArtifactPages } from './artifact-pages.js'
 import { lastExpandableTool, layoutTranscript, type LayoutItem } from './transcript.js'
 import type {
   AgentState,
@@ -106,6 +107,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const [scrolled, setScrolled] = useState(false)
   const [screenEpoch, setScreenEpoch] = useState(0)
   const [reasoningOpen, setReasoningOpen] = useState(false)
+  const [artifactView, setArtifactView] = useState<{ text: string; line: number; loading: boolean; error?: string } | null>(null)
+  const artifactRef = useRef<ArtifactPages | null>(null)
   const [approvalChoice, setApprovalChoice] = useState(0)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const approvalChoiceRef = useRef({ id: '', choice: 0 })
@@ -547,12 +550,35 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
     void send(result.text)
   }
 
+  async function artifactPage(direction: 'first' | 'next' | 'previous') {
+    const pager = artifactRef.current
+    if (!pager) return
+    setArtifactView(view => ({ text: view?.text || '', line: 0, loading: true }))
+    try {
+      const page = await (direction === 'next' ? pager.next() : direction === 'previous' ? pager.previous() : pager.load(pager.offset))
+      if (artifactRef.current === pager) setArtifactView({ text: page.text, line: 0, loading: false })
+    } catch (error) {
+      if (artifactRef.current === pager) setArtifactView({ text: pager.page.text, line: 0, loading: false, error: cleanError(error) })
+    }
+  }
+
   useTerminalInput((input, key, pasted) => {
     const waiting = pendingApproval(feedRef.current.items)
     const text = draftRef.current
     const at = clamp(caretRef.current, text)
     const matches = slashSuggestions(text, { commands, models, sessions, skills })
     const slashIndex = slashIndexRef.current
+
+    if (artifactRef.current && !waiting && !(key.ctrl && input === 'c')) {
+      if (key.escape) { artifactRef.current = null; setArtifactView(null); return }
+      if (artifactView?.loading) return
+      if (input === 'n') { void artifactPage('next'); return }
+      if (input === 'p') { void artifactPage('previous'); return }
+      if (input === 'r') { void artifactPage('first'); return }
+      if (key.downArrow || key.pageDown) setArtifactView(view => view && ({ ...view, line: Math.min(Math.max(0, view.text.split('\n').length - 1), view.line + (key.pageDown ? 10 : 1)) }))
+      if (key.upArrow || key.pageUp) setArtifactView(view => view && ({ ...view, line: Math.max(0, view.line - (key.pageUp ? 10 : 1)) }))
+      return
+    }
 
     if (pasted) {
       if (readyRef.current) replaceDraft(insertAt(text, at, input), at + input.length)
@@ -584,6 +610,14 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
     }
     if (key.ctrl && input === 'q') { exit(); return }
     if (key.ctrl && input === 'r') { setReasoningOpen(value => !value); return }
+    if (key.ctrl && input === 'f') {
+      const tool = feedRef.current.items.findLast(item => item.kind === 'tool' && item.artifactId)
+      if (tool?.artifactId && sessionRef.current) {
+        artifactRef.current = new ArtifactPages(client, sessionRef.current, tool.artifactId)
+        void artifactPage('first')
+      } else addNotice('最近的工具没有完整输出归档')
+      return
+    }
     if (key.pageUp || key.pageDown) {
       transcriptRef.current?.scrollBy((key.pageUp ? -1 : 1) * Math.max(1, terminal.rows - 5))
       return
@@ -811,6 +845,9 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         {feed.error && feed.items.at(-1)?.text !== feed.error ? <Notice text={feed.error} tone="error" /> : null}
       </TranscriptViewport>
       {scrollback && expandedTool ? <ToolLine item={expandedTool} now={now} expanded /> : null}
+      {artifactView ? <Box flexDirection="column"><Text bold>完整工具输出 · ↑↓ 滚动 · n/p 下一页/上一页 · r 重试 · Esc 关闭</Text>
+        <Text>{artifactView.loading ? '加载中…' : terminalText(artifactView.text).split('\n').slice(artifactView.line, artifactView.line + Math.max(1, terminal.rows - 9)).join('\n')}</Text>
+        {artifactView.error ? <Text color={theme.error}>{artifactView.error}</Text> : null}</Box> : null}
       <Box flexDirection="column" flexShrink={0}>
         {feed.busy && !waiting ? (
           <Spinner
