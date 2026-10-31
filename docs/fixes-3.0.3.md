@@ -1198,3 +1198,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：Catalog.prompt已有根/全局项目约定与动态作用域注入，缺日期/OS版本/Git状态。修复：environment.rs注入日期、OS/version、shell/version、cwd、Git分支/改动布尔值；OS/shell进程内缓存、Git每工作区2秒缓存最多32项，不输出环境变量、文件列表或配置凭据。双平台同步工程行为，复用已有指令加载。回归：a3_prompt_has_environment_and_preserves_project_instructions修复前缺日期失败，验证环境/项目约定/不读.env。状态：已修复。
 
+
+### L13 — add line editing history and resume selection
+
+核查：stdin.read_line无编辑/历史/粘贴边界，空resume传空前缀。修复：TTY使用rustyline18.0.1（新增依赖用于跨平台行编辑/括号粘贴/文件补全，关闭非必要默认特性，仅file-history），Ctrl+J换行、命令Tab补全、持久历史；管道保留逐行脚本兼容。空/resume列出最近20会话与选择命令。回归：console单测多行历史/命令补全；cli-resume-list.test.mjs真实CLI列表，先失败后通过。状态：部分完成（真实Windows/POSIX PTY多行粘贴/方向键仍需自动化验收）。
+

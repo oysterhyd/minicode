@@ -6,6 +6,7 @@ mod cli_output;
 mod command_process;
 mod commands;
 pub mod configuration;
+mod console;
 pub mod context;
 mod credentials;
 mod delegate_workspace;

@@ -557,27 +557,7 @@ fn banner(runtime: &Runtime) {
 type ConsoleInput = tokio::sync::mpsc::UnboundedReceiver<io::Result<String>>;
 
 fn console_input() -> ConsoleInput {
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-    // A detached reader must not keep Tokio's blocking pool alive when the user
-    // cancels an approval without entering another line.
-    std::thread::spawn(move || {
-        loop {
-            let mut line = String::new();
-            match io::stdin().read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if sender.send(Ok(line)).is_err() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let _ = sender.send(Err(error));
-                    break;
-                }
-            }
-        }
-    });
-    receiver
+    crate::console::input()
 }
 
 async fn run(
@@ -754,6 +734,16 @@ async fn chat_command(
             for s in runtime.store.sessions()? {
                 println!("{} {}", s["session_id"], s["title"]);
             }
+        }
+        "/resume" if arg.is_empty() => {
+            for session in runtime.store.sessions()?.iter().take(20) {
+                println!(
+                    "{} · {}",
+                    session["session_id"].as_str().unwrap_or_default(),
+                    session["title"].as_str().unwrap_or_default()
+                );
+            }
+            println!("选择会话：/resume <完整 ID 或唯一前缀>");
         }
         "/model" | "/effort" => {
             if arg.is_empty() {
