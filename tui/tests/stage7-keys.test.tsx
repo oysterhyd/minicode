@@ -37,3 +37,17 @@ test('T-UI3 capable bridge owns busy prompts and distinguishes follow-up', async
     assert.equal(client.requests.filter(r => r.method === 'sendPrompt').length, 1)
   } finally { view.unmount() }
 })
+test('T-UI3 queue deletion failure is recoverable and malformed commands are rejected', async () => {
+  const client = new FakeBridge(), initial = await client.request<any>('initialize')
+  client.handlers.set('initialize', () => ({ ...initial, capabilities: ['messageQueue'] }))
+  client.handlers.set('listQueue', () => [])
+  client.handlers.set('deleteQueuedPrompt', () => { throw Error('cannot delete queued message') })
+  const view = render(<App client={client} options={{ workspace: '/repo', provider: 'fake' }} />)
+  try {
+    await delay(100); view.stdin.write('first'); view.stdin.write('\r'); await delay(30)
+    view.stdin.write('/queue cancel id'); view.stdin.write('\r'); await delay(50)
+    assert.match(view.lastFrame() || '', /cannot delete queued message/)
+    view.stdin.write('/queue cancel'); view.stdin.write('\r'); await delay(30)
+    assert.match(view.lastFrame() || '', /用法/)
+  } finally { view.unmount() }
+})

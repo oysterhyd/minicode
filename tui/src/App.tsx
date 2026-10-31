@@ -55,7 +55,7 @@ import { emptyState, historyItems } from './types.js'
 import { terminalText } from './format.js'
 import { clearTranscript, theme, useTerminalInput, useTerminalSize } from './terminal.js'
 
-const LIVE_SLASH = /^\/(help|\?|model|effort|permissions|skill)(?:\s|$)/i
+const LIVE_SLASH = /^\/(help|\?|model|effort|permissions|skill|cost|context|tasks)(?:\s|$)/i
 
 export type AppProps = {
   client: BridgeApi
@@ -117,6 +117,8 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   const [attachments, setAttachments] = useState<Array<{ asset_id: string; name: string }>>([])
   const [serverQueued, setServerQueued] = useState<Array<{ id: string; mode: string; text: string }>>([])
   const serverQueueRef = useRef(false)
+  const queueRevision = useRef(0)
+  const taskRevision = useRef(0)
   const [tasks, setTasks] = useState<Array<{ task_id: string; title: string; status: string }>>([])
   const attachmentsRef = useRef<Array<{ asset_id: string; name: string }>>([])
   const [approvalChoice, setApprovalChoice] = useState(0)
@@ -200,17 +202,19 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
   async function refreshQueue() {
     if (!serverQueueRef.current || !sessionRef.current) return
     const session = sessionRef.current
+    const revision = ++queueRevision.current
     try {
       const queue = await client.request<Array<{ id: string; mode: string; text: string }>>('listQueue', { sessionId: session })
-      if (activeRef.current && session === sessionRef.current) setServerQueued(queue)
+      if (activeRef.current && session === sessionRef.current && revision === queueRevision.current) setServerQueued(queue)
     } catch { /* a transport error is reported by the request that changed the queue */ }
   }
   async function refreshTasks() {
     const session = sessionRef.current
+    const revision = ++taskRevision.current
     if (!session) { setTasks([]); return }
     try {
       const rows = await client.request<Array<{ task_id: string; title: string; status: string }>>('listTasks', { sessionId: session })
-      if (activeRef.current && session === sessionRef.current) setTasks(rows)
+      if (activeRef.current && session === sessionRef.current && revision === taskRevision.current) setTasks(rows)
     } catch { /* old agents may not expose tasks */ }
   }
   async function enqueue(text: string, mode: 'steer' | 'followUp') {
@@ -389,11 +393,14 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
       return
     }
     if (text === '/queue' || text.startsWith('/queue ')) {
-      const [, action, id] = text.split(/\s+/)
-      if (action === 'cancel' && id) await client.request('deleteQueuedPrompt', { sessionId: sessionRef.current, id })
-      else if (action === 'resume') await client.request('resumeQueue', { sessionId: sessionRef.current, workspace: workspaceRef.current })
-      await refreshQueue()
-      if (!action) addNotice(serverQueued.map(item => `${item.id} · ${item.mode} · ${item.text.slice(0, 100)}`).join('\n') || '队列为空')
+      const words = text.split(/\s+/), [, action, id] = words
+      if (!(words.length === 1 || words.length === 2 && action === 'resume' || words.length === 3 && action === 'cancel')) { addNotice('用法：/queue [resume | cancel ID]', 'error'); return }
+      try {
+        if (action === 'cancel') await client.request('deleteQueuedPrompt', { sessionId: sessionRef.current, id })
+        else if (action === 'resume') await client.request('resumeQueue', { sessionId: sessionRef.current, workspace: workspaceRef.current })
+        await refreshQueue()
+        if (!action) addNotice(serverQueued.map(item => `${item.id} · ${item.mode} · ${item.text.slice(0, 100)}`).join('\n') || '队列为空')
+      } catch (error) { addNotice(cleanError(error), 'error') }
       return
     }
     if (text.startsWith('/attach ')) {
@@ -455,6 +462,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
         resetScreen([])
       }
       if (result.action === 'new') {
+        setServerQueued([])
         updateQueue([])
         drainAllowedRef.current = false
         updateFeed(current => ({ ...emptyFeed(), abandonedSessions: bindFeedSession(current, null).abandonedSessions }))
@@ -660,6 +668,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
     const at = clamp(caretRef.current, text)
     const matches = slashSuggestions(text, { commands, models, sessions, skills })
     const slashIndex = slashIndexRef.current
+    if (!key.escape) escapeRef.current = 0
 
     if (artifactRef.current && !waiting && !(key.ctrl && input === 'c')) {
       if (key.escape) { artifactRef.current = null; setArtifactView(null); return }

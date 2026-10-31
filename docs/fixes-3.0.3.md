@@ -1283,3 +1283,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充回归先复现：/clear extra在Bridge校验前已分离视图，使getState丢失当前会话。修复：仅完整无参数重置命令可detach；Desktop同样先拒绝多余参数。commands-stage7.test.mjs保证异常命令后ID不变。运行中cost/context/tasks使用快照与存储读取。
 
+
+### T-UI3 — recover queue failures and reject malformed controls
+
+补充失败测试复现队列删除错误导致未处理Promise；修复catch并显示错误，严格校验/queue参数；queue/task刷新使用revision拒绝迟到结果，新会话清理旧队列显示。Esc双击状态遇其他输入即重置，避免非连续Esc误进入编辑。stage7-keys.test.tsx全部通过。
+
