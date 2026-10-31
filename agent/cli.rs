@@ -413,19 +413,7 @@ pub async fn main() -> Result<()> {
     }
 }
 fn resolve(store: &Store, prefix: &str) -> Result<String> {
-    let matches = store
-        .sessions()?
-        .into_iter()
-        .filter(|s| {
-            s["session_id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with(prefix))
-        })
-        .collect::<Vec<_>>();
-    if matches.len() != 1 {
-        bail!("会话 ID 不唯一或不存在")
-    };
-    Ok(matches[0]["session_id"].as_str().unwrap().into())
+    store.resolve_session(prefix)
 }
 async fn prepare(
     store: &Store,

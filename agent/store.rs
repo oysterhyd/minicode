@@ -213,6 +213,29 @@ impl Store {
             append_message(c, id, message)
         })
     }
+    pub fn resolve_session(&self, prefix: &str) -> Result<String> {
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            bail!("请提供非空会话 ID 或唯一前缀");
+        }
+        let sessions = self.sessions()?;
+        if let Some(exact) = sessions
+            .iter()
+            .find(|session| session["session_id"] == prefix)
+        {
+            return Ok(util::string(exact, "session_id")?.into());
+        }
+        let matches = sessions
+            .iter()
+            .filter_map(|session| session["session_id"].as_str())
+            .filter(|id| id.starts_with(prefix))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [id] => Ok((*id).into()),
+            [] => bail!("会话不存在"),
+            _ => bail!("会话 ID 前缀不唯一，请输入更多字符"),
+        }
+    }
     pub fn sessions(&self) -> Result<Vec<Value>> {
         self.sessions_page(0, None)
     }

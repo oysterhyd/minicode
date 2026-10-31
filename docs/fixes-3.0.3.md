@@ -1153,3 +1153,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：TUI仅普通task工具，Desktop任务仅work页。修复：两端对话常驻最多4条真实任务卡，TUI显示状态/完成数；task_*结果刷新现有listTasks，无transcript重建；恢复/结束刷新。沿用task_id/title/status，无虚构G4接口。回归：tasks-card.test.tsx工具事件刷新；Desktop TestTU6TasksRemainVisibleInConversation 隐藏work页仍可见，先失败后通过。状态：部分完成（Desktop常驻卡还需状态文字与超过4条的展开入口）。
 
+
+### UX1 — share session prefix resolution and document semantics
+
+核查：CLI/Bridge各自prefix匹配，Bridge空resume无列表内容。修复：Store::resolve_session 精确ID优先、非空唯一前缀、歧义明确报错；CLI/Bridge共享，Desktop通过Bridge；空resume提供最近完整ID列表。interaction-spec.md 定义恢复/取消/审批/清屏/队列/编辑。回归：interaction.test.mjs真实Bridge空参数列表、5位前缀与不存在，先失败后通过。状态：部分完成（三端清空/队列/CLI信号由后续条目落实，最终文档需复核）。
+

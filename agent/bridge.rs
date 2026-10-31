@@ -1682,7 +1682,7 @@ impl Router {
     }
     async fn slash(&self, c: &mut Conversation, p: &Value) -> Result<Value> {
         let text = util::string(p, "text")?;
-        let (verb, arg) = text.split_once(' ').unwrap_or((text, ""));
+        let (verb, arg) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
         let verb = verb.to_lowercase();
         let arg = arg.trim();
         if c.busy()
@@ -1726,18 +1726,25 @@ impl Router {
             }
             "/resume" => {
                 if arg.is_empty() {
-                    return Ok(json!({"action":"sessions"}));
+                    let listing = self
+                        .store
+                        .sessions()?
+                        .iter()
+                        .take(20)
+                        .map(|row| {
+                            format!(
+                                "{} · {}",
+                                row["session_id"].as_str().unwrap_or_default(),
+                                row["title"].as_str().unwrap_or_default()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Ok(
+                        json!({"action":"sessions","message":if listing.is_empty(){"暂无会话。".into()}else{listing}}),
+                    );
                 }
-                let matches = self
-                    .store
-                    .sessions()?
-                    .into_iter()
-                    .filter(|s| s["session_id"].as_str().is_some_and(|s| s.starts_with(arg)))
-                    .collect::<Vec<_>>();
-                if matches.len() != 1 {
-                    bail!("会话 ID 不唯一或不存在")
-                };
-                Ok(json!({"action":"resume","sessionId":matches[0]["session_id"]}))
+                Ok(json!({"action":"resume","sessionId":self.store.resolve_session(arg)?}))
             }
             "/model" | "/effort" | "/permissions" => {
                 let action = verb.trim_start_matches('/');
