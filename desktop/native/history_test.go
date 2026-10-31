@@ -62,7 +62,7 @@ func TestClearWhileHistoryPageLoadsDoesNotRestoreOrPanic(t *testing.T) {
 	v := r.d.current()
 	r.d.loadEarlierHistory(v)
 	<-client.started
-	r.d.slash("/clear", v)
+	r.d.slash("/cls", v)
 	close(client.unblock)
 	r.settle()
 	if len(v.Items) != 0 || v.History != nil {

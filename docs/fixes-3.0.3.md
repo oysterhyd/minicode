@@ -1258,3 +1258,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 完整Clippy要求测试模块位于实现之后；移动budget_tests到commands.rs末尾，测试及实现不变。cargo clippy --locked --all-targets -- -D warnings复核通过。
 
+
+### A6 — test display-only clearing through the migrated alias
+
+原历史分页清屏回归仍验证同样的迟到响应不恢复旧视图/不panic，调用迁移后的/cls；不减弱断言。TestClearWhileHistoryPageLoadsDoesNotRestoreOrPanic通过。
+
