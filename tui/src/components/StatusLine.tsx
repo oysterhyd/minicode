@@ -75,15 +75,16 @@ export function shortcutLayout(columns: number): { perRow: number; rows: number 
   return { perRow, rows: Math.ceil(SHORTCUTS.length / perRow) }
 }
 
-export function ShortcutPanel() {
+export function ShortcutPanel({ nativeScrollback = false }: { nativeScrollback?: boolean }) {
   const { columns } = useTerminalSize()
   const { perRow, rows } = shortcutLayout(columns)
+  const shortcuts = nativeScrollback ? SHORTCUTS.map(([key, detail]): [string, string] => key === 'pgup/pgdn' ? ['终端回滚', '查看已完成输出'] : [key, detail]) : SHORTCUTS
   const cell = Math.floor((columns - 2) / perRow)
   return (
     <Box flexDirection="column" paddingX={1} flexShrink={0}>
       {Array.from({ length: rows }, (_, row) => (
         <Text key={row} wrap="truncate-end">
-          {SHORTCUTS.slice(row * perRow, row * perRow + perRow).map(([key, detail], index) => {
+          {shortcuts.slice(row * perRow, row * perRow + perRow).map(([key, detail], index) => {
             const text = `${key} ${detail}`
             const pad = Math.max(0, cell - displayWidth(text))
             return (
@@ -107,7 +108,7 @@ const TIPS = [
   'Enter 可以把下一条消息排进队列',
   'shift+tab 切换自动接受编辑',
   'ctrl+j 在输入框中换行',
-  'PageUp 翻阅更早的输出',
+  '使用终端回滚查看更早的输出',
   '输入 /model 随时切换模型',
 ]
 

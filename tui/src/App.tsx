@@ -1014,7 +1014,7 @@ export function App({ client, options, version = '3.0.3', scrollback = false }: 
             {serverQueued.length ? <Text dimColor wrap="truncate-end">已排队 {serverQueued.length} 条 · {serverQueued[0].mode}：{serverQueued[0].text.split('\n')[0]} · /queue 管理 · /follow 完成后继续</Text> : null}
             {files.length ? <Text dimColor wrap="truncate-end">Tab 补全：{files.slice(0, 5).join(' · ')}</Text> : null}
             {menuOpen ? <SlashMenu items={matches} selected={slashIndex} title={menuTitle} />
-              : shortcutsOpen ? <ShortcutPanel /> : <StatusLine state={agent} elapsed={feed.startedAt ? now - feed.startedAt : 0} />}
+              : shortcutsOpen ? <ShortcutPanel nativeScrollback={scrollback} /> : <StatusLine state={agent} elapsed={feed.startedAt ? now - feed.startedAt : 0} />}
           </>
         )}
         {connecting ? <Text dimColor>正在连接运行核心…</Text> : null}
