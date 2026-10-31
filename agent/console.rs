@@ -61,7 +61,7 @@ pub fn input() -> tokio::sync::mpsc::UnboundedReceiver<io::Result<String>> {
             let history = crate::util::data_dir().join("cli-history");
             let _ = editor.load_history(&history);
             loop {
-                match editor.readline("") {
+                match editor.readline("❯ ") {
                     Ok(line) => {
                         let _ = editor.add_history_entry(line.as_str());
                         if let Some(parent) = history.parent() {
