@@ -111,6 +111,8 @@ enum Commands {
 }
 #[derive(Args, Clone, Default)]
 struct RunOptions {
+    #[arg(short, long)]
+    verbose: bool,
     #[arg(long)]
     workspace: Option<PathBuf>,
     #[arg(long, default_value = "auto")]
@@ -506,7 +508,8 @@ async fn prepare(
     if provider != "auto" && runtime.provider.name != provider {
         bail!("模型不属于 provider {provider}")
     }
-    let sink: Sink = Arc::new(|event| {
+    let verbose = options.verbose;
+    let sink: Sink = Arc::new(move |event| {
         let event_type = event["event"].as_str().unwrap_or_default();
         if event_type == "text_delta" {
             print!(
@@ -523,19 +526,7 @@ async fn prepare(
                     item["data"]["arguments"]
                 ),
                 Some("tool_call_result") => {
-                    let mut output = item["data"]["output_detail"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string();
-                    if let Some(error) = item["data"]["error"]
-                        .as_str()
-                        .filter(|error| !error.is_empty() && !output.contains(error))
-                    {
-                        if !output.is_empty() {
-                            output.push('\n');
-                        }
-                        output.push_str(error);
-                    }
+                    let output = crate::cli_output::tool_output(&item["data"], verbose);
                     println!(
                         "{} {}",
                         if item["data"]["success"] == true {
@@ -1255,5 +1246,7 @@ async fn review(
 mod stage7_tests {
     use super::*;
     #[test]
-    fn l1_no_subcommand_is_accepted() { assert!(Cli::try_parse_from(["minicode"]).is_ok()); }
+    fn l1_no_subcommand_is_accepted() {
+        assert!(Cli::try_parse_from(["minicode"]).is_ok());
+    }
 }

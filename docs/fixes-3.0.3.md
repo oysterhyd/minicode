@@ -1168,3 +1168,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：Cli.command必填导致subcommand required。修复：子命令可选，缺省走现有TUI启动器；显式子命令不变。回归：cli::stage7_tests::l1_no_subcommand_is_accepted。状态：已修复。
 
+
+### L7 — bound tool previews and add verbose output
+
+核查：prepare sink 全量打印output_detail。修复：默认10行/2000字符摘要，独立附加错误保证截断不丢错误；-v/--verbose完整输出，保留终端控制过滤。回归：cli_output单测1000行+尾部错误；cli-output.test.mjs真实CLI默认/verbose对比，先失败后通过。状态：已修复。
+
