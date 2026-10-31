@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {fixture} from './helpers.mjs'
+import {fixture,connect} from './helpers.mjs'
 test('B6 server accepts steer during tool approval and runs follow-up after completion', async t => {
   const f = await fixture(t, [{tool_calls:[{id:'edit',name:'write',arguments:{path:'new.txt',content:'ok'}}]}, {text:'steered'}, {text:'followed'}])
   const run = await f.request('sendPrompt', {workspace:f.workspace,model:'fake',text:'first'})
@@ -19,6 +19,21 @@ test('B6 server accepts steer during tool approval and runs follow-up after comp
   const injected = detail.events.find(e => e.type === 'queue_consumed' && e.data.id === steer.id)
   const tool = detail.events.find(e => e.type === 'tool_call_result')
   assert.ok(injected.seq > tool.seq)
+})
+test('B6 pending input survives bridge restart and explicit resume consumes it once', async t => {
+ const f=await fixture(t,[{tool_calls:[{name:'write',arguments:{path:'x',content:'x'}}]},{text:'done'}])
+ const run=await f.request('sendPrompt',{workspace:f.workspace,model:'fake',text:'first'})
+ await f.wait(e=>e.event==='approval')
+ const queued=await f.request('enqueuePrompt',{sessionId:run.sessionId,mode:'steer',text:'durable direction'})
+ await f.request('cancelTurn',{sessionId:run.sessionId});await f.wait(e=>e.event==='run_done');await f.close()
+ const next=connect(f)
+ await next.request('selectSession',{sessionId:run.sessionId,workspace:f.workspace,deferRuntime:true})
+ assert.equal((await next.request('listQueue',{sessionId:run.sessionId}))[0].id,queued.id)
+ await next.request('resumeQueue',{sessionId:run.sessionId,workspace:f.workspace})
+ await next.wait(e=>e.event==='run_done')
+ assert.deepEqual(await next.request('listQueue',{sessionId:run.sessionId}),[])
+ const detail=await next.request('getSession',{sessionId:run.sessionId})
+ assert.equal(detail.messages.flatMap(m=>m.content).filter(b=>b.text==='durable direction').length,1)
 })
 test('B6 cancellation retains queued input and deletion is explicit', async t => {
   const f = await fixture(t, [{tool_calls:[{id:'a',name:'write',arguments:{path:'x',content:'x'}}]}])

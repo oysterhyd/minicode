@@ -162,6 +162,7 @@ function applyAgentEvent(
   seq: number,
   timestamp: string,
 ): FeedState {
+  if (type === 'queue_consumed' && typeof data.text === 'string') return { ...state, items: [...sealAssistant(state.items), { id: `queued-${data.id}`, kind: 'user', text: data.text }] }
   if (type === 'assistant_message') {
     const index = state.items.findLastIndex(item => item.kind === 'assistant' && item.pending)
     const pending = state.items[index]

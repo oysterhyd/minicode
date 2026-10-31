@@ -1172,7 +1172,7 @@ impl Runtime {
         let event = self.store.checkpoint(
             &self.session,
             "queue_consumed",
-            &json!({"id":item["id"],"mode":item["mode"]}),
+            &json!({"id":item["id"],"mode":item["mode"],"text":item["text"]}),
             Some(&message),
             None,
             None,
@@ -1434,7 +1434,7 @@ impl Runtime {
                 let event = self.store.checkpoint(
                     &self.session,
                     "queue_consumed",
-                    &json!({"id":id}),
+                    &json!({"id":id,"text":message.text()}),
                     Some(&message),
                     None,
                     None,

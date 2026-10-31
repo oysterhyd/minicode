@@ -1233,3 +1233,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 补充Desktop接线：握手messageQueue能力存在时运行输入enqueuePrompt(steer)，/follow区分followUp，listQueue刷新卡片，删除按服务端ID；/queue resume显式继续，关闭完成后的客户端重发；旧Agent保留本地队列。queue_changed/queue_consumed刷新，响应按会话与revision丢弃过期数据。TestB6DesktopUsesServerQueueWithoutClientResubmission验证服务端队列显示且完成不重复sendPrompt。状态：已修复（共享核心持久化恢复进一步验证见B6集成记录）。
 
+
+### B6 — recover durable queues and share CLI steering semantics
+
+补充核心/CLI验收：Store.enqueue_prompt统一验证与持久化；CLI运行中/steer、/follow及普通输入使用同一队列事件/工具边界，完成后自动处理follow-up，/queue支持列出/删除/恢复。Bridge runSlash同名命令复用控制入口。消费事件含text用于两端会话记录；恢复非空队列默认暂停，避免恢复后隐式重放。queue.test.mjs新增跨Bridge进程重启后保留/显式恢复/一次消费；CLI实际进程同时steer和follow后各消息恰好一次。5项集成通过。状态更新：已修复。
+

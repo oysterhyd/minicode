@@ -17,10 +17,12 @@ test('L12 a fresh request confirmation approves exactly that request',async t=>{
  await f.request('listSessions')
  const child=spawn(executable,['run','inspect','--script',f.script,'--workspace',f.workspace],{env:env(f),windowsHide:true,stdio:['pipe','pipe','pipe']})
  let output='',stderr='',sent=false
- child.stdout.on('data',chunk=>{output+=chunk;const code=/确认码：([a-f0-9]{8})/.exec(output)?.[1];if(code&&!sent){sent=true;child.stdin.write(`y ${code}\n`)}})
+ child.stdout.on('data',chunk=>{output+=chunk;const code=/确认码：([a-f0-9]{8})/.exec(output)?.[1];if(code&&!sent){sent=true;child.stdin.write(`/follow after current\n/steer change direction\ny ${code}\n`)}})
  child.stderr.on('data',chunk=>stderr+=chunk)
  const timeout=setTimeout(()=>child.kill(),12000)
  const code=await new Promise(resolve=>child.on('exit',resolve));clearTimeout(timeout)
  assert.equal(code,0,stderr+output);assert.equal(sent,true)
  assert.equal(fs.readFileSync(path.join(f.workspace,'confirmed.txt'),'utf8'),'ok')
+ const [session]=await f.request('listSessions'),detail=await f.request('getSession',{sessionId:session.session_id})
+ for(const text of ['change direction','after current']) assert.equal(detail.messages.flatMap(m=>m.content).filter(b=>b.text===text).length,1)
 })

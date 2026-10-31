@@ -350,6 +350,12 @@ impl Router {
                 previous.lock().await.close_resources(&hooks).await?;
             }
             r.refresh_snapshot(&hooks).await?;
+            if !c.preparing
+                && summary.is_some()
+                && !self.store.queued_prompts(&r.session)?.is_empty()
+            {
+                c.snapshot.lock().unwrap().queue_paused = true;
+            }
             self.commit_settings(c, &r.session, settings);
             c.catalog = Some(r.catalog.clone());
             c.workspace = Some(workspace.into());
@@ -771,8 +777,7 @@ impl Router {
                 if blocks.len() > 10 {
                     bail!("附件超过10个");
                 }
-                let item = json!({"id":util::id(),"mode":mode,"text":text,"attachments":blocks});
-                self.store.event(&id, "prompt_queued", &item)?;
+                let item = self.store.enqueue_prompt(&id, mode, text, &blocks)?;
                 if !snapshot.running {
                     snapshot.queue_paused = true;
                 }
@@ -1234,6 +1239,7 @@ impl Router {
                         settings.budget.max_total_tokens = store.saved_budget(id)?.unwrap_or(0);
                     }
                     *c.snapshot.lock().unwrap() = Snapshot {
+                        queue_paused: !store.queued_prompts(id)?.is_empty(),
                         session: Some(id.into()),
                         pending: summary["status"] != "completed",
                         rounds: summary["rounds"].as_u64().unwrap_or(0),
@@ -1708,12 +1714,50 @@ impl Router {
             return Ok(json!({"message":message}));
         }
         if c.busy()
-            && !["/help", "/?", "/model", "/effort", "/permissions", "/skill"]
-                .contains(&verb.as_str())
+            && ![
+                "/help",
+                "/?",
+                "/model",
+                "/effort",
+                "/permissions",
+                "/skill",
+                "/steer",
+                "/follow",
+                "/queue",
+            ]
+            .contains(&verb.as_str())
         {
             bail!("当前回合结束后才能执行命令")
         }
         match verb.as_str() {
+            "/steer" | "/follow" => {
+                let mut params = p.clone();
+                params["mode"] = json!(if verb == "/steer" {
+                    "steer"
+                } else {
+                    "followUp"
+                });
+                params["text"] = json!(arg);
+                let item = Box::pin(self.handle("enqueuePrompt", &params)).await?;
+                Ok(json!({"message":format!("已排队 {}",item["id"])}))
+            }
+            "/queue" => {
+                let words = arg.split_whitespace().collect::<Vec<_>>();
+                match words.as_slice() {
+                    [] => {
+                        let queued = Box::pin(self.handle("listQueue", p)).await?;
+                        Ok(json!({"message":serde_json::to_string_pretty(&queued)?}))
+                    }
+                    ["cancel", id] => {
+                        let mut params = p.clone();
+                        params["id"] = json!(id);
+                        let deleted = Box::pin(self.handle("deleteQueuedPrompt", &params)).await?;
+                        Ok(json!({"message":format!("queue_deleted: {deleted}")}))
+                    }
+                    ["resume"] => Box::pin(self.dispatch(c, "resumeQueue", p)).await,
+                    _ => bail!("用法：/queue [resume | cancel ID]"),
+                }
+            }
             "/help" | "/?" => {
                 let commands: Vec<Value> =
                     serde_json::from_str(include_str!("assets/commands.json"))?;

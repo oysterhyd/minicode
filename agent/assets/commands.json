@@ -118,5 +118,25 @@
     "name": "/fork",
     "usage": "/fork",
     "summary": "尚不可用：依赖 G3 会话分支"
+  },
+  {
+    "name": "/steer",
+    "usage": "/steer 消息",
+    "summary": "在下一工具结果后插话"
+  },
+  {
+    "name": "/follow",
+    "usage": "/follow 消息",
+    "summary": "当前回合完成后继续"
+  },
+  {
+    "name": "/queue",
+    "usage": "/queue [resume|cancel ID]",
+    "summary": "查看、继续或删除服务端队列"
+  },
+  {
+    "name": "/tasks",
+    "usage": "/tasks",
+    "summary": "查看当前会话全部任务状态"
   }
 ]

@@ -610,6 +610,52 @@ async fn run(
 async fn run_with_input(
     runtime: &mut Runtime,
     text: Option<String>,
+    hooks: Hooks,
+    input: &mut ConsoleInput,
+) -> Result<crate::models::RunResult> {
+    let mut text = text;
+    let initial_id = hooks.snapshot.lock().unwrap().queued_id.clone();
+    let mut attachments = initial_id
+        .and_then(|id| {
+            runtime
+                .store
+                .queued_prompts(&runtime.session)
+                .ok()?
+                .into_iter()
+                .find(|item| item["id"] == id)
+        })
+        .and_then(|item| serde_json::from_value(item["attachments"].clone()).ok())
+        .unwrap_or_default();
+    loop {
+        let result = run_once_with_input(
+            runtime,
+            text.take(),
+            std::mem::take(&mut attachments),
+            hooks.clone(),
+            input,
+        )
+        .await?;
+        if result.exit_reason != "completed" || hooks.snapshot.lock().unwrap().queue_paused {
+            return Ok(result);
+        }
+        let Some(next) = runtime
+            .store
+            .queued_prompts(&runtime.session)?
+            .into_iter()
+            .next()
+        else {
+            return Ok(result);
+        };
+        hooks.snapshot.lock().unwrap().queued_id = next["id"].as_str().map(str::to_string);
+        text = next["text"].as_str().map(str::to_string);
+        attachments = serde_json::from_value(next["attachments"].clone())?;
+    }
+}
+
+async fn run_once_with_input(
+    runtime: &mut Runtime,
+    text: Option<String>,
+    attachments: Vec<crate::models::Block>,
     mut hooks: Hooks,
     input: &mut ConsoleInput,
 ) -> Result<crate::models::RunResult> {
@@ -626,7 +672,9 @@ async fn run_with_input(
         }
     });
     let cancel = hooks.cancel.clone();
-    let running = runtime.run(text, vec![], hooks);
+    let store = runtime.store.clone();
+    let session = runtime.session.clone();
+    let running = runtime.run(text, attachments, hooks);
     tokio::pin!(running);
     let mut cancelled = false;
     let mut input_open = true;
@@ -649,8 +697,19 @@ async fn run_with_input(
                 if line.as_ref().is_some_and(|line|line.as_ref().is_err_and(|error|error.kind()==io::ErrorKind::Interrupted)) {
                     if cancelled {std::process::exit(130)} cancelled=true;cancel.cancel();continue;
                 }
+                if let Some(Ok(line))=line.as_ref() {
+                    let trimmed=line.trim();
+                    let explicit=trimmed.strip_prefix("/steer ").map(|text|("steer",text)).or_else(||trimmed.strip_prefix("/follow ").map(|text|("followUp",text)));
+                    if let Some((mode,text))=explicit {
+                        match store.enqueue_prompt(&session,mode,text,&[]) {Ok(item)=>println!("已排队 {} · {}",mode,item["id"]),Err(error)=>{eprintln!("{error}");input.buffered.push_back(Ok(line.clone()));}}
+                        continue;
+                    }
+                }
                 if waiting.is_empty() && let Some(Ok(line))=line {
-                    input.buffered.push_back(Ok(line));continue;
+                    if !line.trim().is_empty() && !line.trim_start().starts_with('/') {
+                        if let Err(error)=store.enqueue_prompt(&session,"steer",&line,&[]) {eprintln!("{error}");input.buffered.push_back(Ok(line));}
+                    } else {input.buffered.push_back(Ok(line));}
+                    continue;
                 }
                 let (granted,remember) = match line {
                     Some(Ok(line)) => {
@@ -769,6 +828,63 @@ async fn chat_command(
         return Ok(());
     }
     match verb.to_lowercase().as_str() {
+        "/queue" => {
+            let words = arg.split_whitespace().collect::<Vec<_>>();
+            match words.as_slice() {
+                [] => {
+                    for item in runtime.store.queued_prompts(&runtime.session)? {
+                        println!("{} · {} · {}", item["id"], item["mode"], item["text"]);
+                    }
+                }
+                ["cancel", id] => {
+                    if runtime
+                        .store
+                        .queued_prompts(&runtime.session)?
+                        .iter()
+                        .any(|item| item["id"] == *id)
+                    {
+                        runtime.store.event(
+                            &runtime.session,
+                            "queue_deleted",
+                            &json!({"id":id}),
+                        )?;
+                    }
+                }
+                ["resume"] => {
+                    let item = runtime
+                        .store
+                        .queued_prompts(&runtime.session)?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("队列为空"))?;
+                    {
+                        let mut state = hooks.snapshot.lock().unwrap();
+                        state.queue_paused = false;
+                        state.queued_id = item["id"].as_str().map(str::to_string);
+                    }
+                    run_with_input(
+                        runtime,
+                        item["text"].as_str().map(str::to_string),
+                        hooks.clone(),
+                        input,
+                    )
+                    .await?;
+                }
+                _ => bail!("用法：/queue [resume | cancel ID]"),
+            }
+        }
+        "/steer" | "/follow" => {
+            let mode = if verb == "/follow" {
+                "followUp"
+            } else {
+                "steer"
+            };
+            runtime
+                .store
+                .enqueue_prompt(&runtime.session, mode, arg, &[])?;
+            hooks.snapshot.lock().unwrap().queue_paused = true;
+            println!("消息已保留；/queue resume 执行队列");
+        }
         "/continue" => {
             if !runtime.pending {
                 bail!("当前没有暂停的任务");

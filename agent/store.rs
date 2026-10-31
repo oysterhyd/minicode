@@ -442,6 +442,31 @@ impl Store {
             rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
         })
     }
+    pub fn enqueue_prompt(
+        &self,
+        session: &str,
+        mode: &str,
+        text: &str,
+        attachments: &[Block],
+    ) -> Result<Value> {
+        self.require(session)?;
+        if !["steer", "followUp"].contains(&mode) {
+            bail!("mode must be steer or followUp")
+        }
+        if text.trim().is_empty() {
+            bail!("请输入任务内容")
+        }
+        if self.queued_prompts(session)?.len() >= 100 {
+            bail!("队列最多100条消息")
+        }
+        if attachments.len() > 10 {
+            bail!("附件超过10个")
+        }
+        let item =
+            json!({"id":util::id(),"mode":mode,"text":text.trim(),"attachments":attachments});
+        self.event(session, "prompt_queued", &item)?;
+        Ok(item)
+    }
     pub fn replace_messages(&self, id: &str, messages: &[Message]) -> Result<()> {
         let (id, messages) = (id.to_owned(), messages.to_vec());
         self.transaction(move |c| {
