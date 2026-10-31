@@ -12,6 +12,25 @@ pub fn now() -> String {
 pub fn id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
+pub fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+#[cfg(test)]
+mod stage7_id_tests {
+    #[test]
+    fn l17_short_ids_never_split_utf8_or_panic() {
+        for (id, expected) in [
+            ("", ""),
+            ("abc", "abc"),
+            ("123456789", "12345678"),
+            ("中文会话", "中文会话"),
+            ("1234567😀", "1234567😀"),
+        ] {
+            assert_eq!(super::short_id(id), expected);
+        }
+    }
+}
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

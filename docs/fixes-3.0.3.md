@@ -1178,3 +1178,8 @@ B20、D3、B19、B21、B22、TU1、TU2、D1、D2、D4、D5 均已修复，各自
 
 核查：Bridge/CLI通过off空格前缀判断，off缺名称被当skill。修复：共享split_whitespace解析，名称简写与on/off子命令，显式校验数量，大小写仅作用子命令。回归：skill-arguments.test.mjs缺名称/多参数/Tab/多空格/激活停用，先失败后通过。状态：已修复。
 
+
+### L17 — display short and Unicode session IDs safely
+
+核查：CLI恢复/报告默认文件名、Bridge会话列表存在[..8]。修复：统一util::short_id用get(..8)，不足/跨UTF8边界回退完整ID，实际匹配仍用完整ID。回归：l17_short_ids_never_split_utf8_or_panic 空/短/ASCII长/中文/emoji边界，先编译失败后通过。状态：已修复。
+

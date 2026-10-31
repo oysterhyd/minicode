@@ -282,7 +282,7 @@ pub async fn main() -> Result<()> {
             let (runtime, hooks) = prepare(&store, Some(&id), &options).await?;
             println!(
                 "恢复会话 {} · 轮数 {} · Token {}",
-                &id[..8],
+                util::short_id(&id),
                 runtime.rounds,
                 runtime.usage.total()
             );
@@ -1086,9 +1086,9 @@ fn report(
             println!("{text}");
         }
     } else if format == "html" {
-        let path = output
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(format!("minicode-report-{}.html", &id[..8])));
+        let path = output.map(PathBuf::from).unwrap_or_else(|| {
+            PathBuf::from(format!("minicode-report-{}.html", util::short_id(&id)))
+        });
         let events = store.events(&id, -1)?;
         let messages = store.messages(&id)?;
         let mut full_outputs = HashMap::new();

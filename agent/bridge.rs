@@ -1737,7 +1737,7 @@ impl Router {
                     .map(|s| {
                         format!(
                             "{} · {} · {}",
-                            &s["session_id"].as_str().unwrap_or_default()[..8],
+                            util::short_id(s["session_id"].as_str().unwrap_or_default()),
                             s["title"].as_str().unwrap_or_default(),
                             s["status"].as_str().unwrap_or_default()
                         )
