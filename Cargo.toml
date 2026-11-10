@@ -2,7 +2,7 @@
 name = "minicode"
 version = "3.0.3"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "MiniCode native agent runtime, CLI and NDJSON bridge"
 license = "MIT"
 
@@ -22,7 +22,7 @@ memmap2 = "0.9"
 pdf-extract = "0.12"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls", "gzip"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
