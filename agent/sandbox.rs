@@ -312,6 +312,17 @@ pub fn worker(
     windows::worker(profile, cwd, program, status, args)
 }
 
+pub fn cleanup_orphans() -> Result<usize> {
+    #[cfg(windows)]
+    {
+        windows::cleanup_orphans()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

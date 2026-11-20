@@ -72,9 +72,23 @@ impl Seen {
         })
     }
 }
+fn ledger_key(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
 fn remember(ctx: &ToolContext, path: &Path) {
     if let Ok(state) = Seen::of(path) {
-        ctx.files.lock().unwrap().seen.insert(path.into(), state);
+        ctx.files
+            .lock()
+            .unwrap()
+            .seen
+            .insert(ledger_key(path), state);
     }
 }
 /// Refuses to modify an existing file the session has not read, or one that
@@ -83,7 +97,14 @@ fn ensure_current(ctx: &ToolContext, path: &Path, relative: &str) -> Result<Opti
     if !path.exists() {
         return Ok(None);
     }
-    let Some(previous) = ctx.files.lock().unwrap().seen.get(path).cloned() else {
+    let Some(previous) = ctx
+        .files
+        .lock()
+        .unwrap()
+        .seen
+        .get(&ledger_key(path))
+        .cloned()
+    else {
         bail!(
             "{relative} 已存在，但本会话还没有读取过它（会话恢复后也需要重新读取）；请先 read 当前内容再修改"
         )
@@ -361,6 +382,7 @@ pub async fn execute(name: &str, args: &Value, ctx: &ToolContext) -> Outcome {
         Err(e) => Outcome::failure(e.to_string()),
     };
     if outcome.success
+        && outcome.observed_paths.is_empty()
         && ["read", "write", "edit"].contains(&name)
         && let Some(raw) = args["path"].as_str()
         && let Ok(path) = util::in_workspace(&ctx.workspace, raw)
@@ -1009,66 +1031,157 @@ fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     outcome.observed_paths = observed.into_inner().into_iter().collect();
     Ok(outcome)
 }
+fn lexical_join(base: &Path, raw: &str) -> PathBuf {
+    let combined = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        base.join(raw)
+    };
+    let mut resolved = PathBuf::new();
+    for component in combined.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(part) => resolved.push(part),
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
+}
+
+fn initial_lock_key(workspace: &Path, raw: &str) -> Result<PathBuf> {
+    if raw.contains('\0') {
+        bail!("invalid path")
+    }
+    let root = util::canonical(workspace)?;
+    let lex = lexical_join(&root, raw);
+    // Canonicalize only the parent directory so concurrent ReplaceFileW calls
+    // on the leaf file cannot race with path canonicalization before locking.
+    let key = if let (Some(parent), Some(name)) = (lex.parent(), lex.file_name()) {
+        if let Ok(canon_parent) = util::canonical(parent) {
+            canon_parent.join(name)
+        } else {
+            lex
+        }
+    } else {
+        lex
+    };
+    Ok(ledger_key(&key))
+}
+
+fn lock_for(ctx: &ToolContext, key: &Path) -> Arc<std::sync::Mutex<()>> {
+    ctx.files
+        .lock()
+        .unwrap()
+        .locks
+        .entry(key.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+fn large_edit_max_bytes() -> u64 {
+    std::env::var("MINICODE_LARGE_EDIT_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|v| (256_000..=256 * 1024 * 1024).contains(v))
+        .unwrap_or(64 * 1024 * 1024)
+}
+
 fn edit(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let raw = util::string(args, "path")?;
-    let path = util::in_workspace(&ctx.workspace, raw)?;
+    // Mutations of one file are serialized before resolving the leaf file, so
+    // concurrent edits neither race on the same original nor hit transient
+    // replacement paths on Windows.
+    let initial_key = initial_lock_key(&ctx.workspace, raw)?;
+    let first_lock = lock_for(ctx, &initial_key);
+    let first_guard = first_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut path = util::in_workspace(&ctx.workspace, raw)?;
+    let resolved_key = ledger_key(&path);
+    let (low_lock, high_lock);
+    let (_primary_guard, _secondary_guard) = if resolved_key != initial_key {
+        drop(first_guard);
+        let (low, high) = if initial_key <= resolved_key {
+            (&initial_key, &resolved_key)
+        } else {
+            (&resolved_key, &initial_key)
+        };
+        low_lock = lock_for(ctx, low);
+        high_lock = lock_for(ctx, high);
+        let low_guard = low_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let high_guard = high_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        path = util::in_workspace(&ctx.workspace, raw)?;
+        (low_guard, Some(high_guard))
+    } else {
+        (first_guard, None)
+    };
     let relative = path
         .strip_prefix(&ctx.workspace)?
         .to_string_lossy()
         .replace('\\', "/");
-    // Mutations of one file are serialized, so concurrent edits each apply to
-    // the result of the previous one instead of racing on the same original.
-    let lock = ctx
-        .files
-        .lock()
-        .unwrap()
-        .locks
-        .entry(path.clone())
-        .or_default()
-        .clone();
-    let _serialized = lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut outcome = edit_locked(name, args, ctx, &path, &relative)?;
+    if outcome.success
+        && let Some(observed) = observed_path(ctx, &path)
+    {
+        outcome.observed_paths.push(observed);
+    }
+    Ok(outcome)
+}
+
+fn edit_locked(
+    name: &str,
+    args: &Value,
+    ctx: &ToolContext,
+    path: &Path,
+    relative: &str,
+) -> Result<Outcome> {
     if name == "edit" && !path.is_file() {
         bail!("path is not a file: {relative} (use write to create a new file)")
     }
     if path.exists() && !path.is_file() {
         bail!("path exists and is not a file: {relative}")
     }
-    let seen = ensure_current(ctx, &path, &relative)?;
+    let seen = ensure_current(ctx, path, relative)?;
     let size = if path.exists() {
         path.metadata()?.len()
     } else {
         0
     };
     let encoding = if path.exists() {
-        Encoding::probe(&path)?
+        Encoding::probe(path)?
     } else {
         Encoding::Utf8(false)
     };
     if name == "edit" && size > 256_000 && matches!(encoding, Encoding::Utf8(_)) {
-        let outcome = edit_large(&path, &relative, args, ctx, seen)?;
-        remember(ctx, &path);
+        let outcome = edit_large(path, relative, args, ctx, seen)?;
+        remember(ctx, path);
         return Ok(outcome);
     }
     let before = if path.exists() && (size <= 256_000 || !matches!(encoding, Encoding::Utf8(_))) {
-        encoding.decode(&textfile::read_bounded(&path)?)?
+        encoding.decode(&textfile::read_bounded(path)?)?
     } else {
         String::new()
     };
     let after = if name == "write" {
         util::string(args, "content")?.to_string()
     } else {
-        editing::apply(&before, &editing::plan(&before, args, &relative)?)
+        editing::apply(&before, &editing::plan(&before, args, relative)?)
     };
     if ctx.cancel.is_cancelled() {
         bail!("tool cancelled")
     }
     let encoded = encoding.encode(&after)?;
-    util::atomic_write(&path, &encoded)?;
+    util::atomic_write(path, &encoded)?;
     if let Ok(metadata) = path.metadata() {
         ctx.files.lock().unwrap().seen.insert(
-            path.clone(),
+            ledger_key(path),
             Seen {
                 size: metadata.len(),
                 modified: metadata.modified().ok(),
@@ -1126,43 +1239,63 @@ fn edit_large(
     ctx: &ToolContext,
     seen: Option<Seen>,
 ) -> Result<Outcome> {
+    let max_bytes = large_edit_max_bytes();
     let input = File::open(path)?;
     let original = input.metadata()?;
+    if original.len() > max_bytes {
+        bail!(
+            "{relative} exceeds the large-edit limit ({} > {max_bytes} bytes; MINICODE_LARGE_EDIT_MAX_BYTES)",
+            original.len()
+        )
+    }
     let seen = seen.context("large file is not in the read ledger")?;
     if !seen.matches(&original) {
         bail!("{relative} 在上次读取后已被外部修改；请重新 read 后再修改")
     }
-    // The mapped source is borrowed; no second heap copy of a large file.
-    let mapped = unsafe { memmap2::MmapOptions::new().map(&input)? };
-    if util::hash(&mapped) != seen.digest {
+    let mut bytes = Vec::with_capacity(original.len().min(max_bytes) as usize);
+    input.take(max_bytes + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        bail!(
+            "{relative} exceeds the large-edit limit ({} > {max_bytes} bytes; MINICODE_LARGE_EDIT_MAX_BYTES)",
+            bytes.len()
+        )
+    }
+    if util::hash(&bytes) != seen.digest {
         bail!("{relative} 在上次读取后已被外部修改；请重新 read 后再修改")
     }
-    let text = std::str::from_utf8(&mapped).context("binary or non-UTF-8 file")?;
+    let bom = bytes.starts_with(b"\xef\xbb\xbf");
+    let body = if bom { &bytes[3..] } else { &bytes[..] };
+    let text = std::str::from_utf8(body).context("binary or non-UTF-8 file")?;
+    if text.contains('\0') {
+        bail!("binary file contains NUL characters");
+    }
     let changes = editing::plan(text, args, relative)?;
     let parent = path.parent().context("invalid file path")?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    let temp = tempfile::NamedTempFile::new_in(parent)?;
+    let mut writer = std::io::BufWriter::new(temp);
+    if bom {
+        writer.write_all(b"\xef\xbb\xbf")?;
+    }
     let mut position = 0;
     let replacements = changes.len();
     for change in changes {
         if ctx.cancel.is_cancelled() {
             bail!("tool cancelled")
         }
-        temp.write_all(&mapped[position..change.start])?;
-        temp.write_all(change.replacement.as_bytes())?;
+        writer.write_all(&body[position..change.start])?;
+        writer.write_all(change.replacement.as_bytes())?;
         position = change.end;
     }
-    temp.write_all(&mapped[position..])?;
-    temp.as_file().sync_all()?;
-    temp.as_file().set_permissions(original.permissions())?;
-    drop(mapped);
-    drop(input);
+    writer.write_all(&body[position..])?;
+    writer.flush()?;
+    let temp = writer.into_inner().map_err(|e| e.into_error())?;
     if Seen::of(path)?.digest != seen.digest {
         bail!("{relative} 在编辑过程中被外部修改；请重新 read 后再修改")
     }
     if ctx.cancel.is_cancelled() {
         bail!("tool cancelled")
     }
-    temp.persist(path).map_err(|e| e.error)?;
+    util::atomic_persist(temp, path)?;
     Ok(Outcome::ok(format!(
         "Applied change to large file {relative} ({replacements} replacement(s)); old={} bytes, new={} bytes.",
         original.len(),
@@ -1267,11 +1400,11 @@ fn powershell_info() -> &'static (PathBuf, String) {
             .flat_map(std::env::split_paths)
             .map(|dir| dir.join("pwsh.exe"))
             .find(|path| {
-                let app_alias = path.parent().and_then(Path::file_name).is_some_and(|name| {
-                    name.eq_ignore_ascii_case("WindowsApps")
-                        && std::fs::symlink_metadata(path)
-                            .is_ok_and(|metadata| metadata.file_attributes() & 0x400 != 0)
-                });
+                let app_alias = path
+                    .components()
+                    .any(|component| component.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+                    && std::fs::symlink_metadata(path)
+                        .is_ok_and(|metadata| metadata.file_attributes() & 0x400 != 0);
                 path.is_file() && !app_alias
             })
             .unwrap_or_else(|| {
@@ -1526,18 +1659,13 @@ pub(crate) async fn run_command_captured(
         std::mem::swap(&mut cmd, &mut prepared.command);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().context("failed to start command")?;
+    let (mut child, mut tree) = crate::command_process::ProcessTree::spawn(&mut cmd)
+        .await
+        .context("failed to start and own command process tree")?;
     capture.pid.store(
         child.id().unwrap_or(0),
         std::sync::atomic::Ordering::Release,
     );
-    let mut tree = match crate::command_process::ProcessTree::attach(&child) {
-        Ok(tree) => tree,
-        Err(error) => {
-            kill_tree(&mut child).await;
-            return Err(error.context("failed to own command process tree"));
-        }
-    };
     if let Some(prepared) = &sandbox {
         prepared.owned()?;
     }

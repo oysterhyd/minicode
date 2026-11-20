@@ -3649,9 +3649,16 @@ async fn concurrent_edits_of_one_file_are_serialized() {
                 .await
                 .success
         );
-        let edits = words.iter().map(|word| {
+        let edits = words.iter().enumerate().map(|(idx, word)| {
             let ctx = ctx.clone();
-            let args = json!({"path":"shared.txt","old_text":word,"new_text":word.to_uppercase()});
+            let alias = if cfg!(windows) && idx % 2 == 1 {
+                "./SHARED.txt"
+            } else if idx % 3 == 2 {
+                "sub/../shared.txt"
+            } else {
+                "shared.txt"
+            };
+            let args = json!({"path":alias,"old_text":word,"new_text":word.to_uppercase()});
             async move { tools::execute("edit", &args, &ctx).await }
         });
         for out in futures_util::future::join_all(edits).await {
@@ -3662,6 +3669,70 @@ async fn concurrent_edits_of_one_file_are_serialized() {
             words.join(" ").to_uppercase()
         );
     }
+}
+
+#[tokio::test]
+async fn edit_large_uses_no_mmap_preserves_bom_and_handles_concurrent_truncation() {
+    let (_dir, ctx) = fixture();
+    let filler = "large_file_line_payload_0123456789\n".repeat(9_000); // > 300 KB
+    let mut with_bom = b"\xef\xbb\xbf".to_vec();
+    with_bom.extend_from_slice(b"FIRST_BOM_LINE\n");
+    with_bom.extend_from_slice(filler.as_bytes());
+    with_bom.extend_from_slice(b"TARGET_BOM_MARKER\n");
+    fs::write(ctx.workspace.join("bom_large.txt"), &with_bom).unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"bom_large.txt"}), &ctx)
+            .await
+            .success
+    );
+    let bom_edit = tools::execute(
+        "edit",
+        &json!({"path":"bom_large.txt","old_text":"FIRST_BOM_LINE","new_text":"REPLACED_BOM_LINE"}),
+        &ctx,
+    )
+    .await;
+    assert!(bom_edit.success, "{:?}", bom_edit.error);
+    assert_eq!(bom_edit.observed_paths, vec!["bom_large.txt"]);
+    let updated_bom = fs::read(ctx.workspace.join("bom_large.txt")).unwrap();
+    assert!(updated_bom.starts_with(b"\xef\xbb\xbf"));
+    let updated_text = std::str::from_utf8(&updated_bom[3..]).unwrap();
+    assert!(updated_text.starts_with("REPLACED_BOM_LINE\n"));
+    assert!(updated_text.contains("TARGET_BOM_MARKER\n"));
+
+    let plain = format!("{filler}PLAIN_TARGET\n{filler}");
+    let plain_path = ctx.workspace.join("plain_large.txt");
+    fs::write(&plain_path, &plain).unwrap();
+    assert!(
+        tools::execute("read", &json!({"path":"plain_large.txt"}), &ctx)
+            .await
+            .success
+    );
+    let plain_edit = tools::execute(
+        "edit",
+        &json!({"path":"plain_large.txt","old_text":"PLAIN_TARGET","new_text":"PLAIN_REPLACED"}),
+        &ctx,
+    )
+    .await;
+    assert!(plain_edit.success, "{:?}", plain_edit.error);
+    let after_plain = fs::read_to_string(&plain_path).unwrap();
+    assert!(!after_plain.starts_with('\u{feff}'));
+    assert!(after_plain.contains("PLAIN_REPLACED\n"));
+
+    // External truncation after read is rejected cleanly without crashing.
+    fs::write(&plain_path, &plain[..280_000]).unwrap();
+    let truncated_edit = tools::execute(
+        "edit",
+        &json!({"path":"plain_large.txt","old_text":"large_file_line_payload_0123456789","new_text":"x"}),
+        &ctx,
+    )
+    .await;
+    assert!(!truncated_edit.success);
+    assert!(
+        truncated_edit
+            .error
+            .unwrap_or_default()
+            .contains("外部修改")
+    );
 }
 
 // T7: one unreadable file must not abort the search, and grep must never map

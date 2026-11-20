@@ -245,7 +245,10 @@ pub async fn main() -> Result<()> {
             let code = crate::sandbox::worker(&profile, &cwd, &program, &status, &args)?;
             std::process::exit(code)
         }
-        Commands::Bridge => bridge::serve(Store::open(path)?).await,
+        Commands::Bridge => {
+            let _ = crate::sandbox::cleanup_orphans();
+            bridge::serve(Store::open(path)?).await
+        }
         Commands::Tui { args } => launch_tui(
             &args,
             &if path == Path::new(":memory:") {
@@ -255,6 +258,7 @@ pub async fn main() -> Result<()> {
             },
         ),
         Commands::Run { task, options } => {
+            let _ = crate::sandbox::cleanup_orphans();
             let store = Store::open(path)?;
             let (mut runtime, hooks) = prepare(&store, None, &options).await?;
             banner(&runtime);
@@ -277,6 +281,7 @@ pub async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Chat { options } => {
+            let _ = crate::sandbox::cleanup_orphans();
             let store = Store::open(path)?;
             let (runtime, hooks) = prepare(&store, None, &options).await?;
             chat(runtime, hooks).await
@@ -285,6 +290,7 @@ pub async fn main() -> Result<()> {
             session_id,
             options,
         } => {
+            let _ = crate::sandbox::cleanup_orphans();
             let store = Store::open(path)?;
             let id = resolve(&store, &session_id)?;
             let (runtime, hooks) = prepare(&store, Some(&id), &options).await?;

@@ -1,7 +1,11 @@
 use super::{Config, Prepared, clean_environment};
 use crate::util;
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use std::{
+    fs::{self, File, OpenOptions},
+    io::Read,
     path::{Path, PathBuf},
     ptr,
 };
@@ -12,6 +16,29 @@ use windows_sys::Win32::{
     Storage::FileSystem::*,
     System::{Console::*, Threading::*},
 };
+
+const ERROR_FILE_NOT_FOUND_HRESULT: i32 = 0x8007_0002_u32 as i32;
+
+#[derive(Serialize, Deserialize)]
+struct Lease {
+    profile: String,
+    grants: Vec<PathBuf>,
+}
+
+fn leases_dir() -> PathBuf {
+    util::data_dir().join("sandbox-leases")
+}
+
+struct Sid(PSID);
+impl Drop for Sid {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                FreeSid(self.0);
+            }
+        }
+    }
+}
 
 fn wide(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
@@ -28,7 +55,10 @@ pub(super) struct Profile {
     name: String,
     sid: PSID,
     grants: Vec<PathBuf>,
-    _temporary: tempfile::TempDir,
+    lease_meta: PathBuf,
+    lease_lock_path: PathBuf,
+    lease_lock: Option<File>,
+    _temporary: Option<tempfile::TempDir>,
     closed: bool,
 }
 // Profile owns its SID and ACL grants. Win32 profile/ACL APIs have no thread
@@ -37,8 +67,50 @@ unsafe impl Send for Profile {}
 
 impl Profile {
     fn new(workspace: &Path, read_roots: &[PathBuf]) -> Result<Self> {
+        Self::new_in(&leases_dir(), workspace, read_roots)
+    }
+    fn new_in(leases_dir: &Path, workspace: &Path, read_roots: &[PathBuf]) -> Result<Self> {
+        if let Some(parent) = leases_dir.parent()
+            && util::is_link(parent)
+        {
+            bail!("refusing linked sandbox lease parent directory")
+        }
+        fs::create_dir_all(leases_dir)?;
+        if util::is_link(leases_dir) {
+            bail!("refusing linked sandbox lease directory")
+        }
         let temporary = tempfile::tempdir()?;
         let name = format!("minicode.{}", util::id());
+        let lease_lock_path = leases_dir.join(format!("{name}.lock"));
+        let lease_meta = leases_dir.join(format!("{name}.json"));
+        if util::is_link(&lease_lock_path) || util::is_link(&lease_meta) {
+            bail!("refusing linked sandbox lease path")
+        }
+        // Hold the OS lease lock before writing metadata or creating the profile
+        // so concurrent orphan sweeps never reap an in-flight setup.
+        let lease_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lease_lock_path)?;
+        lease_file
+            .try_lock_exclusive()
+            .context("could not acquire sandbox lease lock")?;
+        let mut recorded_grants = vec![workspace.to_path_buf()];
+        recorded_grants.extend(read_roots.iter().cloned());
+        if let Err(error) = util::atomic_write(
+            &lease_meta,
+            &serde_json::to_vec(&Lease {
+                profile: name.clone(),
+                grants: recorded_grants,
+            })?,
+        ) {
+            let _ = lease_file.unlock();
+            drop(lease_file);
+            let _ = fs::remove_file(&lease_lock_path);
+            return Err(error);
+        }
         let text = wide(&name);
         let mut sid = ptr::null_mut();
         let result = unsafe {
@@ -52,6 +124,10 @@ impl Profile {
             )
         };
         if result < 0 {
+            let _ = fs::remove_file(&lease_meta);
+            let _ = lease_file.unlock();
+            drop(lease_file);
+            let _ = fs::remove_file(&lease_lock_path);
             bail!(
                 "Windows AppContainer profile unavailable (0x{:08x}); command was not executed",
                 result as u32
@@ -61,7 +137,10 @@ impl Profile {
             name,
             sid,
             grants: vec![],
-            _temporary: temporary,
+            lease_meta,
+            lease_lock_path,
+            lease_lock: Some(lease_file),
+            _temporary: Some(temporary),
             closed: false,
         };
         profile.grant(
@@ -72,13 +151,19 @@ impl Profile {
                 | DELETE
                 | FILE_DELETE_CHILD,
         )?;
-        let temp = profile._temporary.path().join("child");
+        let temp = profile.temp_path().join("child");
         std::fs::create_dir(&temp)?;
         profile.grant(&temp, FILE_ALL_ACCESS)?;
         for root in read_roots {
             profile.grant(root, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)?;
         }
         Ok(profile)
+    }
+    fn temp_path(&self) -> &Path {
+        self._temporary
+            .as_ref()
+            .expect("sandbox profile temporary dir")
+            .path()
     }
     fn grant(&mut self, path: &Path, access: u32) -> Result<()> {
         if util::is_link(path) {
@@ -106,12 +191,21 @@ impl Profile {
             bail!("{}", failures.join("; "))
         }
         let result = unsafe { DeleteAppContainerProfile(wide(&self.name).as_ptr()) };
-        if result < 0 {
+        if result < 0 && result != ERROR_FILE_NOT_FOUND_HRESULT {
             bail!(
                 "could not delete temporary AppContainer profile (0x{:08x})",
                 result as u32
             )
         }
+        if let Err(error) = fs::remove_file(&self.lease_meta)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            bail!("could not remove temporary sandbox lease metadata: {error}");
+        }
+        if let Some(lock) = self.lease_lock.take() {
+            let _ = lock.unlock();
+        }
+        let _ = fs::remove_file(&self.lease_lock_path);
         self.closed = true;
         Ok(())
     }
@@ -123,6 +217,128 @@ impl Drop for Profile {
             FreeSid(self.sid);
         }
     }
+}
+
+pub(super) fn cleanup_orphans() -> Result<usize> {
+    cleanup_orphans_in(&leases_dir())
+}
+
+fn cleanup_orphans_in(leases_dir: &Path) -> Result<usize> {
+    if !leases_dir.exists() {
+        return Ok(0);
+    }
+    if util::is_link(leases_dir) {
+        bail!("refusing linked sandbox lease directory")
+    }
+    let mut cleaned = 0usize;
+    for entry in fs::read_dir(leases_dir)? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if util::is_link(&path) || !path.is_file() {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !stem.strip_prefix("minicode.").is_some_and(util::valid_id) {
+            continue;
+        }
+        if ext == "lock" {
+            let meta = leases_dir.join(format!("{stem}.json"));
+            if !meta.exists()
+                && let Ok(lock) = OpenOptions::new().read(true).write(true).open(&path)
+                && lock.try_lock_exclusive().is_ok()
+            {
+                let _ = lock.unlock();
+                drop(lock);
+                let _ = fs::remove_file(&path);
+            }
+            continue;
+        }
+        if ext != "json" {
+            continue;
+        }
+        let lock_path = leases_dir.join(format!("{stem}.lock"));
+        if util::is_link(&lock_path) {
+            continue;
+        }
+        let Ok(lock) = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+        else {
+            continue;
+        };
+        if lock.try_lock_exclusive().is_err() {
+            continue;
+        }
+        if util::is_link(&path) || !path.is_file() {
+            let _ = lock.unlock();
+            drop(lock);
+            let _ = fs::remove_file(&lock_path);
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let Ok(file) = File::open(&path) else {
+            let _ = lock.unlock();
+            drop(lock);
+            continue;
+        };
+        if file.take(1024 * 1024).read_to_end(&mut bytes).is_err() {
+            let _ = lock.unlock();
+            drop(lock);
+            continue;
+        }
+        let Ok(lease) = serde_json::from_slice::<Lease>(&bytes) else {
+            let _ = lock.unlock();
+            drop(lock);
+            continue;
+        };
+        if lease.profile != stem {
+            let _ = lock.unlock();
+            drop(lock);
+            continue;
+        }
+        let mut raw_sid = ptr::null_mut();
+        let derived = unsafe {
+            DeriveAppContainerSidFromAppContainerName(wide(&lease.profile).as_ptr(), &mut raw_sid)
+        };
+        let mut revoke_ok = true;
+        if derived >= 0 && !raw_sid.is_null() {
+            let sid = Sid(raw_sid);
+            for grant in &lease.grants {
+                if grant.exists()
+                    && !util::is_link(grant)
+                    && acl(grant, sid.0, REVOKE_ACCESS, 0).is_err()
+                {
+                    revoke_ok = false;
+                }
+            }
+        }
+        if !revoke_ok {
+            let _ = lock.unlock();
+            drop(lock);
+            continue;
+        }
+        let deleted = unsafe { DeleteAppContainerProfile(wide(&lease.profile).as_ptr()) };
+        if deleted < 0 && deleted != ERROR_FILE_NOT_FOUND_HRESULT {
+            let _ = lock.unlock();
+            drop(lock);
+            continue;
+        }
+        if fs::remove_file(&path).is_ok() {
+            cleaned += 1;
+        }
+        let _ = lock.unlock();
+        drop(lock);
+        let _ = fs::remove_file(&lock_path);
+    }
+    Ok(cleaned)
 }
 
 fn acl(path: &Path, sid: PSID, mode: ACCESS_MODE, access: u32) -> Result<()> {
@@ -226,6 +442,25 @@ pub(super) fn prepare(
             "Windows shell sandbox currently supports network=false only; command was not executed"
         )
     }
+    static CLEANUP: std::sync::Once = std::sync::Once::new();
+    CLEANUP.call_once(|| {
+        let _ = cleanup_orphans();
+    });
+    let program_path = Path::new(original.as_std().get_program());
+    let sandbox_program = if program_path
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("pwsh.exe"))
+        && program_path
+            .components()
+            .any(|component| component.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+    {
+        std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .map(|root| root.join("System32/WindowsPowerShell/v1.0/powershell.exe"))
+            .unwrap_or_else(|| PathBuf::from("powershell.exe"))
+    } else {
+        program_path.to_path_buf()
+    };
     let guard = Profile::new(workspace, &config.read_only_paths)?;
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -235,9 +470,9 @@ pub(super) fn prepare(
         .arg("--cwd")
         .arg(cwd)
         .arg("--program")
-        .arg(original.as_std().get_program())
+        .arg(&sandbox_program)
         .arg("--status")
-        .arg(guard._temporary.path().join("started"))
+        .arg(guard.temp_path().join("started"))
         .arg("--")
         .args(original.as_std().get_args());
     command
@@ -245,9 +480,9 @@ pub(super) fn prepare(
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .creation_flags(0x08000000);
-    clean_environment(&mut command, &guard._temporary.path().join("child"));
+    clean_environment(&mut command, &guard.temp_path().join("child"));
     Ok(Prepared {
-        status: guard._temporary.path().join("started"),
+        status: guard.temp_path().join("started"),
         command,
         protection: "windows-appcontainer",
         guard,
@@ -304,14 +539,6 @@ pub(super) fn worker(
         unsafe { DeriveAppContainerSidFromAppContainerName(wide(profile).as_ptr(), &mut sid) };
     if result < 0 {
         bail!("AppContainer identity could not be derived")
-    }
-    struct Sid(PSID);
-    impl Drop for Sid {
-        fn drop(&mut self) {
-            unsafe {
-                FreeSid(self.0);
-            }
-        }
     }
     let sid = Sid(sid);
     let capabilities = SECURITY_CAPABILITIES {
@@ -415,13 +642,52 @@ pub(super) fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn dacl_contains_sid(path: &Path, sid: PSID) -> bool {
+        unsafe {
+            let mut dacl = ptr::null_mut();
+            let mut descriptor = ptr::null_mut();
+            let res = GetNamedSecurityInfoW(
+                wide(path).as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            );
+            assert_eq!(res, 0);
+            let mut count = 0u32;
+            let mut entries = ptr::null_mut();
+            let got = GetExplicitEntriesFromAclW(dacl, &mut count, &mut entries);
+            assert_eq!(got, 0);
+            let slice = if count == 0 || entries.is_null() {
+                &[]
+            } else {
+                std::slice::from_raw_parts(entries, count as usize)
+            };
+            let found = slice.iter().any(|entry| {
+                entry.Trustee.TrusteeForm == TRUSTEE_IS_SID
+                    && !entry.Trustee.ptstrName.is_null()
+                    && EqualSid(entry.Trustee.ptstrName.cast(), sid) != 0
+            });
+            if !entries.is_null() {
+                LocalFree(entries.cast());
+            }
+            if !descriptor.is_null() {
+                LocalFree(descriptor);
+            }
+            found
+        }
+    }
     #[test]
     fn failed_process_creation_never_marks_the_sandbox_started() {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("work");
+        let leases = root.path().join("leases");
         std::fs::create_dir(&workspace).unwrap();
-        let mut profile = Profile::new(&workspace, &[]).unwrap();
-        let marker = profile._temporary.path().join("status");
+        let mut profile = Profile::new_in(&leases, &workspace, &[]).unwrap();
+        let marker = profile.temp_path().join("status");
         std::fs::write(marker.with_extension("owned"), "owned").unwrap();
         assert!(
             worker(
@@ -435,6 +701,63 @@ mod tests {
         );
         assert!(!marker.exists());
         profile.close().unwrap();
+    }
+    #[test]
+    fn orphan_cleanup_revokes_workspace_acl_and_deletes_crashed_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("work");
+        let leases = root.path().join("leases");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut profile = Profile::new_in(&leases, &workspace, &[]).unwrap();
+        let name = profile.name.clone();
+        let sid = profile.sid;
+        assert!(dacl_contains_sid(&workspace, sid));
+        assert_eq!(cleanup_orphans_in(&leases).unwrap(), 0);
+
+        // Simulate host hard-kill: OS closes handles without running Profile::close().
+        let temp = profile._temporary.take();
+        let lock = profile.lease_lock.take();
+        drop(lock);
+        drop(temp);
+        std::mem::forget(profile);
+
+        assert_eq!(cleanup_orphans_in(&leases).unwrap(), 1);
+        assert!(!dacl_contains_sid(&workspace, sid));
+        unsafe {
+            FreeSid(sid);
+            // Recreating the same profile name succeeds only because cleanup deleted it.
+            let mut probe_sid = ptr::null_mut();
+            let text = wide(&name);
+            let recreated = CreateAppContainerProfile(
+                text.as_ptr(),
+                text.as_ptr(),
+                text.as_ptr(),
+                ptr::null(),
+                0,
+                &mut probe_sid,
+            );
+            assert!(
+                recreated >= 0,
+                "crashed profile was not deleted: 0x{:08x}",
+                recreated as u32
+            );
+            FreeSid(probe_sid);
+            assert!(DeleteAppContainerProfile(text.as_ptr()) >= 0);
+        }
+        assert_eq!(fs::read_dir(&leases).unwrap().count(), 0);
+    }
+    #[test]
+    fn orphan_cleanup_skips_active_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("work");
+        let leases = root.path().join("leases");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut profile = Profile::new_in(&leases, &workspace, &[]).unwrap();
+        assert_eq!(cleanup_orphans_in(&leases).unwrap(), 0);
+        assert!(dacl_contains_sid(&workspace, profile.sid));
+        profile.close().unwrap();
+        assert!(!dacl_contains_sid(&workspace, profile.sid));
+        assert_eq!(fs::read_dir(&leases).unwrap().count(), 0);
     }
     #[test]
     fn command_line_quoting_preserves_quotes_spaces_and_trailing_backslashes() {

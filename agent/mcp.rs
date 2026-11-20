@@ -338,9 +338,10 @@ impl Connector {
             cmd.creation_flags(0x08000000);
             #[cfg(unix)]
             cmd.process_group(0);
-            let mut child = cmd.spawn().context("failed to start MCP server")?;
-            self.lifecycle.get_mut().tree =
-                Some(crate::command_process::ProcessTree::attach(&child)?);
+            let (mut child, tree) = crate::command_process::ProcessTree::spawn(&mut cmd)
+                .await
+                .context("failed to start MCP server")?;
+            self.lifecycle.get_mut().tree = Some(tree);
             if let Some(stderr) = child.stderr.take() {
                 let (path, log) = diagnostic_log();
                 self.diagnostics.lock().unwrap().log_path = path;

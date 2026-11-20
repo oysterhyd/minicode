@@ -29,6 +29,42 @@ impl Drop for SessionLock {
         let _ = fs2::FileExt::unlock(&self.0);
     }
 }
+struct InitLock(File);
+impl Drop for InitLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+fn acquire_init_lock(path: &Path) -> Result<InitLock> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if util::is_link(parent) {
+        bail!("refusing linked database directory")
+    }
+    fs::create_dir_all(parent)?;
+    let lock_dir = parent.join(format!(
+        ".{}.locks",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    if util::is_link(&lock_dir) {
+        bail!("refusing linked database lock directory")
+    }
+    fs::create_dir_all(&lock_dir)?;
+    let lock_path = lock_dir.join("_init.lock");
+    if util::is_link(&lock_path) {
+        bail!("refusing linked database init lock")
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok(InitLock(file))
+}
 const COLUMNS: &str = "session_id,created_at,workspace,provider,model,status,exit_reason,rounds,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,usage_available";
 fn summary(row: &Row<'_>) -> rusqlite::Result<Value> {
     Ok(
@@ -42,26 +78,27 @@ fn summary(row: &Row<'_>) -> rusqlite::Result<Value> {
 impl Store {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        if path != Path::new(":memory:") {
-            fs::create_dir_all(
-                path.parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(Path::new(".")),
-            )?;
-        }
-        let database = if path == Path::new(":memory:") {
+        let is_memory = path == Path::new(":memory:");
+        let init_lock = if is_memory {
+            None
+        } else {
+            Some(acquire_init_lock(&path)?)
+        };
+        let database = if is_memory {
             format!("file:minicode_{}?mode=memory&cache=shared", util::id())
         } else {
             path.to_string_lossy().into_owned()
         };
         let mut c = Connection::open(&database)?;
-        c.busy_timeout(std::time::Duration::from_secs(5))?;
+        c.busy_timeout(std::time::Duration::from_secs(10))?;
         let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version > 7 {
             bail!("minicode database was created by a newer version")
         }
-        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY,created_at TEXT NOT NULL,workspace TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'running',exit_reason TEXT,rounds INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,cache_read_tokens INTEGER NOT NULL DEFAULT 0,cache_write_tokens INTEGER NOT NULL DEFAULT 0,usage_available INTEGER NOT NULL DEFAULT 1);
+        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch("
+            CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY,created_at TEXT NOT NULL,workspace TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'running',exit_reason TEXT,rounds INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,cache_read_tokens INTEGER NOT NULL DEFAULT 0,cache_write_tokens INTEGER NOT NULL DEFAULT 0,usage_available INTEGER NOT NULL DEFAULT 1,auto_title TEXT);
             CREATE TABLE IF NOT EXISTS messages(session_id TEXT NOT NULL,seq INTEGER NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,PRIMARY KEY(session_id,seq));
             CREATE TABLE IF NOT EXISTS events(session_id TEXT NOT NULL,seq INTEGER NOT NULL,type TEXT NOT NULL,timestamp TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session_id,seq));
             CREATE TABLE IF NOT EXISTS artifacts(session_id TEXT NOT NULL,artifact_id TEXT NOT NULL,kind TEXT NOT NULL,relpath TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(session_id,artifact_id));
@@ -73,26 +110,29 @@ impl Store {
             CREATE TABLE IF NOT EXISTS tool_results(session_id TEXT NOT NULL,call_id TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(session_id,call_id));
             CREATE TABLE IF NOT EXISTS tasks(session_id TEXT NOT NULL,task_id TEXT NOT NULL,title TEXT NOT NULL,depends_on TEXT NOT NULL,status TEXT NOT NULL,owner TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(session_id,task_id));
             CREATE TABLE IF NOT EXISTS project_memory(id TEXT PRIMARY KEY,workspace TEXT NOT NULL,scope TEXT NOT NULL,fact TEXT NOT NULL,source TEXT NOT NULL,updated_at TEXT NOT NULL);")?;
-        let columns: Vec<String> = c
-            .prepare("PRAGMA table_info(sessions)")?
-            .query_map([], |r| r.get(1))?
-            .collect::<rusqlite::Result<_>>()?;
+        let columns: Vec<String> = {
+            let mut stmt = tx.prepare("PRAGMA table_info(sessions)")?;
+            stmt.query_map([], |r| r.get(1))?
+                .collect::<rusqlite::Result<_>>()?
+        };
         for (name, default) in [
             ("cache_read_tokens", 0),
             ("cache_write_tokens", 0),
             ("usage_available", 0),
         ] {
             if !columns.iter().any(|x| x == name) {
-                c.execute_batch(&format!(
+                tx.execute_batch(&format!(
                     "ALTER TABLE sessions ADD COLUMN {name} INTEGER NOT NULL DEFAULT {default}"
                 ))?;
             }
         }
-        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !columns.iter().any(|name| name == "auto_title") {
             tx.execute_batch("ALTER TABLE sessions ADD COLUMN auto_title TEXT")?;
-            let rows = tx.prepare("SELECT session_id,content FROM messages m WHERE role='user' AND seq=(SELECT MIN(seq) FROM messages WHERE session_id=m.session_id AND role='user')")?
-                .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let rows = {
+                let mut stmt = tx.prepare("SELECT session_id,content FROM messages m WHERE role='user' AND seq=(SELECT MIN(seq) FROM messages WHERE session_id=m.session_id AND role='user')")?;
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
             for (id, content) in rows {
                 let message = Message {
                     role: "user".into(),
@@ -114,8 +154,9 @@ impl Store {
                 INSERT INTO message_revisions VALUES(OLD.session_id,1) ON CONFLICT(session_id) DO UPDATE SET version=version+1; END;
             PRAGMA user_version=7;")?;
         tx.commit()?;
+        drop(init_lock);
         let reader = Connection::open(&database)?;
-        reader.busy_timeout(std::time::Duration::from_secs(5))?;
+        reader.busy_timeout(std::time::Duration::from_secs(10))?;
         let store = Self {
             path,
             connection: Arc::new(Mutex::new(reader)),
@@ -1080,4 +1121,67 @@ fn read_messages(c: &Connection, id: &str) -> Result<Vec<Message>> {
         });
     }
     Ok(messages)
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+
+    #[test]
+    fn store_open_concurrent_init_never_races_or_duplicates_columns() {
+        for round in 0..5 {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join(format!("concurrent_{round}.db"));
+            if round == 4 {
+                // Also test concurrent migration of a pre-auto_title schema.
+                let legacy = Connection::open(&db_path).unwrap();
+                legacy
+                    .execute_batch(
+                        "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, workspace TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', exit_reason TEXT, rounds INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0);
+                         CREATE TABLE messages(session_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, PRIMARY KEY(session_id, seq));
+                         PRAGMA user_version=3;",
+                    )
+                    .unwrap();
+                legacy
+                    .execute(
+                        "INSERT INTO sessions(session_id, created_at, workspace, provider, model) VALUES('s1','2026-01-01T00:00:00Z','.','fake','fake')",
+                        [],
+                    )
+                    .unwrap();
+                legacy
+                    .execute(
+                        "INSERT INTO messages VALUES('s1',0,'user',?)",
+                        [serde_json::to_string(&Message::user("legacy prompt").content).unwrap()],
+                    )
+                    .unwrap();
+            }
+            let barrier = Arc::new(std::sync::Barrier::new(12));
+            let handles = (0..12)
+                .map(|i| {
+                    let path = db_path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let store = Store::open(&path)?;
+                        let id = store.create(".", "fake", &format!("m{i}"))?;
+                        assert!(store.session(&id)?.is_some());
+                        Ok::<_, anyhow::Error>(id)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let ids = handles
+                .into_iter()
+                .map(|h| h.join().expect("thread panicked"))
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(ids.len(), 12);
+            let store = Store::open(&db_path).unwrap();
+            let listed = store.sessions().unwrap();
+            assert_eq!(listed.len(), if round == 4 { 13 } else { 12 });
+            if round == 4 {
+                let legacy = listed.iter().find(|s| s["session_id"] == "s1").unwrap();
+                assert_eq!(legacy["title"], "legacy prompt");
+            }
+        }
+    }
 }

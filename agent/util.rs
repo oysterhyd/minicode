@@ -322,16 +322,13 @@ pub fn in_workspace(workspace: &Path, raw: &str) -> Result<PathBuf> {
     }
     Ok(target)
 }
-pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+pub fn atomic_persist(file: tempfile::NamedTempFile, path: &Path) -> Result<()> {
     let parent = path.parent().context("path has no parent")?;
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
         parent
     };
-    fs::create_dir_all(parent)?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(content)?;
     file.as_file().sync_all()?;
     #[cfg(not(windows))]
     if let Ok(metadata) = path.metadata() {
@@ -349,7 +346,7 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
                 Ok(()) => return Ok(()),
                 Err(error)
                     if attempt < 20
-                        && matches!(error.raw_os_error(), Some(5 | 32 | 33 | 80 | 183)) =>
+                        && matches!(error.raw_os_error(), Some(5 | 32 | 33 | 80 | 183 | 1175)) =>
                 {
                     std::thread::sleep(std::time::Duration::from_millis(5 * (attempt + 1)));
                 }
@@ -365,6 +362,18 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         fs::File::open(parent)?.sync_all()?;
         Ok(())
     }
+}
+pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    let parent = path.parent().context("path has no parent")?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    fs::create_dir_all(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(content)?;
+    atomic_persist(file, path)
 }
 
 #[cfg(windows)]
@@ -398,7 +407,9 @@ fn replace_windows(source: &Path, target: &Path) -> std::io::Result<()> {
         Err(error) => return Err(error),
     };
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    if unsafe { GetFileInformationByHandle(target_file.as_raw_handle(), &mut info) } == 0 {
+    let got_info = unsafe { GetFileInformationByHandle(target_file.as_raw_handle(), &mut info) };
+    drop(target_file);
+    if got_info == 0 {
         return Err(std::io::Error::last_os_error());
     }
     if info.nNumberOfLinks > 1 {

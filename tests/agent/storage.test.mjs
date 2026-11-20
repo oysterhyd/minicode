@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {DatabaseSync} from 'node:sqlite'
 import {test} from 'node:test'
-import {fixture,allowMockMcp} from './helpers.mjs'
+import {fixture,allowMockMcp,profile,connect} from './helpers.mjs'
 
 test('R28: persisted events contain previews and references while old detail consumers still work', async t => {
   const f = await fixture(t, [{tool_calls:[
@@ -58,4 +58,16 @@ test('S1: session list pagination is optional and validates its bounds', async t
   assert.deepEqual(await f.request('listSessions',{offset:3,limit:1}),[])
   await assert.rejects(f.request('listSessions',{offset:-1,limit:1}),/offset/)
   await assert.rejects(f.request('listSessions',{limit:0}),/limit/)
+})
+
+test('concurrent cold-start Store::open across processes initializes cleanly without locking or duplicate column errors', async t => {
+  const f = profile()
+  t.after(async () => {
+    for (const c of f.connections) await c.close()
+    fs.rmSync(f.root,{recursive:true,force:true,maxRetries:10,retryDelay:100})
+  })
+  const clients = Array.from({length:6}, () => connect(f))
+  const lists = await Promise.all(clients.map(c => c.request('listSessions')))
+  for (const list of lists) assert.deepEqual(list, [])
+  await Promise.all(clients.map(c => c.close()))
 })
