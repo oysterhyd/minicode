@@ -14,6 +14,7 @@ Desktop · CLI · TUI — 一个运行核心，三种工作方式
 ![Platform](https://img.shields.io/badge/platform-Windows_x64-3578c9)
 [![CI](https://github.com/oysterhyd/minicode/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/oysterhyd/minicode/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-MIT-63666e)](LICENSE)
+[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/minicode)
 
 [官网](https://minicode.oyster.ink) · [下载安装](https://github.com/oysterhyd/minicode/releases/latest) · [快速开始](#快速开始) · [功能介绍](#功能介绍) · [文档](#文档)
 
