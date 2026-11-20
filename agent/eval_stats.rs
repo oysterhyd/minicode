@@ -1,7 +1,100 @@
-use crate::models::Usage;
+use crate::{configuration::Configuration, models::Usage, store::Store};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path};
+
+const PRICING_ERROR: &str =
+    "模型定价需要非负数字（input/output/cacheRead/cacheWrite，单位 USD / 百万 tokens）";
+
+/// Per-million-token pricing in USD for one model.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Pricing {
+    pub input: f64,
+    pub output: f64,
+    #[serde(alias = "cacheRead")]
+    pub cache_read: f64,
+    #[serde(alias = "cacheWrite")]
+    pub cache_write: f64,
+}
+
+fn rate_field(
+    object: &serde_json::Map<String, Value>,
+    primary: &str,
+    alias: Option<&str>,
+    required: bool,
+) -> Result<f64> {
+    let raw = match object.get(primary) {
+        Some(value) if !value.is_null() => Some(value),
+        _ => alias
+            .and_then(|key| object.get(key))
+            .filter(|value| !value.is_null()),
+    };
+    let Some(raw) = raw else {
+        if required {
+            bail!("{PRICING_ERROR}");
+        }
+        return Ok(0.0);
+    };
+    raw.as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .context(PRICING_ERROR)
+}
+
+impl Pricing {
+    /// Parse pricing metadata from camelCase or snake_case JSON (`Null` / `{}` -> `None`).
+    pub fn from_value(value: &Value) -> Result<Option<Self>> {
+        if value.is_null() {
+            return Ok(None);
+        }
+        let object = value.as_object().context(PRICING_ERROR)?;
+        if object.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            input: rate_field(object, "input", None, true)?,
+            output: rate_field(object, "output", None, true)?,
+            cache_read: rate_field(object, "cacheRead", Some("cache_read"), false)?,
+            cache_write: rate_field(object, "cacheWrite", Some("cache_write"), false)?,
+        }))
+    }
+
+    pub fn to_config_value(&self) -> Value {
+        json!({
+            "input": self.input,
+            "output": self.output,
+            "cacheRead": self.cache_read,
+            "cacheWrite": self.cache_write,
+        })
+    }
+
+    /// Compute turn cost in USD, returning `None` if usage was not reported.
+    pub fn cost(&self, usage: &Usage) -> Option<f64> {
+        if !usage.available {
+            return None;
+        }
+        Some(
+            (usage
+                .input_tokens
+                .saturating_sub(usage.cache_read_tokens)
+                .saturating_sub(usage.cache_write_tokens) as f64
+                * self.input
+                + usage.output_tokens as f64 * self.output
+                + usage.cache_read_tokens as f64 * self.cache_read
+                + usage.cache_write_tokens as f64 * self.cache_write)
+                / 1_000_000.0,
+        )
+    }
+}
+
+pub fn format_usd(usd: f64) -> String {
+    if usd == 0.0 {
+        "$0.00".into()
+    } else if usd >= 0.01 {
+        format!("${usd:.4}")
+    } else {
+        format!("${usd:.6}")
+    }
+}
 
 pub fn prices(path: Option<&Path>) -> Result<Value> {
     let Some(path) = path else {
@@ -28,20 +121,57 @@ pub fn prices(path: Option<&Path>) -> Result<Value> {
 }
 
 pub fn cost(usage: &Usage, rates: &Value) -> Option<f64> {
-    if !usage.available {
-        return None;
+    Pricing::from_value(rates)
+        .ok()
+        .flatten()
+        .and_then(|pricing| pricing.cost(usage))
+}
+
+pub fn session_cost(
+    store: &Store,
+    configuration: &Configuration,
+    session_id: &str,
+    fallback_model: &str,
+) -> Result<Option<f64>> {
+    let (_, events) = store.statistics_events(session_id, -1)?;
+    let mut requests = 0u64;
+    let mut total = 0.0;
+    for event in events {
+        if event.r#type != "assistant_message" {
+            continue;
+        }
+        requests += 1;
+        let usage = Usage {
+            input_tokens: event.data["usage"]["input_tokens"].as_u64().unwrap_or(0),
+            output_tokens: event.data["usage"]["output_tokens"].as_u64().unwrap_or(0),
+            cache_read_tokens: event.data["usage"]["cache_read_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+            cache_write_tokens: event.data["usage"]["cache_write_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+            available: event.data["usage"]["available"] != false,
+        };
+        let model = event.data["model"].as_str().unwrap_or(fallback_model);
+        if model == "fake" || !usage.available {
+            return Ok(None);
+        }
+        if let Some(recorded) = event.data["cost_usd"]
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+        {
+            total += recorded;
+            continue;
+        }
+        let Some(pricing) = configuration.resolve_pricing(model)? else {
+            return Ok(None);
+        };
+        let Some(turn_cost) = pricing.cost(&usage) else {
+            return Ok(None);
+        };
+        total += turn_cost;
     }
-    Some(
-        (usage
-            .input_tokens
-            .saturating_sub(usage.cache_read_tokens)
-            .saturating_sub(usage.cache_write_tokens) as f64
-            * rates["input"].as_f64()?
-            + usage.output_tokens as f64 * rates["output"].as_f64()?
-            + usage.cache_read_tokens as f64 * rates["cache_read"].as_f64()?
-            + usage.cache_write_tokens as f64 * rates["cache_write"].as_f64()?)
-            / 1_000_000.0,
-    )
+    Ok((requests > 0).then_some(total))
 }
 
 fn moments(values: impl Iterator<Item = f64>) -> Value {
@@ -157,5 +287,147 @@ mod tests {
             .is_none()
         );
         assert!(moments(std::iter::empty())["mean"].is_null());
+    }
+
+    #[test]
+    fn pricing_normalization_camel_and_snake_case_and_rejection() {
+        assert_eq!(Pricing::from_value(&Value::Null).unwrap(), None);
+        assert_eq!(Pricing::from_value(&json!({})).unwrap(), None);
+        let camel =
+            Pricing::from_value(&json!({"input": 1.25, "output": 10.0, "cacheRead": 0.125}))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            camel,
+            Pricing {
+                input: 1.25,
+                output: 10.0,
+                cache_read: 0.125,
+                cache_write: 0.0,
+            }
+        );
+        let snake = Pricing::from_value(
+            &json!({"input": 1.25, "output": 10.0, "cache_read": 0.125, "cache_write": 1.5}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            snake.to_config_value(),
+            json!({"input": 1.25, "output": 10.0, "cacheRead": 0.125, "cacheWrite": 1.5})
+        );
+        for invalid in [
+            json!({"input": -1.0, "output": 2.0}),
+            json!({"input": "1.0", "output": 2.0}),
+            json!({"input": 1.0}),
+            json!({"input": 1.0, "output": 2.0, "cacheRead": "free"}),
+            json!("bad"),
+        ] {
+            assert!(
+                Pricing::from_value(&invalid).is_err(),
+                "expected rejection for {invalid}"
+            );
+        }
+        assert_eq!(format_usd(0.0), "$0.00");
+        assert_eq!(format_usd(0.000084), "$0.000084");
+        assert_eq!(format_usd(0.123456), "$0.1235");
+    }
+
+    #[test]
+    fn session_cost_sums_multi_model_turns_and_excludes_fake_or_unpriced() {
+        let dir = tempfile::tempdir().unwrap();
+        let configuration = Configuration {
+            path: dir.path().join("config.json"),
+        };
+        configuration
+            .write(&json!({
+                "services": [{
+                    "id": "svc",
+                    "name": "Svc",
+                    "enabled": true,
+                    "apiStyle": "openai_responses",
+                    "baseUrl": "https://example.test/v1",
+                    "apiKey": "key",
+                    "models": [
+                        {
+                            "modelId": "priced-a",
+                            "contextWindow": 200000,
+                            "maxOutputTokens": 8192,
+                            "pricing": {"input": 1.0, "output": 2.0, "cacheRead": 0.1, "cacheWrite": 0.0}
+                        },
+                        {
+                            "modelId": "priced-b",
+                            "contextWindow": 200000,
+                            "maxOutputTokens": 8192,
+                            "pricing": {"input": 3.0, "output": 15.0, "cacheRead": 0.3, "cacheWrite": 3.75}
+                        },
+                        {
+                            "modelId": "unpriced",
+                            "contextWindow": 200000,
+                            "maxOutputTokens": 8192
+                        }
+                    ]
+                }],
+                "agents": []
+            }))
+            .unwrap();
+        let store = Store::open(dir.path().join("session.db")).unwrap();
+        let session = store.create(".", "svc::priced-a", "commandcode").unwrap();
+        store
+            .event(
+                &session,
+                "assistant_message",
+                &json!({
+                    "model": "svc::priced-a",
+                    "usage": {"input_tokens": 100, "output_tokens": 10, "cache_read_tokens": 40, "cache_write_tokens": 0, "available": true}
+                }),
+            )
+            .unwrap();
+        store
+            .event(
+                &session,
+                "assistant_message",
+                &json!({
+                    "model": "svc::priced-b",
+                    "usage": {"input_tokens": 200, "output_tokens": 20, "cache_read_tokens": 0, "cache_write_tokens": 100, "available": true}
+                }),
+            )
+            .unwrap();
+        // Turn 1: (60*1 + 10*2 + 40*0.1) / 1e6 = 0.000084
+        // Turn 2: (100*3 + 20*15 + 100*3.75) / 1e6 = (300 + 300 + 375) / 1e6 = 0.000975
+        // Total = 0.001059
+        let total = session_cost(&store, &configuration, &session, "svc::priced-a")
+            .unwrap()
+            .unwrap();
+        assert!((total - 0.001059).abs() < 1e-12, "got {total}");
+
+        // Adding an unpriced turn makes session total cost unavailable (None).
+        store
+            .event(
+                &session,
+                "assistant_message",
+                &json!({
+                    "model": "svc::unpriced",
+                    "usage": {"input_tokens": 50, "output_tokens": 10, "available": true}
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            session_cost(&store, &configuration, &session, "svc::priced-a").unwrap(),
+            None
+        );
+
+        // Fake session returns None even if another event had cost_usd.
+        let fake_session = store.create(".", "fake", "fake").unwrap();
+        store
+            .event(
+                &fake_session,
+                "assistant_message",
+                &json!({"model": "fake", "usage": {"input_tokens": 100, "output_tokens": 20, "available": true}}),
+            )
+            .unwrap();
+        assert_eq!(
+            session_cost(&store, &configuration, &fake_session, "fake").unwrap(),
+            None
+        );
     }
 }

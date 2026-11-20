@@ -59,6 +59,7 @@ pub struct Conversation {
     settings_session: Option<String>,
     pub catalog: Option<Arc<tokio::sync::Mutex<Catalog>>>,
     pub workspace: Option<PathBuf>,
+    configuration: Configuration,
 }
 impl Conversation {
     fn new(configuration: &Configuration) -> Result<Self> {
@@ -79,6 +80,7 @@ impl Conversation {
             settings_session: None,
             catalog: None,
             workspace: None,
+            configuration: configuration.clone(),
         })
     }
     fn busy(&self) -> bool {
@@ -104,21 +106,35 @@ impl Conversation {
         }
     }
     fn state(&self, store: &Store) -> Result<Value> {
-        snapshot_state(&self.settings, &self.snapshot, &self.statistics, store)
+        snapshot_state(
+            &self.settings,
+            &self.snapshot,
+            &self.statistics,
+            &self.configuration,
+            store,
+        )
     }
 }
 fn snapshot_state(
     settings: &Mutex<Settings>,
     snapshot: &Mutex<Snapshot>,
     statistics: &Mutex<Statistics>,
+    configuration: &Configuration,
     store: &Store,
 ) -> Result<Value> {
     let settings = settings.lock().unwrap();
     let snapshot = snapshot.lock().unwrap();
-    let stats = statistics
-        .lock()
-        .unwrap()
-        .read(store, snapshot.session.as_deref())?;
+    let active_model = if snapshot.active_model.is_empty() {
+        settings.model.as_str()
+    } else {
+        snapshot.active_model.as_str()
+    };
+    let stats = statistics.lock().unwrap().read(
+        store,
+        configuration,
+        active_model,
+        snapshot.session.as_deref(),
+    )?;
     let mut always = settings.always_allow.iter().cloned().collect::<Vec<_>>();
     always.sort();
     Ok(
@@ -395,6 +411,7 @@ impl Router {
             &owner.settings,
             &owner.snapshot,
             &owner.statistics,
+            &self.configuration,
             &self.store,
         )?;
         if joined && state["running"] == true {
@@ -1963,9 +1980,19 @@ pub struct Statistics {
     generation: f64,
     measured: u64,
     generated: u64,
+    recorded_cost: f64,
+    usage_incomplete: bool,
+    has_fake: bool,
+    unpriced_by_model: std::collections::BTreeMap<String, crate::models::Usage>,
 }
 impl Statistics {
-    fn read(&mut self, store: &Store, session: Option<&str>) -> Result<Value> {
+    fn read(
+        &mut self,
+        store: &Store,
+        configuration: &Configuration,
+        fallback_model: &str,
+        session: Option<&str>,
+    ) -> Result<Value> {
         if self.session.as_deref() != session {
             *self = Self {
                 session: session.map(str::to_string),
@@ -1982,6 +2009,39 @@ impl Statistics {
                     let usage = &e.data["usage"];
                     let output = usage["output_tokens"].as_u64().unwrap_or(0);
                     let available = usage["available"] != false;
+                    let turn_usage = crate::models::Usage {
+                        input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
+                        output_tokens: output,
+                        cache_read_tokens: usage["cache_read_tokens"].as_u64().unwrap_or(0),
+                        cache_write_tokens: usage["cache_write_tokens"].as_u64().unwrap_or(0),
+                        available,
+                    };
+                    let event_model = e.data["model"].as_str().unwrap_or(fallback_model);
+                    if event_model == "fake" {
+                        self.has_fake = true;
+                    }
+                    if !turn_usage.available {
+                        self.usage_incomplete = true;
+                    }
+                    let sample_cost = if event_model == "fake" || !turn_usage.available {
+                        None
+                    } else if let Some(recorded) = e.data["cost_usd"]
+                        .as_f64()
+                        .filter(|n| n.is_finite() && *n >= 0.0)
+                    {
+                        self.recorded_cost += recorded;
+                        Some(recorded)
+                    } else {
+                        self.unpriced_by_model
+                            .entry(event_model.to_string())
+                            .or_default()
+                            .add(&turn_usage);
+                        configuration
+                            .resolve_pricing(event_model)
+                            .ok()
+                            .flatten()
+                            .and_then(|pricing| pricing.cost(&turn_usage))
+                    };
                     let seconds = e.data["request_seconds"].as_f64();
                     let generation = e.data["generation_seconds"].as_f64();
                     self.requests += 1;
@@ -1999,7 +2059,7 @@ impl Statistics {
                         self.generation += generation.unwrap();
                         self.generated += output
                     }
-                    self.samples.push_back(json!({"round":self.requests,"input":usage["input_tokens"],"output":output,"cached":usage["cache_read_tokens"],"available":available,"seconds":seconds,"generationSeconds":generation,"firstTokenSeconds":e.data["first_token_seconds"],"requestTps":request_tps,"tps":tps}));
+                    self.samples.push_back(json!({"round":self.requests,"input":usage["input_tokens"],"output":output,"cached":usage["cache_read_tokens"],"available":available,"seconds":seconds,"generationSeconds":generation,"firstTokenSeconds":e.data["first_token_seconds"],"requestTps":request_tps,"tps":tps,"costUsd":sample_cost}));
                     if self.samples.len() > 32 {
                         self.samples.pop_front();
                     }
@@ -2007,10 +2067,57 @@ impl Statistics {
             }
             self.after = until;
         }
+        let total_cost = if self.requests == 0 || self.usage_incomplete || self.has_fake {
+            None
+        } else {
+            let mut sum = self.recorded_cost;
+            let mut complete = true;
+            for (model, usage) in &self.unpriced_by_model {
+                if let Some(pricing) = configuration.resolve_pricing(model)?
+                    && let Some(part) = pricing.cost(usage)
+                {
+                    sum += part;
+                } else {
+                    complete = false;
+                    break;
+                }
+            }
+            complete.then_some(sum)
+        };
         Ok(
-            json!({"toolCalls":self.calls,"requests":self.requests,"modelSeconds":self.seconds,"tps":if self.generation>0.0{Some(self.generated as f64/self.generation)}else{None},"requestTps":if self.seconds>0.0{Some(self.measured as f64/self.seconds)}else{None},"lastTps":self.samples.back().map(|v|v["tps"].clone()).unwrap_or(Value::Null),"samples":self.samples}),
+            json!({"toolCalls":self.calls,"requests":self.requests,"modelSeconds":self.seconds,"tps":if self.generation>0.0{Some(self.generated as f64/self.generation)}else{None},"requestTps":if self.seconds>0.0{Some(self.measured as f64/self.seconds)}else{None},"lastTps":self.samples.back().map(|v|v["tps"].clone()).unwrap_or(Value::Null),"samples":self.samples,"cost":total_cost}),
         )
     }
+}
+fn per_token_million(value: &Value) -> Option<f64> {
+    let raw = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f64>().ok()))?;
+    (raw.is_finite() && raw >= 0.0).then_some(raw * 1_000_000.0)
+}
+fn discovered_pricing(model: &Value) -> Option<crate::eval_stats::Pricing> {
+    let pricing = model.get("pricing").filter(|value| value.is_object())?;
+    if let Ok(Some(direct)) = crate::eval_stats::Pricing::from_value(pricing) {
+        return Some(direct);
+    }
+    let input = per_token_million(&pricing["prompt"])?;
+    let output = per_token_million(&pricing["completion"])?;
+    let cache_read = if pricing.get("input_cache_read").is_none_or(Value::is_null) {
+        0.0
+    } else {
+        per_token_million(&pricing["input_cache_read"])?
+    };
+    let cache_write = if pricing.get("input_cache_write").is_none_or(Value::is_null) {
+        0.0
+    } else {
+        per_token_million(&pricing["input_cache_write"])?
+    };
+    Some(crate::eval_stats::Pricing {
+        input,
+        output,
+        cache_read,
+        cache_write,
+    })
 }
 fn discovered_model(model: &Value) -> Value {
     let id = model["id"].as_str().unwrap_or_default();
@@ -2092,6 +2199,9 @@ fn discovered_model(model: &Value) -> Value {
     if !compat.as_object().unwrap().is_empty() {
         result["parameterCompat"] = compat;
     }
+    if let Some(pricing) = discovered_pricing(model) {
+        result["pricing"] = pricing.to_config_value();
+    }
     result
 }
 
@@ -2135,7 +2245,9 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
     if !["http", "https"].contains(&parsed.scheme()) {
         bail!("接口地址必须是 HTTP(S) URL")
     }
-    let anthropic = service["apiStyle"] == "anthropic";
+    let style = service["apiStyle"].as_str().unwrap_or("openai");
+    let anthropic = style == "anthropic";
+    let responses = style == "openai_responses";
     let base = if anthropic && !url.trim_end_matches('/').ends_with("/v1") {
         format!("{}/v1", url.trim_end_matches('/'))
     } else {
@@ -2162,6 +2274,7 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
         let configured =
             models.and_then(|models| models.iter().find(|entry| entry["modelId"] == model));
         if !anthropic
+            && !responses
             && !crate::provider::chat_supported(
                 model,
                 configured
@@ -2171,27 +2284,32 @@ pub async fn network(method: &str, p: &Value, configuration: &Configuration) -> 
         {
             bail!("该模型需要 Responses API，当前 Chat Completions 接口不支持它")
         }
-        let mut body =
-            json!({"model":model,"messages":[{"role":"user","content":"Hi"}],"stream":false});
-        let completion = !anthropic
-            && configured
-                .and_then(|entry| entry["parameterCompat"]["maxCompletionTokens"].as_bool())
-                .unwrap_or_else(|| crate::provider::openai_reasoning_family(model).is_some());
-        body[if completion {
-            "max_completion_tokens"
+        if responses {
+            let body = json!({"model":model,"input":"Hi","max_output_tokens":16,"stream":false,"store":false});
+            client.post(format!("{base}/responses")).json(&body)
         } else {
-            "max_tokens"
-        }] = json!(16);
-        client
-            .post(format!(
-                "{base}/{}",
-                if anthropic {
-                    "messages"
-                } else {
-                    "chat/completions"
-                }
-            ))
-            .json(&body)
+            let mut body =
+                json!({"model":model,"messages":[{"role":"user","content":"Hi"}],"stream":false});
+            let completion = !anthropic
+                && configured
+                    .and_then(|entry| entry["parameterCompat"]["maxCompletionTokens"].as_bool())
+                    .unwrap_or_else(|| crate::provider::openai_reasoning_family(model).is_some());
+            body[if completion {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            }] = json!(16);
+            client
+                .post(format!(
+                    "{base}/{}",
+                    if anthropic {
+                        "messages"
+                    } else {
+                        "chat/completions"
+                    }
+                ))
+                .json(&body)
+        }
     } else {
         client.get(format!("{base}/models"))
     };

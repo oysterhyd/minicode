@@ -864,6 +864,9 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 						metrics = append(metrics, struct{ Label, Value string }{tr("最近首字等待"), fmt.Sprintf(tr("%.2f 秒"), *last.FirstTokenSeconds)})
 					}
 				}
+				if stats.Cost != nil {
+					metrics = append(metrics, struct{ Label, Value string }{tr("估算费用"), formatUSD(*stats.Cost)})
+				}
 			}
 			for pair := 0; pair*2 < len(metrics); pair++ {
 				ui.Row(c).Margin(12, 0, 0, 0).Gap(12).Children(func() {

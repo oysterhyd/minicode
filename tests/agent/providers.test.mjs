@@ -521,3 +521,125 @@ test('ATT: cancelling a turn remains responsive while a large image is prepared'
   const done=await f.wait(e=>e.event==='run_done'&&e.sessionId===started.sessionId,from)
   assert.equal(done.result.exit_reason,'cancelled');assert.ok(Date.now()-before<2000,`cancellation took ${Date.now()-before} ms`)
 })
+
+test('OpenAI Responses API supports Responses-only models, reasoning with tools, and encrypted round-trip',async t=>{
+  const f=await fixture(t),payloads=[],probeRequests=[]
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    const parsed=body?JSON.parse(body):null
+    if(parsed?.input==='Hi'){probeRequests.push({url:req.url,headers:req.headers,body:parsed});res.setHeader('content-type','application/json');res.end(JSON.stringify({status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'ok'}]}]}));return}
+    payloads.push({url:req.url,body:parsed})
+    if(payloads.length===1){
+      write(res,[
+        {type:'response.output_item.added',output_index:0,item:{type:'reasoning',summary:[]}},
+        {type:'response.reasoning_summary_text.delta',output_index:0,delta:'plan read'},
+        {type:'response.output_item.done',output_index:0,item:{type:'reasoning',summary:[{type:'summary_text',text:'plan read'}],encrypted_content:'enc_r1'}},
+        {type:'response.output_item.added',output_index:1,item:{type:'function_call',id:'fc_1',call_id:'call_resp_1',name:'read'}},
+        {type:'response.function_call_arguments.delta',output_index:1,delta:'{"path":"README.md"}'},
+        {type:'response.output_item.done',output_index:1,item:{type:'function_call',id:'fc_1',call_id:'call_resp_1',name:'read',arguments:'{"path":"README.md"}'}},
+        {type:'response.completed',response:{status:'completed',usage:{input_tokens:120,output_tokens:25,input_tokens_details:{cached_tokens:40}}}}
+      ],false)
+    }else{
+      write(res,[
+        {type:'response.output_item.added',output_index:0,item:{type:'message',role:'assistant'}},
+        {type:'response.output_text.delta',output_index:0,delta:'responses done'},
+        {type:'response.completed',response:{status:'completed',usage:{input_tokens:150,output_tokens:10,input_tokens_details:{cached_tokens:60}}}}
+      ],false)
+    }
+  })})
+  const service={name:'OpenAI Responses',baseUrl:url+'/v1',apiStyle:'openai_responses',apiKey:'resp-key',enabled:true,models:[
+    {modelId:'gpt-5.6-sol',name:'GPT-5.6 Sol',contextWindow:1050000,maxOutputTokens:128000,supportsEffort:true,capabilities:{images:true,pdf:true,audio:true}},
+    {modelId:'gpt-5-pro',name:'GPT-5 Pro',contextWindow:400000,maxOutputTokens:128000,supportsEffort:true,capabilities:{images:true,pdf:true,audio:true}}
+  ]}
+  const probe=await f.request('testServiceConnection',{service,modelId:'gpt-5-pro'})
+  assert.ok(probe.message)
+  assert.equal(probeRequests.length,1)
+  assert.equal(probeRequests[0].url,'/v1/responses')
+  assert.equal(probeRequests[0].headers.authorization,'Bearer resp-key')
+  assert.equal(probeRequests[0].body.store,false)
+  assert.equal(probeRequests[0].body.max_output_tokens,16)
+
+  const saved=await f.request('saveService',{service})
+  const respModel=`${saved.services.find(s=>s.apiStyle==='openai_responses').id}::gpt-5.6-sol`
+  await f.request('setModel',{model:respModel})
+  await f.request('setEffort',{effort:'high'})
+  const run=await f.run({model:respModel})
+  assert.equal(run.result.exit_reason,'completed')
+  assert.equal(payloads.length,2)
+  assert.equal(payloads[0].url,'/v1/responses')
+  assert.equal(payloads[0].body.store,false)
+  assert.equal(payloads[0].body.reasoning.effort,'high')
+  assert.equal(payloads[0].body.reasoning.summary,'auto')
+  assert.deepEqual(payloads[0].body.include,['reasoning.encrypted_content'])
+  assert.ok(payloads[0].body.tools.some(tool=>tool.type==='function'&&tool.name==='read'&&tool.parameters?.type==='object'))
+  assert.ok(payloads[1].body.input.some(item=>item.type==='reasoning'&&item.encrypted_content==='enc_r1'))
+  assert.ok(payloads[1].body.input.some(item=>item.type==='function_call'&&item.call_id==='call_resp_1'))
+  assert.ok(payloads[1].body.input.some(item=>item.type==='function_call_output'&&item.call_id==='call_resp_1'))
+
+  // Switching to Anthropic degrades foreign encrypted reasoning safely without forwarding invalid signatures
+  let anthropicPayload
+  const anthropicUrl=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    anthropicPayload=JSON.parse(body)
+    write(res,[{type:'message_start',message:{usage:{input_tokens:20}}},{type:'content_block_start',index:0,content_block:{type:'text',text:'switched'}},{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:4}},{type:'message_stop'}],false)
+  })})
+  const anthropicCfg=await f.request('saveService',{service:{name:'Anthropic',baseUrl:anthropicUrl,apiStyle:'anthropic',apiKey:'ant-key',enabled:true,models:[{modelId:'claude-sonnet-4-6',contextWindow:200000,maxOutputTokens:8192,supportsEffort:false}]}})
+  const antModel=`${anthropicCfg.services.find(s=>s.apiStyle==='anthropic').id}::claude-sonnet-4-6`
+  await f.request('setModel',{sessionId:run.id,model:antModel})
+  const switched=await f.run({sessionId:run.id,model:antModel,text:'follow up'})
+  assert.equal(switched.result.exit_reason,'completed')
+  assert.ok(!JSON.stringify(anthropicPayload.messages).includes('enc_r1'))
+  assert.ok(JSON.stringify(anthropicPayload.messages).includes('[Previous reasoning]'))
+})
+
+test('configurable model pricing drives live statistics.cost, /cost output, and discovery pricing',async t=>{
+  const f=await fixture(t);let turn=0
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    if(req.url.endsWith('/models')){
+      res.setHeader('content-type','application/json')
+      res.end(JSON.stringify({data:[{id:'discovered-priced',pricing:{prompt:'0.0000015',completion:'0.000006',input_cache_read:'0.00000015'}}]}))
+      return
+    }
+    turn++
+    const usage=turn===1
+      ?{input_tokens:100,output_tokens:10,input_tokens_details:{cached_tokens:40}}
+      :turn===2
+      ?{input_tokens:200,output_tokens:20,input_tokens_details:{cached_tokens:0,cache_creation_tokens:100}}
+      :{input_tokens:50,output_tokens:5}
+    write(res,[
+      {type:'response.output_item.added',output_index:0,item:{type:'message',role:'assistant'}},
+      {type:'response.output_text.delta',output_index:0,delta:`turn ${turn}`},
+      {type:'response.completed',response:{status:'completed',usage}}
+    ],false)
+  })})
+  const discovery=await f.request('fetchServiceModels',{service:{name:'Disc',baseUrl:url+'/v1',apiStyle:'openai_responses',apiKey:'key',models:[]}})
+  assert.equal(discovery.models[0].pricing.input,1.5)
+  assert.equal(discovery.models[0].pricing.output,6)
+  assert.equal(discovery.models[0].pricing.cacheRead,0.15)
+  assert.equal(discovery.models[0].pricing.cacheWrite,0)
+
+  const cfg=await f.request('saveService',{service:{name:'Priced',baseUrl:url+'/v1',apiStyle:'openai_responses',apiKey:'key',enabled:true,models:[
+    {modelId:'fast',contextWindow:200000,maxOutputTokens:8192,pricing:{input:1,output:2,cacheRead:0.1,cacheWrite:0}},
+    {modelId:'smart',contextWindow:200000,maxOutputTokens:8192,pricing:{input:3,output:15,cacheRead:0.3,cacheWrite:3.75}},
+    {modelId:'unpriced',contextWindow:200000,maxOutputTokens:8192}
+  ]}})
+  const sid=cfg.services.find(s=>s.name==='Priced').id
+  const r1=await f.run({model:`${sid}::fast`})
+  assert.equal(r1.result.exit_reason,'completed')
+  const s1=await f.request('getState',{sessionId:r1.id})
+  assert.ok(Math.abs(s1.statistics.cost-0.000084)<1e-12)
+  assert.ok(Math.abs(s1.statistics.samples[0].costUsd-0.000084)<1e-12)
+  assert.match((await f.request('runSlash',{text:'/cost',workspace:f.workspace})).message,/\$0\.000084 USD/)
+
+  await f.request('setModel',{sessionId:r1.id,model:`${sid}::smart`})
+  const r2=await f.run({sessionId:r1.id,model:`${sid}::smart`,text:'second'})
+  assert.equal(r2.result.exit_reason,'completed')
+  const s2=await f.request('getState',{sessionId:r1.id})
+  assert.ok(Math.abs(s2.statistics.cost-0.001059)<1e-12)
+  assert.match((await f.request('runSlash',{text:'/cost',workspace:f.workspace})).message,/\$0\.001059 USD/)
+
+  await f.request('setModel',{sessionId:r1.id,model:`${sid}::unpriced`})
+  const r3=await f.run({sessionId:r1.id,model:`${sid}::unpriced`,text:'third'})
+  assert.equal(r3.result.exit_reason,'completed')
+  const s3=await f.request('getState',{sessionId:r1.id})
+  assert.equal(s3.statistics.cost,null)
+  assert.match((await f.request('runSlash',{text:'/cost',workspace:f.workspace})).message,/不可用/)
+})

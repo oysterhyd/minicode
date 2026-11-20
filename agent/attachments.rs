@@ -222,6 +222,9 @@ impl Attachments {
                         "Anthropic Messages 接口不支持原生音频或视频附件，请选择支持这些输入的兼容接口"
                     )
                 }
+                if style == "openai_responses" && kind == "video" {
+                    bail!("OpenAI Responses 接口不支持原生视频附件，请选择支持这些输入的兼容接口")
+                }
             } else {
                 bail!("invalid attachment")
             }

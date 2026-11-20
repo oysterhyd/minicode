@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"runtime"
 	"slices"
 	"strconv"
@@ -713,6 +714,12 @@ func (d *desktop) serviceSettings(c *ui.Context, p palette, s *settingsState) {
 				if iconButton(c, p, "Pencil", tr("编辑 ")+service.Name).Clicked() {
 					copy := service
 					copy.Models = slices.Clone(service.Models)
+					for i := range copy.Models {
+						if copy.Models[i].Pricing != nil {
+							pricing := *copy.Models[i].Pricing
+							copy.Models[i].Pricing = &pricing
+						}
+					}
 					copy.APIKey = ""
 					s.Service = &copy
 					s.Found = nil
@@ -770,10 +777,16 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 			ui.Column(c).Grow(1).Basis(0).Children(func() { field(c, p, tr("服务名称"), &service.Name, false) })
 			ui.Column(c).Grow(1).Basis(0).Gap(5).Children(func() {
 				muted(c, p, tr("接口格式"))
-				if selectField(c, p, &service.APIStyle, []selectOption{{Value: "openai", Label: "OpenAI Chat Completions"}, {Value: "anthropic", Label: "Anthropic Messages"}}).Label(tr("接口格式")).FillWidth().Height(32).Changed() && service.APIStyle == "anthropic" {
-					for i := range service.Models {
-						service.Models[i].InputCapabilities.Audio = false
-						service.Models[i].InputCapabilities.Video = false
+				if selectField(c, p, &service.APIStyle, []selectOption{{Value: "openai", Label: "OpenAI Chat Completions"}, {Value: "openai_responses", Label: "OpenAI Responses"}, {Value: "anthropic", Label: "Anthropic Messages"}}).Label(tr("接口格式")).FillWidth().Height(32).Changed() {
+					if service.APIStyle == "anthropic" {
+						for i := range service.Models {
+							service.Models[i].InputCapabilities.Audio = false
+							service.Models[i].InputCapabilities.Video = false
+						}
+					} else if service.APIStyle == "openai_responses" {
+						for i := range service.Models {
+							service.Models[i].InputCapabilities.Video = false
+						}
 					}
 				}
 			})
@@ -890,15 +903,16 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 							muted(c, p, tr("输入能力"))
 							ui.Row(c).Wrap().Gap(16).Children(func() {
 								for _, option := range []struct {
-									Label  string
-									Value  *bool
-									OpenAI bool
-								}{{tr("图片"), &m.InputCapabilities.Images, false}, {"PDF", &m.InputCapabilities.PDF, false}, {tr("音频"), &m.InputCapabilities.Audio, true}, {tr("视频"), &m.InputCapabilities.Video, true}} {
-									ui.Checkbox(c, option.Value, option.Label).FontSize(p.font(11.48)).Disabled(option.OpenAI && service.APIStyle != "openai")
+									Label    string
+									Value    *bool
+									Disabled bool
+								}{{tr("图片"), &m.InputCapabilities.Images, false}, {"PDF", &m.InputCapabilities.PDF, false}, {tr("音频"), &m.InputCapabilities.Audio, service.APIStyle == "anthropic"}, {tr("视频"), &m.InputCapabilities.Video, service.APIStyle != "openai"}} {
+									ui.Checkbox(c, option.Value, option.Label).FontSize(p.font(11.48)).Disabled(option.Disabled)
 								}
 							})
-							muted(c, p, tr("按服务和模型的实际能力勾选；视频需要接口支持视频输入。Anthropic Messages 支持图片与 PDF。")).FontSize(p.font(10.36))
+							muted(c, p, tr("按服务和模型的实际能力勾选；视频需要 Chat Completions 兼容接口，OpenAI Responses 支持图片、PDF 与音频，Anthropic Messages 支持图片与 PDF。")).FontSize(p.font(10.36))
 						})
+						pricingEditor(c, p, m)
 						if button(c, p, tr("移除模型"), "Trash2", false).Clicked() {
 							remove = i
 						}
@@ -910,6 +924,91 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 				s.OpenModels = map[int]bool{}
 			}
 		})
+	})
+}
+
+func parseRateInput(raw string, required bool) (float64, bool, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, !required, true
+	}
+	v, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0, false, false
+	}
+	return v, true, false
+}
+
+func pricingEditor(c *ui.Context, p palette, m *model.ServiceModel) {
+	root := ui.Column(c).FillWidth().Gap(6)
+	initRate := func(selectRate func(*model.ModelPricing) float64) func() string {
+		return func() string {
+			if m.Pricing == nil {
+				return ""
+			}
+			return strconv.FormatFloat(selectRate(m.Pricing), 'f', -1, 64)
+		}
+	}
+	inText := ui.Local(root, "pricing-in", initRate(func(pr *model.ModelPricing) float64 { return pr.Input }))
+	outText := ui.Local(root, "pricing-out", initRate(func(pr *model.ModelPricing) float64 { return pr.Output }))
+	crText := ui.Local(root, "pricing-cr", initRate(func(pr *model.ModelPricing) float64 { return pr.CacheRead }))
+	cwText := ui.Local(root, "pricing-cw", initRate(func(pr *model.ModelPricing) float64 { return pr.CacheWrite }))
+
+	root.Children(func() {
+		muted(c, p, tr("模型定价（USD / 百万 tokens，可选）"))
+		specs := []struct {
+			Label string
+			Buf   *string
+		}{
+			{tr("输入 ($/1M)"), inText},
+			{tr("输出 ($/1M)"), outText},
+			{tr("缓存读 ($/1M)"), crText},
+			{tr("缓存写 ($/1M)"), cwText},
+		}
+		changed := false
+		focused := false
+		for pair := 0; pair < 2; pair++ {
+			ui.Row(c).FillWidth().Gap(12).Children(func() {
+				for _, spec := range specs[pair*2 : pair*2+2] {
+					ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(4).Children(func() {
+						ui.Text(c, spec.Label).FontSize(p.font(10.92)).TextColor(p.Text2)
+						input := ui.TextInput(c, spec.Buf).Label(spec.Label).Height(30).FillWidth().FontSize(p.font(11.48))
+						changed = changed || input.Changed()
+						focused = focused || input.Focused()
+					})
+				}
+			})
+		}
+		inVal, inValid, inBlank := parseRateInput(*inText, true)
+		outVal, outValid, outBlank := parseRateInput(*outText, true)
+		crVal, crValid, crBlank := parseRateInput(*crText, false)
+		cwVal, cwValid, cwBlank := parseRateInput(*cwText, false)
+		allBlank := inBlank && outBlank && crBlank && cwBlank
+		valid := allBlank || (inValid && outValid && crValid && cwValid)
+		if changed {
+			if allBlank {
+				m.Pricing = nil
+			} else if inValid && outValid && crValid && cwValid {
+				m.Pricing = &model.ModelPricing{
+					Input:      inVal,
+					Output:     outVal,
+					CacheRead:  crVal,
+					CacheWrite: cwVal,
+				}
+			}
+		} else if !focused {
+			if m.Pricing == nil {
+				*inText, *outText, *crText, *cwText = "", "", "", ""
+			} else {
+				*inText = strconv.FormatFloat(m.Pricing.Input, 'f', -1, 64)
+				*outText = strconv.FormatFloat(m.Pricing.Output, 'f', -1, 64)
+				*crText = strconv.FormatFloat(m.Pricing.CacheRead, 'f', -1, 64)
+				*cwText = strconv.FormatFloat(m.Pricing.CacheWrite, 'f', -1, 64)
+			}
+		}
+		if !valid {
+			ui.Text(c, tr("输入与输出需同时填写非负数字，全部留空可清除")).FontSize(p.font(10.36)).TextColor(p.Danger)
+		}
 	})
 }
 

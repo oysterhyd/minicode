@@ -71,12 +71,34 @@ pub fn information(
                 .map(|id| store.require(id))
                 .transpose()?
                 .unwrap_or(json!({}));
+            let cost = if let Some(stats) = state.get("statistics") {
+                stats["cost"]
+                    .as_f64()
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+            } else if let Some(id) = session {
+                let fallback_model = state["model"]
+                    .as_str()
+                    .or_else(|| summary["model"].as_str())
+                    .unwrap_or_default();
+                crate::eval_stats::session_cost(
+                    store,
+                    &Configuration::default(),
+                    id,
+                    fallback_model,
+                )?
+            } else {
+                None
+            };
+            let cost_line = match cost {
+                Some(usd) => format!("费用：{} USD", crate::eval_stats::format_usd(usd)),
+                None => "费用：不可用（没有可核实的模型定价）".into(),
+            };
             format!(
-                "会话用量：input={} output={} cache_read={} cache_write={}\n费用：不可用（没有可核实的模型定价）",
+                "会话用量：input={} output={} cache_read={} cache_write={}\n{cost_line}",
                 summary["input_tokens"].as_u64().unwrap_or(0),
                 summary["output_tokens"].as_u64().unwrap_or(0),
                 summary["cache_read_tokens"].as_u64().unwrap_or(0),
-                summary["cache_write_tokens"].as_u64().unwrap_or(0)
+                summary["cache_write_tokens"].as_u64().unwrap_or(0),
             )
         }
         "/doctor" => format!(

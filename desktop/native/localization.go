@@ -671,4 +671,13 @@ Agent bridge 不可用|Agent bridge unavailable
 仅读取 Command Code 服务的接口地址和 API Key，不读取其他服务或会话。|Read only the Command Code endpoint and API key. Other providers and sessions are excluded.
 API Key 保存到系统安全存储（Windows 当前用户 DPAPI / macOS Keychain / Linux Secret Service）；MiniCode 配置只保存引用，原文件保持不变。|Store the API key in the OS credential store (Windows user DPAPI / macOS Keychain / Linux Secret Service). MiniCode saves only a reference. The source file stays unchanged.
 \n...[文件预览已截断，使用 Agent 的 read 工具分页查看]|\n...[Preview truncated. Use the agent's read tool to view additional pages.]
+按服务和模型的实际能力勾选；视频需要 Chat Completions 兼容接口，OpenAI Responses 支持图片、PDF 与音频，Anthropic Messages 支持图片与 PDF。|Select the inputs supported by your service and model. Video requires a Chat Completions compatible endpoint; OpenAI Responses supports images, PDF and audio; Anthropic Messages supports images and PDF.
+模型定价（USD / 百万 tokens，可选）|Model pricing (USD / 1M tokens, optional)
+输入 ($/1M)|Input ($/1M)
+输出 ($/1M)|Output ($/1M)
+缓存读 ($/1M)|Cache read ($/1M)
+缓存写 ($/1M)|Cache write ($/1M)
+输入与输出需同时填写非负数字，全部留空可清除|Enter non-negative numbers for input and output, or leave all blank to clear
+估算费用|Estimated cost
+估算费用 |Estimated cost\x20
 `

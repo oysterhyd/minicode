@@ -565,7 +565,7 @@ impl Store {
             // cursor past events that this poll has not processed.
             let until = c.prepare_cached("SELECT COALESCE(MAX(seq),-1) FROM events WHERE session_id=?")?.query_row([id], |r| r.get(0))?;
             if until <= after { return Ok((until, Vec::new())); }
-            let mut q = c.prepare_cached("SELECT seq,type,timestamp,CASE WHEN type='assistant_message' THEN json_object('usage',json_extract(data,'$.usage'),'request_seconds',json_extract(data,'$.request_seconds'),'generation_seconds',json_extract(data,'$.generation_seconds'),'first_token_seconds',json_extract(data,'$.first_token_seconds')) ELSE '{}' END FROM events WHERE session_id=? AND seq>? AND seq<=? AND type IN ('assistant_message','tool_call_start') ORDER BY seq")?;
+            let mut q = c.prepare_cached("SELECT seq,type,timestamp,CASE WHEN type='assistant_message' THEN json_object('usage',json_extract(data,'$.usage'),'request_seconds',json_extract(data,'$.request_seconds'),'generation_seconds',json_extract(data,'$.generation_seconds'),'first_token_seconds',json_extract(data,'$.first_token_seconds'),'model',json_extract(data,'$.model'),'cost_usd',json_extract(data,'$.cost_usd')) ELSE '{}' END FROM events WHERE session_id=? AND seq>? AND seq<=? AND type IN ('assistant_message','tool_call_start') ORDER BY seq")?;
             let mut rows = q.query(params![id, after, until])?;
             let mut events = Vec::new();
             while let Some(row) = rows.next()? {

@@ -425,6 +425,16 @@ func (d *desktop) previewView(c *ui.Context, p palette) {
 	}
 }
 
+func formatUSD(usd float64) string {
+	if usd == 0 {
+		return "$0.00"
+	}
+	if usd >= 0.01 {
+		return fmt.Sprintf("$%.4f", usd)
+	}
+	return fmt.Sprintf("$%.6f", usd)
+}
+
 func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 	v := d.current()
 	state := v.State
@@ -492,6 +502,13 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 			muted(c, p, pair[1]).Grow(1).Basis(0).FontSize(p.font(10.5))
 		})
 	}
+	costLabel := "—"
+	if stats != nil && stats.Cost != nil {
+		costLabel = formatUSD(*stats.Cost)
+	}
+	ui.Row(c).Padding(0, 6).Children(func() {
+		muted(c, p, tr("估算费用 ")+costLabel).FontSize(p.font(10.5))
+	})
 	if stats != nil && len(stats.Samples) > 0 {
 		samples := stats.Samples[max(0, len(stats.Samples)-32):]
 		maxTokens, maxTPS := 1, 1.0

@@ -1840,8 +1840,18 @@ impl Runtime {
                 .cloned()
                 .collect::<Vec<_>>();
             metrics["text"] = json!(assistant.text());
+            metrics["model"] = json!(self.provider.configuration_id);
             metrics["usage"] = json!(response.usage);
             metrics["usage"]["total_tokens"] = json!(response.usage.total());
+            if self.provider.name != "fake"
+                && let Some(turn_cost) = self
+                    .provider
+                    .pricing
+                    .as_ref()
+                    .and_then(|pricing| pricing.cost(&response.usage))
+            {
+                metrics["cost_usd"] = json!(turn_cost);
+            }
             metrics["stop_reason"] = json!(response.stop_reason);
             metrics["tool_calls"] = json!(
                 calls

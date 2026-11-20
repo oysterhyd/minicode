@@ -13,3 +13,8 @@ test('TU8 budget includes round and time limits when tokens are unlimited', () =
   assert.match(text, /8/); assert.match(text, /300/); assert.doesNotMatch(text, /不限/)
   assert.match(statusFields({ ...emptyState, budget: { max_rounds: 0, max_total_tokens: 1000, max_seconds: 0 } }, ['budget'], 80, 0), /tokens/)
 })
+test('cost status field formats USD values cleanly', () => {
+  assert.match(statusFields({ ...emptyState, statistics: { cost: 0.000084 } }, ['cost'], 80, 0), /费用 \$0\.000084/)
+  assert.match(statusFields({ ...emptyState, statistics: { cost: 0.123456 } }, ['cost'], 80, 0), /费用 \$0\.1235/)
+  assert.match(statusFields({ ...emptyState, statistics: { cost: 0 } }, ['cost'], 80, 0), /费用 \$0\.00/)
+})

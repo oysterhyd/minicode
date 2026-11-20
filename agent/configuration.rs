@@ -1,7 +1,10 @@
 use crate::{credentials, util};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone)]
 pub struct Configuration {
@@ -224,7 +227,11 @@ impl Configuration {
         for s in data["services"].as_array().unwrap() {
             let available = s["enabled"] == true && !self.credentials(s)?.1.is_empty();
             for m in s["models"].as_array().context("invalid service models")? {
-                models.push(json!({"id":Self::model_key(s,m),"name":m.get("name").filter(|v|v.as_str()!=Some("")).unwrap_or(&m["modelId"]),"modelId":m["modelId"],"serviceId":s["id"],"provider":s["name"],"supportsEffort":m["supportsEffort"],"contextWindow":m["contextWindow"],"maxOutputTokens":m["maxOutputTokens"],"capabilities":capabilities(&m["capabilities"])?,"available":available}));
+                let mut entry = json!({"id":Self::model_key(s,m),"name":m.get("name").filter(|v|v.as_str()!=Some("")).unwrap_or(&m["modelId"]),"modelId":m["modelId"],"serviceId":s["id"],"provider":s["name"],"supportsEffort":m["supportsEffort"],"contextWindow":m["contextWindow"],"maxOutputTokens":m["maxOutputTokens"],"capabilities":capabilities(&m["capabilities"])?,"available":available});
+                if let Some(pricing) = m.get("pricing").filter(|value| value.is_object()) {
+                    entry["pricing"] = pricing.clone();
+                }
+                models.push(entry);
             }
         }
         Ok(models)
@@ -236,6 +243,45 @@ impl Configuration {
                 if Self::model_key(s, m) == key {
                     return Ok(Some((s.clone(), m.clone())));
                 }
+            }
+        }
+        Ok(None)
+    }
+    pub fn resolve_pricing(&self, model_key: &str) -> Result<Option<crate::eval_stats::Pricing>> {
+        if model_key.is_empty() || model_key == "fake" {
+            return Ok(None);
+        }
+        if let Some((_, model)) = self.find_model(model_key)?
+            && let Some(pricing) = crate::eval_stats::Pricing::from_value(&model["pricing"])?
+        {
+            return Ok(Some(pricing));
+        }
+        if let Ok(data) = self.read()
+            && let Some(services) = data["services"].as_array()
+        {
+            for service in services {
+                if let Some(models) = service["models"].as_array() {
+                    for model in models {
+                        if model["modelId"] == model_key
+                            && let Some(pricing) =
+                                crate::eval_stats::Pricing::from_value(&model["pricing"])?
+                        {
+                            return Ok(Some(pricing));
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(path) = std::env::var("MINICODE_PRICES_FILE")
+            && !path.trim().is_empty()
+        {
+            let prices = crate::eval_stats::prices(Some(Path::new(&path)))?;
+            let bare = model_key.rsplit_once("::").map(|(_, id)| id);
+            if let Some(entry) = prices
+                .get(model_key)
+                .or_else(|| bare.and_then(|id| prices.get(id)))
+            {
+                return crate::eval_stats::Pricing::from_value(entry);
             }
         }
         Ok(None)
@@ -314,7 +360,7 @@ impl Configuration {
             s["name"] = json!(name);
             s["baseUrl"] = json!(url);
             let style = s["apiStyle"].as_str().unwrap_or_default().to_string();
-            if !["openai", "anthropic"].contains(&style.as_str()) {
+            if !["openai", "openai_responses", "anthropic"].contains(&style.as_str()) {
                 bail!("不支持的接口格式")
             }
             let mut seen = std::collections::HashSet::new();
@@ -344,6 +390,16 @@ impl Configuration {
                     bail!(
                         "Anthropic Messages 可配置图片与 PDF；音频、视频需要支持这些输入的兼容接口"
                     )
+                }
+                if style == "openai_responses" && m["capabilities"]["video"] == true {
+                    bail!(
+                        "OpenAI Responses 接口支持图片、PDF 与音频；视频需要支持视频输入的 Chat Completions 接口"
+                    )
+                }
+                if let Some(pricing) = crate::eval_stats::Pricing::from_value(&m["pricing"])? {
+                    m["pricing"] = pricing.to_config_value();
+                } else if let Some(object) = m.as_object_mut() {
+                    object.remove("pricing");
                 }
             }
             s["enabled"] = json!(s.get("enabled").map(|x| x == true).unwrap_or(true));
@@ -656,5 +712,81 @@ mod tests {
             })
             .unwrap();
         assert_eq!(config.read().unwrap()["defaultModel"], "committed");
+    }
+
+    #[test]
+    fn save_service_persists_valid_pricing_and_rejects_invalid_and_responses_video() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Configuration {
+            path: dir.path().join("config.json"),
+        };
+        let saved = config
+            .save_service(&json!({
+                "name": "Responses",
+                "baseUrl": "https://example.test/v1",
+                "apiStyle": "openai_responses",
+                "apiKey": "key",
+                "enabled": true,
+                "models": [{
+                    "modelId": "gpt-5.4",
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 8192,
+                    "supportsEffort": true,
+                    "capabilities": {"images": true, "pdf": true, "audio": true, "video": false},
+                    "pricing": {"input": 2.5, "output": 10.0, "cache_read": 0.25}
+                }]
+            }))
+            .unwrap();
+        assert_eq!(saved["services"][0]["apiStyle"], "openai_responses");
+        assert_eq!(
+            saved["services"][0]["models"][0]["pricing"],
+            json!({"input": 2.5, "output": 10.0, "cacheRead": 0.25, "cacheWrite": 0.0})
+        );
+        let service_id = saved["services"][0]["id"].as_str().unwrap();
+        let pricing = config
+            .resolve_pricing(&format!("{service_id}::gpt-5.4"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pricing.input, 2.5);
+        assert_eq!(pricing.output, 10.0);
+        assert_eq!(pricing.cache_read, 0.25);
+
+        assert!(
+            config
+                .save_service(&json!({
+                    "name": "Bad Video",
+                    "baseUrl": "https://example.test/v1",
+                    "apiStyle": "openai_responses",
+                    "apiKey": "key",
+                    "enabled": true,
+                    "models": [{
+                        "modelId": "gpt-video",
+                        "contextWindow": 200000,
+                        "maxOutputTokens": 8192,
+                        "capabilities": {"video": true}
+                    }]
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("OpenAI Responses")
+        );
+
+        assert!(
+            config
+                .save_service(&json!({
+                    "name": "Bad Pricing",
+                    "baseUrl": "https://example.test/v1",
+                    "apiStyle": "openai",
+                    "apiKey": "key",
+                    "enabled": true,
+                    "models": [{
+                        "modelId": "m",
+                        "contextWindow": 200000,
+                        "maxOutputTokens": 8192,
+                        "pricing": {"input": -1.0, "output": 2.0}
+                    }]
+                }))
+                .is_err()
+        );
     }
 }

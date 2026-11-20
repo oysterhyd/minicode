@@ -8,6 +8,11 @@ const EFFORT_LABELS: Record<string, string> = { low: '低', medium: '中', high:
 
 export const NEXT_PERMISSION: Record<string, string> = { default: 'accept_edits', accept_edits: 'default', bypass: 'default' }
 
+function formatCost(cost: number): string {
+  if (cost === 0) return '$0.00'
+  return cost >= 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(6)}`
+}
+
 function contextLabel(state: AgentState, columns: number): string {
   if (!state.contextWindow) return `${formatTokens(state.contextTokens)} tokens`
   const percent = Math.min(100, Math.round(state.contextTokens / state.contextWindow * 100))
@@ -26,7 +31,7 @@ export function statusFields(state: AgentState, fields: string[], columns: numbe
     model: state.model || '未选择模型', effort: state.effort === 'off' ? '' : EFFORT_LABELS[state.effort] || state.effort,
     context: contextLabel(state, columns), turns: `${state.rounds} 轮`,
     budget: `预算 ${budget.join('/') || '不限'}`,
-    cost: state.statistics?.cost == null ? '费用 不可用' : `费用 ${state.statistics.cost}`,
+    cost: state.statistics?.cost == null ? '费用 不可用' : `费用 ${formatCost(state.statistics.cost)}`,
     branch: state.branch ? `分支 ${state.branch}` : '分支 不可用',
     elapsed: `${Math.max(0, Math.floor(elapsed / 1000))}s`,
   }

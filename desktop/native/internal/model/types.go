@@ -31,6 +31,13 @@ type Model struct {
 	InputCapabilities ModelCapabilities `json:"capabilities"`
 }
 
+type ModelPricing struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+}
+
 type ServiceModel struct {
 	ModelID           string            `json:"modelId"`
 	Name              string            `json:"name"`
@@ -39,6 +46,7 @@ type ServiceModel struct {
 	SupportsEffort    bool              `json:"supportsEffort"`
 	ParameterCompat   map[string]any    `json:"parameterCompat,omitempty"`
 	InputCapabilities ModelCapabilities `json:"capabilities"`
+	Pricing           *ModelPricing     `json:"pricing,omitempty"`
 }
 
 type Service struct {
@@ -121,6 +129,7 @@ type UsageSample struct {
 	GenerationSeconds *float64 `json:"generationSeconds"`
 	FirstTokenSeconds *float64 `json:"firstTokenSeconds"`
 	TPS               *float64 `json:"tps"`
+	CostUSD           *float64 `json:"costUsd,omitempty"`
 }
 
 type Statistics struct {
@@ -131,6 +140,7 @@ type Statistics struct {
 	RequestTPS   *float64      `json:"requestTps"`
 	LastTPS      *float64      `json:"lastTps"`
 	Samples      []UsageSample `json:"samples"`
+	Cost         *float64      `json:"cost"`
 }
 
 type Budget struct {
