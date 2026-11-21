@@ -68,6 +68,8 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
 
 3.1.0 强化 SQLite 跨进程初始化、Windows 进程树与 AppContainer 沙箱租约回收及分层权限 DSL，新增 OpenAI Responses API、可配置模型单价与实时成本统计、服务端持久化队列、CLI 默认 TUI 与行编辑、脱敏录制回放与多模型评测矩阵，并将 Bridge 协议契约（[bridge-protocol.v2.json](agent/assets/bridge-protocol.v2.json)）、stdout 背压与 Desktop/TUI 状态归约收敛一致。
 
+3.1.1 对 Go 原生桌面端进行系统视觉与排版精修（优化中西文衬线混排、设置页字体卡片与整数字号阶梯，清理对话顶部重复任务列表与羽化切字，改进 Markdown 悬挂缩进与行内代码胶囊，精简工作台统计卡片，精确对齐思考滑条刻度与标签，并协调审批卡片与底部输入框的焦点权重），同时包含扩展缓存与 MCP 子进程回收修复。
+
 发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未作 Windows 代码签名，更新归档使用 Ed25519 签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
 

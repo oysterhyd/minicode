@@ -1,3 +1,11 @@
+# v3.1.1 原生桌面端视觉精修与发行核验
+
+2026-11-22，Windows x64 / PowerShell 7，Rust stable MSVC、Go 1.27.1、Node.js 22.22.0。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.1.1，沿用既有 Ed25519 更新签名公钥（`4Ykb7FjKNYD3nPbz3ogPgB8KlxYTN4uflE/MO8EEJo0=`）。
+
+本机 `3.1.1` 发行前核验：`cargo check --locked`、`node scripts/check-doc-paths.mjs`、`node release/audit.mjs --source --history .`、`npm run build --prefix tui`、Native Desktop `go vet ./...` 与 `go test -count=1 ./...` 全部通过；已复核精修后的浅色/深色原生快照（`home`、`conversation`、`approval`、`model-menu`、`settings`、`settings-model` 等），验证中西文混排、字体卡片、整数字号阶梯、顶部任务条与遮罩留白、Markdown 悬挂缩进与行内代码胶囊、右侧统计摘要、思考滑条对齐及审批焦点收敛。
+
+正式 Windows 安装包构建、原公钥 Ed25519 签名、差分包生成、烟测与安装卸载验收由 GitHub Actions `.github/workflows/release.yml`（`mygo@v0.5.5` + 仓库 Secret `MYGO_UPDATER_PRIVATE_KEY`）及 `.github/workflows/tests.yml` 在远端干净环境执行并发布到 `v3.1.1` Release。
+
 # v3.1.0 核心可靠性、OpenAI Responses API、架构收敛与发行核验
 
 2026-11-21，Windows x64 / PowerShell 7，Rust stable MSVC、Go 1.27.1、Node.js 22.22.0、MyGo 0.5.5。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.1.0，沿用既有 Ed25519 更新签名公钥（`4Ykb7FjKNYD3nPbz3ogPgB8KlxYTN4uflE/MO8EEJo0=`）。
