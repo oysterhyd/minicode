@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    process::{Child, ChildStderr, ChildStdin, Command},
+    process::{ChildStderr, ChildStdin, Command},
     sync::Mutex,
 };
 
@@ -230,7 +230,8 @@ fn windows_command(config: &Server) -> std::path::PathBuf {
 
 #[derive(Default)]
 struct Lifecycle {
-    child: Option<Child>,
+    reap_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    reap_task: Option<tokio::task::JoinHandle<()>>,
     tree: Option<crate::command_process::ProcessTree>,
     reader_task: Option<tokio::task::JoinHandle<()>>,
     legacy_task: Option<tokio::task::JoinHandle<()>>,
@@ -264,16 +265,11 @@ impl Drop for Lifecycle {
         if let Some(tree) = self.tree.take() {
             tree.terminate();
         }
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-            // kill_on_drop signals the process but can leave an unpolled Unix
-            // child as a zombie. Own and await it even when discovery is dropped.
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    let _ = child.wait().await;
-                });
-            }
+        if let Some(tx) = self.reap_tx.take() {
+            let _ = tx.send(());
         }
+        // Detach reap_task (do NOT abort it) so Tokio finishes killing and reaping the child.
+        let _ = self.reap_task.take();
     }
 }
 impl Connector {
@@ -360,7 +356,21 @@ impl Connector {
                 self.pending.clone(),
             )));
             self.input = Some(input);
-            self.lifecycle.get_mut().child = Some(child);
+            let (reap_tx, mut reap_rx) = tokio::sync::oneshot::channel::<()>();
+            let reap_pending = self.pending.clone();
+            let reap_task = tokio::spawn(async move {
+                tokio::select! {
+                    _ = child.wait() => {
+                        reap_pending.close("MCP server exited");
+                    }
+                    _ = &mut reap_rx => {
+                        let _ = child.kill().await;
+                    }
+                }
+            });
+            let lifecycle = self.lifecycle.get_mut();
+            lifecycle.reap_tx = Some(reap_tx);
+            lifecycle.reap_task = Some(reap_task);
         } else if self.config.transport == "sse" {
             self.open_legacy().await?;
         }
@@ -616,9 +626,11 @@ impl Connector {
         if let Some(tree) = &lifecycle.tree {
             tree.shutdown().await;
         }
-        if let Some(mut child) = lifecycle.child.take() {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+        if let Some(tx) = lifecycle.reap_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = lifecycle.reap_task.take() {
+            let _ = task.await;
         }
         if let Some(mut task) = lifecycle.stderr_task.take()
             && tokio::time::timeout(Duration::from_secs(2), &mut task)

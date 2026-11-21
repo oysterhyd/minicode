@@ -1,5 +1,6 @@
 use crate::{configuration::Configuration, extensions::Catalog, util};
 use anyhow::Result;
+use sha2::{Digest as _, Sha256};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, VecDeque},
@@ -54,6 +55,7 @@ impl Metadata {
 struct Stamp {
     link: Option<Metadata>,
     target: Option<Metadata>,
+    entries: Option<String>,
     unreadable: bool,
 }
 impl Stamp {
@@ -64,12 +66,47 @@ impl Stamp {
         };
         let (link, a) = read(fs::symlink_metadata(path));
         let (target, b) = read(fs::metadata(path));
+        let (entries, dir_unreadable) =
+            if !a && !b && link.as_ref().is_some_and(|meta| meta.kind == 2) {
+                match directory_entries_hash(path) {
+                    Ok(hash) => (Some(hash), false),
+                    Err(_) => (None, true),
+                }
+            } else {
+                (None, false)
+            };
         Self {
             link,
             target,
-            unreadable: a || b,
+            entries,
+            unreadable: a || b || dir_unreadable,
         }
     }
+}
+fn directory_entries_hash(path: &Path) -> std::io::Result<String> {
+    let mut entries = vec![];
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let kind = if file_type.is_file() {
+            1u8
+        } else if file_type.is_dir() {
+            2u8
+        } else if file_type.is_symlink() {
+            3u8
+        } else {
+            4u8
+        };
+        entries.push((entry.file_name().as_encoded_bytes().to_vec(), kind));
+    }
+    entries.sort();
+    let mut hasher = Sha256::new();
+    for (name, kind) in entries {
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(&name);
+        hasher.update([kind]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 type Dependencies = BTreeMap<PathBuf, Stamp>;
 thread_local! { static TRACKING:RefCell<Option<Dependencies>>=const{RefCell::new(None)}; }
