@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -327,6 +328,17 @@ func TestEffortSliderPointerKeyboardAndDisabled(t *testing.T) {
 	rect, ok := tt.Find("思考强度滑条")
 	if !ok {
 		t.Fatal("slider missing")
+	}
+	for i, option := range effortOptions {
+		btn, ok := tt.Find("思考强度：" + option.Label)
+		if !ok {
+			t.Fatalf("effort button %q missing", option.Label)
+		}
+		wantCenter := rect.X + rect.W*(2*float32(i)+1)/(2*float32(len(effortOptions)))
+		gotCenter := btn.X + btn.W/2
+		if math.Abs(float64(gotCenter-wantCenter)) > 0.5 {
+			t.Fatalf("effort label %q center = %.2f, want %.2f", option.Label, gotCenter, wantCenter)
+		}
 	}
 	y := rect.Y + rect.H/2
 	tt.Press(rect.X+12, y)

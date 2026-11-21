@@ -21,7 +21,7 @@ func selectField(c *ui.Context, p palette, value *string, options []selectOption
 		sel.Trigger.BorderColor(p.BorderStrong)
 	}
 	sel.Trigger.Children(func() {
-		ui.Text(c, tr(label)).Grow(1).SingleLine().FontSize(p.font(11.76))
+		ui.Text(c, tr(label)).Grow(1).SingleLine().FontSize(p.font(fontSmall))
 		icon(c, "ChevronsUpDown", 13, p.Text3)
 	})
 	sel.Popup(func(panel ui.Element) {
@@ -33,7 +33,7 @@ func selectField(c *ui.Context, p palette, value *string, options []selectOption
 			}
 			current := option.Value == *value
 			item.Children(func() {
-				ui.Text(c, tr(option.Label)).Grow(1).FontSize(p.font(11.76))
+				ui.Text(c, tr(option.Label)).Grow(1).FontSize(p.font(fontSmall))
 				if current {
 					icon(c, "Check", 13, p.Text)
 				}

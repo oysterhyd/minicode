@@ -56,9 +56,22 @@ type palette struct {
 // CJK text falling back to the system's UI face.
 const (
 	sansFont   = "Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI"
-	serifFont  = "Georgia, Cambria, Microsoft YaHei UI"
+	serifFont  = "Source Han Serif SC, Noto Serif SC, Noto Serif CJK SC, Georgia, Cambria, Songti SC, STZhongsong, STSong, SimSun, Microsoft YaHei UI"
 	systemFont = "Segoe UI, Microsoft YaHei UI"
 	monoFont   = "Cascadia Mono, Cascadia Code, Consolas, Microsoft YaHei UI"
+)
+
+const (
+	fontMicro   float32 = 10 // Tiny counters, keycaps, chart axis ticks, diff stats
+	fontCaption float32 = 11 // Badges, timestamps, muted hints, section subtitles, status pills
+	fontSmall   float32 = 12 // Code, diffs, secondary lists, form inputs, composer chips, compact controls
+	fontBody    float32 = 13 // Sidebar items, standard buttons, settings rows, tool group headers
+	fontProse   float32 = 14 // Conversation title, chat messages, composer input, markdown body, approval title
+	fontSubhead float32 = 16 // Brand wordmark, H3 headings, command palette search
+	fontHeading float32 = 18 // H2 markdown headings
+	fontTitle   float32 = 20 // Settings / modal titles, H1 markdown headings
+	fontPreview float32 = 24 // Font card specimen preview
+	fontHero    float32 = 32 // Welcome greeting headline
 )
 
 func (p palette) font(size float32) float32 {
@@ -169,7 +182,7 @@ var enterMotion = ui.ElementTransition{Duration: 220 * time.Millisecond, Ease: u
 // styleButton dresses a button as Claude's: a quiet outline, or ink for
 // the primary action, rounded as macOS rounds its push buttons.
 func styleButton(e ui.Element, p palette, primary bool) ui.Element {
-	e.Height(30).Padding(0, 12).Gap(6).Radius(10).FontSize(p.font(12.32)).FontWeight(550).Cursor(ui.CursorDefault)
+	e.Height(30).Padding(0, 12).Gap(6).Radius(10).FontSize(p.font(fontBody)).FontWeight(550).Cursor(ui.CursorDefault)
 	fill, color, border := ui.Transparent, p.Text2, p.Border
 	if primary {
 		fill, color, border = p.Ink, p.InkText, ui.Transparent
@@ -233,11 +246,11 @@ func iconButton(c *ui.Context, p palette, name, label string) ui.Element {
 }
 
 func badge(c *ui.Context, p palette, text string, color, bg ui.Color) ui.Element {
-	return ui.Text(c, tr(text)).FontSize(p.font(9.8)).FontWeight(550).Padding(2, 6).Radius(99).TextColor(color).Background(bg).SingleLine().Shrink(0)
+	return ui.Text(c, tr(text)).FontSize(p.font(fontCaption)).FontWeight(550).Padding(2, 6).Radius(99).TextColor(color).Background(bg).SingleLine().Shrink(0)
 }
 
 func muted(c *ui.Context, p palette, text string) ui.Element {
-	return ui.Text(c, tr(text)).FontSize(p.font(11.48)).TextColor(p.Text3)
+	return ui.Text(c, tr(text)).FontSize(p.font(fontCaption)).TextColor(p.Text3)
 }
 
 func spinner(c *ui.Context, p palette) {

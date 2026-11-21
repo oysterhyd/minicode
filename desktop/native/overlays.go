@@ -28,7 +28,7 @@ func (d *desktop) overlays(c *ui.Context, p palette) {
 			d.commandPalette(c, p, panel)
 		case "shortcuts":
 			ui.Row(c).Height(60).Padding(0, 16, 0, 24).Children(func() {
-				ui.Text(c, tr("键盘快捷键")).Font(serifFont).FontSize(p.font(18.2)).FontWeight(500).Grow(1)
+				ui.Text(c, tr("键盘快捷键")).Font(serifFont).FontSize(p.font(fontTitle)).FontWeight(500).Grow(1)
 				if iconButton(c, p, "X", tr("关闭快捷键")).Clicked() {
 					open = false
 				}
@@ -39,8 +39,8 @@ func (d *desktop) overlays(c *ui.Context, p palette) {
 			// buttons sharing the width.
 			panel.Width(380).Padding(26, 24, 20, 24).Gap(10).AlignItems(ui.Center).Label(tr("删除任务"))
 			ui.Box(c).Size(48, 48).Radius(14).Background(p.DangerSoft).Center().Margin(0, 0, 4, 0).Children(func() { icon(c, "Trash2", 22, p.Danger) })
-			ui.Text(c, tr("删除任务？")).Font(serifFont).FontSize(p.font(18.2)).FontWeight(500)
-			ui.Text(c, tr("对话记录、运行事件和归档输出将被永久删除，工作区中的文件不受影响。")).TextAlign(ui.Center).FontSize(p.font(12.04)).LineHeight(1.55).TextColor(p.Text3)
+			ui.Text(c, tr("删除任务？")).Font(serifFont).FontSize(p.font(fontTitle)).FontWeight(500)
+			ui.Text(c, tr("对话记录、运行事件和归档输出将被永久删除，工作区中的文件不受影响。")).TextAlign(ui.Center).FontSize(p.font(fontSmall)).LineHeight(1.55).TextColor(p.Text3)
 			ui.Row(c).FillWidth().Margin(10, 0, 0, 0).Gap(8).Children(func() {
 				if button(c, p, tr("取消"), "", false).Grow(1).Basis(0).Height(34).Justify(ui.Center).Clicked() {
 					open = false
@@ -102,7 +102,7 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 	panel.Label(tr("快捷操作"))
 	ui.Row(c).Height(64).Padding(0, 20).Gap(12).BorderWidth(0, 0, 1, 0).BorderColor(p.BorderSubtle).Children(func() {
 		icon(c, "Search", 20, p.Text2)
-		input := ui.TextInputBase(c, &d.paletteQuery).Grow(1).Label(tr("搜索操作和任务")).Placeholder(tr("搜索操作、任务或文件…")).AutoFocus().FontSize(p.font(16.8))
+		input := ui.TextInputBase(c, &d.paletteQuery).Grow(1).Label(tr("搜索操作和任务")).Placeholder(tr("搜索操作、任务或文件…")).AutoFocus().FontSize(p.font(fontSubhead))
 		count := len(filtered)
 		input.OnTextKey(func(k ui.TextKey) bool {
 			if k.Mods != 0 || count == 0 || (k.Key != ui.KeyUp && k.Key != ui.KeyDown) {
@@ -129,7 +129,7 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 	ui.Scroll(c).MaxHeight(420).Padding(8).Children(func() {
 		for i, action := range filtered {
 			if i == 0 || filtered[i-1].Group != action.Group {
-				ui.Text(c, action.Group).Padding(10, 12, 6, 12).FontSize(p.font(10.36)).FontWeight(600).TextColor(p.Text3)
+				ui.Text(c, action.Group).Padding(10, 12, 6, 12).FontSize(p.font(fontCaption)).FontWeight(600).TextColor(p.Text3)
 			}
 			selected := i == d.paletteIndex
 			row := ui.ButtonBase(c).Label(action.Label).FillWidth().Height(42).Padding(0, 10).Gap(12).Radius(12).Cursor(ui.CursorDefault)
@@ -142,11 +142,11 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 				ui.Box(c).Size(28, 28).Shrink(0).Radius(8).Background(p.Elevated).Border(1, p.BorderSubtle).Center().Children(func() {
 					icon(c, action.Icon, 15, p.Text2)
 				})
-				ui.Text(c, action.Label).Grow(1).SingleLine().FontSize(p.font(12.6))
+				ui.Text(c, action.Label).Grow(1).SingleLine().FontSize(p.font(fontBody))
 				if isShortcut(action.Hint) {
 					keys(c, p, action.Hint)
 				} else {
-					muted(c, p, action.Hint).SingleLine().FontSize(p.font(10.64))
+					muted(c, p, action.Hint).SingleLine().FontSize(p.font(fontCaption))
 				}
 			})
 			if row.Clicked() {
@@ -161,7 +161,7 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 		for _, hint := range [][2]string{{"↑↓", "选择"}, {"↵", "打开"}, {"Esc", "关闭"}} {
 			ui.Row(c).Gap(6).Children(func() {
 				keycap(c, p, hint[0])
-				muted(c, p, hint[1]).FontSize(p.font(10.64))
+				muted(c, p, hint[1]).FontSize(p.font(fontCaption))
 			})
 		}
 	})
@@ -169,7 +169,7 @@ func (d *desktop) commandPalette(c *ui.Context, p palette, panel ui.Element) {
 
 // keycap is one key, drawn as a raised chip.
 func keycap(c *ui.Context, p palette, key string) ui.Element {
-	return ui.Text(c, key).Font(sansFont).FontSize(p.font(10.08)).FontWeight(550).TextColor(p.Text2).MinWidth(20).TextAlign(ui.Center).
+	return ui.Text(c, key).Font(sansFont).FontSize(p.font(fontMicro)).FontWeight(550).TextColor(p.Text2).MinWidth(20).TextAlign(ui.Center).
 		Padding(1, 6).Radius(6).Background(p.Elevated).Border(1, p.Border).Shadow(0, 1, 0, 0, p.Border).SingleLine().Shrink(0)
 }
 

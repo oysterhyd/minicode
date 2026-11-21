@@ -324,7 +324,7 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 		if notice != "" {
 			ui.Row(c).Padding(9, 12).Radius(14).Border(1, p.Danger.Alpha(0.25)).Background(p.DangerSoft).Gap(9).Transition(enterMotion).Children(func() {
 				icon(c, "CircleAlert", 15, p.Danger)
-				ui.Text(c, localizeNotice(notice)).Grow(1).FontSize(p.font(12.04)).MaxHeight(100).Selectable()
+				ui.Text(c, localizeNotice(notice)).Grow(1).FontSize(p.font(fontSmall)).MaxHeight(100).Selectable()
 				if !d.bridgeFailed && iconButton(c, p, "X", tr("关闭提示")).Size(22, 22).Clicked() {
 					v.Error = ""
 				}
@@ -338,15 +338,15 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 					glassy(chip, 14, ui.Transparent).Border(1, p.BorderSubtle)
 					chip.Children(func() {
 						icon(c, "Clock", 14, p.Text3)
-						muted(c, p, tr("排队中")).NoWrap().Shrink(0).FontSize(p.font(11.2))
+						muted(c, p, tr("排队中")).NoWrap().Shrink(0).FontSize(p.font(fontCaption))
 						if prompt.Mode != "" {
-							ui.Text(c, prompt.Mode).NoWrap().FontSize(p.font(10.36)).TextColor(p.Text3)
+							ui.Text(c, prompt.Mode).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text3)
 						}
 						text := prompt.Text
 						if len(prompt.Attachments) > 0 {
 							text += fmt.Sprintf(tr(" · %d 个附件"), len(prompt.Attachments))
 						}
-						ui.Text(c, text).Grow(1).Basis(0).SingleLine().FontSize(p.font(12.32)).TextColor(p.Text2)
+						ui.Text(c, text).Grow(1).Basis(0).SingleLine().FontSize(p.font(fontSmall)).TextColor(p.Text2)
 						if iconButton(c, p, "X", fmt.Sprintf(tr("取消排队消息 %d"), i+1)).Size(24, 24).Clicked() {
 							remove = i
 						}
@@ -357,11 +357,22 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				}
 			})
 		}
-		composer := ui.Column(c).Radius(24).Material(glass.Glass{Tint: p.Input.Alpha(0.72)}).Border(1, p.Border).Transition(fastMotion)
-		if p.Dark {
-			composer.Shadow(0, 10, 32, -8, ui.RGBA(0, 0, 0, 0.45))
+		waitingApproval := !home && d.pendingApproval() != nil
+		composer := ui.Column(c).Radius(24).Border(1, p.Border).Transition(fastMotion)
+		if waitingApproval && !composer.FocusWithin() {
+			composer.Background(p.Subtle.Alpha(0.75)).BorderColor(p.BorderSubtle)
+			if p.Dark {
+				composer.Shadow(0, 2, 8, -4, ui.RGBA(0, 0, 0, 0.16))
+			} else {
+				composer.Shadow(0, 2, 8, -4, ui.RGBA(31, 30, 29, 0.05))
+			}
 		} else {
-			composer.Shadow(0, 10, 32, -10, ui.RGBA(31, 30, 29, 0.16))
+			composer.Material(glass.Glass{Tint: p.Input.Alpha(0.72)})
+			if p.Dark {
+				composer.Shadow(0, 10, 32, -8, ui.RGBA(0, 0, 0, 0.45))
+			} else {
+				composer.Shadow(0, 10, 32, -10, ui.RGBA(31, 30, 29, 0.16))
+			}
 		}
 		if composer.FocusWithin() {
 			composer.BorderColor(p.BorderStrong)
@@ -374,7 +385,7 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				ui.Column(c).Padding(12, 12, 0, 12).Gap(6).Children(func() {
 					ui.Scroll(c).FillWidth().MaxHeight(112).Children(func() { d.attachmentChips(c, p, v.Attachments, true) })
 					if problem := d.attachmentProblem(v, v.Attachments); problem != "" {
-						ui.Text(c, problem).FontSize(p.font(11.2)).TextColor(p.Warning)
+						ui.Text(c, problem).FontSize(p.font(fontCaption)).TextColor(p.Warning)
 					}
 				})
 			}
@@ -392,7 +403,7 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				minHeight = 72
 			}
 			input := ui.TextAreaBase(c, &v.Draft).Label(tr("任务输入")).Placeholder(placeholder).FillWidth().Height(min(240, float32(lines)*22.5+28)).MinHeight(minHeight).
-				Padding(16, 20, 4, 20).FontSize(p.font(14.5)).LineHeight(1.55)
+				Padding(16, 20, 4, 20).FontSize(p.font(fontProse)).LineHeight(1.55)
 			if d.focusPrompt {
 				input.Focus()
 				d.focusPrompt = false
@@ -446,9 +457,16 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 					bg = p.Accent
 				}
 				if stopping {
-					bg, color = p.Ink, p.InkText
-				}
-				if send.Hovered() && ready && !stopping {
+					if waitingApproval {
+						bg, color = p.Hover, p.Text3
+						send.Border(1, p.Border)
+						if send.Hovered() {
+							bg, color = p.Active, p.Text
+						}
+					} else {
+						bg, color = p.Ink, p.InkText
+					}
+				} else if send.Hovered() && ready {
 					bg = p.AccentHover
 				}
 				scale := float32(1)
@@ -518,7 +536,7 @@ func (d *desktop) workspaceChip(c *ui.Context, p palette) {
 	}
 	chip.Children(func() {
 		icon(c, "Folder", 14, p.Text3)
-		ui.Text(c, workspace).SingleLine().MaxWidth(160).MinWidth(0).Shrink(1).FontSize(p.font(12.32)).TextColor(p.Text2)
+		ui.Text(c, workspace).SingleLine().MaxWidth(160).MinWidth(0).Shrink(1).FontSize(p.font(fontSmall)).TextColor(p.Text2)
 		icon(c, "ChevronDown", 12, p.Text4)
 	})
 	if chip.Clicked() {
@@ -530,7 +548,7 @@ func (d *desktop) workspaceChip(c *ui.Context, p palette) {
 // folder, the changes made there, and how full the context is.
 func (d *desktop) composerFoot(c *ui.Context, p palette, v *conversation) {
 	ui.Row(c).Height(26).Justify(ui.Center).Gap(6).Children(func() {
-		dim := func(text string) { ui.Text(c, text).NoWrap().FontSize(p.font(11.2)).TextColor(p.Text4) }
+		dim := func(text string) { ui.Text(c, text).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text4) }
 		if v.Workspace != "" {
 			icon(c, "Folder", 12, p.Text4)
 			dim(basename(v.Workspace))
@@ -573,8 +591,8 @@ func (d *desktop) suggestionOverlay(c *ui.Context, p palette, anchor, input ui.E
 				label = tr("引用本地文件")
 			}
 			ui.Row(c).Padding(5, 8).Children(func() {
-				muted(c, p, label).Grow(1).FontSize(p.font(10.08))
-				muted(c, p, tr("↑↓ 选择 · Tab 插入")).FontSize(p.font(10.08))
+				muted(c, p, label).Grow(1).FontSize(p.font(fontCaption))
+				muted(c, p, tr("↑↓ 选择 · Tab 插入")).FontSize(p.font(fontCaption))
 			})
 			for i, item := range state.Items {
 				row := ui.ButtonBase(c).Label(item.Value+" "+item.Detail).Height(34).Radius(10).Padding(0, 10).Gap(10).Role(ui.RoleListItem)
@@ -589,8 +607,8 @@ func (d *desktop) suggestionOverlay(c *ui.Context, p palette, anchor, input ui.E
 						title = basename(item.Value)
 					}
 					icon(c, name, 14, p.Text3)
-					ui.Text(c, title).SingleLine().MaxWidth(240).FontSize(p.font(12.6)).FontWeight(550).TextColor(p.Text)
-					muted(c, p, item.Detail).Grow(1).SingleLine().FontSize(p.font(10.92))
+					ui.Text(c, title).SingleLine().MaxWidth(240).FontSize(p.font(fontBody)).FontWeight(550).TextColor(p.Text)
+					muted(c, p, item.Detail).Grow(1).SingleLine().FontSize(p.font(fontCaption))
 					if i == state.Index {
 						icon(c, "CornerDownLeft", 12, p.Text4)
 					}
@@ -639,12 +657,12 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 		chip.Background(p.Hover)
 	}
 	chip.Children(func() {
-		textWidth, _ := c.MeasureText(0, ui.Span{Text: label, Size: p.font(12.32), Weight: 500})
-		ui.Text(c, label).SingleLine().Width(min(190, textWidth+2)).Shrink(1).FontSize(p.font(12.32)).TextColor(p.Text2).Tooltip(label)
+		textWidth, _ := c.MeasureText(0, ui.Span{Text: label, Size: p.font(fontSmall), Weight: 500})
+		ui.Text(c, label).SingleLine().Width(min(190, textWidth+2)).Shrink(1).FontSize(p.font(fontSmall)).TextColor(p.Text2).Tooltip(label)
 		if v.State.Effort != "" && v.State.Effort != "off" && supports {
 			for _, effort := range effortOptions {
 				if effort.Value == v.State.Effort {
-					ui.Text(c, tr(effort.Label)).NoWrap().FontSize(p.font(11.76)).TextColor(p.Text4)
+					ui.Text(c, tr(effort.Label)).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text4)
 				}
 			}
 		}
@@ -664,9 +682,9 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 		available := composerPopover(c, panel, chip, 360, home)
 		popoverMaterial(panel.Key("model-popup").Padding(8), p)
 		panel.FocusGroup(ui.Vertical)
-		ui.Text(c, tr("模型")).Padding(6, 10, 6, 10).FontSize(p.font(11.2)).FontWeight(550).TextColor(p.Text3)
+		ui.Text(c, tr("模型")).Padding(6, 10, 6, 10).FontSize(p.font(fontCaption)).FontWeight(550).TextColor(p.Text3)
 		if len(d.models) == 0 {
-			muted(c, p, tr("尚未配置模型，添加你的 AI 服务后开始使用。")).Padding(8, 10).FontSize(p.font(11.76))
+			muted(c, p, tr("尚未配置模型，添加你的 AI 服务后开始使用。")).Padding(8, 10).FontSize(p.font(fontCaption))
 		} else {
 			ui.Scroll(c).FillWidth().Height(min(260, float32(len(d.models))*54, available-260*p.Scale)).MinHeight(54).Children(func() {
 				for _, m := range d.models {
@@ -685,13 +703,13 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 					}
 					row.Children(func() {
 						ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(2).Children(func() {
-							ui.Text(c, name).SingleLine().FontSize(p.font(12.88)).FontWeight(550).TextColor(p.Text)
+							ui.Text(c, name).SingleLine().FontSize(p.font(fontBody)).FontWeight(550).TextColor(p.Text)
 							detail := m.Provider
 							detail += " · " + capabilityLabel(m.InputCapabilities)
 							if !m.Available {
 								detail += tr(" · 未配置或未启用")
 							}
-							muted(c, p, detail).SingleLine().FontSize(p.font(11.2))
+							muted(c, p, detail).SingleLine().FontSize(p.font(fontCaption))
 						})
 						if selected {
 							icon(c, "Check", 16, p.Accent)
@@ -712,7 +730,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 		}
 		manage.Children(func() {
 			icon(c, "Settings2", 14, p.Text3)
-			ui.Text(c, tr("管理模型与服务")).FontSize(p.font(12.32)).TextColor(p.Text2)
+			ui.Text(c, tr("管理模型与服务")).FontSize(p.font(fontBody)).TextColor(p.Text2)
 		})
 		if manage.Clicked() {
 			d.modelOpen = false
@@ -756,7 +774,7 @@ func (d *desktop) permissionMenu(c *ui.Context, p palette, home bool) {
 			color = p.Warning
 		}
 		icon(c, []string{"Shield", "ShieldCheck", "ShieldOff"}[index], 14, color)
-		ui.Text(c, label).SingleLine().MinWidth(0).Shrink(1).FontSize(p.font(12.32)).TextColor(p.Text2)
+		ui.Text(c, label).SingleLine().MinWidth(0).Shrink(1).FontSize(p.font(fontSmall)).TextColor(p.Text2)
 	})
 	if chip.Clicked() {
 		d.permissionOpen = !d.permissionOpen
@@ -793,7 +811,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 	chip.Children(func() {
 		contextRing(c, p, percent)
 		if !home {
-			ui.Text(c, trf("上下文 %d%%", percent)).FontSize(p.font(11.2)).NoWrap()
+			ui.Text(c, trf("上下文 %d%%", percent)).FontSize(p.font(fontCaption)).NoWrap()
 		}
 	})
 	if home {
@@ -810,8 +828,8 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 		popoverMaterial(panel.Padding(16), p)
 		ui.Scroll(c).FillWidth().MaxHeight(available - 28).Children(func() {
 			ui.Row(c).Children(func() {
-				ui.Text(c, tr("上下文窗口")).FontSize(p.font(11.76)).Grow(1)
-				ui.Text(c, fmt.Sprintf("%s / %s", number(v.State.ContextTokens), number(v.State.ContextWindow))).FontSize(p.font(11.76)).Bold()
+				ui.Text(c, tr("上下文窗口")).FontSize(p.font(fontSmall)).Grow(1)
+				ui.Text(c, fmt.Sprintf("%s / %s", number(v.State.ContextTokens), number(v.State.ContextWindow))).FontSize(p.font(fontSmall)).Bold()
 			})
 			parts := []struct {
 				Key, Label string
@@ -825,8 +843,8 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 			for _, entry := range parts {
 				ui.Row(c).Height(23).Gap(8).Children(func() {
 					ui.Box(c).Size(7, 7).Radius(2).Background(entry.Color)
-					muted(c, p, entry.Label).Grow(1).FontSize(p.font(11.2))
-					ui.Text(c, number(v.State.Breakdown[entry.Key])).FontSize(p.font(11.2))
+					muted(c, p, entry.Label).Grow(1).FontSize(p.font(fontCaption))
+					ui.Text(c, number(v.State.Breakdown[entry.Key])).FontSize(p.font(fontCaption))
 				})
 			}
 			usage := v.State.Usage
@@ -838,7 +856,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 				}
 				ui.Row(c).Margin(10, 0, 0, 0).Children(func() {
 					muted(c, p, tr("本会话累计")).Grow(1)
-					ui.Text(c, value).FontSize(p.font(10.92)).FontWeight(550)
+					ui.Text(c, value).FontSize(p.font(fontSmall)).FontWeight(550)
 				})
 			}
 			metrics := []struct{ Label, Value string }{{tr("缓存命中率"), tr("未报告")}, {tr("最近生成 TPS"), tr("未记录")}, {tr("缓存读取 / 写入"), tr("未报告")}, {tr("平均生成 TPS"), tr("未记录")}, {tr("请求整体速度"), tr("未记录")}}
@@ -872,8 +890,8 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 				ui.Row(c).Margin(12, 0, 0, 0).Gap(12).Children(func() {
 					for _, metric := range metrics[pair*2 : min(len(metrics), pair*2+2)] {
 						ui.Column(c).Grow(1).Basis(0).Gap(3).Children(func() {
-							muted(c, p, metric.Label).FontSize(p.font(10.08))
-							ui.Text(c, metric.Value).FontSize(p.font(10.92)).FontWeight(550)
+							muted(c, p, metric.Label).FontSize(p.font(fontCaption))
+							ui.Text(c, metric.Value).FontSize(p.font(fontSmall)).FontWeight(550)
 						})
 					}
 				})

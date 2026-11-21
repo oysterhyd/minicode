@@ -143,8 +143,8 @@ func (d *desktop) attachmentChips(c *ui.Context, p palette, files []model.Attach
 					}
 					ui.Box(c).Size(32, 32).Radius(9).Background(p.Subtle).Center().Children(func() { icon(c, name, 15, p.Text3) })
 					ui.Column(c).Gap(0).Children(func() {
-						ui.Text(c, file.Name).SingleLine().MaxWidth(170).FontSize(p.font(12.04)).FontWeight(550).TextColor(p.Text)
-						ui.Text(c, tr(mediaLabels[file.Kind])).SingleLine().FontSize(p.font(10.64)).TextColor(p.Text3)
+						ui.Text(c, file.Name).SingleLine().MaxWidth(170).FontSize(p.font(fontSmall)).FontWeight(550).TextColor(p.Text)
+						ui.Text(c, tr(mediaLabels[file.Kind])).SingleLine().FontSize(p.font(fontCaption)).TextColor(p.Text3)
 					})
 				})
 				b.Tooltip(file.Name + " · " + mediaLabels[file.Kind])

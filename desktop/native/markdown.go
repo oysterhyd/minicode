@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -23,12 +25,12 @@ type inline struct {
 	Image                      bool
 }
 type docBlock struct {
-	Kind, Text, Language string
-	Level, Indent        int
-	Spans                []inline
-	Code                 []codeLine
-	Table                [][][]inline
-	ImageURL             string
+	Kind, Text, Language, Marker string
+	Level, Indent                int
+	Spans                        []inline
+	Code                         []codeLine
+	Table                        [][][]inline
+	ImageURL                     string
 }
 type document struct{ Blocks []docBlock }
 type codeSpan struct {
@@ -157,7 +159,7 @@ func codeText(c *ui.Context, p palette, line codeLine) {
 	if len(spans) == 0 {
 		spans = []ui.Span{{Text: " "}}
 	}
-	ui.RichText(c, spans...).Font(monoFont).FontSize(p.font(12.04)).NoWrap().Selectable().LineHeight(1.65)
+	ui.RichText(c, spans...).Font(monoFont).FontSize(p.font(fontSmall)).NoWrap().Selectable().LineHeight(1.65)
 }
 
 var markdownParser = goldmark.New(goldmark.WithExtensions(extension.GFM)).Parser()
@@ -201,9 +203,9 @@ func parseMarkdown(source string) *document {
 					index = 1
 				}
 				for child := n.FirstChild(); child != nil; child = child.NextSibling() {
-					prefix := "• "
+					marker := "•"
 					if node.IsOrdered() {
-						prefix = fmt.Sprintf("%d. ", index)
+						marker = fmt.Sprintf("%d.", index)
 						index++
 					}
 					first := true
@@ -218,11 +220,16 @@ func parseMarkdown(source string) *document {
 							continue
 						}
 						spans := inlines(paragraph, data, inline{})
+						itemMarker := ""
 						if first {
-							spans = append([]inline{{Text: prefix}}, spans...)
+							itemMarker = marker
+							if len(spans) > 0 && (spans[0].Text == "☑ " || spans[0].Text == "☐ ") {
+								itemMarker = strings.TrimSpace(spans[0].Text)
+								spans = spans[1:]
+							}
 							first = false
 						}
-						doc.Blocks = append(doc.Blocks, docBlock{Kind: "list", Indent: indent, Spans: spans})
+						doc.Blocks = append(doc.Blocks, docBlock{Kind: "list", Indent: indent, Marker: itemMarker, Spans: spans})
 						paragraph = next
 					}
 				}
@@ -315,10 +322,44 @@ func inlines(parent ast.Node, data []byte, style inline) []inline {
 	return spans
 }
 
+func endsWithSpace(s string) bool {
+	r, size := utf8.DecodeLastRuneInString(s)
+	return size == 0 || unicode.IsSpace(r)
+}
+
+func startsWithSpace(s string) bool {
+	r, size := utf8.DecodeRuneInString(s)
+	return size == 0 || unicode.IsSpace(r)
+}
+
 func inlineText(c *ui.Context, p palette, spans []inline, bold bool) ui.Element {
 	e := ui.RichText(c).Selectable().LineHeight(1.72)
 	e.Children(func() {
-		for _, span := range spans {
+		for i, span := range spans {
+			if span.Code && !(span.URL != "" && allowedExternal(span.URL)) {
+				if i > 0 && !endsWithSpace(spans[i-1].Text) {
+					ui.RichText(c, ui.Span{Text: " ", Size: p.font(7)})
+				}
+				weight := 0
+				if span.Bold || bold {
+					weight = 600
+				}
+				ui.RichText(c, ui.Span{
+					Text:          span.Text,
+					Font:          monoFont,
+					Size:          p.font(fontSmall),
+					Weight:        weight,
+					Italic:        span.Italic,
+					Strikethrough: span.Strike,
+					Color:         p.Text,
+					Background:    p.Active,
+					Radius:        5,
+				})
+				if i+1 < len(spans) && !spans[i+1].Code && !startsWithSpace(spans[i+1].Text) {
+					ui.RichText(c, ui.Span{Text: " ", Size: p.font(7)})
+				}
+				continue
+			}
 			var part ui.Element
 			if span.URL != "" && allowedExternal(span.URL) {
 				part = ui.Link(c, span.Text, span.URL).TextColor(p.Text).Underline()
@@ -335,7 +376,7 @@ func inlineText(c *ui.Context, p palette, spans []inline, bold bool) ui.Element 
 				part.Strikethrough()
 			}
 			if span.Code {
-				part.Font(monoFont).FontSize(p.font(12.32)).TextBackground(p.Active).TextColor(p.Text)
+				part.Font(monoFont).FontSize(p.font(fontSmall)).TextBackground(p.Active).TextColor(p.Text)
 			}
 		}
 	})
@@ -346,29 +387,45 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 	doc := d.renderCache.markdown(source)
 	// Replies are set as Claude sets them: a book face, a little larger,
 	// with generous leading.
-	ui.Column(c).Gap(12).Font(p.Prose).FontSize(p.font(14.7)).Children(func() {
+	ui.Column(c).Gap(12).Font(p.Prose).FontSize(p.font(fontProse)).Children(func() {
 		for i, block := range doc.Blocks {
-			ui.Column(c.Key(i)).Margin(0, 0, 0, float32(block.Indent)*18).Children(func() {
+			topMargin := float32(0)
+			if block.Kind == "list" && i > 0 && doc.Blocks[i-1].Kind == "list" {
+				topMargin = -4
+			}
+			ui.Column(c.Key(i)).Margin(topMargin, 0, 0, float32(block.Indent)*20).Children(func() {
 				switch block.Kind {
 				case "image":
 					d.markdownImage(c, p, block.ImageURL, block.Text)
 				case "heading":
-					size := float32(15.4)
+					size := fontSubhead
 					if block.Level == 1 {
-						size = 20.3
+						size = fontTitle
 					}
 					if block.Level == 2 {
-						size = 17.5
+						size = fontHeading
 					}
 					if block.Level >= 4 {
-						size = 14.7
+						size = fontProse
 					}
 					heading := inlineText(c, p, block.Spans, true).FontSize(p.font(size)).LineHeight(1.35)
 					if i > 0 {
 						heading.Margin(10, 0, 0, 0)
 					}
-				case "paragraph", "list":
+				case "paragraph":
 					inlineText(c, p, block.Spans, false)
+				case "list":
+					ui.Row(c).FillWidth().AlignItems(ui.Start).Gap(6).Children(func() {
+						marker := ui.Text(c, block.Marker).Shrink(0).TextColor(p.Text3).LineHeight(1.72)
+						if block.Marker == "•" || block.Marker == "" || block.Marker == "☑" || block.Marker == "☐" {
+							marker.Width(16).TextAlign(ui.Center)
+						} else {
+							marker.MinWidth(22).TextAlign(ui.End)
+						}
+						ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() {
+							inlineText(c, p, block.Spans, false)
+						})
+					})
 				case "quote":
 					ui.Column(c).BorderWidth(0, 0, 0, 2).BorderColor(p.BorderStrong).Padding(0, 0, 0, 14).Children(func() { inlineText(c, p, block.Spans, false).TextColor(p.Text2) })
 				case "divider":
@@ -380,9 +437,9 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 							if language == "" {
 								language = "text"
 							}
-							ui.Text(c, language).Font(monoFont).FontSize(p.font(10.64)).TextColor(p.Text3)
+							ui.Text(c, language).Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text3)
 							ui.Spacer(c)
-							copyCode := button(c, p, tr("复制代码"), "Copy", false).Height(24).Padding(0, 8).Radius(8).FontSize(p.font(10.36)).Border(0, ui.Transparent)
+							copyCode := button(c, p, tr("复制代码"), "Copy", false).Height(24).Padding(0, 8).Radius(8).FontSize(p.font(fontCaption)).Border(0, ui.Transparent)
 							if copyCode.Clicked() {
 								c.WriteClipboard(block.Text)
 							}
@@ -410,7 +467,7 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 								return 1
 							}(), 0).BorderColor(p.BorderSubtle).Children(func() {
 								for _, cell := range row {
-									ui.Column(c).Grow(1).Basis(0).Padding(8, 12).Children(func() { inlineText(c, p, cell, rowIndex == 0).FontSize(p.font(12.6)) })
+									ui.Column(c).Grow(1).Basis(0).Padding(8, 12).Children(func() { inlineText(c, p, cell, rowIndex == 0).FontSize(p.font(fontBody)) })
 								}
 							})
 						}

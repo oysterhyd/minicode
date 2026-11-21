@@ -58,8 +58,8 @@ func (d *desktop) checkUpdateButton(c *ui.Context, p palette) {
 		u.Check()
 	}
 	if !u.Enabled() {
-		muted(c, p, tr("此构建未启用更新，或安装目录不可写。请使用安装版并安装到当前用户可写的目录。")).FontSize(p.font(10.92))
+		muted(c, p, tr("此构建未启用更新，或安装目录不可写。请使用安装版并安装到当前用户可写的目录。")).FontSize(p.font(fontCaption))
 	} else if checked := u.LastCheck(); !checked.IsZero() {
-		muted(c, p, tr("上次检查：")+checked.Local().Format("2006-01-02 15:04")).FontSize(p.font(10.92))
+		muted(c, p, tr("上次检查：")+checked.Local().Format("2006-01-02 15:04")).FontSize(p.font(fontCaption))
 	}
 }

@@ -121,6 +121,9 @@ Agent 协议版本 %d 比桌面端支持的 %d 新，部分新功能不可用；
 对话字体|Conversation font
 MiniCode 回复所用的字体|The typeface of MiniCode's replies
 默认衬线|Serif (default)
+Aa 文|Aa
+查看任务进度|View task progress
+详细统计（最近 %d 次）|Detailed statistics (latest %d)
 无衬线|Sans serif
 系统|System
 窗口|Window

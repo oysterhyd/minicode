@@ -60,11 +60,11 @@ var settingsRows int
 // section is a titled group: a heading, and below it a raised, rounded
 // card that holds the rows, as System Settings groups its options.
 func section(c *ui.Context, p palette, title, description string, fn func()) {
-	ui.Column(c).FillWidth().Margin(0, 0, 24, 0).Gap(8).Children(func() {
+	ui.Column(c).FillWidth().Margin(0, 0, 20, 0).Gap(8).Children(func() {
 		ui.Column(c).Padding(0, 4).Gap(2).Children(func() {
-			ui.Text(c, tr(title)).FontSize(p.font(12.6)).FontWeight(600).TextColor(p.Text)
+			ui.Text(c, tr(title)).FontSize(p.font(fontBody)).FontWeight(600).TextColor(p.Text)
 			if description != "" {
-				muted(c, p, description).FontSize(p.font(11.2)).LineHeight(1.5)
+				muted(c, p, description).FontSize(p.font(fontCaption)).LineHeight(1.5)
 			}
 		})
 		group(c, p, fn)
@@ -101,9 +101,9 @@ func settingsRowLead(c *ui.Context, p palette, lead func(), label, description s
 			lead()
 		}
 		ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(1).Children(func() {
-			ui.Text(c, tr(label)).FontSize(p.font(12.32)).FontWeight(500)
+			ui.Text(c, tr(label)).FontSize(p.font(fontBody)).FontWeight(500)
 			if description != "" {
-				muted(c, p, description).FontSize(p.font(10.92)).LineHeight(1.45)
+				muted(c, p, description).FontSize(p.font(fontCaption)).LineHeight(1.45)
 			}
 		})
 		fn()
@@ -113,8 +113,8 @@ func settingsRowLead(c *ui.Context, p palette, lead func(), label, description s
 func field(c *ui.Context, p palette, label string, value *string, password bool) ui.Element {
 	var e ui.Element
 	ui.Column(c).Gap(5).Children(func() {
-		ui.Text(c, tr(label)).FontSize(p.font(11.48)).TextColor(p.Text2)
-		e = ui.TextInput(c, value).Label(tr(label)).FillWidth().Height(32).FontSize(p.font(11.76))
+		ui.Text(c, tr(label)).FontSize(p.font(fontSmall)).TextColor(p.Text2)
+		e = ui.TextInput(c, value).Label(tr(label)).FillWidth().Height(32).FontSize(p.font(fontSmall))
 		if password {
 			e.Password()
 		}
@@ -126,8 +126,8 @@ func numericField(c *ui.Context, p palette, label string, value *int, minimum in
 	root := ui.Column(c).FillWidth().Gap(5)
 	text := ui.Local(root, "number", func() string { return strconv.Itoa(*value) })
 	root.Children(func() {
-		ui.Text(c, tr(label)).FontSize(p.font(11.48)).TextColor(p.Text2)
-		input := ui.TextInput(c, text).Label(tr(label)).Height(32).FillWidth().FontSize(p.font(11.76))
+		ui.Text(c, tr(label)).FontSize(p.font(fontSmall)).TextColor(p.Text2)
+		input := ui.TextInput(c, text).Label(tr(label)).Height(32).FillWidth().FontSize(p.font(fontSmall))
 		if input.Changed() {
 			if n, err := strconv.Atoi(*text); err == nil && n >= minimum && n <= 2147483647 {
 				*value = n
@@ -137,7 +137,7 @@ func numericField(c *ui.Context, p palette, label string, value *int, minimum in
 			*text = strconv.Itoa(*value)
 		}
 		if n, err := strconv.Atoi(*text); err != nil || n < minimum || n > 2147483647 {
-			ui.Text(c, fmt.Sprintf(tr("请输入 %d 至 2147483647 的整数"), minimum)).FontSize(p.font(10.36)).TextColor(p.Danger)
+			ui.Text(c, fmt.Sprintf(tr("请输入 %d 至 2147483647 的整数"), minimum)).FontSize(p.font(fontCaption)).TextColor(p.Danger)
 		}
 	})
 }
@@ -170,7 +170,7 @@ func segmented(c *ui.Context, p palette, label, value string, options [][2]strin
 		origin := row.Bounds()
 		for i, option := range options {
 			e := ui.RadioBase(c, &selected, option[0]).Label(tr(option[1])).Height(26).Padding(0, 12).Radius(8).Center().
-				FontSize(p.font(11.2)).TextColor(p.Text3).Cursor(ui.CursorDefault)
+				FontSize(p.font(fontSmall)).TextColor(p.Text3).Cursor(ui.CursorDefault)
 			if option[0] == value {
 				e.TextColor(p.Text).FontWeight(550)
 				if !ready {
@@ -213,7 +213,7 @@ func appearanceCard(c *ui.Context, p palette, label, kind string, selected bool)
 				}
 			})
 		})
-		text := ui.Text(c, tr(label)).FontSize(p.font(11.48)).TextColor(p.Text2)
+		text := ui.Text(c, tr(label)).FontSize(p.font(fontSmall)).TextColor(p.Text2)
 		if selected {
 			text.TextColor(p.Text).FontWeight(600)
 		}
@@ -246,9 +246,9 @@ func miniWindow(painter *ui.Painter, r ui.Rect, k palette, _, _ float32) {
 	painter.Fill(ui.Rect{X: input.X + input.W - 10, Y: input.Y + 2, W: 7, H: 7}, k.Accent, 4)
 }
 
-// fontCard is one choice of the replies' typeface, shown as "Aa".
+// fontCard is one choice of the replies' typeface, shown as "Aa 文".
 func fontCard(c *ui.Context, p palette, label, font string, selected bool) ui.Element {
-	e := ui.ButtonBase(c).Label(tr(label)).Grow(1).Basis(0).Height(92).Padding(12).Gap(4).Radius(14).Column().Center().
+	e := ui.ButtonBase(c).Label(tr(label)).Grow(1).Basis(0).MinHeight(104).Padding(16, 12).Gap(6).Radius(14).Column().Center().
 		Background(p.Main).Border(1, p.Border).Cursor(ui.CursorDefault).Transition(fastMotion)
 	if selected {
 		e.Border(2, p.Ink).Background(p.Elevated)
@@ -256,8 +256,12 @@ func fontCard(c *ui.Context, p palette, label, font string, selected bool) ui.El
 		e.BorderColor(p.BorderStrong)
 	}
 	e.Children(func() {
-		ui.Text(c, "Aa").Font(font).FontSize(p.font(25)).LineHeight(1.2).TextColor(p.Text)
-		ui.Text(c, tr(label)).FontSize(p.font(11.2)).TextColor(p.Text3)
+		ui.Text(c, tr("Aa 文")).Font(font).FontSize(p.font(fontPreview)).LineHeight(1.25).TextColor(p.Text)
+		labelColor := p.Text3
+		if selected {
+			labelColor = p.Text
+		}
+		ui.Text(c, tr(label)).FontSize(p.font(fontSmall)).LineHeight(1.4).TextColor(labelColor)
 	})
 	target := float32(1)
 	if e.Pressed() {
@@ -276,7 +280,7 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 	ui.DialogBase(c, &open, func(back, panel ui.Element) {
 		back.Material(modalBackdrop{p.Overlay})
 		_, height := c.Size()
-		panel.Width(980).MaxWidthPercent(95).Height(min(680, height-64)).Padding(0).Radius(22).Clip().Background(p.Main).Border(1, p.Border).
+		panel.Width(980).MaxWidthPercent(95).Height(min(740, height-64)).Padding(0).Radius(22).Clip().Background(p.Main).Border(1, p.Border).
 			Shadow(0, 30, 80, -12, ui.RGBA(0, 0, 0, 0.32)).Label(tr("设置")).Row().
 			Transition(ui.ElementTransition{Duration: 260 * time.Millisecond, Ease: ui.CubicBezier(0.2, 0.9, 0.25, 1), Enter: &ui.Motion{Scale: 0.96, Opacity: 0}, Exit: &ui.Motion{Scale: 0.98, Opacity: 0}})
 		d.settingsNav(c, p, s)
@@ -288,17 +292,17 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 				}
 			}
 			ui.Row(c).Height(64).Shrink(0).Padding(0, 14, 0, 36).Children(func() {
-				ui.Text(c, tr(label)).Font(serifFont).FontSize(p.font(19.6)).FontWeight(500).Grow(1)
+				ui.Text(c, tr(label)).Font(serifFont).FontSize(p.font(fontTitle)).FontWeight(500).Grow(1)
 				if iconButton(c, p, "X", tr("关闭设置")).Clicked() {
 					open = false
 				}
 			})
 			ui.Scroll(c.Key(fmt.Sprintf("%s-%t", s.Tab, s.Service != nil))).Grow(1).Basis(0).MinHeight(0).Padding(4, 36, 32, 36).Children(func() {
 				if s.Error != "" {
-					ui.Text(c, localizeNotice(s.Error)).Margin(0, 0, 12, 0).Padding(10, 14).Radius(12).Background(p.DangerSoft).FontSize(p.font(11.48))
+					ui.Text(c, localizeNotice(s.Error)).Margin(0, 0, 12, 0).Padding(10, 14).Radius(12).Background(p.DangerSoft).FontSize(p.font(fontSmall))
 				}
 				if d.current().Busy {
-					ui.Text(c, tr("模型与思考强度在下一次请求生效，预算在下一回合生效。")).Margin(0, 0, 12, 0).Padding(10, 14).Radius(12).Background(p.WarningSoft).FontSize(p.font(11.48))
+					ui.Text(c, tr("模型与思考强度在下一次请求生效，预算在下一回合生效。")).Margin(0, 0, 12, 0).Padding(10, 14).Radius(12).Background(p.WarningSoft).FontSize(p.font(fontSmall))
 				}
 				d.settingsContent(c, p, s)
 			})
@@ -323,11 +327,11 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 // the pages, the current one on a pill that slides between them.
 func (d *desktop) settingsNav(c *ui.Context, p palette, s *settingsState) {
 	ui.Column(c).Width(232).Shrink(0).FillHeight().Padding(20, 12).Gap(12).BorderWidth(0, 1, 0, 0).BorderColor(p.BorderSubtle).Background(p.Subtle.Alpha(0.7)).Children(func() {
-		ui.Text(c, tr("设置")).Padding(0, 10).Font(serifFont).FontSize(p.font(21)).FontWeight(500)
+		ui.Text(c, tr("设置")).Padding(0, 10).Font(serifFont).FontSize(p.font(fontTitle)).FontWeight(500)
 		ui.Row(c).Height(32).Padding(0, 10).Gap(7).Radius(10).Background(p.Active).Children(func() {
 			icon(c, "Search", 13, p.Text3)
 			ui.TextInput(c, &s.NavQuery).Label(tr("搜索设置")).Placeholder(tr("搜索设置")).Grow(1).Basis(0).MinWidth(0).Height(30).Padding(0).
-				Background(ui.Transparent).Border(0, ui.Transparent).FontSize(p.font(11.76))
+				Background(ui.Transparent).Border(0, ui.Transparent).FontSize(p.font(fontSmall))
 		})
 		list := ui.Column(c).FillWidth().Gap(2)
 		query := strings.ToLower(strings.TrimSpace(s.NavQuery))
@@ -363,7 +367,7 @@ func (d *desktop) settingsNav(c *ui.Context, p palette, s *settingsState) {
 				}
 				current := s.Tab == tab.ID
 				b := ui.ButtonBase(c).Label(tr(tab.Label)).FillWidth().Height(32).Padding(0, 10).Gap(10).Radius(10).Justify(ui.Start).
-					FontSize(p.font(12.32)).TextColor(p.Text2).Cursor(ui.CursorDefault).Transition(fastMotion)
+					FontSize(p.font(fontBody)).TextColor(p.Text2).Cursor(ui.CursorDefault).Transition(fastMotion)
 				if current {
 					b.TextColor(p.Text).FontWeight(550)
 				} else if b.Hovered() {
@@ -584,7 +588,7 @@ func (d *desktop) settingsContent(c *ui.Context, p palette, s *settingsState) {
 	case "about":
 		section(c, p, "MiniCode Desktop", tr("本地优先的 Coding Agent 工作台。会话保存在 ~/.minicode/sessions.db。"), func() {
 			for _, entry := range [][2]string{{tr("版本"), appVersion}, {"MyGo", "0.5.5"}, {tr("渲染器"), tr("原生 Direct3D 11")}, {tr("平台"), "Windows x64"}} {
-				settingsRow(c, p, entry[0], "", func() { ui.Text(c, entry[1]).FontSize(p.font(12.6)) })
+				settingsRow(c, p, entry[0], "", func() { ui.Text(c, entry[1]).FontSize(p.font(fontBody)) })
 			}
 			d.checkUpdateButton(c, p)
 		})
@@ -664,15 +668,15 @@ func (d *desktop) modelSettings(c *ui.Context, p palette, s *settingsState) {
 func (d *desktop) serviceSettings(c *ui.Context, p palette, s *settingsState) {
 	section(c, p, fmt.Sprintf(tr("AI 服务 · %d"), len(d.config.Services)), tr("配置接口与模型，新服务从空白开始。"), func() {
 		if s.Status != "" {
-			muted(c, p, localizeNotice(s.Status)).FontSize(p.font(11.2))
+			muted(c, p, localizeNotice(s.Status)).FontSize(p.font(fontCaption))
 		}
 		if s.CredentialImport != nil {
 			info := s.CredentialImport
 			ui.Column(c).FillWidth().Gap(8).Children(func() {
 				ui.Text(c, tr("从 Command Code 导入")).FontWeight(600)
-				ui.Text(c, info.SourcePath).FontSize(p.font(11)).TextColor(p.Text2)
-				ui.Text(c, tr(info.DataDescription)).FontSize(p.font(11)).LineHeight(1.5)
-				ui.Text(c, tr(info.StorageDescription)).FontSize(p.font(11)).LineHeight(1.5)
+				ui.Text(c, info.SourcePath).FontSize(p.font(fontCaption)).TextColor(p.Text2)
+				ui.Text(c, tr(info.DataDescription)).FontSize(p.font(fontCaption)).LineHeight(1.5)
+				ui.Text(c, tr(info.StorageDescription)).FontSize(p.font(fontCaption)).LineHeight(1.5)
 				ui.Row(c).Gap(8).Children(func() {
 					if button(c, p, tr("确认读取并导入"), "Download", true).Disabled(s.Working).Clicked() {
 						d.configAction(s, "importCommandCode", map[string]any{"confirmed": true}, func() {
@@ -763,7 +767,7 @@ func initialsAvatar(c *ui.Context, p palette, name string, on bool) {
 	if !on {
 		color = p.Text4
 	}
-	tile.Children(func() { ui.Text(c, initial).Font(serifFont).FontSize(p.font(14)).FontWeight(600).TextColor(color) })
+	tile.Children(func() { ui.Text(c, initial).Font(serifFont).FontSize(p.font(fontProse)).FontWeight(600).TextColor(color) })
 }
 
 func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
@@ -831,7 +835,7 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 			}
 		})
 		if s.Status != "" {
-			muted(c, p, localizeNotice(s.Status)).FontSize(p.font(11.2))
+			muted(c, p, localizeNotice(s.Status)).FontSize(p.font(fontCaption))
 		}
 	})
 	section(c, p, tr("添加模型"), tr("获取服务列表或输入模型 ID。"), func() {
@@ -884,7 +888,7 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 					}
 					head := ui.ButtonBase(c).Label(tr("编辑模型 ") + m.ModelID).FillWidth().Height(28).Gap(8).Justify(ui.Start)
 					head.Children(func() {
-						ui.Text(c, label).SingleLine().Grow(1).Basis(0).MinWidth(0).FontSize(p.font(12.04)).FontWeight(600)
+						ui.Text(c, label).SingleLine().Grow(1).Basis(0).MinWidth(0).FontSize(p.font(fontBody)).FontWeight(600)
 						icon(c, map[bool]string{true: "ChevronDown", false: "ChevronRight"}[s.OpenModels[i]], 14, p.Text3)
 					})
 					if head.Clicked() {
@@ -897,8 +901,8 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 							ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() { numericField(c, p, tr("上下文窗口"), &m.ContextWindow, 2) })
 							ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() { numericField(c, p, tr("输出上限"), &m.MaxOutput, 1) })
 						})
-						ui.Checkbox(c, &m.SupportsEffort, tr("支持思考强度")).FontSize(p.font(11.48))
-						muted(c, p, tr("仅在模型支持思考时启用。")).FontSize(p.font(10.36))
+						ui.Checkbox(c, &m.SupportsEffort, tr("支持思考强度")).FontSize(p.font(fontSmall))
+						muted(c, p, tr("仅在模型支持思考时启用。")).FontSize(p.font(fontCaption))
 						ui.Column(c).FillWidth().Gap(6).Children(func() {
 							muted(c, p, tr("输入能力"))
 							ui.Row(c).Wrap().Gap(16).Children(func() {
@@ -907,10 +911,10 @@ func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {
 									Value    *bool
 									Disabled bool
 								}{{tr("图片"), &m.InputCapabilities.Images, false}, {"PDF", &m.InputCapabilities.PDF, false}, {tr("音频"), &m.InputCapabilities.Audio, service.APIStyle == "anthropic"}, {tr("视频"), &m.InputCapabilities.Video, service.APIStyle != "openai"}} {
-									ui.Checkbox(c, option.Value, option.Label).FontSize(p.font(11.48)).Disabled(option.Disabled)
+									ui.Checkbox(c, option.Value, option.Label).FontSize(p.font(fontSmall)).Disabled(option.Disabled)
 								}
 							})
-							muted(c, p, tr("按服务和模型的实际能力勾选；视频需要 Chat Completions 兼容接口，OpenAI Responses 支持图片、PDF 与音频，Anthropic Messages 支持图片与 PDF。")).FontSize(p.font(10.36))
+							muted(c, p, tr("按服务和模型的实际能力勾选；视频需要 Chat Completions 兼容接口，OpenAI Responses 支持图片、PDF 与音频，Anthropic Messages 支持图片与 PDF。")).FontSize(p.font(fontCaption))
 						})
 						pricingEditor(c, p, m)
 						if button(c, p, tr("移除模型"), "Trash2", false).Clicked() {
@@ -971,8 +975,8 @@ func pricingEditor(c *ui.Context, p palette, m *model.ServiceModel) {
 			ui.Row(c).FillWidth().Gap(12).Children(func() {
 				for _, spec := range specs[pair*2 : pair*2+2] {
 					ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(4).Children(func() {
-						ui.Text(c, spec.Label).FontSize(p.font(10.92)).TextColor(p.Text2)
-						input := ui.TextInput(c, spec.Buf).Label(spec.Label).Height(30).FillWidth().FontSize(p.font(11.48))
+						ui.Text(c, spec.Label).FontSize(p.font(fontCaption)).TextColor(p.Text2)
+						input := ui.TextInput(c, spec.Buf).Label(spec.Label).Height(30).FillWidth().FontSize(p.font(fontSmall))
 						changed = changed || input.Changed()
 						focused = focused || input.Focused()
 					})
@@ -1007,7 +1011,7 @@ func pricingEditor(c *ui.Context, p palette, m *model.ServiceModel) {
 			}
 		}
 		if !valid {
-			ui.Text(c, tr("输入与输出需同时填写非负数字，全部留空可清除")).FontSize(p.font(10.36)).TextColor(p.Danger)
+			ui.Text(c, tr("输入与输出需同时填写非负数字，全部留空可清除")).FontSize(p.font(fontCaption)).TextColor(p.Danger)
 		}
 	})
 }
@@ -1019,7 +1023,7 @@ func (d *desktop) agentSettings(c *ui.Context, p palette, s *settingsState) {
 			field(c, p, tr("名称"), &a.Name, false).Disabled(a.Builtin)
 			field(c, p, tr("显示名称"), &a.Label, false)
 			field(c, p, tr("委派条件"), &a.Description, false)
-			ui.Text(c, tr("指令")).FontSize(p.font(11.48)).TextColor(p.Text2)
+			ui.Text(c, tr("指令")).FontSize(p.font(fontSmall)).TextColor(p.Text2)
 			ui.TextArea(c, &a.Instructions).Label(tr("子助手指令")).Height(180)
 			ui.Checkbox(c, &a.InheritTools, tr("继承父助手全部工具"))
 			ui.Row(c).Wrap().Gap(8).Children(func() {

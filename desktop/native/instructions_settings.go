@@ -42,10 +42,10 @@ func (d *desktop) instructionsSettings(c *ui.Context, p palette, s *settingsStat
 			return
 		}
 		if a.Path != "" {
-			ui.Text(c, a.Path).FontSize(p.font(10.92)).TextColor(p.Text3).Selectable()
+			ui.Text(c, a.Path).FontSize(p.font(fontCaption)).TextColor(p.Text3).Selectable()
 		}
-		ui.Text(c, tr("指令内容")).FontSize(p.font(11.48)).FontWeight(550)
-		ui.TextArea(c, &a.Content).Label(tr("全局指令内容")).FillWidth().Height(340).FontSize(p.font(11.76)).Disabled(a.Saving)
+		ui.Text(c, tr("指令内容")).FontSize(p.font(fontSmall)).FontWeight(550)
+		ui.TextArea(c, &a.Content).Label(tr("全局指令内容")).FillWidth().Height(340).FontSize(p.font(fontSmall)).Disabled(a.Saving)
 		ui.Row(c).Gap(12).Children(func() {
 			muted(c, p, trf("%d / 64000 字节", len([]byte(a.Content)))).Grow(1)
 			if a.Content != a.Saved {
@@ -53,7 +53,7 @@ func (d *desktop) instructionsSettings(c *ui.Context, p palette, s *settingsStat
 			}
 		})
 		if a.Error != "" {
-			ui.Text(c, tr(a.Error)).TextColor(p.Danger).FontSize(p.font(11.48))
+			ui.Text(c, tr(a.Error)).TextColor(p.Danger).FontSize(p.font(fontSmall))
 		}
 		if a.Status != "" {
 			muted(c, p, tr(a.Status))

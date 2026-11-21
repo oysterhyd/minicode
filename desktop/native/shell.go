@@ -74,7 +74,6 @@ func (d *desktop) view(c *ui.Context) {
 func (d *desktop) conversationBody(c *ui.Context, p palette) {
 	ui.Box(c.Key("body")).Grow(1).Basis(0).MinHeight(0).FillWidth().Children(func() {
 		d.feed(c, p)
-		ui.Box(c).Absolute().Top(0).Left(0).Right(0).Height(22).PassThrough().Material(glass.ScrollEdge{Background: p.Main})
 		dock := ui.Column(c.Key("dock")).Absolute().Left(0).Right(0).Bottom(0).Padding(28, 0, 0, 0).PassThrough().
 			Material(glass.ScrollEdge{Bottom: true, Background: p.Main})
 		dock.Children(func() { d.composer(c, p, false) })
@@ -92,7 +91,7 @@ func (d *desktop) header(c *ui.Context, p palette) {
 			title.Background(p.Hover)
 		}
 		title.Children(func() {
-			ui.Text(c, v.title(d.sessions)).SingleLine().Shrink(1).FontSize(p.font(13.3)).FontWeight(600).TextColor(p.Text)
+			ui.Text(c, v.title(d.sessions)).SingleLine().Shrink(1).FontSize(p.font(fontProse)).FontWeight(600).TextColor(p.Text)
 			icon(c, "ChevronDown", 13, p.Text3)
 		})
 		var session *model.Session
@@ -127,13 +126,13 @@ func (d *desktop) runState(c *ui.Context, p palette, v *conversation) {
 	case waiting:
 		ui.Row(c.Key("state-waiting")).Height(24).Padding(0, 9).Gap(6).Radius(99).Background(p.WarningSoft).Transition(enterMotion).Children(func() {
 			pulse(c, 6, 6, 3, p.Warning, 1600*time.Millisecond, 0.45, 1)
-			ui.Text(c, tr("等待你的确认")).NoWrap().FontSize(p.font(11.2)).FontWeight(550).TextColor(p.Warning)
+			ui.Text(c, tr("等待你的确认")).NoWrap().FontSize(p.font(fontCaption)).FontWeight(550).TextColor(p.Warning)
 		})
 	case v.Busy:
 		ui.Row(c.Key("state-running")).Height(24).Padding(0, 9, 0, 7).Gap(5).Radius(99).Background(p.Hover).Label(tr("任务处理中")).Transition(enterMotion).Children(func() {
 			spark(c, 12, p.Accent, true)
-			ui.Text(c, tr("运行中")+" ·").NoWrap().FontSize(p.font(11.2)).TextColor(p.Text2)
-			ui.Text(c, formatDuration(time.Since(v.StartedAt))).NoWrap().FontSize(p.font(11.2)).TextColor(p.Text2)
+			ui.Text(c, tr("运行中")+" ·").NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text2)
+			ui.Text(c, formatDuration(time.Since(v.StartedAt))).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text2)
 		})
 		c.After(time.Second)
 	}
@@ -200,7 +199,7 @@ func (d *desktop) titlebar(c *ui.Context, p palette) {
 		}
 		ui.Row(c).Gap(7).Padding(0, 6).Children(func() {
 			ui.Image(c, logo).Size(18, 18).Radius(5)
-			ui.Text(c, "MiniCode").Font(serifFont).FontSize(p.font(15)).FontWeight(600).TextColor(p.Text).NoWrap()
+			ui.Text(c, "MiniCode").Font(serifFont).FontSize(p.font(fontSubhead)).FontWeight(600).TextColor(p.Text).NoWrap()
 		})
 		ui.Spacer(c)
 	})
@@ -221,7 +220,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 			create.AnimatePose(ui.Pose{Scale: pressed}, pressMotion)
 			create.Children(func() {
 				ui.Box(c).Size(22, 22).Radius(99).Background(p.Accent).Center().Children(func() { icon(c, "Plus", 14, ui.Hex("#ffffff")) })
-				ui.Text(c, tr("新建对话")).NoWrap().FontSize(p.font(13)).FontWeight(550).TextColor(p.Text)
+				ui.Text(c, tr("新建对话")).NoWrap().FontSize(p.font(fontBody)).FontWeight(550).TextColor(p.Text)
 			})
 			if create.Clicked() {
 				d.newSession(v.Workspace)
@@ -234,7 +233,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 			}
 			search.Children(func() {
 				icon(c, "Search", 15, p.Text3)
-				input := ui.TextInputBase(c, &d.search).Grow(1).Placeholder(tr("搜索任务")).Label(tr("搜索任务")).FontSize(p.font(12.6))
+				input := ui.TextInputBase(c, &d.search).Grow(1).Placeholder(tr("搜索任务")).Label(tr("搜索任务")).FontSize(p.font(fontBody))
 				if d.focusSearch {
 					input.Focus()
 					d.focusSearch = false
@@ -261,7 +260,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 					}
 				}
 				ui.Row(c).Height(30).Padding(0, 2, 0, 8).Margin(8, 0, 0, 0).Children(func() {
-					ui.Text(c, tr("工作空间")).FontSize(p.font(11.2)).FontWeight(550).TextColor(p.Text4)
+					ui.Text(c, tr("工作空间")).FontSize(p.font(fontCaption)).FontWeight(550).TextColor(p.Text4)
 					ui.Spacer(c)
 					if iconButton(c, p, "FolderPlus", tr("打开工作区")).Size(24, 24).Clicked() {
 						d.chooseWorkspace()
@@ -279,7 +278,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 								folder = "FolderOpen"
 							}
 							icon(c, folder, 15, p.Text3)
-							ui.Text(c, basename(root)).SingleLine().Shrink(1).FontSize(p.font(12.6)).FontWeight(550).TextColor(p.Text2)
+							ui.Text(c, basename(root)).SingleLine().Shrink(1).FontSize(p.font(fontBody)).FontWeight(550).TextColor(p.Text2)
 							if root == v.Workspace {
 								ui.Box(c).Size(5, 5).Radius(99).Background(p.Accent).Shrink(0).Tooltip(tr("当前"))
 							}
@@ -317,7 +316,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 									d.sessionRow(c, p, session, false)
 								}
 								if len(groups.Projects[root]) == 0 {
-									muted(c, p, tr("暂无任务")).Padding(4, 31).FontSize(p.font(11.2)).TextColor(p.Text4)
+									muted(c, p, tr("暂无任务")).Padding(4, 31).FontSize(p.font(fontCaption)).TextColor(p.Text4)
 								}
 							})
 						}
@@ -330,7 +329,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 					}
 					open.Children(func() {
 						icon(c, "FolderOpen", 18, p.Text3)
-						ui.Text(c, tr("打开本地项目")).FontSize(p.font(12.04)).TextColor(p.Text2)
+						ui.Text(c, tr("打开本地项目")).FontSize(p.font(fontBody)).TextColor(p.Text2)
 					})
 					if open.Clicked() {
 						d.chooseWorkspace()
@@ -347,7 +346,7 @@ func (d *desktop) sidebar(c *ui.Context, p palette) {
 
 // sideHeading labels a group of the sidebar.
 func sideHeading(c *ui.Context, p palette, label string) {
-	ui.Text(c, label).FontSize(p.font(11.2)).FontWeight(550).TextColor(p.Text4).Padding(8, 8, 4, 8)
+	ui.Text(c, label).FontSize(p.font(fontCaption)).FontWeight(550).TextColor(p.Text4).Padding(8, 8, 4, 8)
 }
 
 // sidebarFooter is the account of the sidebar: who is working, on how many
@@ -356,17 +355,17 @@ func (d *desktop) sidebarFooter(c *ui.Context, p palette) {
 	ui.Row(c).Height(54).Shrink(0).Padding(0, 4, 0, 10).Gap(10).Children(func() {
 		name := userName()
 		ui.Box(c).Size(30, 30).Radius(99).Background(p.Ink).Center().Shrink(0).Children(func() {
-			ui.Text(c, strings.ToUpper(string([]rune(name)[:1]))).FontSize(p.font(12.6)).FontWeight(650).TextColor(p.InkText)
+			ui.Text(c, strings.ToUpper(string([]rune(name)[:1]))).FontSize(p.font(fontBody)).FontWeight(650).TextColor(p.InkText)
 		})
 		ui.Column(c).Grow(1).Basis(0).MinWidth(0).Children(func() {
-			ui.Text(c, name).SingleLine().FontSize(p.font(12.6)).FontWeight(600).TextColor(p.Text)
+			ui.Text(c, name).SingleLine().FontSize(p.font(fontBody)).FontWeight(600).TextColor(p.Text)
 			services := 0
 			for _, service := range d.config.Services {
 				if service.Enabled {
 					services++
 				}
 			}
-			ui.Text(c, trf("本地 · %d 个 AI 服务", services)).SingleLine().FontSize(p.font(10.64)).TextColor(p.Text3)
+			ui.Text(c, trf("本地 · %d 个 AI 服务", services)).SingleLine().FontSize(p.font(fontCaption)).TextColor(p.Text3)
 		})
 		themeIcon := "Moon"
 		if d.lastDark {
@@ -456,13 +455,13 @@ func (d *desktop) sessionRow(c *ui.Context, p palette, session model.Session, pi
 				if active {
 					color, weight = p.Text, 550
 				}
-				ui.Text(c, session.Title).Grow(1).SingleLine().FontSize(p.font(12.6)).FontWeight(weight).TextColor(color)
+				ui.Text(c, session.Title).Grow(1).SingleLine().FontSize(p.font(fontBody)).FontWeight(weight).TextColor(color)
 				if !row.Hovered() {
 					stamp := session.UpdatedAt
 					if stamp == "" {
 						stamp = session.CreatedAt
 					}
-					ui.Text(c, relativeTime(stamp)).NoWrap().Shrink(0).FontSize(p.font(10.64)).TextColor(p.Text4)
+					ui.Text(c, relativeTime(stamp)).NoWrap().Shrink(0).FontSize(p.font(fontCaption)).TextColor(p.Text4)
 				}
 			})
 			if main.Clicked() {
@@ -543,7 +542,7 @@ func (d *desktop) welcome(c *ui.Context, p palette) {
 				ui.Column(c).FillWidth().MaxWidth(720).Padding(32, 32, 48, 32).Margin(0, ui.Auto).Children(func() {
 					ui.Row(c).FillWidth().Justify(ui.Center).Gap(14).Margin(0, 0, 26, 0).Transition(enterMotion).Children(func() {
 						spark(c, 34, p.Accent, false)
-						ui.Text(c, greeting(time.Now())+tr("，")+userName()).Font(serifFont).FontSize(p.font(34)).FontWeight(400).TextColor(p.Text).LetterSpacing(-0.4).SingleLine().MinWidth(0).Shrink(1)
+						ui.Text(c, greeting(time.Now())+tr("，")+userName()).Font(serifFont).FontSize(p.font(fontHero)).FontWeight(400).TextColor(p.Text).LetterSpacing(-0.4).SingleLine().MinWidth(0).Shrink(1)
 					})
 					d.composer(c, p, true)
 					ui.Row(c).Wrap().Justify(ui.Center).Gap(8).Margin(16, 0, 0, 0).Children(func() {
@@ -559,7 +558,7 @@ func (d *desktop) welcome(c *ui.Context, p palette) {
 							pill.AnimatePose(ui.Pose{Scale: scale}, pressMotion)
 							pill.Children(func() {
 								icon(c, s.Icon, 14, p.Text3)
-								ui.Text(c, tr(s.Label)).NoWrap().FontSize(p.font(12.32)).TextColor(p.Text2)
+								ui.Text(c, tr(s.Label)).NoWrap().FontSize(p.font(fontBody)).TextColor(p.Text2)
 							})
 							if pill.Clicked() {
 								v.Draft = tr(s.Prompt)
@@ -585,7 +584,7 @@ func (d *desktop) recentTasks(c *ui.Context, p palette) {
 	recent = recent[:min(4, len(recent))]
 	ui.Column(c).Margin(36, 0, 0, 0).Gap(2).Children(func() {
 		ui.Row(c).Padding(0, 10, 6, 10).Children(func() {
-			ui.Text(c, tr("最近任务")).FontSize(p.font(11.76)).FontWeight(550).TextColor(p.Text3)
+			ui.Text(c, tr("最近任务")).FontSize(p.font(fontSmall)).FontWeight(550).TextColor(p.Text3)
 		})
 		ui.Column(c).Gap(1).Children(func() {
 			for _, session := range recent {
@@ -595,13 +594,13 @@ func (d *desktop) recentTasks(c *ui.Context, p palette) {
 				}
 				row.Children(func() {
 					icon(c, "MessageSquare", 14, p.Text3)
-					ui.Text(c, session.Title).Grow(1).Basis(0).MinWidth(0).SingleLine().FontSize(p.font(12.6)).TextColor(p.Text2)
-					ui.Text(c, basename(session.Workspace)).NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(p.Text4)
+					ui.Text(c, session.Title).Grow(1).Basis(0).MinWidth(0).SingleLine().FontSize(p.font(fontBody)).TextColor(p.Text2)
+					ui.Text(c, basename(session.Workspace)).NoWrap().Shrink(0).FontSize(p.font(fontCaption)).TextColor(p.Text4)
 					stamp := session.UpdatedAt
 					if stamp == "" {
 						stamp = session.CreatedAt
 					}
-					ui.Text(c, relativeTime(stamp)).NoWrap().Shrink(0).Width(52).TextAlign(ui.End).FontSize(p.font(11.2)).TextColor(p.Text4)
+					ui.Text(c, relativeTime(stamp)).NoWrap().Shrink(0).Width(52).TextAlign(ui.End).FontSize(p.font(fontCaption)).TextColor(p.Text4)
 				})
 				if row.Clicked() {
 					d.openSession(session)
@@ -707,7 +706,7 @@ func (d *desktop) toastView(c *ui.Context, p palette) {
 				glassy(toastCard, 18, p.Elevated.Alpha(0.72)).Children(func() {
 					ui.Row(c).Gap(8).Children(func() {
 						icon(c, "CircleCheck", 15, p.Success)
-						ui.Text(c, tr(entry.Title)).FontSize(p.font(12.32)).FontWeight(600).Grow(1)
+						ui.Text(c, tr(entry.Title)).FontSize(p.font(fontBody)).FontWeight(600).Grow(1)
 						if iconButton(c, p, "X", tr("关闭通知")).Size(20, 20).Clicked() {
 							d.toasts = slices.DeleteFunc(d.toasts, func(t toast) bool { return t.ID == entry.ID })
 						}

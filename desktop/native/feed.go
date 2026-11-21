@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 	"minicode.desktop/internal/content"
 	"minicode.desktop/internal/model"
@@ -31,22 +32,66 @@ func toolTarget(item *model.FeedItem) string {
 // feedWidth is the measure of the conversation, as Claude keeps its column.
 const feedWidth = 800
 
+func (d *desktop) feedTaskStrip(c *ui.Context, p palette, v *conversation) {
+	done := 0
+	for _, task := range v.Tasks {
+		if task.Status == "done" {
+			done++
+		}
+	}
+	ui.Column(c).FillWidth().MaxWidth(feedWidth).Margin(0, ui.Auto).Padding(4, 32, 6, 32).Children(func() {
+		ui.Column(c).FillWidth().Padding(8, 12).Gap(5).Radius(12).Border(1, p.BorderSubtle).Background(p.Subtle.Alpha(0.7)).Children(func() {
+			ui.Row(c).Gap(6).Children(func() {
+				icon(c, "ListTodo", 13, p.Text3)
+				ui.Text(c, tr("任务进度")).FontSize(p.font(fontCaption)).FontWeight(550).TextColor(p.Text3)
+				ui.Spacer(c)
+				ui.Text(c, fmt.Sprintf("%d / %d", done, len(v.Tasks))).FontSize(p.font(fontCaption)).TextColor(p.Text4)
+				if iconButton(c, p, "ArrowUpRight", tr("查看任务进度")).Size(20, 20).Clicked() {
+					d.tab = 3
+					d.preview = nil
+					d.preferences.RightCollapsed = false
+					d.persist()
+				}
+			})
+			for _, task := range v.Tasks[:min(3, len(v.Tasks))] {
+				ui.Row(c).Gap(8).Children(func() {
+					switch task.Status {
+					case "done":
+						ui.Box(c).Size(14, 14).Shrink(0).Radius(99).Background(p.Ink).Center().Children(func() { icon(c, "Check", 9, p.InkText) })
+					case "running":
+						ui.Box(c).Size(14, 14).Shrink(0).Center().Children(func() { spark(c, 12, p.Accent, true) })
+					case "failed":
+						icon(c, "CircleAlert", 14, p.Danger)
+					default:
+						ui.Box(c).Size(14, 14).Shrink(0).Center().Children(func() { ui.Box(c).Size(6, 6).Radius(99).Background(p.BorderStrong) })
+					}
+					title := ui.Text(c, task.Title).Grow(1).SingleLine().FontSize(p.font(fontSmall)).TextColor(p.Text2)
+					statusColor := p.Text3
+					switch task.Status {
+					case "done":
+						title.Strikethrough().TextColor(p.Text3)
+					case "running":
+						title.FontWeight(550)
+						statusColor = p.AccentText
+					case "failed":
+						statusColor = p.Danger
+					}
+					status := map[string]string{"done": tr("完成"), "running": tr("进行中"), "failed": tr("失败"), "pending": tr("待执行")}[task.Status]
+					ui.Text(c, status).NoWrap().Shrink(0).FontSize(p.font(fontCaption)).TextColor(statusColor)
+				})
+			}
+			if len(v.Tasks) > 3 {
+				ui.Text(c, fmt.Sprintf("+%d", len(v.Tasks)-3)).FontSize(p.font(fontCaption)).TextColor(p.Text4)
+			}
+		})
+	})
+}
+
 func (d *desktop) feed(c *ui.Context, p palette) {
 	v := d.current()
 	ui.Column(c).Fill().Children(func() {
-		if len(v.Tasks) > 0 {
-			ui.Column(c).Padding(8, 32).Gap(4).Children(func() {
-				for _, task := range v.Tasks[:min(4, len(v.Tasks))] {
-					ui.Row(c).Gap(8).Children(func() {
-						ui.Text(c, task.Title).Grow(1).SingleLine().FontSize(p.font(11.48)).TextColor(p.Text2)
-						status := map[string]string{"done": tr("完成"), "running": tr("进行中"), "failed": tr("失败"), "pending": tr("待执行")}[task.Status]
-						ui.Text(c, status).FontSize(p.font(10.36)).TextColor(p.Text3)
-					})
-				}
-				if len(v.Tasks) > 4 {
-					ui.Text(c, fmt.Sprintf("+%d · /tasks", len(v.Tasks)-4)).FontSize(p.font(10.36)).TextColor(p.Text3)
-				}
-			})
+		if len(v.Tasks) > 0 && (d.preferences.RightCollapsed || d.tab != 3) {
+			d.feedTaskStrip(c, p, v)
 		}
 		if v.Loading {
 			ui.Row(c).Grow(1).Center().Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在恢复会话…")) })
@@ -65,32 +110,35 @@ func (d *desktop) feed(c *ui.Context, p palette) {
 		}
 		v.List.Key = func(i int) any { return v.Rows[i].ID }
 		bottom := max(150, d.dockHeight) + 12
-		ui.List(c, &v.List, len(v.Rows), func(i int) {
-			row := v.Rows[i]
-			ui.Column(c).FillWidth().MaxWidth(feedWidth).Margin(0, ui.Auto).Padding(0, 32).Children(func() {
-				if row.Tools != nil {
-					if len(row.Tools) > 1 {
-						d.toolGroup(c, p, row)
+		ui.Box(c).Grow(1).Basis(0).MinHeight(0).FillWidth().Children(func() {
+			ui.List(c, &v.List, len(v.Rows), func(i int) {
+				row := v.Rows[i]
+				ui.Column(c).FillWidth().MaxWidth(feedWidth).Margin(0, ui.Auto).Padding(0, 32).Children(func() {
+					if row.Tools != nil {
+						if len(row.Tools) > 1 {
+							d.toolGroup(c, p, row)
+						} else {
+							d.toolGroup(c, p, row)
+						}
 					} else {
-						d.toolGroup(c, p, row)
+						d.message(c, p, row.Item, i == len(v.Rows)-1)
 					}
-				} else {
-					d.message(c, p, row.Item, i == len(v.Rows)-1)
-				}
-			})
-		}).Grow(1).Gap(18).Padding(8, 0, bottom, 0).ScrollbarInsets(8, 0, bottom-12, 0).Label(tr("对话记录")).Role(ui.RoleList)
-		if !v.List.AtEnd() {
-			ui.Row(c).Absolute().Bottom(bottom - 4).Left(0).Right(0).Justify(ui.Center).PassThrough().Children(func() {
-				back := glassy(ui.ButtonBase(c).Label(tr("回到最新")).Height(32).Padding(0, 14, 0, 12).Gap(6), 99, ui.Transparent).Transition(enterMotion)
-				back.Children(func() {
-					icon(c, "ArrowDown", 14, p.Text2)
-					ui.Text(c, tr("回到最新")).NoWrap().FontSize(p.font(12.04)).FontWeight(550).TextColor(p.Text2)
 				})
-				if back.Clicked() {
-					v.List.ScrollToEnd()
-				}
-			})
-		}
+			}).Fill().Gap(18).Padding(20, 0, bottom, 0).ScrollbarInsets(16, 0, bottom-12, 0).Label(tr("对话记录")).Role(ui.RoleList)
+			ui.Box(c).Absolute().Top(0).Left(0).Right(0).Height(16).PassThrough().Material(glass.ScrollEdge{Background: p.Main})
+			if !v.List.AtEnd() {
+				ui.Row(c).Absolute().Bottom(bottom - 4).Left(0).Right(0).Justify(ui.Center).PassThrough().Children(func() {
+					back := glassy(ui.ButtonBase(c).Label(tr("回到最新")).Height(32).Padding(0, 14, 0, 12).Gap(6), 99, ui.Transparent).Transition(enterMotion)
+					back.Children(func() {
+						icon(c, "ArrowDown", 14, p.Text2)
+						ui.Text(c, tr("回到最新")).NoWrap().FontSize(p.font(fontSmall)).FontWeight(550).TextColor(p.Text2)
+					})
+					if back.Clicked() {
+						v.List.ScrollToEnd()
+					}
+				})
+			}
+		})
 	})
 }
 
@@ -98,12 +146,12 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 	v := d.current()
 	switch item.Kind {
 	case "user":
-		turn := ui.Column(c).AlignItems(ui.End).Gap(6).Margin(10, 0, 0, 0).Transition(enterMotion)
+		turn := ui.Column(c).AlignItems(ui.End).Gap(6).Margin(6, 0, 0, 0).Transition(enterMotion)
 		turn.Children(func() {
 			if len(item.Attachments) > 0 {
 				d.attachmentChips(c, p, item.Attachments, false)
 			}
-			ui.Text(c, item.Text).MaxWidthPercent(82).Padding(10, 16).Radius(20).Background(p.Subtle).FontSize(p.font(14)).LineHeight(1.6).TextColor(p.Text).Selectable()
+			ui.Text(c, item.Text).MaxWidthPercent(82).Padding(10, 16).Radius(20).Background(p.Subtle).FontSize(p.font(fontProse)).LineHeight(1.6).TextColor(p.Text).Selectable()
 			actions := ui.Row(c).Height(26).Gap(2).Margin(-2, 0, 0, 0)
 			if !turn.Hovered() && !turn.FocusWithin() {
 				actions.Opacity(0)
@@ -148,7 +196,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 			spark(c, 18, p.Accent, true)
 			shimmer(c, p, tr(item.Text)).Grow(1).Basis(0).MinWidth(0)
 			if elapsed := time.Since(item.StartedAt); elapsed >= 2*time.Second {
-				muted(c, p, formatDuration(elapsed)).NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(p.Text4)
+				muted(c, p, formatDuration(elapsed)).NoWrap().Shrink(0).FontSize(p.font(fontCaption)).TextColor(p.Text4)
 			}
 		})
 		c.After(time.Second)
@@ -167,7 +215,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 		}
 		ui.Row(c).Gap(8).Padding(4, 0).AlignItems(ui.Start).Transition(enterMotion).Children(func() {
 			ui.Box(c).Height(20).Center().Children(func() { icon(c, name, 14, color) })
-			ui.Text(c, localizeNotice(item.Text)).Grow(1).FontSize(p.font(12.32)).TextColor(p.Text2).Selectable()
+			ui.Text(c, localizeNotice(item.Text)).Grow(1).FontSize(p.font(fontSmall)).TextColor(p.Text2).Selectable()
 		})
 	case "summary":
 		label, name, color := tr("已完成"), "CircleCheck", p.Text4
@@ -183,7 +231,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 		ui.Row(c).Height(24).Gap(10).Children(func() {
 			ui.Box(c).Grow(1).Height(1).Background(p.BorderSubtle)
 			icon(c, name, 12, color)
-			ui.Text(c, text).NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(p.Text4)
+			ui.Text(c, text).NoWrap().Shrink(0).FontSize(p.font(fontCaption)).TextColor(p.Text4)
 			ui.Box(c).Grow(1).Height(1).Background(p.BorderSubtle)
 		})
 	case "approval":
@@ -195,7 +243,7 @@ func (d *desktop) message(c *ui.Context, p palette, item *model.FeedItem, last b
 // Claude shows a step in progress, in frames that only paint.
 func shimmer(c *ui.Context, p palette, text string) ui.Element {
 	still := reduceMotion(c)
-	e := ui.Text(c, text).SingleLine().FontSize(p.font(13)).TextColor(p.Text2)
+	e := ui.Text(c, text).SingleLine().FontSize(p.font(fontBody)).TextColor(p.Text2)
 	e.DrawOver(func(painter *ui.Painter, r ui.Rect) {
 		if still || r.W <= 0 {
 			return
@@ -249,10 +297,10 @@ func (d *desktop) reasoningView(c *ui.Context, p palette, item *model.FeedItem) 
 		head.Children(func() {
 			if item.Pending {
 				spark(c, 14, p.Accent, true)
-				shimmer(c, p, tr("正在思考…")).FontSize(p.font(12.6))
+				shimmer(c, p, tr("正在思考…")).FontSize(p.font(fontSmall))
 			} else {
 				icon(c, "Clock", 14, p.Text3)
-				ui.Text(c, label).NoWrap().FontSize(p.font(12.6)).TextColor(p.Text3)
+				ui.Text(c, label).NoWrap().FontSize(p.font(fontSmall)).TextColor(p.Text3)
 			}
 			disclosure(c, p, open)
 		})
@@ -264,7 +312,7 @@ func (d *desktop) reasoningView(c *ui.Context, p palette, item *model.FeedItem) 
 				scroll.Y = math.MaxFloat32
 			}
 			ui.Scroll(c).FillWidth().MaxHeight(220).TrackScroll(scroll).Margin(0, 0, 4, 13).Padding(2, 12, 2, 14).BorderWidth(0, 0, 0, 2).BorderColor(p.Border).Transition(enterMotion).Children(func() {
-				ui.Text(c, item.Text).FillWidth().Selectable().FontSize(p.font(12.6)).LineHeight(1.65).TextColor(p.Text3)
+				ui.Text(c, item.Text).FillWidth().Selectable().FontSize(p.font(fontSmall)).LineHeight(1.65).TextColor(p.Text3)
 			})
 		}
 	})
@@ -284,7 +332,7 @@ func (d *desktop) toolMeta(c *ui.Context, p palette, item *model.FeedItem) {
 		return strings.Count(s, "\n") + 1
 	}
 	small := func(text string, color ui.Color) {
-		ui.Text(c, text).NoWrap().Shrink(0).FontSize(p.font(11.2)).TextColor(color)
+		ui.Text(c, text).NoWrap().Shrink(0).FontSize(p.font(fontCaption)).TextColor(color)
 	}
 	if !item.Success && !item.Interrupted {
 		small(tr("失败"), p.Danger)
@@ -389,10 +437,10 @@ func (d *desktop) toolGroup(c *ui.Context, p palette, row model.FeedRow) {
 			} else {
 				icon(c, "Layers", 15, p.Text3)
 			}
-			ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(13)).FontWeight(550).TextColor(p.Text)
+			ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(fontBody)).FontWeight(550).TextColor(p.Text)
 			ui.Spacer(c)
 			if len(names) > 0 {
-				ui.Text(c, strings.Join(names, " · ")).SingleLine().Shrink(1).FontSize(p.font(11.76)).TextColor(p.Text3)
+				ui.Text(c, strings.Join(names, " · ")).SingleLine().Shrink(1).FontSize(p.font(fontSmall)).TextColor(p.Text3)
 			}
 			disclosure(c, p, open)
 		})
@@ -474,7 +522,7 @@ func (d *desktop) stepWith(c *ui.Context, p palette, item *model.FeedItem, more,
 				if !item.Pending {
 					label = strings.TrimPrefix(meta.Done, "已")
 				}
-				ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(12.6)).TextColor(p.Text)
+				ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(fontBody)).TextColor(p.Text)
 				target := toolTarget(item)
 				if item.Name == "grep" {
 					target = fmt.Sprintf("\"%s\"", model.String(item.Args["pattern"]))
@@ -482,7 +530,7 @@ func (d *desktop) stepWith(c *ui.Context, p palette, item *model.FeedItem, more,
 						target += tr(" 于 ") + path
 					}
 				}
-				ui.Text(c, target).Grow(1).Basis(0).MinWidth(0).SingleLine().Font(monoFont).FontSize(p.font(11.48)).TextColor(p.Text3)
+				ui.Text(c, target).Grow(1).Basis(0).MinWidth(0).SingleLine().Font(monoFont).FontSize(p.font(fontSmall)).TextColor(p.Text3)
 				switch {
 				case waiting:
 					badge(c, p, tr("等待批准"), p.Warning, p.WarningSoft)
@@ -497,7 +545,7 @@ func (d *desktop) stepWith(c *ui.Context, p palette, item *model.FeedItem, more,
 				v.Open["tool-"+item.ID] = !open
 			}
 			if item.ChildSessionID != "" {
-				ui.Text(c, model.ChildSummary(item)).SingleLine().Margin(0, 0, 4, 6).FontSize(p.font(11.48)).TextColor(p.Text3)
+				ui.Text(c, model.ChildSummary(item)).SingleLine().Margin(0, 0, 4, 6).FontSize(p.font(fontSmall)).TextColor(p.Text3)
 			}
 			if item.Success && len(item.Attachments) > 0 {
 				ui.Column(c).Margin(2, 0, 8, 6).Children(func() { d.readImages(c, p, item.Attachments) })
@@ -515,7 +563,7 @@ func (d *desktop) toolDetail(c *ui.Context, p palette, v *conversation, item *mo
 	if len(item.ChildProgress) > 0 {
 		ui.Column(c).Gap(4).Children(func() {
 			for _, step := range item.ChildProgress {
-				ui.Text(c, step.Name+" · "+model.ChildStatusLabel(step.Status)).SingleLine().FontSize(p.font(11.48)).TextColor(p.Text2)
+				ui.Text(c, step.Name+" · "+model.ChildStatusLabel(step.Status)).SingleLine().FontSize(p.font(fontSmall)).TextColor(p.Text2)
 			}
 		})
 	}
@@ -575,20 +623,29 @@ func (d *desktop) toolDetail(c *ui.Context, p palette, v *conversation, item *mo
 }
 
 func (d *desktop) terminal(c *ui.Context, p palette, command, output string) {
-	ui.Column(c).Padding(10, 14).Radius(12).Background(p.Terminal).Border(1, p.CodeBorder).Gap(6).Children(func() {
+	box := ui.Column(c).Radius(12).Background(p.Terminal).Border(1, p.CodeBorder)
+	if output == "" {
+		box.Padding(8, 12)
+	} else {
+		box.Padding(10, 14).Gap(6)
+	}
+	box.Children(func() {
 		if command != "" {
-			ui.RichText(c, ui.Span{Text: "$ ", Color: p.TerminalDim}, ui.Span{Text: command, Color: p.TerminalText}).Font(monoFont).FontSize(p.font(12.04)).Selectable()
+			cmd := ui.RichText(c, ui.Span{Text: "$ ", Color: p.TerminalDim}, ui.Span{Text: command, Color: p.TerminalText}).Font(monoFont).FontSize(p.font(fontSmall)).Selectable()
+			if output == "" {
+				cmd.LineHeight(1.35)
+			}
 		}
 		if output != "" {
 			text := output
-			ui.TextAreaBase(c, &text).ReadOnly(true).Label(tr("命令输出")).Height(min(280, float32(strings.Count(output, "\n")+1)*19+8)).Font(monoFont).FontSize(p.font(11.76)).TextColor(p.TerminalDim).LineHeight(1.6)
+			ui.TextAreaBase(c, &text).ReadOnly(true).Label(tr("命令输出")).Height(min(280, float32(strings.Count(output, "\n")+1)*19+8)).Font(monoFont).FontSize(p.font(fontSmall)).TextColor(p.TerminalDim).LineHeight(1.6)
 		}
 	})
 }
 func logText(c *ui.Context, p palette, source string, maxHeight float32) {
 	text := source
 	ui.Column(c).Radius(12).Background(p.Code).Border(1, p.CodeBorder).Padding(8, 12).Children(func() {
-		ui.TextAreaBase(c, &text).ReadOnly(true).Label(tr("工具输出")).Height(min(maxHeight, float32(strings.Count(source, "\n")+1)*18+8)).Font(monoFont).FontSize(p.font(11.48)).TextColor(p.Text2).LineHeight(1.6)
+		ui.TextAreaBase(c, &text).ReadOnly(true).Label(tr("工具输出")).Height(min(maxHeight, float32(strings.Count(source, "\n")+1)*18+8)).Font(monoFont).FontSize(p.font(fontSmall)).TextColor(p.Text2).LineHeight(1.6)
 	})
 }
 
@@ -614,12 +671,20 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 		}
 		ui.Row(c).Gap(8).Height(26).Children(func() {
 			icon(c, name, 14, color)
-			ui.Text(c, label+" · "+toolTarget(item)).SingleLine().FontSize(p.font(12.04)).TextColor(p.Text3)
+			ui.Text(c, label+" · "+toolTarget(item)).SingleLine().FontSize(p.font(fontSmall)).TextColor(p.Text3)
 		})
 		return
 	}
-	card := ui.Column(c).Radius(18).Clip().Border(1, p.Border).Background(p.Elevated).Transition(ui.ElementTransition{Duration: 260 * time.Millisecond, Ease: ui.CubicBezier(0.2, 0.8, 0.2, 1), Enter: &ui.Motion{Y: 10, Scale: 0.98}}).Role(ui.RoleGroup).Label(tr("需要你的批准"))
-	card.Shadow(0, 10, 30, -10, ui.RGBA(0, 0, 0, 0.16))
+	border := p.Warning.Alpha(0.32)
+	if p.Dark {
+		border = p.Warning.Alpha(0.36)
+	}
+	card := ui.Column(c).Radius(18).Clip().Border(1, border).Background(p.Elevated).Transition(ui.ElementTransition{Duration: 260 * time.Millisecond, Ease: ui.CubicBezier(0.2, 0.8, 0.2, 1), Enter: &ui.Motion{Y: 10, Scale: 0.98}}).Role(ui.RoleGroup).Label(tr("需要你的批准"))
+	if p.Dark {
+		card.Shadow(0, 8, 24, -8, ui.RGBA(0, 0, 0, 0.36))
+	} else {
+		card.Shadow(0, 8, 24, -8, ui.RGBA(31, 30, 29, 0.12))
+	}
 	question, iconName := tr("允许 MiniCode 编辑这个文件吗？"), "PencilLine"
 	switch item.Name {
 	case "bash", "powershell":
@@ -633,18 +698,18 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 		question, iconName = trf("允许 MiniCode 使用 %s 吗？", item.Name), "Wrench"
 	}
 	card.Children(func() {
-		ui.Row(c).Padding(16, 18, 12, 18).Gap(12).Children(func() {
+		ui.Row(c).Padding(14, 18, 10, 18).Gap(12).Children(func() {
 			ui.Box(c).Size(34, 34).Radius(10).Background(p.WarningSoft).Center().Shrink(0).Children(func() { icon(c, iconName, 17, p.Warning) })
 			ui.Column(c).Grow(1).Gap(2).Children(func() {
-				ui.Text(c, question).FontSize(p.font(14)).FontWeight(600).TextColor(p.Text)
-				muted(c, p, tr("需要你的批准")+" · "+toolTarget(item)).FontSize(p.font(11.48)).SingleLine()
+				ui.Text(c, question).FontSize(p.font(fontProse)).FontWeight(600).TextColor(p.Text)
+				muted(c, p, tr("需要你的批准")+" · "+toolTarget(item)).FontSize(p.font(fontCaption)).SingleLine()
 			})
 		})
-		ui.Column(c).Padding(0, 18, 14, 18).Children(func() {
+		ui.Column(c).Padding(0, 18, 0, 18).Children(func() {
 			if item.Name == "bash" || item.Name == "powershell" {
 				d.terminal(c, p, model.String(item.Args["command"]), "")
 			} else {
-				ui.Text(c, model.String(item.Args["path"])).Font(monoFont).FontSize(p.font(11.48)).TextColor(p.Text2).Margin(0, 0, 8, 0)
+				ui.Text(c, model.String(item.Args["path"])).Font(monoFont).FontSize(p.font(fontSmall)).TextColor(p.Text2).Margin(0, 0, 8, 0)
 				if item.Name == "edit" {
 					d.diffView(c, p, d.itemDiff(item), item.ID, 40)
 				} else {
@@ -657,7 +722,7 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 				}
 			}
 		})
-		ui.Row(c).Padding(12, 18, 16, 18).Gap(8).Justify(ui.End).Children(func() {
+		ui.Row(c).Padding(12, 18, 14, 18).Gap(8).Justify(ui.End).Children(func() {
 			key := func(label, k string, primary bool) ui.Element {
 				b := styleButton(ui.ButtonBase(c).Label(label), p, primary).Height(34).Radius(11).Padding(0, 12, 0, 14)
 				b.Children(func() {
@@ -666,7 +731,7 @@ func (d *desktop) approval(c *ui.Context, p palette, item *model.FeedItem) {
 					if primary {
 						color, bg = p.InkText.Alpha(0.7), p.InkText.Alpha(0.14)
 					}
-					ui.Text(c, k).Font(monoFont).FontSize(p.font(10.36)).Padding(1, 5).Radius(5).TextColor(color).Background(bg)
+					ui.Text(c, k).Font(monoFont).FontSize(p.font(fontMicro)).Padding(1, 5).Radius(5).TextColor(color).Background(bg)
 				})
 				return b
 			}
@@ -718,7 +783,7 @@ func (d *desktop) diffView(c *ui.Context, p palette, lines []content.DiffLine, i
 	if limit > 0 && !expanded {
 		count = min(limit, count)
 	}
-	frame := ui.Column(c).Clip().Radius(12).Border(1, p.CodeBorder).Background(p.Code).Padding(4, 0).Font(monoFont).FontSize(p.font(11.76))
+	frame := ui.Column(c).Clip().Radius(12).Border(1, p.CodeBorder).Background(p.Code).Padding(4, 0).Font(monoFont).FontSize(p.font(fontSmall))
 	if id == "preview-row" {
 		// The preview lists the lines one by one; each is a bare row.
 		frame.Radius(0).Border(0, ui.Transparent).Padding(0).Background(ui.Transparent)
@@ -746,7 +811,7 @@ func (d *desktop) diffView(c *ui.Context, p palette, lines []content.DiffLine, i
 					if n > 0 {
 						label = fmtInt(n)
 					}
-					ui.Text(c, label).Width(44).TextAlign(ui.End).Padding(2, 8, 2, 4).TextColor(number).FontSize(p.font(10.64))
+					ui.Text(c, label).Width(44).TextAlign(ui.End).Padding(2, 8, 2, 4).TextColor(number).FontSize(p.font(fontCaption))
 					ui.Text(c, sign).Width(16).TextColor(color).Padding(2, 0)
 				}
 				text := line.Text
@@ -755,7 +820,7 @@ func (d *desktop) diffView(c *ui.Context, p palette, lines []content.DiffLine, i
 				}
 				row := ui.Text(c, text).Grow(1).Padding(2, 10, 2, 0).TextColor(color).NoWrap().Selectable().LineHeight(1.6)
 				if line.Type == "hunk" {
-					row.Padding(2, 14).FontSize(p.font(10.64))
+					row.Padding(2, 14).FontSize(p.font(fontCaption))
 				}
 			})
 		}

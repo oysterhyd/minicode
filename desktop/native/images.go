@@ -80,7 +80,7 @@ func (d *desktop) readImages(c *ui.Context, p palette, files []model.Attachment)
 				if b.Clicked() {
 					d.openAttachment(file)
 				}
-				muted(c, p, file.Name).SingleLine().MaxWidth(320).FontSize(p.font(10.5))
+				muted(c, p, file.Name).SingleLine().MaxWidth(320).FontSize(p.font(fontCaption))
 			})
 		}
 	})

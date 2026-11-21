@@ -83,14 +83,14 @@ func (d *desktop) extensionSettings(c *ui.Context, p palette, s *settingsState, 
 			}
 		})
 		if e.Error != "" {
-			ui.Text(c, tr(e.Error)).TextColor(p.Danger).FontSize(p.font(11.48))
+			ui.Text(c, tr(e.Error)).TextColor(p.Danger).FontSize(p.font(fontSmall))
 		}
 		if e.Loading {
 			ui.Row(c).Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在扫描本地配置…")) })
 			return
 		}
 		entries := visibleExtensions(e, kind)
-		muted(c, p, trf("%d 个资源", len(entries))).FontSize(p.font(10.92))
+		muted(c, p, trf("%d 个资源", len(entries))).FontSize(p.font(fontCaption))
 		if len(entries) == 0 {
 			empty(c, p, "未发现匹配的本地资源。")
 		}
@@ -98,7 +98,7 @@ func (d *desktop) extensionSettings(c *ui.Context, p palette, s *settingsState, 
 			ui.Row(c.Key(item.ID)).FillWidth().Padding(14).Gap(14).Radius(10).Border(1, p.BorderSubtle).Background(p.Panel).Children(func() {
 				ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(5).Children(func() {
 					ui.Row(c).Wrap().Gap(6).Children(func() {
-						ui.Text(c, item.Name).FontSize(p.font(12.32)).FontWeight(600)
+						ui.Text(c, item.Name).FontSize(p.font(fontBody)).FontWeight(600)
 						label := "全局"
 						if item.Scope == "project" {
 							label = "项目"
@@ -110,9 +110,9 @@ func (d *desktop) extensionSettings(c *ui.Context, p palette, s *settingsState, 
 						}
 					})
 					if item.Description != "" {
-						ui.Text(c, item.Description).FontSize(p.font(11.48)).TextColor(p.Text3).MaxLines(2).Tooltip(item.Description)
+						ui.Text(c, item.Description).FontSize(p.font(fontSmall)).TextColor(p.Text3).MaxLines(2).Tooltip(item.Description)
 					}
-					ui.Text(c, item.Path).FontSize(p.font(10.36)).TextColor(p.Text4).SingleLine().Tooltip(item.Path)
+					ui.Text(c, item.Path).FontSize(p.font(fontCaption)).TextColor(p.Text4).SingleLine().Tooltip(item.Path)
 					if item.Detail != "" {
 						muted(c, p, item.Detail).MaxLines(2).Tooltip(item.Detail)
 					}
@@ -196,14 +196,14 @@ func (d *desktop) extensionSettings(c *ui.Context, p palette, s *settingsState, 
 				settingsRow(c, p, name, label, func() {})
 				if status.StderrTail != "" || status.LogPath != "" {
 					ui.Column(c).FillWidth().Gap(5).Children(func() {
-						ui.Text(c, tr("最近日志")).FontSize(p.font(11.2)).TextColor(p.Text2)
+						ui.Text(c, tr("最近日志")).FontSize(p.font(fontSmall)).TextColor(p.Text2)
 						if status.StderrTail != "" {
 							ui.Scroll(c).FillWidth().MaxHeight(160).Children(func() {
-								ui.Text(c, status.StderrTail).FillWidth().Font(monoFont).FontSize(p.font(11)).TextColor(p.Text2).Selectable()
+								ui.Text(c, status.StderrTail).FillWidth().Font(monoFont).FontSize(p.font(fontSmall)).TextColor(p.Text2).Selectable()
 							})
 						}
 						if status.LogPath != "" {
-							ui.Text(c, tr("日志文件")+": "+status.LogPath).FontSize(p.font(10.92)).TextColor(p.Text3).Selectable()
+							ui.Text(c, tr("日志文件")+": "+status.LogPath).FontSize(p.font(fontCaption)).TextColor(p.Text3).Selectable()
 						}
 					})
 				}
