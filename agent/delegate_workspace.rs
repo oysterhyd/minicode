@@ -50,6 +50,7 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub fn create(parent: &Path, storage: &Path, owner: &str, extra: &[PathBuf]) -> Result<Self> {
+        let raw_parent = parent;
         let parent = util::canonical(parent)?;
         let container = storage.join("delegates");
         if util::canonical(&container)?.starts_with(&parent) {
@@ -68,7 +69,10 @@ impl Workspace {
         fs::create_dir(temporary.path().join("work"))?;
         let mut paths = source_files(&parent)?;
         for source in extra {
-            if let Ok(relative) = source.strip_prefix(&parent) {
+            if let Ok(relative) = source
+                .strip_prefix(&parent)
+                .or_else(|_| source.strip_prefix(raw_parent))
+            {
                 paths.push(
                     relative
                         .to_str()

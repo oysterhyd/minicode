@@ -47,16 +47,16 @@ pub fn is_link(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0 && fs::read_link(path).is_ok()
+        metadata.file_type().is_symlink()
+            || (metadata.file_attributes() & 0x400 != 0 && fs::read_link(path).is_ok())
     }
     #[cfg(not(windows))]
-    false
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 pub fn valid_id(value: &str) -> bool {
     !value.is_empty()

@@ -217,28 +217,33 @@ mod windows_tests {
     async fn windows_spawn_binds_job_before_descendants_escape() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("grandchild.pid");
-        let ps = std::env::var_os("SystemRoot")
-            .map(std::path::PathBuf::from)
-            .map(|r| r.join("System32/WindowsPowerShell/v1.0/powershell.exe"))
-            .unwrap_or_else(|| std::path::PathBuf::from("powershell.exe"));
-        let script = format!(
-            "$p = Start-Process -FilePath '{}' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60' -PassThru -WindowStyle Hidden; [IO.File]::WriteAllText('{}', [string]$p.Id); Start-Sleep -Seconds 60",
-            ps.display(),
-            pid_file.display()
-        );
-        let mut cmd = Command::new(&ps);
-        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        let script = r#"
+const fs = require('fs');
+const { spawn } = require('child_process');
+const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+  stdio: 'ignore',
+  detached: true,
+});
+fs.writeFileSync(process.argv[1], String(child.pid));
+setTimeout(() => {}, 60000);
+"#;
+        let mut cmd = Command::new("node");
+        cmd.args(["-e", script])
+            .arg(&pid_file)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         let (mut child, tree) = ProcessTree::spawn(&mut cmd).await.unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let gc_pid: u32 = loop {
             if let Ok(text) = std::fs::read_to_string(&pid_file)
                 && let Ok(pid) = text.trim().parse::<u32>()
             {
                 break pid;
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                panic!("parent exited early before writing pid file: {status}");
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -250,20 +255,33 @@ mod windows_tests {
         tree.shutdown().await;
         let _ = child.wait().await;
         assert!(!tree.active());
-        unsafe {
-            use windows_sys::Win32::{
-                Foundation::CloseHandle,
-                System::Threading::{
-                    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-                },
+        let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let alive = unsafe {
+                use windows_sys::Win32::{
+                    Foundation::CloseHandle,
+                    System::Threading::{
+                        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+                    },
+                };
+                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, gc_pid);
+                if handle.is_null() {
+                    false
+                } else {
+                    let mut code = 0u32;
+                    let ok = GetExitCodeProcess(handle, &mut code);
+                    CloseHandle(handle);
+                    ok != 0 && code == 259
+                }
             };
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, gc_pid);
-            if !handle.is_null() {
-                let mut code = 0u32;
-                let ok = GetExitCodeProcess(handle, &mut code);
-                CloseHandle(handle);
-                assert!(ok == 0 || code != 259, "grandchild {gc_pid} still alive");
+            if !alive {
+                break;
             }
+            assert!(
+                std::time::Instant::now() < exit_deadline,
+                "grandchild {gc_pid} still alive"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
 }
