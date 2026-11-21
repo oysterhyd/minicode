@@ -66,6 +66,8 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
 
 3.0.3 改善运行恢复、Provider / Bridge 兼容性和中文 Windows 工具链，增加多编码文件读写、PDF / Notebook 文本读取、批量编辑、忽略规则搜索与命令输出治理；修复记录及可配置边界见 [3.0.3 修复说明](docs/fixes-3.0.3.md)。
 
+3.1.0 强化 SQLite 跨进程初始化、Windows 进程树与 AppContainer 沙箱租约回收及分层权限 DSL，新增 OpenAI Responses API、可配置模型单价与实时成本统计、服务端持久化队列、CLI 默认 TUI 与行编辑、脱敏录制回放与多模型评测矩阵，并将 Bridge 协议契约（[bridge-protocol.v2.json](agent/assets/bridge-protocol.v2.json)）、stdout 背压与 Desktop/TUI 状态归约收敛一致。
+
 发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未作 Windows 代码签名，更新归档使用 Ed25519 签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
 
@@ -96,7 +98,7 @@ CLI 与桌面端共用已添加的 AI 服务和会话。源码构建后，使用
 | 流式交互 | Markdown 回复、代码高亮、工具状态、文件引用、斜杠命令和键盘快捷操作。 |
 | 权限审批 | 修改与命令遵循所选权限模式；可逐项审批，也可为当前会话记住授权。 |
 | 会话恢复 | 持久保存消息、事件、用量和运行状态，支持查看历史与继续任务。 |
-| 模型服务 | 支持 OpenAI Chat Completions 与 Anthropic Messages，可管理多个服务和模型。 |
+| 模型服务 | 支持 OpenAI Chat Completions、OpenAI Responses API 与 Anthropic Messages，可管理多个服务、模型与单价估算。 |
 | 上下文与预算 | 上下文压缩、长输出归档，以及轮数、token 和时长预算。 |
 | 任务验收 | 可配置验收命令，将测试结果和工作区状态作为完成任务的证据。 |
 | 扩展能力 | 项目指令、Skills、MCP（stdio / HTTP / SSE）、插件和可配置子助手。 |

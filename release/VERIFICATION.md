@@ -1,3 +1,11 @@
+# v3.1.0 核心可靠性、OpenAI Responses API、架构收敛与发行核验
+
+2026-11-21，Windows x64 / PowerShell 7，Rust stable MSVC、Go 1.27.1、Node.js 22.22.0、MyGo 0.5.5。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.1.0，沿用既有 Ed25519 更新签名公钥（`4Ykb7FjKNYD3nPbz3ogPgB8KlxYTN4uflE/MO8EEJo0=`）。
+
+本机 `3.1.0` 发行前核验：Rust `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（250 通过、0 失败、2 项手动基准按配置忽略）与 `cargo build --locked --release` 通过。`node scripts/check-doc-paths.mjs`、`evals/generate-tasks.mjs --verify`、`evals/scenarios/generate-trace.mjs` 与 60 次任务 + 9 次场景评测全部符合预期（`counter_retry` 的 B0/B1 为预设首轮失败、B2 通过）。Node 后端 `concurrency` / `extensions` 12 通过、0 失败、1 项 Unix 用例跳过；除 `sandbox.test.mjs` 外 51 套件本机实跑 310 通过、3 跳过（`windows-prompt` 受本机 Store `WindowsApps\pwsh.exe` 别名影响，`sandbox.test.mjs` 受本机 AppContainer 宿主启动错误 `0xC0000142` 限制，完整跨平台回归交由 GitHub Actions `ubuntu-latest` / `windows-latest` 执行）。TUI 源码构建及含真实 Rust 桥接的 144 项测试全通过（0 失败、0 跳过）；生产裁剪与压缩（移除 2,557 个元数据文件、压缩 2,256 个 JS 文件）后的包内 TUI 完整回归同样 144 项全通过；收集 259 个 Rust 依赖许可，源码（1,786 文件）、Git 历史（7,094 blobs）及包内 runtime（3,496 文件）凭据审计均通过。Native Desktop `go test -count=1 ./...`（5 个含测试包全通过）、`go vet ./...` 与 `go test -count=1 ./vendor/github.com/egoist/mygo/ui` 全部通过。
+
+因本机开发环境的全局 `mygo` CLI 与 `%APPDATA%` 签名私钥与仓库正式发行公钥不一致，正式 Windows 安装包构建、原公钥 Ed25519 签名、差分包生成、烟测与安装卸载验收由 GitHub Actions `.github/workflows/release.yml`（`mygo@v0.5.5` + 仓库 Secret `MYGO_UPDATER_PRIVATE_KEY`）及 `.github/workflows/tests.yml` 在远端干净环境执行并发布到 `v3.1.0` Release。
+
 # v3.0.3 运行可靠性、Windows 与文件工具发行核验
 
 2026-10-28，Windows x64 / PowerShell 7，MyGo 0.5.5。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.0.3，保留原更新签名公钥；包含阶段 0–3 的累计迭代，详细行为与可配置边界见 [修复记录](../docs/fixes-3.0.3.md)。

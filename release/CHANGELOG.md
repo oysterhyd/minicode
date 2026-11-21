@@ -1,5 +1,13 @@
 # MiniCode
 
+## 3.1.0 - 2026-11-21
+
+- 核心可靠性与安全隔离：跨进程 SQLite 初始化加锁、大文件编辑移除 `unsafe memmap2` 与确定性锁序、Windows `CREATE_SUSPENDED` 进程树 Job 绑定及 AppContainer 沙箱租约清理；新增分层权限 DSL 与可选 OS Shell 沙箱。
+- Provider 与成本估算：新增 OpenAI Responses API（`openai_responses`）样式（支持思考、工具调用及加密思考内容往返）；新增可配置模型单价（USD/1M tokens）、实时会话成本统计、`/cost` 命令与 TUI / Desktop 费用显示。
+- 运行时与交互演进（阶段 4–8A）：服务端持久化的引导/跟进队列、CLI 交互式行编辑/历史/恢复与默认启动 TUI、脱敏运行录制与确定性回放（G5）、多模型与机制重复评测矩阵（E3），以及 `rusqlite 0.41` / `tokio 1.54` 依赖升级。
+- 架构与协议收敛：新增权威桥接协议清单 `agent/assets/bridge-protocol.v2.json` 与 Rust/Go/TUI 三端契约测试、有界合并与分级丢弃的 stdout 背压队列、核心大文件模块化拆分及 Desktop/TUI 状态归约统一。
+- 升级兼容：旧配置、schema 7 会话、附件、记忆与既有 Ed25519 更新签名公钥继续兼容；因次版本号升级至 3.1.0，显式声明 `3.0.x` 的本地插件需审查兼容性后将 `minicode_version` 更新至 `3.1.0` 并重新锁定。
+
 ## 3.0.3 - 2026-10-28
 
 - 提升运行可靠性：流式请求按空闲时间超时；中断、取消及异常退出后完整收尾，可恢复会话、项目指令与技能。
