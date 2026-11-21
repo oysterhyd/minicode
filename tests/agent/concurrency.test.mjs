@@ -5,13 +5,15 @@ import {test} from 'node:test'
 import {setTimeout as delay} from 'node:timers/promises'
 import {fixture} from './helpers.mjs'
 
+const minicodeVersion=JSON.parse(fs.readFileSync(new URL('../../release/package.json',import.meta.url),'utf8')).version
+
 test('B5/B15: concurrent catalog scans cannot delay another sessions cancellation by 100ms', async t => {
   const f = await fixture(t,[{tool_calls:[{name:'write',arguments:{path:'needs-approval.txt',content:'pending'}}]}])
   const started = await f.request('sendPrompt',{clientKey:'active',workspace:f.workspace,model:'fake',text:'wait for approval'})
   await f.wait(e=>e.event==='approval')
   const workspace=path.join(f.root,'slow-repo'),plugin=path.join(workspace,'.minicode/plugins/dense')
   fs.mkdirSync(plugin,{recursive:true})
-  fs.writeFileSync(path.join(plugin,'plugin.json'),JSON.stringify({name:'dense',version:'1.0.0',minicode_version:'3.0.2',enabled:true}))
+  fs.writeFileSync(path.join(plugin,'plugin.json'),JSON.stringify({name:'dense',version:'1.0.0',minicode_version:minicodeVersion,enabled:true}))
   const content=Buffer.alloc(30_000,'x')
   for(let i=0;i<500;i++)fs.writeFileSync(path.join(plugin,`${i}.txt`),content)
   let completed=0

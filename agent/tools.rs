@@ -5,9 +5,9 @@ mod shell;
 use file_ops::grep_files;
 pub use file_ops::{FileLedger, Files};
 use file_ops::{edit, grep, list, observed_path, read_file, remember};
-pub(crate) use shell::{
-    CommandCapture, decode, git_bash, run_command_captured, windows_shell_guidance,
-};
+pub(crate) use shell::{CommandCapture, decode, run_command_captured};
+#[cfg(windows)]
+pub(crate) use shell::{git_bash, windows_shell_guidance};
 pub use shell::{kill_tree, run_command, run_command_for, shell};
 
 use crate::{

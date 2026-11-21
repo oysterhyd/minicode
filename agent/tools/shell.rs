@@ -5,11 +5,13 @@ use serde_json::json;
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::Stdio,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+use std::{path::PathBuf, sync::OnceLock};
 use tokio::process::Command;
 
 #[cfg(windows)]

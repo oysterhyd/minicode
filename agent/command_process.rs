@@ -1,4 +1,6 @@
-use anyhow::{Context, Result, bail};
+#[cfg(windows)]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 
 // OS ownership also reaps descendants when a command future is dropped.
