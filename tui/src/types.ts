@@ -27,6 +27,8 @@ export type AgentState = {
   acceptance: string
   alwaysAllow?: string[]
   branch?: string | null
+  activeModel?: string
+  pendingSettings?: boolean
   statistics?: { cost?: number | null; [key: string]: unknown }
 }
 
@@ -64,7 +66,7 @@ export type FeedItem = {
   tone?: 'info' | 'warning' | 'error'
 }
 
-export type ApprovalRequestData = { tool_name: string; arguments: Record<string, unknown>; summary: string; grant_rule?: string | null }
+export type ApprovalRequestData = { tool_name: string; call_id?: string; arguments: Record<string, unknown>; summary: string; grant_rule?: string | null }
 
 export type DesktopEvent = {
   clientKey?: string

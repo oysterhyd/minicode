@@ -98,6 +98,41 @@ export function bindFeedSession(state: FeedState, sessionId: string | null): Fee
   return { ...state, sessionId, abandonedSessions }
 }
 
+export function formatToolResultOutput(data: Record<string, unknown>): string {
+  const output = String(data.output_detail || data.output_preview || '')
+  const err = data.error ? String(data.error) : ''
+  return [output, err && !output.includes(err) ? err : ''].filter(Boolean).join('\n')
+}
+
+export function noticeForAgentEvent(
+  type: string,
+  data: Record<string, unknown>,
+): { text: string; tone: 'info' | 'warning' } | null {
+  if (type === 'context_compacted') {
+    return { text: '上下文已自动压缩，较早的内容已归档', tone: 'info' }
+  }
+  if (type === 'goal_check') {
+    return { text: `验收检查：${data.passed ? '通过' : '仍需改进'}`, tone: 'info' }
+  }
+  if (type === 'background_job_completed' || type === 'background_job_lost') {
+    return {
+      text: `后台命令 ${data.job_id ?? ''}：${type === 'background_job_completed' ? '已完成' : '结果丢失'}`,
+      tone: type === 'background_job_lost' ? 'warning' : 'info',
+    }
+  }
+  if (type === 'side_effect_unknown') {
+    return { text: `工具执行结果需复核：${data.name || data.call_id || ''}`, tone: 'warning' }
+  }
+  if (type === 'provider_retry') {
+    const nextAttempt = Number(data.next_attempt)
+    return {
+      text: `模型请求暂时失败，${Number(data.delay_s || 0)} 秒后重试（第 ${nextAttempt > 0 ? nextAttempt : 2} 次）。`,
+      tone: 'warning',
+    }
+  }
+  return null
+}
+
 export function acceptsRunEvent(state: FeedState, event: DesktopEvent): boolean {
   if (event.sessionId) {
     if (state.abandonedSessions?.has(event.sessionId)) return false
@@ -143,8 +178,9 @@ export function applyDesktopEvent(state: FeedState, event: DesktopEvent): FeedSt
   }
   if (event.event === 'approval_auto' && event.request) {
     const request = event.request
+    const callId = request.call_id || state.approvalCallId
     const index = state.items.findLastIndex(item => item.kind === 'tool' && item.pending
-      && (state.approvalCallId ? (item.callId || item.id) === state.approvalCallId : item.name === request.tool_name))
+      && (callId ? (item.callId || item.id) === callId : item.name === request.tool_name))
     if (index < 0) return state
     return {
       ...state,
@@ -189,8 +225,6 @@ function applyAgentEvent(
   }
   if (type === 'tool_call_result') {
     const index = state.items.findLastIndex(item => item.kind === 'tool' && (item.callId || item.id) === String(data.call_id))
-    const output = data.output_detail || data.output_preview
-    const error = data.error !== output ? data.error : undefined
     return {
       ...state,
       items: replaceItem(state.items, index, item => ({
@@ -199,7 +233,7 @@ function applyAgentEvent(
         success: Boolean(data.success),
         interrupted: false,
         endedAt: eventTime(timestamp),
-        output: [output, error].filter(Boolean).join('\n'),
+        output: formatToolResultOutput(data),
         artifactId: data.artifact_id ? String(data.artifact_id) : undefined,
       })),
     }
@@ -224,30 +258,31 @@ function applyAgentEvent(
     return { ...state, items: applyChildEvent(state.items, type, data) }
   }
   if (type === 'provider_retry') {
+    const notice = noticeForAgentEvent(type, data)
+    const resetOutput = data.reset_output !== false
     return {
       ...state,
-      items: [...state.items.filter(item => !(item.kind === 'assistant' && item.pending)), {
-        id: `retry-${seq}`,
-        kind: 'notice',
-        tone: 'warning',
-        text: `模型请求暂时失败，${Number(data.delay_s || 0)} 秒后重试（第 ${Number(data.next_attempt || 2)} 次）。`,
-      }],
+      ...(resetOutput ? { reasoning: '' } : {}),
+      items: [
+        ...(resetOutput ? state.items.filter(item => !(item.kind === 'assistant' && item.pending)) : state.items),
+        ...(notice ? [{
+          id: `retry-${seq}`,
+          kind: 'notice' as const,
+          tone: notice.tone,
+          text: notice.text,
+        }] : []),
+      ],
     }
   }
-  const notice = type === 'context_compacted' ? '上下文已自动压缩，较早的内容已归档'
-    : type === 'goal_check' ? `验收检查：${data.passed ? '通过' : '仍需改进'}`
-    : type === 'background_job_completed' || type === 'background_job_lost'
-      ? `后台命令 ${data.job_id}：${type === 'background_job_completed' ? '已完成' : '结果丢失'}`
-    : type === 'side_effect_unknown' ? `工具执行结果需复核：${data.name || data.call_id || ''}`
-    : null
+  const notice = noticeForAgentEvent(type, data)
   if (notice) {
     return {
       ...state,
       items: [...state.items, {
         id: `notice-${seq}`,
         kind: 'notice',
-        text: notice,
-        tone: type === 'side_effect_unknown' || type === 'background_job_lost' ? 'warning' : 'info',
+        text: notice.text,
+        tone: notice.tone,
       }],
     }
   }

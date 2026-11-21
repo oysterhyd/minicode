@@ -162,6 +162,7 @@ type State struct {
 	Rounds          int            `json:"rounds"`
 	ContextTokens   int            `json:"contextTokens"`
 	ContextWindow   int            `json:"contextWindow"`
+	Branch          string         `json:"branch"`
 	Breakdown       map[string]int `json:"contextBreakdown"`
 	Usage           *Usage         `json:"usage"`
 	Statistics      *Statistics    `json:"statistics"`

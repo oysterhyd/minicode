@@ -28,6 +28,7 @@ type Event struct {
 	Item       json.RawMessage `json:"item"`
 	Request    json.RawMessage `json:"request"`
 	Result     json.RawMessage `json:"result"`
+	Usage      json.RawMessage `json:"usage"`
 }
 
 type reply struct {

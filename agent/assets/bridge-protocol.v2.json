@@ -1,0 +1,263 @@
+{
+  "protocolVersion": 2,
+  "minClientProtocol": 2,
+  "capabilities": [
+    "workspaceTrust",
+    "projectInstructionsChanged",
+    "sessionPaging",
+    "diagnosticEvents",
+    "runIdentity",
+    "asyncStart",
+    "sessionSubscriptions",
+    "fileCompletion",
+    "messageQueue",
+    "stdoutBackpressure"
+  ],
+  "apiStyles": [
+    "openai",
+    "openai_responses",
+    "anthropic"
+  ],
+  "methods": {
+    "control": [
+      "cancelTurn",
+      "resolveApproval"
+    ],
+    "network": [
+      "fetchServiceModels",
+      "testServiceConnection",
+      "refreshMcp"
+    ],
+    "router": [
+      "initialize",
+      "getConfiguration",
+      "getCredentialImportInfo",
+      "importCommandCode",
+      "listModels",
+      "saveService",
+      "deleteService",
+      "setDefaultModel",
+      "saveAgent",
+      "setAgentEnabled",
+      "deleteAgent",
+      "getInstructions",
+      "saveInstructions",
+      "listSessions",
+      "listTasks",
+      "getSession",
+      "getSessionPage",
+      "renameSession",
+      "pinSession",
+      "deleteSession",
+      "listFiles",
+      "readArtifact",
+      "selectSession",
+      "getState",
+      "resetSession",
+      "setModel",
+      "setTuiProvider",
+      "setEffort",
+      "setPermissionMode",
+      "setBudget",
+      "setAcceptance",
+      "clearAlwaysAllow",
+      "getCapabilities",
+      "getLocalExtensions",
+      "setLocalExtensionEnabled",
+      "getWorkspaceTrust",
+      "trustWorkspace",
+      "setPluginEnabled",
+      "lockPlugins",
+      "setSkillActive",
+      "importAttachments",
+      "attachmentPath",
+      "sendPrompt",
+      "enqueuePrompt",
+      "listQueue",
+      "deleteQueuedPrompt",
+      "resumeQueue",
+      "runSlash"
+    ]
+  },
+  "events": {
+    "critical": [
+      "run_started",
+      "agent_event",
+      "queue_changed",
+      "approval",
+      "approval_auto",
+      "run_done",
+      "run_error",
+      "bridge_error",
+      "warning"
+    ],
+    "transient": [
+      "text_delta",
+      "reasoning_delta",
+      "usage_delta",
+      "log"
+    ]
+  },
+  "stateFields": [
+    "protocolVersion",
+    "model",
+    "runId",
+    "phase",
+    "running",
+    "activeModel",
+    "pendingSettings",
+    "effort",
+    "permissionMode",
+    "sessionId",
+    "taskPending",
+    "rounds",
+    "contextTokens",
+    "contextBreakdown",
+    "contextWindow",
+    "branch",
+    "usage",
+    "statistics",
+    "budget",
+    "acceptance",
+    "alwaysAllow"
+  ],
+  "conformance": {
+    "runGateCases": [
+      {
+        "name": "rejects_abandoned_session_event",
+        "view": { "sessionId": "s2", "abandoned": ["s1"], "runId": "", "awaitingRun": false, "busy": false },
+        "event": { "event": "text_delta", "sessionId": "s1", "runId": "" },
+        "expected": false
+      },
+      {
+        "name": "rejects_mismatched_session_event",
+        "view": { "sessionId": "s2", "abandoned": [], "runId": "r2", "awaitingRun": false, "busy": true },
+        "event": { "event": "text_delta", "sessionId": "s1", "runId": "r2" },
+        "expected": false
+      },
+      {
+        "name": "awaiting_run_rejects_old_run_id_on_run_started",
+        "view": { "sessionId": "s1", "abandoned": [], "runId": "r1", "awaitingRun": true, "busy": false },
+        "event": { "event": "run_started", "sessionId": "s1", "runId": "r1" },
+        "expected": false
+      },
+      {
+        "name": "awaiting_run_accepts_new_run_id_on_run_started",
+        "view": { "sessionId": "s1", "abandoned": [], "runId": "r1", "awaitingRun": true, "busy": false },
+        "event": { "event": "run_started", "sessionId": "s1", "runId": "r2" },
+        "expected": true
+      },
+      {
+        "name": "awaiting_run_rejects_non_start_run_events",
+        "view": { "sessionId": "s1", "abandoned": [], "runId": "r1", "awaitingRun": true, "busy": false },
+        "event": { "event": "text_delta", "sessionId": "s1", "runId": "r2" },
+        "expected": false
+      },
+      {
+        "name": "busy_view_rejects_other_run_started",
+        "view": { "sessionId": "s1", "abandoned": [], "runId": "r1", "awaitingRun": false, "busy": true },
+        "event": { "event": "run_started", "sessionId": "s1", "runId": "r2" },
+        "expected": false
+      },
+      {
+        "name": "bridge_error_passes_even_with_mismatched_run_id",
+        "view": { "sessionId": "s1", "abandoned": [], "runId": "r1", "awaitingRun": true, "busy": false },
+        "event": { "event": "bridge_error", "sessionId": "s1", "runId": "r0" },
+        "expected": true
+      },
+      {
+        "name": "empty_run_id_passes_when_session_matches",
+        "view": { "sessionId": "s1", "abandoned": [], "runId": "r1", "awaitingRun": true, "busy": true },
+        "event": { "event": "agent_event", "sessionId": "s1", "runId": "" },
+        "expected": true
+      }
+    ],
+    "noticeCases": [
+      {
+        "name": "context_compacted",
+        "type": "context_compacted",
+        "data": {},
+        "expectedText": "上下文已自动压缩，较早的内容已归档",
+        "expectedTone": "info"
+      },
+      {
+        "name": "goal_check_passed",
+        "type": "goal_check",
+        "data": { "passed": true },
+        "expectedText": "验收检查：通过",
+        "expectedTone": "info"
+      },
+      {
+        "name": "goal_check_failed",
+        "type": "goal_check",
+        "data": { "passed": false },
+        "expectedText": "验收检查：仍需改进",
+        "expectedTone": "info"
+      },
+      {
+        "name": "background_job_completed",
+        "type": "background_job_completed",
+        "data": { "job_id": "job_1" },
+        "expectedText": "后台命令 job_1：已完成",
+        "expectedTone": "info"
+      },
+      {
+        "name": "background_job_lost",
+        "type": "background_job_lost",
+        "data": { "job_id": "job_2" },
+        "expectedText": "后台命令 job_2：结果丢失",
+        "expectedTone": "warning"
+      },
+      {
+        "name": "side_effect_unknown_with_name",
+        "type": "side_effect_unknown",
+        "data": { "name": "write", "call_id": "c1" },
+        "expectedText": "工具执行结果需复核：write",
+        "expectedTone": "warning"
+      },
+      {
+        "name": "side_effect_unknown_falls_back_to_call_id",
+        "type": "side_effect_unknown",
+        "data": { "call_id": "c2" },
+        "expectedText": "工具执行结果需复核：c2",
+        "expectedTone": "warning"
+      },
+      {
+        "name": "provider_retry",
+        "type": "provider_retry",
+        "data": { "delay_s": 1.5, "next_attempt": 2 },
+        "expectedText": "模型请求暂时失败，1.5 秒后重试（第 2 次）。",
+        "expectedTone": "warning"
+      },
+      {
+        "name": "unknown_event_produces_no_notice",
+        "type": "tool_call_start",
+        "data": {},
+        "expectedText": "",
+        "expectedTone": ""
+      }
+    ],
+    "toolOutputCases": [
+      {
+        "name": "prefers_detail_over_preview",
+        "data": { "output_detail": "full detail", "output_preview": "preview" },
+        "expected": "full detail"
+      },
+      {
+        "name": "falls_back_to_preview",
+        "data": { "output_preview": "preview only" },
+        "expected": "preview only"
+      },
+      {
+        "name": "appends_distinct_error",
+        "data": { "output_detail": "exit 1", "error": "command failed" },
+        "expected": "exit 1\ncommand failed"
+      },
+      {
+        "name": "deduplicates_identical_or_contained_error",
+        "data": { "output_detail": "connection lost", "error": "connection lost" },
+        "expected": "connection lost"
+      }
+    ]
+  }
+}
