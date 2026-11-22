@@ -1,3 +1,11 @@
+# v3.2.0 原生桌面端 UI v3 升级与发行核验
+
+2026-11-22，Windows x64 / PowerShell 7，Rust stable MSVC、Go 1.27.1、Node.js 22.22.0。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.2.0，沿用既有 Ed25519 更新签名公钥（`4Ykb7FjKNYD3nPbz3ogPgB8KlxYTN4uflE/MO8EEJo0=`）。
+
+本机 `3.2.0` 发行前核验：Rust `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（250 通过、0 失败、2 项手动基准按配置忽略）与 `cargo build --locked` 通过；`node scripts/check-doc-paths.mjs`、`node release/audit.mjs --source --history .`（1,785 文件、7,162 个 Git blobs）通过；`evals/generate-tasks.mjs --verify`、`evals/scenarios/generate-trace.mjs` 与 60 次任务 + 9 次场景评测符合预期（`counter_retry` 的 B0/B1 为预设首轮失败、B2 通过）。`npm ci --prefix tui`、`npm run build --prefix tui` 与含真实 Rust 桥接的 `npm test --prefix tui` 144 项全部通过（0 失败、0 跳过）；Native Desktop `go test -count=1 ./...`（含新增 `ui_v3_test.go` 在内 5 个含测试包全通过）、`go vet ./...`、`go test -count=1 ./vendor/github.com/egoist/mygo/ui` 与 `desktop/native/build.ps1` 全部通过。Node 后端 `tests/agent/*.test.mjs` 本机共运行 323 项（315 通过、3 跳过、5 失败；5 项均为已知宿主机环境差异：4 项 `sandbox.test.mjs` 受本机 AppContainer 宿主限制，1 项 `windows-prompt.test.mjs` 受本机 Store `WindowsApps\pwsh.exe` 别名影响，完整跨平台回归交由 GitHub Actions `ubuntu-latest` / `windows-latest` 执行）。
+
+因本机全局 `mygo` CLI（0.7.3）及 `%APPDATA%` 签名私钥与仓库正式发行公钥不一致，正式 Windows 安装包构建、原公钥 Ed25519 签名、差分包生成、烟测与安装卸载验收由 GitHub Actions `.github/workflows/release.yml`（`mygo@v0.5.5` + 仓库 Secret `MYGO_UPDATER_PRIVATE_KEY`）及 `.github/workflows/tests.yml` 在远端干净环境执行并发布到 `v3.2.0` Release。
+
 # v3.1.1 原生桌面端视觉精修与发行核验
 
 2026-11-22，Windows x64 / PowerShell 7，Rust stable MSVC、Go 1.27.1、Node.js 22.22.0。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.1.1，沿用既有 Ed25519 更新签名公钥（`4Ykb7FjKNYD3nPbz3ogPgB8KlxYTN4uflE/MO8EEJo0=`）。
