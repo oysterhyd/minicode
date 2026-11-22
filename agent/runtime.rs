@@ -1600,7 +1600,9 @@ impl Runtime {
                 &self.permission_settings,
                 settings.shell_sandbox,
             )?;
-            if settings.pending_model || settings.model != self.provider.configuration_id {
+            if !self.child
+                && (settings.pending_model || settings.model != self.provider.configuration_id)
+            {
                 let config = self.catalog.lock().await.configuration.clone();
                 self.provider = Provider::for_settings(&settings, &config, Some(&self.provider))?;
                 hooks.settings.lock().unwrap().pending_model = false;
@@ -2030,11 +2032,26 @@ impl Runtime {
                     && self.provider.fake.is_none()
                     && self.readonly_delegate(call).await?
                 {
+                    let mut seen = HashSet::new();
+                    seen.insert((
+                        input["kind"].as_str().unwrap_or_default().to_string(),
+                        input["task"].as_str().unwrap_or_default().to_string(),
+                    ));
                     let mut end = index + 1;
-                    if end < calls.len()
+                    while end < calls.len()
+                        && end - index < 4
                         && self.readonly_delegate(&calls[end]).await?
-                        && matches!((call, &calls[end]), (Block::ToolUse{input:a,..}, Block::ToolUse{input:b,..}) if a["kind"]!=b["kind"] || a["task"]!=b["task"])
                     {
+                        let Block::ToolUse { input: next, .. } = &calls[end] else {
+                            break;
+                        };
+                        let key = (
+                            next["kind"].as_str().unwrap_or_default().to_string(),
+                            next["task"].as_str().unwrap_or_default().to_string(),
+                        );
+                        if !seen.insert(key) {
+                            break;
+                        }
                         end += 1;
                     }
                     let mut branches = vec![];
@@ -2977,9 +2994,10 @@ impl Runtime {
             return Ok(def["enabled"] == true
                 && def["inheritTools"] != true
                 && def["tools"].as_array().is_some_and(|tools| {
-                    tools
-                        .iter()
-                        .all(|t| t.as_str().is_some_and(tools::read_only))
+                    tools.iter().all(|t| {
+                        t.as_str()
+                            .is_some_and(|tool| tools::read_only(tool) || tool == "glob")
+                    })
                 }));
         }
         Ok(catalog.agents.contains_key(kind))
@@ -2995,11 +3013,13 @@ impl Runtime {
         Box::pin(async move {
             let catalog = self.catalog.lock().await;
             let configuration = catalog.configuration.clone();
-            let definition = configuration
-                .agents()?
+            let config_data = configuration.read()?;
+            let definition = Configuration::agents_from(&config_data)?
                 .into_iter()
                 .find(|a| a["name"] == kind);
-            let (instructions, source, allowed) = if let Some(def) = definition {
+            let (instructions, source, allowed, agent_model, agent_effort) = if let Some(def) =
+                definition
+            {
                 if def["enabled"] != true {
                     return Ok(Outcome::failure(format!("subagent is disabled: {kind}")));
                 }
@@ -3010,27 +3030,51 @@ impl Runtime {
                         def["tools"].clone(),
                     )?)
                 };
+                let agent_model = def
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let agent_effort = def
+                    .get("effort")
+                    .and_then(Value::as_str)
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| {
+                        ["off", "low", "medium", "high", "xhigh", "max"].contains(&s.as_str())
+                    });
                 (
                     util::string(&def, "instructions")?.to_string(),
                     json!({"agent":kind,"origin":if def["builtin"]==true{"builtin"}else{"user"}}),
                     allowed,
+                    agent_model,
+                    agent_effort,
                 )
             } else if let Some((source, metadata)) = catalog.agents.get(kind) {
                 (
                     source.content.clone(),
                     metadata.clone(),
                     Some(
-                        ["read", "ls", "grep", "read_artifact"]
+                        ["read", "ls", "grep", "glob", "read_artifact"]
                             .iter()
                             .map(|s| s.to_string())
                             .collect(),
                     ),
+                    None,
+                    None,
                 )
             } else {
                 return Ok(Outcome::failure(format!(
                     "unknown read-only subagent kind: {kind}"
                 )));
             };
+            let global_subagent_model = config_data
+                .get("subagentModel")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let requested_model = agent_model.or(global_subagent_model);
             let mut inherited_catalog = catalog.clone();
             drop(catalog);
             let key = (kind.to_string(), task.to_string());
@@ -3143,15 +3187,54 @@ impl Runtime {
                     })
                     .collect();
             }
+            let custom_routing = self.provider.fake.is_none() && !self.provider.trace.is_replay();
+            let child_model = if custom_routing {
+                requested_model
+                    .as_deref()
+                    .unwrap_or(&self.provider.configuration_id)
+                    .to_string()
+            } else {
+                self.provider.configuration_id.clone()
+            };
+            let child_effort = if custom_routing {
+                agent_effort
+                    .as_deref()
+                    .unwrap_or(&self.provider.effort)
+                    .to_string()
+            } else {
+                self.provider.effort.clone()
+            };
+            let mut effective_provider = self.provider.clone();
+            if custom_routing
+                && (child_model != self.provider.configuration_id
+                    || child_effort != self.provider.effort)
+            {
+                let mut provider_settings = hooks.settings.lock().unwrap().clone();
+                provider_settings.model = child_model;
+                provider_settings.effort = child_effort;
+                if let Ok(mut provider) =
+                    Provider::for_settings(&provider_settings, &configuration, None)
+                {
+                    if !provider.trace.active() && self.provider.trace.active() {
+                        provider.trace = self.provider.trace.clone();
+                    }
+                    effective_provider = provider;
+                }
+            }
+            let routed_custom = effective_provider.configuration_id
+                != self.provider.configuration_id
+                || effective_provider.effort != self.provider.effort;
             let mut child = if let Some(child) = cached {
                 child
             } else {
                 let mut settings = hooks.settings.lock().unwrap().clone();
                 settings.acceptance = None;
+                settings.model = effective_provider.configuration_id.clone();
+                settings.effort = effective_provider.effort.clone();
                 Box::new(
                     Self::from_catalog(
                         child_workspace,
-                        &self.provider.configuration_id,
+                        &effective_provider.configuration_id,
                         paused.as_deref(),
                         self.store.clone(),
                         inherited_catalog,
@@ -3192,6 +3275,7 @@ impl Runtime {
                 } else {
                     set.retain(|name| {
                         tools::read_only(name)
+                            || name == "glob"
                             || self
                                 .mcp
                                 .tools
@@ -3206,7 +3290,13 @@ impl Runtime {
             // current parent view. Borrowed handles never close parent services.
             child.mcp.close().await;
             child.mcp = Arc::new(self.mcp.restricted(child.allowed.as_ref()));
-            child.provider = self.provider.clone();
+            child.provider = effective_provider;
+            if routed_custom {
+                child.store.update(
+                    &child.session,
+                    &json!({"model":child.provider.configuration_id,"provider":child.provider.name}),
+                )?;
+            }
             let requirements = delegate_requirements(&self.messages);
             child.custom_prompt = Some(format!(
                 "\n你是子助手。只使用配置的工具，遵守父会话权限。完成时优先调用 submit_result 提交结构化结果；也可最终输出 JSON 对象，键为 summary（字符串）、findings（字符串列表）、evidence_refs（你实际读取过的工作区相对路径列表）、unresolved（字符串列表）。不得编造证据。\n父任务要求：\n{requirements}\n子助手指令：\n{instructions}"
@@ -3215,7 +3305,7 @@ impl Runtime {
             self.event(
                 hooks,
                 "subagent_start",
-                json!({"call_id":call_id,"kind":kind,"task":task,"child_session_id":child_id,"source":source}),
+                json!({"call_id":call_id,"kind":kind,"task":task,"child_session_id":child_id,"model":child.provider.configuration_id,"source":source}),
             )?;
             let child_settings = hooks.settings.clone();
             let parent_sink = hooks.sink.clone();
@@ -3279,8 +3369,10 @@ impl Runtime {
                     return Err(error);
                 }
             };
-            self.provider.index = child.provider.index;
-            self.provider.call_counter = child.provider.call_counter;
+            if !routed_custom {
+                self.provider.index = child.provider.index;
+                self.provider.call_counter = child.provider.call_counter;
+            }
             let usage = Usage {
                 input_tokens: child.usage.input_tokens - old.input_tokens,
                 output_tokens: child.usage.output_tokens - old.output_tokens,
@@ -3325,7 +3417,7 @@ impl Runtime {
                     .as_str()
                     .or_else(|| legacy_call.and_then(|call| call.data["name"].as_str()))
                     .unwrap_or_default();
-                if !["read", "write", "edit", "grep", "ls"].contains(&name) {
+                if !["read", "write", "edit", "grep", "glob", "ls"].contains(&name) {
                     continue;
                 }
                 if let Some(paths) = result.data["observed_paths"].as_array() {
@@ -3431,6 +3523,7 @@ impl Runtime {
             return Ok(false);
         }
         let mut generated = None;
+        let mut summary_fallback_reason = None;
         if let Some(range) = context::archive_range(&self.messages, force, window) {
             let config = self.catalog.lock().await.configuration.clone();
             let model = config.read()?["compactionModel"]
@@ -3448,46 +3541,52 @@ impl Runtime {
                 ),
                 None => Ok(self.provider.clone()),
             };
-            if let Ok(mut provider) = provider {
-                provider.observation_context = self.observation_context(hooks);
-                provider.observation_context.purpose = "summary".into();
-                let attachments = Attachments {
-                    root: self.store.root().join("attachments"),
-                };
-                let deadline = hooks.shared.lock().unwrap().deadline;
-                let timeout = deadline.map_or(Duration::from_secs(30), |d| {
-                    d.saturating_duration_since(Instant::now())
-                        .min(Duration::from_secs(30))
-                });
-                let mut usage = Usage::default();
-                let limit = hooks.settings.lock().unwrap().budget.max_total_tokens;
-                let remaining = if limit > 0 {
-                    (limit as u64)
-                        .saturating_sub(hooks.shared.lock().unwrap().usage.total())
-                        .max(1)
-                } else {
-                    0
-                };
-                let result = tokio::select! {
-                    _ = hooks.cancel.cancelled() => Err(anyhow::Error::from(ProviderError::Cancelled)),
-                    result = tokio::time::timeout(timeout, provider.summarize(&self.messages[..range.end], &attachments, &mut usage, remaining)) => result.map_err(anyhow::Error::from).and_then(|r| r),
-                };
-                if usage.total() > 0 {
-                    self.usage.add(&usage);
-                    hooks.shared.lock().unwrap().usage.add(&usage);
-                    self.store.checkpoint(
-                        &self.session,
-                        "context_summary",
-                        &json!({"usage":usage,"model":provider.configuration_id}),
-                        None,
-                        None,
-                        Some(&store::counters(self.rounds, &self.usage)),
-                    )?;
+            match provider {
+                Ok(mut provider) => {
+                    provider.observation_context = self.observation_context(hooks);
+                    provider.observation_context.purpose = "summary".into();
+                    let attachments = Attachments {
+                        root: self.store.root().join("attachments"),
+                    };
+                    let deadline = hooks.shared.lock().unwrap().deadline;
+                    let timeout = deadline.map_or(Duration::from_secs(60), |d| {
+                        d.saturating_duration_since(Instant::now())
+                            .min(Duration::from_secs(60))
+                    });
+                    let mut usage = Usage::default();
+                    let limit = hooks.settings.lock().unwrap().budget.max_total_tokens;
+                    let remaining = if limit > 0 {
+                        (limit as u64)
+                            .saturating_sub(hooks.shared.lock().unwrap().usage.total())
+                            .max(1)
+                    } else {
+                        0
+                    };
+                    let result = tokio::select! {
+                        _ = hooks.cancel.cancelled() => Err(anyhow::Error::from(ProviderError::Cancelled)),
+                        result = tokio::time::timeout(timeout, provider.summarize(&self.messages[..range.end], &attachments, &mut usage, remaining)) => result.map_err(anyhow::Error::from).and_then(|r| r),
+                    };
+                    if usage.total() > 0 {
+                        self.usage.add(&usage);
+                        hooks.shared.lock().unwrap().usage.add(&usage);
+                        self.store.checkpoint(
+                            &self.session,
+                            "context_summary",
+                            &json!({"usage":usage,"model":provider.configuration_id}),
+                            None,
+                            None,
+                            Some(&store::counters(self.rounds, &self.usage)),
+                        )?;
+                    }
+                    if hooks.cancel.is_cancelled() {
+                        return Err(ProviderError::Cancelled.into());
+                    }
+                    match result {
+                        Ok(summary) => generated = Some(summary),
+                        Err(error) => summary_fallback_reason = Some(format!("{error:#}")),
+                    }
                 }
-                if hooks.cancel.is_cancelled() {
-                    return Err(ProviderError::Cancelled.into());
-                }
-                generated = result.ok();
+                Err(error) => summary_fallback_reason = Some(format!("{error:#}")),
             }
         }
         self.message_revision = None;
@@ -3501,7 +3600,16 @@ impl Runtime {
             (force, generated.as_deref()),
         )?;
         self.message_revision = Some(self.store.message_revision(&self.session)?);
-        if let Some(stats) = changed {
+        if let Some(mut stats) = changed {
+            if let Some(reason) = summary_fallback_reason
+                && stats["summarized_units"].as_u64().unwrap_or(0) == 0
+                && let Some(object) = stats.as_object_mut()
+            {
+                object.insert(
+                    "summary_fallback_reason".into(),
+                    json!(util::prefix(&reason, 512)),
+                );
+            }
             self.event(hooks, "context_compacted", stats)?;
             Ok(true)
         } else {

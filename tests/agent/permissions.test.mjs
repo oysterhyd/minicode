@@ -68,3 +68,17 @@ test('R26 bypass still asks for MCP and an explicit scoped approval can be remem
   await f.wait(e=>e.event==='run_done')
   assert.equal(f.events.filter(e=>e.event==='approval').length,1)
 })
+
+test('R26 glob permission rules validate workspace-relative scopes like ls and grep',async t=>{
+  const f=await fixture(t,[{text:'ok'}])
+  rules(f,{deny:['glob(secrets/**)'],allow:['glob(src/**)']})
+  const run=await f.run()
+  assert.equal(run.result.exit_reason,'completed')
+
+  const invalid=await fixture(t,[{text:'never'}])
+  rules(invalid,{deny:['glob(../escape)']})
+  await assert.rejects(
+    invalid.request('sendPrompt',{workspace:invalid.workspace,model:'fake',text:'check'}),
+    /workspace relative without \.\./
+  )
+})

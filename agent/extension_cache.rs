@@ -262,11 +262,11 @@ pub(crate) fn catalog(
             cache.push_back(entry);
             slot
         } else {
-            if cache.len() >= 32 {
+            if cache.len() >= 128 {
                 cache.pop_front();
             }
             let slot = Arc::new(Mutex::new(None));
-            cache.push_back((key, slot.clone()));
+            cache.push_back((key.clone(), slot.clone()));
             slot
         }
     };
@@ -291,6 +291,19 @@ pub(crate) fn catalog(
             catalog: catalog.clone(),
             dependencies,
         });
+        let mut cache = CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = cache.iter().position(|(k, _)| k == &key) {
+            let item = cache.remove(index).unwrap();
+            cache.push_back(item);
+        } else {
+            if cache.len() >= 128 {
+                cache.pop_front();
+            }
+            cache.push_back((key, slot.clone()));
+        }
     }
     Ok(catalog)
 }

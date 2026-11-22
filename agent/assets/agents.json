@@ -7,6 +7,7 @@
       "read",
       "ls",
       "grep",
+      "glob",
       "read_artifact"
     ],
     "instructions": "查找与任务相关的实现，给出文件路径和发现。"
@@ -19,6 +20,7 @@
       "read",
       "ls",
       "grep",
+      "glob",
       "read_artifact"
     ],
     "instructions": "审查指定代码，只报告可验证的问题和证据。"
@@ -31,6 +33,7 @@
       "read",
       "ls",
       "grep",
+      "glob",
       "bash",
       "powershell"
     ],
@@ -44,6 +47,7 @@
       "read",
       "ls",
       "grep",
+      "glob",
       "read_artifact",
       "bash",
       "powershell",
@@ -60,6 +64,7 @@
       "read",
       "ls",
       "grep",
+      "glob",
       "read_artifact",
       "bash",
       "powershell",

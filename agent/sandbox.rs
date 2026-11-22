@@ -49,14 +49,95 @@ impl Config {
         if config.read_only_paths.len() > 32 {
             bail!("shell sandbox permits at most 32 extra read-only roots")
         }
-        for path in &mut config.read_only_paths {
-            *path = util::canonical(path)?;
-            if !path.is_dir() {
-                bail!("shell sandbox read-only root is not a directory")
+        let mut normalized = Vec::with_capacity(config.read_only_paths.len());
+        for path in &config.read_only_paths {
+            let canonical = validate_read_only_path(path)?;
+            if !normalized.contains(&canonical) {
+                normalized.push(canonical);
             }
         }
+        config.read_only_paths = normalized;
         Ok(config)
     }
+}
+
+fn contains_unexpanded_env_var(text: &str) -> bool {
+    if text == "~" || text.starts_with("~/") || text.starts_with("~\\") {
+        return true;
+    }
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(end_offset) = bytes[i + 1..].iter().position(|&b| b == b'%')
+        {
+            let inner = &text[i + 1..i + 1 + end_offset];
+            if !inner.is_empty()
+                && inner.bytes().any(|b| b.is_ascii_alphabetic())
+                && inner
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'(' | b')'))
+            {
+                return true;
+            }
+            i += 1 + end_offset + 1;
+            continue;
+        }
+        i += 1;
+    }
+    for (idx, _) in text.match_indices('$') {
+        let rest = &text[idx + 1..];
+        if let Some(after_brace) = rest.strip_prefix('{') {
+            if let Some(close) = after_brace.find('}')
+                && !after_brace[..close].is_empty()
+            {
+                return true;
+            }
+        } else if rest
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn validate_read_only_path(raw: &Path) -> Result<PathBuf> {
+    let raw_text = raw.to_string_lossy();
+    let trimmed = raw_text.trim();
+    if trimmed.is_empty() {
+        bail!(
+            "shellSandbox.readOnlyPaths contains an empty path; provide an absolute directory path in settings.json"
+        );
+    }
+    if contains_unexpanded_env_var(trimmed) {
+        bail!(
+            "shellSandbox.readOnlyPaths entry '{}' contains an unexpanded environment variable or '~'; expand it to an absolute directory path before configuring settings.json",
+            raw.display()
+        );
+    }
+    if !raw.is_absolute() {
+        bail!(
+            "shellSandbox.readOnlyPaths entry '{}' must be an absolute path (relative paths are not allowed); resolve it to a full directory path in settings.json",
+            raw.display()
+        );
+    }
+    let canonical = util::canonical(raw).with_context(|| {
+        format!(
+            "shellSandbox.readOnlyPaths entry '{}' could not be normalized; ensure it is an existing absolute directory path",
+            raw.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        bail!(
+            "shellSandbox.readOnlyPaths entry '{}' (normalized to '{}') is not an existing directory",
+            raw.display(),
+            canonical.display()
+        );
+    }
+    Ok(canonical)
 }
 
 pub fn dangerous(command: &str) -> Option<&'static str> {
@@ -347,5 +428,97 @@ mod tests {
         ] {
             assert!(dangerous(command).is_none(), "{command}");
         }
+    }
+
+    fn load_with_read_only_paths(paths: Value) -> Result<Config> {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let settings = dir.path().join("settings");
+        fs::create_dir_all(workspace.join(".minicode")).unwrap();
+        fs::create_dir_all(&settings).unwrap();
+        fs::write(
+            workspace.join(".minicode/settings.json"),
+            json!({
+                "shellSandbox": {
+                    "enabled": true,
+                    "readOnlyPaths": paths
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        Config::load(&workspace, &settings, None)
+    }
+
+    #[test]
+    fn read_only_paths_normalize_valid_directories_and_deduplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = dir.path().join("tools");
+        let sub = tools.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let unnormalized = sub.join("..");
+        let config = load_with_read_only_paths(json!([tools, unnormalized])).unwrap();
+        assert_eq!(
+            config.read_only_paths,
+            vec![util::canonical(&tools).unwrap()]
+        );
+    }
+
+    #[test]
+    fn read_only_paths_reject_relative_paths_env_vars_empty_and_non_directories() {
+        for rel in ["./tools", "../shared", "tools/bin"] {
+            let err = load_with_read_only_paths(json!([rel]))
+                .err()
+                .expect(rel)
+                .to_string();
+            assert!(err.contains("shellSandbox.readOnlyPaths"), "{rel}: {err}");
+            assert!(err.contains("absolute path"), "{rel}: {err}");
+        }
+        for env_path in [
+            "%USERPROFILE%\\tools",
+            "C:\\Users\\%USERNAME%\\tools",
+            "%ProgramFiles(x86)%\\Git",
+            "$HOME/tools",
+            "${HOME}/tools",
+            "$env:USERPROFILE\\tools",
+            "~/tools",
+        ] {
+            let err = load_with_read_only_paths(json!([env_path]))
+                .err()
+                .expect(env_path)
+                .to_string();
+            assert!(
+                err.contains("shellSandbox.readOnlyPaths"),
+                "{env_path}: {err}"
+            );
+            assert!(
+                err.contains("unexpanded environment variable"),
+                "{env_path}: {err}"
+            );
+        }
+        let empty_err = load_with_read_only_paths(json!([""]))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(empty_err.contains("empty path"), "{empty_err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tool.exe");
+        fs::write(&file, b"bin").unwrap();
+        let file_err = load_with_read_only_paths(json!([file]))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(file_err.contains("not an existing directory"), "{file_err}");
+
+        let missing = dir.path().join("does-not-exist");
+        let missing_err = load_with_read_only_paths(json!([missing]))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            missing_err.contains("not an existing directory"),
+            "{missing_err}"
+        );
     }
 }

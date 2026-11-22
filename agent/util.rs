@@ -329,6 +329,18 @@ pub fn atomic_persist(file: tempfile::NamedTempFile, path: &Path) -> Result<()> 
     } else {
         parent
     };
+    if let Ok(old_modified) = path.metadata().and_then(|m| m.modified())
+        && file
+            .as_file()
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .is_some_and(|new_modified| new_modified <= old_modified)
+    {
+        let _ = file
+            .as_file()
+            .set_modified(old_modified + std::time::Duration::from_micros(1));
+    }
     file.as_file().sync_all()?;
     #[cfg(not(windows))]
     if let Ok(metadata) = path.metadata() {

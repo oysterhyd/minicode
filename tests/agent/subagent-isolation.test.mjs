@@ -195,3 +195,26 @@ test('A4 deleting a session after an owner crash removes its retained snapshots'
   const c=connect(f);await c.request('deleteSession',{sessionId:first.id})
   assert.ok(!fs.existsSync(root));assert.ok(!fs.existsSync(path.join(f.workspace,'child.txt')))
 })
+
+test('A4 multi-file snapshot edits a single file via atomic_write and merges cleanly',async t=>{
+  const f=await fixture(t,[delegate(),{tool_calls:[{name:'read',arguments:{path:'src/target.txt'}}]},write('src/target.txt','after edit\n'),done,review('inspect'),review('merge'),{text:'parent done'}])
+  fs.mkdirSync(path.join(f.workspace,'src'),{recursive:true})
+  for(let i=0;i<50;i++){
+    fs.writeFileSync(path.join(f.workspace,`src/file-${String(i).padStart(2,'0')}.txt`),`untouched-${i}\n`)
+  }
+  fs.writeFileSync(path.join(f.workspace,'src/target.txt'),'before edit\n')
+  await f.request('setPermissionMode',{mode:'bypass'})
+  const started=await f.request('sendPrompt',{workspace:f.workspace,text:'edit one file in multi-file repo',model:'fake'})
+  const approval=await f.wait(e=>e.event==='approval'&&e.request.tool_name==='review_delegate')
+  assert.equal(fs.readFileSync(path.join(f.workspace,'src/target.txt'),'utf8'),'before edit\n')
+  await f.request('resolveApproval',{sessionId:started.sessionId,approvalId:approval.approvalId,granted:true})
+  await f.wait(e=>e.event==='run_done')
+  const detail=await f.request('getSession',{sessionId:started.sessionId})
+  assert.equal(result({detail},'review_delegate').success,true)
+  assert.equal(fs.readFileSync(path.join(f.workspace,'src/target.txt'),'utf8'),'after edit\n')
+  for(let i=0;i<50;i++){
+    assert.equal(fs.readFileSync(path.join(f.workspace,`src/file-${String(i).padStart(2,'0')}.txt`),'utf8'),`untouched-${i}\n`)
+  }
+  const child=await f.request('getSession',{sessionId:detail.events.find(e=>e.type==='subagent_start').data.child_session_id})
+  assert.ok(!fs.existsSync(child.summary.workspace),'merge cleans up isolated workspace')
+})

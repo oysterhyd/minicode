@@ -291,12 +291,30 @@ impl Drop for OutputReaders {
         }
     }
 }
+struct PipeDoneGuard {
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    done: Arc<tokio::sync::Notify>,
+}
+impl Drop for PipeDoneGuard {
+    fn drop(&mut self) {
+        if self
+            .remaining
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.done.notify_one();
+        }
+    }
+}
 fn capture_pipe(
     mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     file: Arc<std::sync::Mutex<File>>,
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    done: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
+        let _done_guard = PipeDoneGuard { remaining, done };
         let mut buffer = [0u8; 16 * 1024];
         loop {
             let size = pipe.read(&mut buffer).await?;
@@ -382,9 +400,21 @@ pub(crate) async fn run_command_captured(
         prepared.owned()?;
     }
     let file = Arc::new(std::sync::Mutex::new(captured.as_file().try_clone()?));
+    let remaining_readers = Arc::new(std::sync::atomic::AtomicUsize::new(2));
+    let readers_done = Arc::new(tokio::sync::Notify::new());
     let mut readers = OutputReaders(vec![
-        capture_pipe(child.stdout.take().unwrap(), file.clone()),
-        capture_pipe(child.stderr.take().unwrap(), file),
+        capture_pipe(
+            child.stdout.take().unwrap(),
+            file.clone(),
+            remaining_readers.clone(),
+            readers_done.clone(),
+        ),
+        capture_pipe(
+            child.stderr.take().unwrap(),
+            file,
+            remaining_readers.clone(),
+            readers_done.clone(),
+        ),
     ]);
     let started = Instant::now();
     let mut live_position = 0u64;
@@ -408,8 +438,9 @@ pub(crate) async fn run_command_captured(
         {
             exited = Some((Instant::now(), status));
         }
+        let all_readers_done = remaining_readers.load(std::sync::atomic::Ordering::Acquire) == 0;
         if let Some((time, status)) = exited {
-            if readers.0.iter().all(|reader| reader.is_finished()) {
+            if all_readers_done {
                 break Some(status);
             }
             if time.elapsed() >= Duration::from_secs(2) {
@@ -420,20 +451,20 @@ pub(crate) async fn run_command_captured(
         if ctx.cancel.is_cancelled() {
             cancelled = true;
             kill_tree(&mut child).await;
-            break child.try_wait()?;
+            break child.try_wait()?.or(exited.map(|(_, status)| status));
         }
         if (timeout > 0.0 && started.elapsed().as_secs_f64() >= timeout)
             || ctx.deadline.is_some_and(|d| Instant::now() >= d)
         {
             timed_out = true;
             kill_tree(&mut child).await;
-            break child.try_wait()?;
+            break child.try_wait()?.or(exited.map(|(_, status)| status));
         }
         let size = captured.as_file().metadata()?.len();
         if size > 100_000_000 {
             quota = true;
             kill_tree(&mut child).await;
-            break child.try_wait()?;
+            break child.try_wait()?.or(exited.map(|(_, status)| status));
         }
         if size > live_position && last_emit.elapsed() >= Duration::from_millis(250) {
             if let Some(emit) = &ctx.output {
@@ -447,7 +478,22 @@ pub(crate) async fn run_command_captured(
             live_position = size;
             last_emit = Instant::now();
         }
-        tokio::select! {_ = tokio::time::sleep(Duration::from_millis(50))=>{},_ = ctx.cancel.cancelled()=>{}}
+        let heartbeat = if let Some((time, _)) = exited {
+            Duration::from_secs(2)
+                .saturating_sub(time.elapsed())
+                .min(Duration::from_millis(50))
+        } else {
+            Duration::from_millis(50)
+        };
+        tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => {}
+            wait_result = child.wait(), if exited.is_none() => {
+                exited = Some((Instant::now(), wait_result?));
+            }
+            _ = readers_done.notified(), if !all_readers_done => {}
+            _ = tokio::time::sleep(heartbeat) => {}
+        }
     };
     if sandbox.is_none() && !capture.background && !timed_out && !quota && !cancelled && !lingered {
         tree.release()?;
@@ -466,15 +512,17 @@ pub(crate) async fn run_command_captured(
         )?;
         let mut bytes = vec![];
         captured.reopen()?.take(2000).read_to_end(&mut bytes)?;
+        let detail = util::terminal_text(&String::from_utf8_lossy(&bytes));
         let reason = if cfg!(windows) {
-            "OS shell sandbox could not start; command was not executed"
+            if detail.contains("shellSandbox.readOnlyPaths") {
+                "OS shell sandbox could not start; command was not executed"
+            } else {
+                "OS shell sandbox could not start (if the shell or external toolchain lives outside default system directories, add its directory to shellSandbox.readOnlyPaths in settings.json); command was not executed"
+            }
         } else {
             "OS shell sandbox startup could not be verified; command may have started"
         };
-        bail!(
-            "{reason}: {}",
-            util::terminal_text(&String::from_utf8_lossy(&bytes))
-        );
+        bail!("{reason}: {detail}");
     }
     for reader in &mut readers.0 {
         match tokio::time::timeout(Duration::from_secs(1), &mut *reader).await {
@@ -896,5 +944,117 @@ mod windows_encoding_tests {
         file.write_all(&[0xd6, 0xd0]).unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
         assert!(!capture_is_utf8(&mut file, total + 2).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod capture_wakeup_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::Notify;
+
+    fn test_tool_context() -> (tempfile::TempDir, ToolContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = util::canonical(dir.path()).unwrap();
+        let store = crate::store::Store::open(workspace.join("test.db")).unwrap();
+        let session = store
+            .create(&workspace.to_string_lossy(), "fake", "fake")
+            .unwrap();
+        let catalog = crate::extensions::Catalog {
+            workspace: workspace.clone(),
+            skills: Default::default(),
+            plugins: vec![],
+            servers: vec![],
+            agents: Default::default(),
+            local: vec![],
+            instructions: Default::default(),
+            active: Default::default(),
+            pending_scopes: Default::default(),
+            configuration: crate::configuration::Configuration {
+                path: workspace.join("config.json"),
+            },
+        };
+        let ctx = ToolContext {
+            workspace: workspace.clone(),
+            session,
+            store,
+            attachments: crate::attachments::Attachments {
+                root: workspace.join("attachments"),
+            },
+            modalities: vec![],
+            catalog: Arc::new(tokio::sync::Mutex::new(catalog)),
+            mcp: Arc::new(crate::mcp::McpRegistry::default()),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            output: None,
+            deadline: None,
+            files: Default::default(),
+            permissions: Default::default(),
+            sandbox: Default::default(),
+            force_sandbox: false,
+        };
+        (dir, ctx)
+    }
+
+    #[tokio::test]
+    async fn capture_pipe_notifies_immediately_when_last_pipe_closes() {
+        let captured = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(std::sync::Mutex::new(
+            captured.as_file().try_clone().unwrap(),
+        ));
+        let remaining = Arc::new(AtomicUsize::new(2));
+        let done = Arc::new(Notify::new());
+        let (r1, mut w1) = tokio::io::duplex(64);
+        let (r2, mut w2) = tokio::io::duplex(64);
+        let h1 = capture_pipe(r1, file.clone(), remaining.clone(), done.clone());
+        let h2 = capture_pipe(r2, file, remaining.clone(), done.clone());
+
+        w1.write_all(b"hello ").await.unwrap();
+        drop(w1);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(remaining.load(Ordering::Acquire), 1);
+
+        let notified = done.notified();
+        tokio::pin!(notified);
+        w2.write_all(b"world").await.unwrap();
+        drop(w2);
+        tokio::time::timeout(Duration::from_millis(25), &mut notified)
+            .await
+            .expect("Notify should wake as soon as both pipes hit EOF");
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+        h1.await.unwrap().unwrap();
+        h2.await.unwrap().unwrap();
+        assert_eq!(fs::read_to_string(captured.path()).unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn fast_command_completes_and_lingering_descendant_is_detected() {
+        let (_dir, ctx) = test_tool_context();
+        let fast = run_command("echo fast-done", &ctx.workspace, 10.0, &ctx)
+            .await
+            .unwrap();
+        assert!(fast.success, "{fast:?}");
+        assert!(fast.output.contains("fast-done"));
+
+        #[cfg(windows)]
+        let linger_cmd = (
+            "powershell",
+            "Start-Process -NoNewWindow -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 5'; Write-Output 'parent-exited'",
+        );
+        #[cfg(not(windows))]
+        let linger_cmd = ("bash", "sleep 5 & echo parent-exited");
+
+        let linger = run_command_for(linger_cmd.0, linger_cmd.1, &ctx.workspace, 10.0, &ctx)
+            .await
+            .unwrap();
+        assert!(!linger.success, "{linger:?}");
+        assert!(
+            linger
+                .error
+                .as_deref()
+                .is_some_and(|err| err.contains("descendant kept output open")),
+            "{linger:?}"
+        );
+        assert!(linger.output.contains("parent-exited"), "{linger:?}");
     }
 }

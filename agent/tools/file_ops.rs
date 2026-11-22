@@ -8,9 +8,10 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    ops::ControlFlow,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime},
@@ -272,6 +273,15 @@ fn read_text_page(
     outcome.truncated = more;
     Ok(outcome)
 }
+fn path_denied(ctx: &ToolContext, tool: &str, path: &Path) -> bool {
+    matches!(
+        ctx.permissions
+            .path_decision(&ctx.workspace, tool, &path.to_string_lossy())
+            .unwrap_or(Some(crate::permissions::Decision::Deny)),
+        Some(crate::permissions::Decision::Deny)
+    )
+}
+
 pub(super) fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let path = args["path"].as_str().unwrap_or(".");
     let base = util::in_workspace(&ctx.workspace, path)?;
@@ -279,6 +289,7 @@ pub(super) fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         bail!("path is not a directory: {path}")
     }
     let recursive = args["recursive"] == true;
+    let include_ignored = args["include_ignored"] == true;
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = args["limit"].as_u64().unwrap_or(500).min(500) as usize;
     let mut entries = vec![];
@@ -286,24 +297,72 @@ pub(super) fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let mut seen = 0;
     let mut used = 0;
     let mut more = false;
-    let mut dirs = vec![base.clone()];
-    'walk: while let Some(dir) = dirs.pop() {
+    if recursive {
+        let permissions = ctx.permissions.clone();
+        let workspace = ctx.workspace.clone();
+        let walker = ignore::WalkBuilder::new(&base)
+            .require_git(false)
+            .standard_filters(!include_ignored)
+            .hidden(false)
+            .sort_by_file_name(|a, b| a.cmp(b))
+            .filter_entry(move |e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                if e.file_type().is_some_and(|t| t.is_dir())
+                    && (util::SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref())
+                        || util::is_link(e.path()))
+                {
+                    return false;
+                }
+                !matches!(
+                    permissions
+                        .path_decision(&workspace, "ls", &e.path().to_string_lossy())
+                        .unwrap_or(Some(crate::permissions::Decision::Deny)),
+                    Some(crate::permissions::Decision::Deny)
+                )
+            })
+            .build();
+        for entry in walker.filter_map(Result::ok) {
+            if ctx.cancel.is_cancelled() {
+                bail!("tool cancelled")
+            }
+            if entry.depth() == 0 {
+                continue;
+            }
+            let entry_path = entry.path();
+            let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+            let relative = portable_path(&entry_path.strip_prefix(&base)?.to_string_lossy());
+            let text = if is_dir {
+                format!("{relative}/")
+            } else {
+                relative
+            };
+            if seen >= offset {
+                if entries.len() >= limit || used + text.len() + 1 > 50 * 1024 - 100 {
+                    more = true;
+                    break;
+                }
+                used += text.len() + 1;
+                entries.push(text);
+                if let Some(path) = observed_path(ctx, entry_path) {
+                    observed.push(path);
+                }
+            }
+            seen += 1;
+        }
+    } else {
         if ctx.cancel.is_cancelled() {
             bail!("tool cancelled")
         }
-        let mut children = fs::read_dir(&dir)?
+        let mut children = fs::read_dir(&base)?
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         children.sort_by_key(|e| e.file_name());
         let mut subdirs = vec![];
         let mut files = vec![];
         for e in children {
-            if matches!(
-                ctx.permissions
-                    .path_decision(&ctx.workspace, "ls", &e.path().to_string_lossy())
-                    .unwrap_or(Some(crate::permissions::Decision::Deny)),
-                Some(crate::permissions::Decision::Deny)
-            ) {
+            if path_denied(ctx, "ls", &e.path()) {
                 continue;
             }
             let kind = e.file_type()?;
@@ -332,7 +391,7 @@ pub(super) fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             if seen >= offset {
                 if entries.len() >= limit || used + text.len() + 1 > 50 * 1024 - 100 {
                     more = true;
-                    break 'walk;
+                    break;
                 }
                 used += text.len() + 1;
                 entries.push(text);
@@ -341,11 +400,6 @@ pub(super) fn list(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
                 }
             }
             seen += 1;
-        }
-        if recursive {
-            dirs.extend(subdirs.into_iter().rev());
-        } else {
-            break;
         }
     }
     entries.sort();
@@ -398,12 +452,171 @@ pub(super) fn grep_files(
         .filter_entry(move |e| {
             e.depth() == 0
                 || !e.file_type().is_some_and(|t| t.is_dir())
-                || !util::SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref())
+                || (!util::SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref())
+                    && !util::is_link(e.path()))
         })
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
 }
+pub(super) fn glob(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
+    let raw_pattern = util::string(args, "pattern")?;
+    let normalized = raw_pattern.replace('\\', "/");
+    let normalized = normalized.strip_prefix("./").unwrap_or(&normalized);
+    if normalized.is_empty() {
+        bail!("pattern must not be empty")
+    }
+    let has_sep = normalized.contains('/');
+    let matcher = globset::GlobBuilder::new(normalized)
+        .literal_separator(true)
+        .build()
+        .map_err(|error| anyhow::anyhow!("invalid glob pattern: {error}"))?
+        .compile_matcher();
+    let raw_path = args["path"].as_str().unwrap_or(".");
+    let base = util::in_workspace(&ctx.workspace, raw_path)?;
+    if !base.is_dir() {
+        bail!("path is not a directory: {raw_path}")
+    }
+    if path_denied(ctx, "glob", &base) || path_denied(ctx, "ls", &base) {
+        bail!("path denied by permission rules: {raw_path}")
+    }
+    let limit = args["limit"].as_i64().unwrap_or(200).clamp(1, 1000) as usize;
+    let include_ignored = args["include_ignored"] == true;
+    let start = Instant::now();
+    let mut matches: Vec<(Option<SystemTime>, String, Option<String>)> = vec![];
+    for entry in grep_files(&base, include_ignored) {
+        if ctx.cancel.is_cancelled() {
+            bail!("tool cancelled")
+        }
+        if start.elapsed().as_secs() > 30 {
+            bail!("glob timed out; narrow path or pattern and retry")
+        }
+        let path = entry.path();
+        if util::is_link(path) {
+            continue;
+        }
+        if path_denied(ctx, "glob", path) || path_denied(ctx, "ls", path) {
+            continue;
+        }
+        let match_rel = portable_path(&path.strip_prefix(&base)?.to_string_lossy());
+        let matched = matcher.is_match(&match_rel)
+            || (!has_sep && path.file_name().is_some_and(|name| matcher.is_match(name)));
+        if !matched {
+            continue;
+        }
+        let relative = path.strip_prefix(&ctx.workspace)?;
+        let workspace_path = portable_path(&relative.to_string_lossy());
+        let actual_path = relative.to_str().map(portable_path);
+        let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
+        matches.push((modified, workspace_path, actual_path));
+    }
+    matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let total = matches.len();
+    let truncated = total > limit;
+    let mut selected = Vec::with_capacity(total.min(limit));
+    let mut observed = Vec::with_capacity(total.min(limit));
+    for (_, workspace_path, actual_path) in matches.into_iter().take(limit) {
+        selected.push(workspace_path);
+        if let Some(path) = actual_path {
+            observed.push(path);
+        }
+    }
+    let text = if selected.is_empty() {
+        "(no matches)".to_string()
+    } else {
+        let mut text = selected.join("\n");
+        if truncated {
+            text.push_str(&format!(
+                "\n...[达到结果上限（共 {total} 个匹配，仅显示最近修改的 {limit} 个）；请缩小 path 或 pattern 继续搜索]"
+            ));
+        }
+        text
+    };
+    let mut outcome = bounded(text);
+    outcome.truncated |= truncated;
+    outcome.observed_paths = observed;
+    Ok(outcome)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrepOutputMode {
+    Content,
+    FilesWithMatches,
+    Count,
+}
+
+fn format_grep_line(
+    workspace_path: &str,
+    number: usize,
+    sep: char,
+    line: &str,
+    truncated: &mut bool,
+) -> String {
+    let mut chars = line.chars();
+    let snippet = chars.by_ref().take(500).collect::<String>();
+    let shortened = chars.next().is_some();
+    *truncated |= shortened;
+    format!(
+        "{workspace_path}{sep}{number}{sep} {snippet}{}",
+        if shortened { "...[行已截断]" } else { "" }
+    )
+}
+
+fn for_each_file_line(
+    mut reader: impl BufRead,
+    ctx: &ToolContext,
+    start: Instant,
+    mut on_line: impl FnMut(usize, &str, bool) -> Result<ControlFlow<()>>,
+) -> Result<bool> {
+    let mut number = 0;
+    let mut chunk = vec![];
+    let mut ended_with_lf = false;
+    loop {
+        chunk.clear();
+        match reader.read_until(b'\n', &mut chunk) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => return Ok(false),
+        }
+        ended_with_lf = chunk.last() == Some(&b'\n');
+        let text = String::from_utf8_lossy(&chunk);
+        let body = text.strip_suffix('\n').unwrap_or(&text);
+        let mut pieces = body
+            .split([
+                '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}',
+            ])
+            .collect::<Vec<_>>();
+        // CRLF counts as one line, as in the original universal-newline reader.
+        if ended_with_lf && body.ends_with('\r') {
+            pieces.pop();
+        }
+        for line in pieces {
+            if ctx.cancel.is_cancelled() {
+                bail!("tool cancelled")
+            }
+            if start.elapsed().as_secs() > 30 {
+                bail!("search timed out; narrow path or glob and retry")
+            }
+            number += 1;
+            if matches!(on_line(number, line, false)?, ControlFlow::Break(())) {
+                return Ok(true);
+            }
+        }
+    }
+    // Text that ends with a line break has one more, empty, line.
+    if ended_with_lf {
+        if ctx.cancel.is_cancelled() {
+            bail!("tool cancelled")
+        }
+        if start.elapsed().as_secs() > 30 {
+            bail!("search timed out; narrow path or glob and retry")
+        }
+        number += 1;
+        let _ = on_line(number, "", true)?;
+    }
+    Ok(true)
+}
+
 pub(super) fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let pattern = util::string(args, "pattern")?;
     let pattern = if args.get("case_sensitive").is_some_and(|v| v == false) {
@@ -414,6 +627,17 @@ pub(super) fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
     let regex = regex::RegexBuilder::new(&pattern)
         .build()
         .map_err(|error| anyhow::anyhow!("invalid regex: {error}"))?;
+    let output_mode = match args.get("output_mode") {
+        None | Some(Value::Null) => GrepOutputMode::Content,
+        Some(Value::String(s)) => match s.as_str() {
+            "content" => GrepOutputMode::Content,
+            "files_with_matches" => GrepOutputMode::FilesWithMatches,
+            "count" => GrepOutputMode::Count,
+            other => bail!("invalid output_mode: {other}"),
+        },
+        Some(_) => bail!("output_mode must be a string"),
+    };
+    let context_lines = args["context_lines"].as_u64().unwrap_or(0).min(10) as usize;
     let raw = args["path"].as_str().unwrap_or(".");
     let base = util::in_workspace(&ctx.workspace, raw)?;
     if !base.is_dir() && !base.is_file() {
@@ -426,43 +650,11 @@ pub(super) fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         .map(|g| g.compile_matcher());
     let max = args["max_results"].as_i64().unwrap_or(100).clamp(1, 1000) as usize;
     let mut lines = vec![];
-    let observed = std::cell::RefCell::new(std::collections::BTreeSet::new());
+    let mut observed = BTreeSet::new();
     let mut skipped = 0;
-    let truncated = std::cell::Cell::new(false);
+    let mut truncated = false;
+    let mut matches_found = 0usize;
     let start = Instant::now();
-    let search_line = |line: &str,
-                       number: &mut usize,
-                       workspace_path: &str,
-                       actual_path: Option<&str>,
-                       lines: &mut Vec<String>|
-     -> Result<bool> {
-        if ctx.cancel.is_cancelled() {
-            bail!("tool cancelled")
-        }
-        if start.elapsed().as_secs() > 30 {
-            bail!("search timed out; narrow path or glob and retry")
-        }
-        *number += 1;
-        if regex.is_match(line) {
-            if let Some(path) = actual_path {
-                observed.borrow_mut().insert(path.to_string());
-            }
-            let mut chars = line.chars();
-            let snippet = chars.by_ref().take(500).collect::<String>();
-            let shortened = chars.next().is_some();
-            truncated.set(truncated.get() || shortened);
-            lines.push(format!(
-                "{workspace_path}:{number}: {snippet}{}",
-                if shortened { "...[行已截断]" } else { "" }
-            ));
-            if lines.len() >= max {
-                truncated.set(true);
-                lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    };
     let files = grep_files(&base, args["include_ignored"] == true);
     'files: for entry in files {
         if ctx.cancel.is_cancelled() {
@@ -472,12 +664,7 @@ pub(super) fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
             bail!("search timed out; narrow path or glob and retry")
         }
         let path = entry.path();
-        if matches!(
-            ctx.permissions
-                .path_decision(&ctx.workspace, "grep", &path.to_string_lossy())
-                .unwrap_or(Some(crate::permissions::Decision::Deny)),
-            Some(crate::permissions::Decision::Deny)
-        ) {
+        if path_denied(ctx, "grep", path) {
             continue;
         }
         let relative = if base.is_file() {
@@ -513,60 +700,157 @@ pub(super) fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         if head.is_empty() || head.contains(&0) {
             continue;
         }
-        let mut reader = BufReader::new(std::io::Cursor::new(head).chain(reader));
+        let reader = BufReader::new(std::io::Cursor::new(head).chain(reader));
         let relative = path.strip_prefix(&ctx.workspace)?;
         let workspace_path = portable_path(&relative.to_string_lossy());
         // The walker never follows links. Record its actual path only for
         // matching files, and leave canonical comparison to the verifier.
         let actual_path = relative.to_str().map(portable_path);
-        let mut number = 0;
-        let mut chunk = vec![];
-        let mut ended_with_lf = false;
-        loop {
-            chunk.clear();
-            match reader.read_until(b'\n', &mut chunk) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => {
+        match output_mode {
+            GrepOutputMode::FilesWithMatches => {
+                let mut stop_all = false;
+                let read_ok = for_each_file_line(reader, ctx, start, |_, line, _| {
+                    if regex.is_match(line) {
+                        if let Some(path) = actual_path.as_deref() {
+                            observed.insert(path.to_string());
+                        }
+                        lines.push(workspace_path.clone());
+                        if lines.len() >= max {
+                            truncated = true;
+                            lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
+                            stop_all = true;
+                        }
+                        return Ok(ControlFlow::Break(()));
+                    }
+                    Ok(ControlFlow::Continue(()))
+                })?;
+                if !read_ok {
                     skipped += 1;
                     continue 'files;
                 }
-            }
-            ended_with_lf = chunk.last() == Some(&b'\n');
-            let text = String::from_utf8_lossy(&chunk);
-            let body = text.strip_suffix('\n').unwrap_or(&text);
-            let mut pieces = body
-                .split([
-                    '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}',
-                ])
-                .collect::<Vec<_>>();
-            // CRLF counts as one line, as in the original universal-newline reader.
-            if ended_with_lf && body.ends_with('\r') {
-                pieces.pop();
-            }
-            for line in pieces {
-                if search_line(
-                    line,
-                    &mut number,
-                    &workspace_path,
-                    actual_path.as_deref(),
-                    &mut lines,
-                )? {
+                if stop_all {
                     break 'files;
                 }
             }
-        }
-        // Text that ends with a line break has one more, empty, line.
-        if ended_with_lf
-            && search_line(
-                "",
-                &mut number,
-                &workspace_path,
-                actual_path.as_deref(),
-                &mut lines,
-            )?
-        {
-            break 'files;
+            GrepOutputMode::Count => {
+                let mut file_matches = 0usize;
+                let read_ok = for_each_file_line(reader, ctx, start, |_, line, _| {
+                    if regex.is_match(line) {
+                        file_matches += 1;
+                    }
+                    Ok(ControlFlow::Continue(()))
+                })?;
+                if !read_ok {
+                    skipped += 1;
+                    continue 'files;
+                }
+                if file_matches > 0 {
+                    if let Some(path) = actual_path.as_deref() {
+                        observed.insert(path.to_string());
+                    }
+                    lines.push(format!("{workspace_path}: {file_matches}"));
+                    if lines.len() >= max {
+                        truncated = true;
+                        lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
+                        break 'files;
+                    }
+                }
+            }
+            GrepOutputMode::Content => {
+                let mut before: VecDeque<(usize, String)> = VecDeque::with_capacity(context_lines);
+                let mut after_remaining = 0usize;
+                let mut last_emitted_line: Option<usize> = None;
+                let mut limit_hit_in_file = false;
+                let mut stop_all = false;
+                let read_ok =
+                    for_each_file_line(reader, ctx, start, |number, line, is_trailing_empty| {
+                        let matched = regex.is_match(line);
+                        if is_trailing_empty && !matched {
+                            return Ok(ControlFlow::Continue(()));
+                        }
+                        if limit_hit_in_file {
+                            if !matched && after_remaining > 0 {
+                                lines.push(format_grep_line(
+                                    &workspace_path,
+                                    number,
+                                    '-',
+                                    line,
+                                    &mut truncated,
+                                ));
+                                after_remaining -= 1;
+                                if after_remaining == 0 {
+                                    return Ok(ControlFlow::Break(()));
+                                }
+                                return Ok(ControlFlow::Continue(()));
+                            }
+                            return Ok(ControlFlow::Break(()));
+                        }
+                        if matched {
+                            if let Some(path) = actual_path.as_deref() {
+                                observed.insert(path.to_string());
+                            }
+                            if context_lines > 0 {
+                                let first_line = before.front().map(|(n, _)| *n).unwrap_or(number);
+                                if last_emitted_line.is_some_and(|prev| first_line > prev + 1) {
+                                    lines.push("--".into());
+                                }
+                                for (bn, bl) in before.drain(..) {
+                                    lines.push(format_grep_line(
+                                        &workspace_path,
+                                        bn,
+                                        '-',
+                                        &bl,
+                                        &mut truncated,
+                                    ));
+                                }
+                            }
+                            lines.push(format_grep_line(
+                                &workspace_path,
+                                number,
+                                ':',
+                                line,
+                                &mut truncated,
+                            ));
+                            last_emitted_line = Some(number);
+                            after_remaining = context_lines;
+                            matches_found += 1;
+                            if matches_found >= max {
+                                truncated = true;
+                                stop_all = true;
+                                if context_lines == 0 {
+                                    return Ok(ControlFlow::Break(()));
+                                }
+                                limit_hit_in_file = true;
+                            }
+                        } else if context_lines > 0 {
+                            if after_remaining > 0 {
+                                lines.push(format_grep_line(
+                                    &workspace_path,
+                                    number,
+                                    '-',
+                                    line,
+                                    &mut truncated,
+                                ));
+                                last_emitted_line = Some(number);
+                                after_remaining -= 1;
+                            } else {
+                                if before.len() == context_lines {
+                                    before.pop_front();
+                                }
+                                before.push_back((number, line.to_string()));
+                            }
+                        }
+                        Ok(ControlFlow::Continue(()))
+                    })?;
+                if !read_ok {
+                    skipped += 1;
+                    continue 'files;
+                }
+                if stop_all {
+                    lines.push("...[达到结果上限；请缩小 path 或 glob 继续搜索]".into());
+                    break 'files;
+                }
+            }
         }
     }
     if lines.is_empty() {
@@ -576,8 +860,8 @@ pub(super) fn grep(args: &Value, ctx: &ToolContext) -> Result<Outcome> {
         lines.push(format!("...[跳过 {skipped} 个无法读取的文件]"));
     }
     let mut outcome = bounded(lines.join("\n"));
-    outcome.truncated |= truncated.get();
-    outcome.observed_paths = observed.into_inner().into_iter().collect();
+    outcome.truncated |= truncated;
+    outcome.observed_paths = observed.into_iter().collect();
     Ok(outcome)
 }
 fn lexical_join(base: &Path, raw: &str) -> PathBuf {
@@ -850,4 +1134,313 @@ fn edit_large(
         original.len(),
         path.metadata()?.len()
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        attachments::Attachments, configuration::Configuration, extensions::Catalog,
+        mcp::McpRegistry, permissions::Rules, store::Store, tools,
+    };
+    use serde_json::json;
+    use std::collections::{BTreeMap, HashSet};
+    use tokio_util::sync::CancellationToken;
+
+    fn test_ctx(rules: Rules) -> (tempfile::TempDir, ToolContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = util::canonical(dir.path()).unwrap();
+        let store = Store::open(workspace.join("test.db")).unwrap();
+        let session = store
+            .create(&workspace.to_string_lossy(), "fake", "fake")
+            .unwrap();
+        let catalog = Catalog {
+            workspace: workspace.clone(),
+            skills: BTreeMap::new(),
+            plugins: vec![],
+            servers: vec![],
+            agents: BTreeMap::new(),
+            local: vec![],
+            instructions: BTreeMap::new(),
+            active: BTreeMap::new(),
+            pending_scopes: HashSet::new(),
+            configuration: Configuration {
+                path: workspace.join("config.json"),
+            },
+        };
+        let ctx = ToolContext {
+            permissions: Arc::new(rules),
+            sandbox: Default::default(),
+            force_sandbox: false,
+            workspace: workspace.clone(),
+            session,
+            store,
+            attachments: Attachments {
+                root: workspace.join("attachments"),
+            },
+            modalities: vec!["image".into()],
+            catalog: Arc::new(tokio::sync::Mutex::new(catalog)),
+            mcp: Arc::new(McpRegistry::default()),
+            cancel: CancellationToken::new(),
+            output: None,
+            deadline: None,
+            files: Default::default(),
+        };
+        (dir, ctx)
+    }
+
+    fn write_with_mtime(path: &Path, content: &str, mtime: SystemTime) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(mtime))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn glob_matches_patterns_sorts_by_mtime_and_tracks_observed_paths() {
+        let (_dir, ctx) = test_ctx(Rules::default());
+        let base_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        write_with_mtime(&ctx.workspace.join("root.rs"), "", base_time);
+        write_with_mtime(
+            &ctx.workspace.join("src/b.rs"),
+            "",
+            base_time + Duration::from_secs(10),
+        );
+        write_with_mtime(
+            &ctx.workspace.join("src/a.rs"),
+            "",
+            base_time + Duration::from_secs(10),
+        );
+        write_with_mtime(
+            &ctx.workspace.join("src/sub/deep.rs"),
+            "",
+            base_time + Duration::from_secs(20),
+        );
+        write_with_mtime(
+            &ctx.workspace.join("src/user_auth.ts"),
+            "",
+            base_time + Duration::from_secs(30),
+        );
+        write_with_mtime(
+            &ctx.workspace.join("auth/other.ts"),
+            "",
+            base_time + Duration::from_secs(40),
+        );
+
+        let all_rs = tools::execute("glob", &json!({"pattern": "**/*.rs"}), &ctx).await;
+        assert!(all_rs.success, "{:?}", all_rs.error);
+        assert!(!all_rs.truncated);
+        assert_eq!(
+            all_rs.output,
+            "src/sub/deep.rs\nsrc/a.rs\nsrc/b.rs\nroot.rs"
+        );
+        assert_eq!(
+            all_rs.observed_paths,
+            vec!["src/sub/deep.rs", "src/a.rs", "src/b.rs", "root.rs"]
+        );
+
+        let auth_ts = tools::execute("glob", &json!({"pattern": "*auth*.ts"}), &ctx).await;
+        assert!(auth_ts.success, "{:?}", auth_ts.error);
+        assert_eq!(auth_ts.output, "src/user_auth.ts");
+        assert_eq!(auth_ts.observed_paths, vec!["src/user_auth.ts"]);
+
+        let shallow_rs = tools::execute("glob", &json!({"pattern": "src/*.rs"}), &ctx).await;
+        assert!(shallow_rs.success, "{:?}", shallow_rs.error);
+        assert_eq!(shallow_rs.output, "src/a.rs\nsrc/b.rs");
+
+        let limited =
+            tools::execute("glob", &json!({"pattern": "**/*.rs", "limit": 2}), &ctx).await;
+        assert!(limited.success, "{:?}", limited.error);
+        assert!(limited.truncated);
+        assert!(
+            limited
+                .output
+                .starts_with("src/sub/deep.rs\nsrc/a.rs\n...[达到结果上限")
+        );
+        assert_eq!(limited.observed_paths, vec!["src/sub/deep.rs", "src/a.rs"]);
+
+        let none = tools::execute("glob", &json!({"pattern": "**/*.go"}), &ctx).await;
+        assert!(none.success, "{:?}", none.error);
+        assert_eq!(none.output, "(no matches)");
+        assert!(none.observed_paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn glob_respects_ignore_files_skip_dirs_and_permissions() {
+        let mut rules = Rules::default();
+        rules
+            .extend(&json!({"deny": ["read(.env)", "glob(secret/**)"]}))
+            .unwrap();
+        let (_dir, ctx) = test_ctx(rules);
+
+        fs::write(
+            ctx.workspace.join(".gitignore"),
+            "target/\n*.log\n!keep.log\n",
+        )
+        .unwrap();
+        fs::write(ctx.workspace.join(".ignore"), "ignored.txt\n").unwrap();
+        for rel in [
+            "main.txt",
+            "skip.log",
+            "keep.log",
+            "ignored.txt",
+            "target/build.txt",
+            "node_modules/pkg.txt",
+            ".env",
+            "secret/key.txt",
+        ] {
+            let p = ctx.workspace.join(rel);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(p, "x").unwrap();
+        }
+
+        let filtered = tools::execute("glob", &json!({"pattern": "**/*"}), &ctx).await;
+        assert!(filtered.success, "{:?}", filtered.error);
+        let lines: Vec<&str> = filtered.output.lines().collect();
+        assert!(lines.contains(&"main.txt"));
+        assert!(lines.contains(&"keep.log"));
+        assert!(!lines.contains(&"skip.log"));
+        assert!(!lines.contains(&"ignored.txt"));
+        assert!(!lines.contains(&"target/build.txt"));
+        assert!(!lines.contains(&"node_modules/pkg.txt"));
+        assert!(!lines.contains(&".env"));
+        assert!(!lines.contains(&"secret/key.txt"));
+
+        let override_ignored = tools::execute(
+            "glob",
+            &json!({"pattern": "**/*", "include_ignored": true}),
+            &ctx,
+        )
+        .await;
+        assert!(override_ignored.success, "{:?}", override_ignored.error);
+        let lines: Vec<&str> = override_ignored.output.lines().collect();
+        assert!(lines.contains(&"skip.log"));
+        assert!(lines.contains(&"ignored.txt"));
+        assert!(lines.contains(&"target/build.txt"));
+        assert!(!lines.contains(&"node_modules/pkg.txt"));
+        assert!(!lines.contains(&".env"));
+        assert!(!lines.contains(&"secret/key.txt"));
+    }
+
+    #[tokio::test]
+    async fn grep_supports_files_with_matches_count_and_context_lines() {
+        let (_dir, ctx) = test_ctx(Rules::default());
+        fs::write(
+            ctx.workspace.join("a.txt"),
+            "zero\none\nhit1\ntwo\nhit2\nthree\nfour\nfive\nhit3\nsix\n",
+        )
+        .unwrap();
+        fs::write(ctx.workspace.join("b.txt"), "hit only\n").unwrap();
+        fs::write(ctx.workspace.join("c.txt"), "nothing here\n").unwrap();
+        fs::write(ctx.workspace.join("bin.dat"), b"hit\0binary\n").unwrap();
+
+        let files_mode = tools::execute(
+            "grep",
+            &json!({"pattern": "hit", "output_mode": "files_with_matches"}),
+            &ctx,
+        )
+        .await;
+        assert!(files_mode.success, "{:?}", files_mode.error);
+        assert_eq!(files_mode.output, "a.txt\nb.txt");
+        assert_eq!(files_mode.observed_paths, vec!["a.txt", "b.txt"]);
+
+        let files_limited = tools::execute(
+            "grep",
+            &json!({"pattern": "hit", "output_mode": "files_with_matches", "max_results": 1}),
+            &ctx,
+        )
+        .await;
+        assert!(files_limited.success, "{:?}", files_limited.error);
+        assert!(files_limited.truncated);
+        assert!(files_limited.output.starts_with("a.txt\n...[达到结果上限"));
+        assert_eq!(files_limited.observed_paths, vec!["a.txt"]);
+
+        let count_mode = tools::execute(
+            "grep",
+            &json!({"pattern": "hit", "output_mode": "count"}),
+            &ctx,
+        )
+        .await;
+        assert!(count_mode.success, "{:?}", count_mode.error);
+        assert_eq!(count_mode.output, "a.txt: 3\nb.txt: 1");
+        assert_eq!(count_mode.observed_paths, vec!["a.txt", "b.txt"]);
+
+        let context_mode = tools::execute(
+            "grep",
+            &json!({"pattern": "hit", "output_mode": "content", "context_lines": 1}),
+            &ctx,
+        )
+        .await;
+        assert!(context_mode.success, "{:?}", context_mode.error);
+        assert_eq!(
+            context_mode.output,
+            [
+                "a.txt-2- one",
+                "a.txt:3: hit1",
+                "a.txt-4- two",
+                "a.txt:5: hit2",
+                "a.txt-6- three",
+                "--",
+                "a.txt-8- five",
+                "a.txt:9: hit3",
+                "a.txt-10- six",
+                "b.txt:1: hit only",
+            ]
+            .join("\n")
+        );
+        assert_eq!(context_mode.observed_paths, vec!["a.txt", "b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn ls_recursive_respects_ignore_files_and_flat_ls_keeps_direct_entries() {
+        let (_dir, ctx) = test_ctx(Rules::default());
+        fs::write(ctx.workspace.join(".gitignore"), "dist_cache/\n*.tmp\n").unwrap();
+        fs::write(ctx.workspace.join(".ignore"), "secret.txt\n").unwrap();
+        fs::create_dir_all(ctx.workspace.join("dist_cache")).unwrap();
+        fs::create_dir_all(ctx.workspace.join("node_modules")).unwrap();
+        fs::create_dir_all(ctx.workspace.join("src")).unwrap();
+        fs::write(ctx.workspace.join("dist_cache/artifact.bin"), "x").unwrap();
+        fs::write(ctx.workspace.join("node_modules/pkg.txt"), "x").unwrap();
+        fs::write(ctx.workspace.join("junk.tmp"), "x").unwrap();
+        fs::write(ctx.workspace.join("secret.txt"), "x").unwrap();
+        fs::write(ctx.workspace.join("src/main.rs"), "fn main() {}").unwrap();
+
+        let flat = tools::execute("ls", &json!({"path": "."}), &ctx).await;
+        assert!(flat.success, "{:?}", flat.error);
+        assert!(flat.output.contains("dist_cache/"));
+        assert!(flat.output.contains("junk.tmp"));
+        assert!(flat.output.contains("secret.txt"));
+        assert!(!flat.output.contains("node_modules"));
+
+        let recursive = tools::execute("ls", &json!({"path": ".", "recursive": true}), &ctx).await;
+        assert!(recursive.success, "{:?}", recursive.error);
+        assert!(recursive.output.contains("src/"));
+        assert!(recursive.output.contains("src/main.rs"));
+        assert!(!recursive.output.contains("dist_cache"));
+        assert!(!recursive.output.contains("artifact.bin"));
+        assert!(!recursive.output.contains("junk.tmp"));
+        assert!(!recursive.output.contains("secret.txt"));
+        assert!(!recursive.output.contains("node_modules"));
+
+        let recursive_all = tools::execute(
+            "ls",
+            &json!({"path": ".", "recursive": true, "include_ignored": true}),
+            &ctx,
+        )
+        .await;
+        assert!(recursive_all.success, "{:?}", recursive_all.error);
+        assert!(recursive_all.output.contains("dist_cache/"));
+        assert!(recursive_all.output.contains("dist_cache/artifact.bin"));
+        assert!(recursive_all.output.contains("junk.tmp"));
+        assert!(recursive_all.output.contains("secret.txt"));
+        assert!(!recursive_all.output.contains("node_modules"));
+    }
 }

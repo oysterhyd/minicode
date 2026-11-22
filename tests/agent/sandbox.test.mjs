@@ -109,3 +109,44 @@ test('SEC2 cancelling an idle sandboxed background job reaps the restricted proc
   const pid=Number(fs.readFileSync(marker,'utf8'));assert.ok(pidAlive(pid))
   await f.request('cancelTurn',{sessionId:run.id});assert.ok(await until(()=>!pidAlive(pid)))
 })
+
+test('SEC2 invalid shellSandbox.readOnlyPaths report clear normalization errors before execution',async t=>{
+  for(const [entry,pattern] of [
+    ['./tools',/shellSandbox\.readOnlyPaths.*absolute path/],
+    ['%USERPROFILE%\\tools',/shellSandbox\.readOnlyPaths.*unexpanded environment variable/],
+    ['$HOME/tools',/shellSandbox\.readOnlyPaths.*unexpanded environment variable/]
+  ]){
+    const f=await fixture(t,[call('echo should-not-run'),{text:'done'}])
+    fs.mkdirSync(path.join(f.workspace,'.minicode'))
+    fs.writeFileSync(path.join(f.workspace,'.minicode/settings.json'),JSON.stringify({shellSandbox:{enabled:true,readOnlyPaths:[entry]}}))
+    await assert.rejects(
+      f.request('sendPrompt',{workspace:f.workspace,model:'fake',text:'validate sandbox paths'}),
+      pattern
+    )
+  }
+})
+
+test('SEC2 Windows sandbox authorizes configured readOnlyPaths while blocking writes and other outside reads',{skip:process.platform!=='win32'},async t=>{
+  const f=await fixture(t)
+  const outsideAllowed=path.join(f.root,'ext-readonly')
+  const outsideBlocked=path.join(f.root,'ext-blocked')
+  fs.mkdirSync(outsideAllowed);fs.mkdirSync(outsideBlocked)
+  fs.writeFileSync(path.join(outsideAllowed,'allowed.txt'),'ALLOWED_TOOL_DATA')
+  fs.writeFileSync(path.join(outsideBlocked,'blocked.txt'),'BLOCKED_SECRET')
+  const allowedFile=path.join(outsideAllowed,'allowed.txt').replaceAll("'","''")
+  const writeAttempt=path.join(outsideAllowed,'write.txt').replaceAll("'","''")
+  const blockedFile=path.join(outsideBlocked,'blocked.txt').replaceAll("'","''")
+  const command=`Write-Output ([IO.File]::ReadAllText('${allowedFile}'));try{[IO.File]::WriteAllText('${writeAttempt}','nope');Write-Output 'WRITE_ESCAPED'}catch{Write-Output 'WRITE_BLOCKED'};try{[IO.File]::ReadAllText('${blockedFile}');Write-Output 'READ_ESCAPED'}catch{Write-Output 'READ_BLOCKED'}`
+  fs.writeFileSync(f.script,JSON.stringify({turns:[{tool_calls:[{name:'powershell',arguments:{command}}]},{text:'done'}]}))
+  fs.mkdirSync(path.join(f.workspace,'.minicode'))
+  fs.writeFileSync(path.join(f.workspace,'.minicode/settings.json'),JSON.stringify({shellSandbox:{enabled:true,network:false,readOnlyPaths:[outsideAllowed]}}))
+  await f.request('setPermissionMode',{mode:'bypass'})
+  const approvals=(async()=>{const approval=await f.wait(e=>e.event==='approval');await f.request('resolveApproval',{approvalId:approval.approvalId,sessionId:approval.sessionId,granted:true})})()
+  const run=await f.run();await approvals
+  const tool=run.detail.events.find(e=>e.type==='tool_call_result').data
+  assert.equal(tool.success,true,JSON.stringify(tool))
+  assert.match(tool.output_detail,/ALLOWED_TOOL_DATA/)
+  assert.match(tool.output_detail,/WRITE_BLOCKED/)
+  assert.match(tool.output_detail,/READ_BLOCKED/)
+  assert.ok(!fs.existsSync(path.join(outsideAllowed,'write.txt')))
+})

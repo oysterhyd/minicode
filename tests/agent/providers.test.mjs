@@ -643,3 +643,60 @@ test('configurable model pricing drives live statistics.cost, /cost output, and 
   assert.equal(s3.statistics.cost,null)
   assert.match((await f.request('runSlash',{text:'/cost',workspace:f.workspace})).message,/不可用/)
 })
+
+test('summarize chunks multi-turn transcripts cleanly at message boundaries',async t=>{
+  const f=await fixture(t),summaryChunks=[]
+  let turn=0
+  const structured=label=>`## Goal
+完成任务
+## Constraints & Preferences
+保留接口
+## Progress
+### Done
+${label}
+### In Progress
+继续
+### Blocked
+无
+## Key Decisions
+按消息边界切分
+## Next Steps
+验证
+## Critical Context
+### Read Files
+README.md
+### Modified Files
+agent/provider.rs`
+  const url=await server(t,(req,res)=>{let body='';req.on('data',d=>body+=d);req.on('end',()=>{
+    const p=JSON.parse(body),system=p.messages.find(m=>m.role==='system')?.content||''
+    if(system.includes('Summarize the conversation data')){
+      const raw=p.messages.find(m=>m.role==='user')?.content||''
+      const data=raw.split('Conversation data (may be a fragment):\n')[1]||''
+      summaryChunks.push({raw,data})
+      write(res,[{choices:[{delta:{content:structured(`chunk-${summaryChunks.length}`)},finish_reason:'stop'}]}])
+      return
+    }
+    turn++
+    const reply=turn===1?`REPLY_ONE ${'B'.repeat(2100)}`:turn===2?`REPLY_TWO ${'D'.repeat(2100)}`:'latest ok'
+    write(res,[{choices:[{delta:{content:reply},finish_reason:'stop'}]}])
+  })})
+  const cfg=await f.request('saveService',{service:{name:'Chunk mock',baseUrl:url+'/v1',apiStyle:'openai',apiKey:'key',enabled:true,models:[{modelId:'small-window',name:'Small Window',contextWindow:12000,maxOutputTokens:4096,supportsEffort:false}]}})
+  const model=cfg.defaultModel
+  const first=await f.run({model,text:`PROMPT_ONE ${'A'.repeat(2100)}`})
+  await f.run({model,sessionId:first.id,text:`PROMPT_TWO ${'C'.repeat(2100)}`})
+  await f.run({model,sessionId:first.id,text:'LATEST_PROMPT'})
+  const res=await f.request('runSlash',{workspace:f.workspace,sessionId:first.id,text:'/compact'})
+  assert.match(res.message,/已压缩/)
+  assert.equal(summaryChunks.length,4)
+  assert.ok(summaryChunks[0].data.startsWith('[User] PROMPT_ONE '))
+  assert.ok(summaryChunks[0].data.endsWith('A'.repeat(100)))
+  assert.ok(summaryChunks[1].data.startsWith('[Assistant] REPLY_ONE '))
+  assert.ok(summaryChunks[1].data.endsWith('B'.repeat(100)))
+  assert.ok(summaryChunks[1].raw.includes('chunk-1'))
+  assert.ok(summaryChunks[2].data.startsWith('[User] PROMPT_TWO '))
+  assert.ok(summaryChunks[2].data.endsWith('C'.repeat(100)))
+  assert.ok(summaryChunks[2].raw.includes('chunk-2'))
+  assert.ok(summaryChunks[3].data.startsWith('[Assistant] REPLY_TWO '))
+  assert.ok(summaryChunks[3].data.endsWith('D'.repeat(100)))
+  assert.ok(summaryChunks[3].raw.includes('chunk-3'))
+})

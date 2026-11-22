@@ -373,8 +373,11 @@ impl Provider {
         Ok(())
     }
     fn prompt_fingerprint(&self, system: &str, messages: &[Message], specs: &[ToolSpec]) -> String {
-        util::hash(
-            &serde_json::to_vec(&(
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        serde_json::to_writer(
+            &mut hasher,
+            &(
                 system,
                 messages,
                 specs,
@@ -384,9 +387,10 @@ impl Provider {
                 &self.url,
                 &self.effort,
                 &self.parameter_compat,
-            ))
-            .expect("serializable prompt"),
+            ),
         )
+        .expect("serializable prompt");
+        format!("{:x}", hasher.finalize())
     }
     pub fn estimated_prompt_tokens(
         &self,
@@ -397,6 +401,7 @@ impl Provider {
         let estimated = context::estimate(system, messages, specs);
         if let Some(anchor) = &self.prompt_anchor
             && messages.len() >= anchor.messages
+            && (messages.len() > anchor.messages || estimated == anchor.estimated)
             && self.prompt_fingerprint(system, &messages[..anchor.messages], specs)
                 == anchor.fingerprint
         {
@@ -417,7 +422,14 @@ impl Provider {
         let estimated = context::estimate(system, messages, specs);
         if usage.available && usage.input_tokens > 0 && estimated > 0 {
             let observed = (usage.input_tokens as f64 / estimated as f64).clamp(0.5, 3.0);
-            self.prompt_scale = (self.prompt_scale + observed) / 2.0;
+            let raw_scale = (self.prompt_scale + observed) / 2.0;
+            let serialized = json!({"version":1,"scale":raw_scale})
+                .to_string()
+                .into_bytes();
+            self.prompt_scale = serde_json::from_slice::<Value>(&serialized)
+                .ok()
+                .and_then(|value| value["scale"].as_f64())
+                .unwrap_or(raw_scale);
             self.prompt_anchor = Some(PromptAnchor {
                 messages: messages.len(),
                 fingerprint: self.prompt_fingerprint(system, messages, specs),
@@ -426,12 +438,7 @@ impl Provider {
             });
             // A failed cache write must not discard a successful model response.
             // Atomic replacement keeps concurrent writers valid; latest EMA wins.
-            let _ = util::atomic_write(
-                &self.calibration_path(),
-                json!({"version":1,"scale":self.prompt_scale})
-                    .to_string()
-                    .as_bytes(),
-            );
+            let _ = util::atomic_write(&self.calibration_path(), &serialized);
         }
     }
     pub async fn stream(
@@ -525,11 +532,15 @@ impl Provider {
             self.index = 0;
         }
         self.max_output = self.max_output.min(4096);
-        let transcript = serde_json::to_string(messages)?;
-        let mut remaining = transcript.as_str();
+        let blocks = context::render_for_summary(messages);
+        if blocks.is_empty() {
+            bail!("no conversation data to summarize");
+        }
+        let mut block_idx = 0usize;
+        let mut byte_offset = 0usize;
         let mut summary = String::new();
         let sink: Sink = std::sync::Arc::new(|_| {});
-        while !remaining.is_empty() {
+        while block_idx < blocks.len() {
             let budget = (self.window.saturating_sub(8192) as f64 / self.prompt_scale.max(1.0))
                 .min(24_000.0) as usize;
             if budget < 1024 {
@@ -540,13 +551,9 @@ impl Provider {
             }
             // One char per token is deliberately conservative for mixed/CJK data.
             let take = budget.saturating_sub(summary.chars().count()).max(1);
-            let end = remaining
-                .char_indices()
-                .nth(take)
-                .map_or(remaining.len(), |(i, _)| i);
+            let chunk = next_summary_chunk(&blocks, &mut block_idx, &mut byte_offset, take);
             let input = Message::user(format!(
-                "Previous summary:\n{summary}\nConversation data (may be a fragment):\n{}",
-                &remaining[..end]
+                "Previous summary:\n{summary}\nConversation data (may be a fragment):\n{chunk}"
             ));
             if max_total_tokens > 0
                 && usage
@@ -572,7 +579,6 @@ impl Provider {
             if response.stop_reason == "max_tokens" || !valid_summary(&summary) {
                 bail!("invalid structured summary");
             }
-            remaining = &remaining[end..];
             if self.fake.is_some() {
                 self.index = 0;
             }
@@ -1461,6 +1467,53 @@ impl Provider {
     }
 }
 
+fn next_summary_chunk(
+    blocks: &[String],
+    block_idx: &mut usize,
+    byte_offset: &mut usize,
+    take: usize,
+) -> String {
+    let take = take.max(1);
+    let mut chunk = String::new();
+    let mut chunk_chars = 0usize;
+    while *block_idx < blocks.len() {
+        let slice = &blocks[*block_idx][*byte_offset..];
+        if slice.is_empty() {
+            *block_idx += 1;
+            *byte_offset = 0;
+            continue;
+        }
+        let slice_chars = slice.chars().count();
+        let sep_chars = if chunk.is_empty() { 0 } else { 2 };
+        if chunk_chars + sep_chars + slice_chars <= take {
+            if !chunk.is_empty() {
+                chunk.push_str("\n\n");
+                chunk_chars += 2;
+            }
+            chunk.push_str(slice);
+            chunk_chars += slice_chars;
+            *block_idx += 1;
+            *byte_offset = 0;
+        } else if chunk.is_empty() {
+            let end = slice
+                .char_indices()
+                .nth(take)
+                .map_or(slice.len(), |(i, _)| i);
+            chunk.push_str(&slice[..end]);
+            if end >= slice.len() {
+                *block_idx += 1;
+                *byte_offset = 0;
+            } else {
+                *byte_offset += end;
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    chunk
+}
+
 #[cfg(test)]
 mod calibration_tests {
     use super::*;
@@ -1556,5 +1609,129 @@ mod calibration_tests {
             provider.estimated_prompt_tokens("system", &messages, &[]),
             1000
         );
+    }
+
+    #[test]
+    fn prompt_fingerprint_streaming_matches_full_json_serialization() {
+        let (_dir, configuration) = fixture();
+        let mut provider = Provider::new("calibration::one", "off", &configuration).unwrap();
+        let specs = vec![ToolSpec {
+            name: "edit".into(),
+            description: "编辑文件".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+            requires_approval: true,
+            read_only_hint: false,
+        }];
+        let messages = vec![
+            Message::user("请检查中文🦀路径"),
+            Message {
+                role: "assistant".into(),
+                content: vec![
+                    Block::Thinking {
+                        thinking: "分析问题".into(),
+                        signature: Some("sig".into()),
+                        source: "test".into(),
+                    },
+                    Block::ToolUse {
+                        id: "call_1".into(),
+                        name: "edit".into(),
+                        input: json!({"path":"a.rs","old_text":"x","new_text":"y"}),
+                        input_error: None,
+                    },
+                ],
+            },
+            Message {
+                role: "user".into(),
+                content: vec![
+                    Block::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: "done".into(),
+                        is_error: false,
+                        images: vec![],
+                    },
+                    Block::Media {
+                        asset_id: "asset_1".into(),
+                        kind: "image".into(),
+                        name: "shot.png".into(),
+                        mime_type: "image/png".into(),
+                        size: 42,
+                    },
+                ],
+            },
+        ];
+        let expected = util::hash(
+            &serde_json::to_vec(&(
+                "sys",
+                &messages,
+                &specs,
+                &provider.configuration_id,
+                &provider.model,
+                &provider.style,
+                &provider.url,
+                &provider.effort,
+                &provider.parameter_compat,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            provider.prompt_fingerprint("sys", &messages, &specs),
+            expected
+        );
+
+        let usage = Usage {
+            input_tokens: 1000,
+            available: true,
+            ..Usage::default()
+        };
+        provider.observe_prompt("sys", &messages, &specs, &usage);
+        assert_eq!(
+            provider.estimated_prompt_tokens("sys", &messages, &specs),
+            1000
+        );
+
+        let mut extended = messages.clone();
+        extended.push(Message::user("followup"));
+        assert!(provider.estimated_prompt_tokens("sys", &extended, &specs) > 1000);
+
+        let mut mutated_same_len = messages;
+        mutated_same_len[0] = Message::user("改掉前缀内容");
+        assert_ne!(
+            provider.prompt_fingerprint("sys", &mutated_same_len, &specs),
+            expected
+        );
+        assert_ne!(
+            provider.estimated_prompt_tokens("sys", &mutated_same_len, &specs),
+            1000
+        );
+    }
+
+    #[test]
+    fn summary_chunking_prefers_message_boundaries_and_splits_oversized_single_block() {
+        let blocks = vec![
+            "[User] 第一段".to_string(),
+            "[Assistant] 第二段内容".to_string(),
+            format!("[ToolResult] {}", "中文🦀A".repeat(15)),
+        ];
+        let mut idx = 0;
+        let mut offset = 0;
+
+        // First two blocks (9 + 2 + 16 = 27 chars) fit in budget 30, third does not -> splits at boundary.
+        let chunk1 = next_summary_chunk(&blocks, &mut idx, &mut offset, 30);
+        assert_eq!(chunk1, "[User] 第一段\n\n[Assistant] 第二段内容");
+        assert_eq!((idx, offset), (2, 0));
+
+        // Oversized single block (13 + 45 = 58 chars) splits across char boundaries with budget 25.
+        let chunk2 = next_summary_chunk(&blocks, &mut idx, &mut offset, 25);
+        assert_eq!(chunk2.chars().count(), 25);
+        assert_eq!(idx, 2);
+        assert!(offset > 0);
+
+        let chunk3 = next_summary_chunk(&blocks, &mut idx, &mut offset, 25);
+        assert_eq!(chunk3.chars().count(), 25);
+        assert_eq!(idx, 2);
+
+        let chunk4 = next_summary_chunk(&blocks, &mut idx, &mut offset, 25);
+        assert_eq!((idx, offset), (3, 0));
+        assert_eq!(format!("{chunk2}{chunk3}{chunk4}"), blocks[2]);
     }
 }

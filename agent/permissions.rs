@@ -7,6 +7,9 @@ use std::{
     path::{Component, Path},
 };
 
+const FILE_TOOLS: &[&str] = &["read", "write", "edit", "grep", "ls", "glob"];
+const READ_DISCOVERY_TOOLS: &[&str] = &["grep", "ls", "glob"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     Deny,
@@ -27,11 +30,50 @@ struct Rule {
 impl Rules {
     pub fn has_file_denies(&self) -> bool {
         self.entries.iter().any(|rule| {
-            rule.effect == Decision::Deny
-                && ["read", "edit", "write", "grep", "ls"]
-                    .iter()
-                    .any(|name| rule.tool.is_match(name))
+            rule.effect == Decision::Deny && FILE_TOOLS.iter().any(|name| rule.tool.is_match(name))
         })
+    }
+    pub fn matched_file_deny_in_command(&self, workspace: &Path, command: &str) -> Option<String> {
+        let deny_matchers: Vec<GlobMatcher> = self
+            .entries
+            .iter()
+            .filter(|rule| {
+                rule.effect == Decision::Deny
+                    && FILE_TOOLS.iter().any(|name| rule.tool.is_match(name))
+            })
+            .filter_map(|rule| rule.scope.as_deref())
+            .filter_map(|scope| path_glob(scope).ok())
+            .collect();
+        if deny_matchers.is_empty() {
+            return None;
+        }
+        let canonical_workspace = util::canonical(workspace).ok()?;
+        let mut candidates = Vec::new();
+        for part in commands(command).parts {
+            for word in command_words(&part) {
+                collect_path_candidates(&word, &mut candidates);
+            }
+            for word in raw_quoted_words(&part) {
+                collect_path_candidates(&word, &mut candidates);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for candidate in candidates {
+            if !seen.insert(candidate.clone()) {
+                continue;
+            }
+            let Some(relative) = normalize_candidate_in_workspace(&canonical_workspace, &candidate)
+            else {
+                continue;
+            };
+            if deny_matchers
+                .iter()
+                .any(|matcher| matcher.is_match(&relative))
+            {
+                return Some(relative);
+            }
+        }
+        None
     }
     pub fn load(
         workspace: &Path,
@@ -175,11 +217,11 @@ impl Rules {
             } else {
                 None
             })
-        } else if ["read", "write", "edit", "grep", "ls"].contains(&name) {
+        } else if FILE_TOOLS.contains(&name) {
             let decision =
                 self.path_decision(workspace, name, input["path"].as_str().unwrap_or("."))?;
             if decision != Some(Decision::Deny)
-                && ["grep", "ls"].contains(&name)
+                && READ_DISCOVERY_TOOLS.contains(&name)
                 && self.entries.iter().any(|rule| {
                     rule.effect == Decision::Ask
                         && (rule.tool.is_match("read") || rule.tool.is_match(name))
@@ -216,7 +258,7 @@ impl Rules {
         for rule in &self.entries {
             let tool = rule.tool.is_match(name)
                 || name == "powershell" && rule.tool.is_match("bash")
-                || file && ["grep", "ls"].contains(&name) && rule.tool.is_match("read")
+                || file && READ_DISCOVERY_TOOLS.contains(&name) && rule.tool.is_match("read")
                 || file
                     && ["write", "edit"].contains(&name)
                     && rule.effect != Decision::Allow
@@ -298,7 +340,7 @@ impl Rules {
             }
             return Ok(Some(format!("{name}({}:*)", words[..2].join(" "))));
         }
-        if ["read", "write", "edit", "grep", "ls"].contains(&name) {
+        if FILE_TOOLS.contains(&name) {
             let path = util::in_workspace(workspace, input["path"].as_str().unwrap_or("."))?;
             let relative = path
                 .strip_prefix(util::canonical(workspace)?)?
@@ -342,7 +384,7 @@ fn parse(text: &str, effect: Decision) -> Result<Rule> {
         bail!("invalid permission tool pattern")
     }
     if let Some(scope) = &scope
-        && ["read", "write", "edit", "grep", "ls"].contains(&tool)
+        && FILE_TOOLS.contains(&tool)
     {
         path_glob(scope)?;
     }
@@ -496,6 +538,266 @@ pub(crate) fn command_words(text: &str) -> Vec<String> {
         words.push(word)
     }
     words
+}
+fn raw_quoted_words(text: &str) -> Vec<String> {
+    let mut words = vec![];
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    for ch in text.chars() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+            started = true;
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            started = true;
+            continue;
+        }
+        if ch.is_whitespace() {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        } else {
+            word.push(ch);
+            started = true;
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
+}
+fn strip_token_wrappers(token: &str) -> &str {
+    let mut s = token.trim();
+    loop {
+        let prev = s;
+        s = s.trim_matches(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+                )
+        });
+        for prefix in [
+            "2>>", "1>>", "&>>", "0<", "1>", "2>", "&>", "<<", ">>", "<", ">", "@",
+        ] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                s = rest;
+                break;
+            }
+        }
+        if s == prev {
+            break;
+        }
+    }
+    s
+}
+fn push_trimmed_and_kv(token: &str, out: &mut Vec<String>) {
+    let trimmed = token.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+    let stripped = strip_token_wrappers(trimmed);
+    if !stripped.is_empty() && stripped != trimmed {
+        out.push(stripped.to_string());
+    }
+    for source in [trimmed, stripped] {
+        if let Some((_, rhs)) = source.split_once('=') {
+            let rhs_stripped = strip_token_wrappers(rhs);
+            if !rhs_stripped.is_empty() {
+                out.push(rhs_stripped.to_string());
+            }
+        }
+        if source.starts_with('-')
+            && let Some((_, rhs)) = source.split_once(':')
+        {
+            let rhs_stripped = strip_token_wrappers(rhs);
+            if !rhs_stripped.is_empty() {
+                out.push(rhs_stripped.to_string());
+            }
+        }
+    }
+}
+fn collect_path_candidates(token: &str, out: &mut Vec<String>) {
+    push_trimmed_and_kv(token, out);
+    let is_delimiter = |ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '\'' | '"'
+                    | '`'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | ','
+                    | ';'
+                    | '<'
+                    | '>'
+                    | '|'
+                    | '&'
+            )
+    };
+    if token.contains(is_delimiter) {
+        for piece in token.split(is_delimiter) {
+            if !piece.is_empty() {
+                push_trimmed_and_kv(piece, out);
+            }
+        }
+    }
+}
+fn normalize_candidate_in_workspace(canonical_workspace: &Path, candidate: &str) -> Option<String> {
+    if candidate.is_empty() || candidate.contains('\0') || candidate.contains("://") {
+        return None;
+    }
+    let normalized = if Path::new(candidate).is_absolute() {
+        std::borrow::Cow::Borrowed(candidate)
+    } else {
+        std::borrow::Cow::Owned(candidate.replace('\\', "/"))
+    };
+    let raw_path = Path::new(normalized.as_ref());
+    let target = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        canonical_workspace.join(raw_path)
+    };
+    if let Ok(resolved) = util::canonical(&target) {
+        if !resolved.starts_with(canonical_workspace) {
+            return None;
+        }
+        let relative = resolved
+            .strip_prefix(canonical_workspace)
+            .ok()?
+            .to_str()?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        return Some(if relative.is_empty() {
+            ".".into()
+        } else {
+            relative
+        });
+    }
+    if !candidate.contains(['*', '?', '[', ']', '{', '}']) {
+        return None;
+    }
+    lexical_in_workspace(canonical_workspace, raw_path, candidate)
+}
+fn normalize_abs_components(path: &Path) -> Option<String> {
+    let mut prefix_parts = Vec::new();
+    let mut normal_parts = Vec::new();
+    let mut has_root = false;
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(p) => {
+                prefix_parts.push(p.as_os_str().to_string_lossy().replace('\\', "/"));
+            }
+            Component::RootDir => has_root = true,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normal_parts.pop()?;
+            }
+            Component::Normal(part) => normal_parts.push(part.to_string_lossy().into_owned()),
+        }
+    }
+    let mut out = prefix_parts.join("");
+    if has_root {
+        out.push('/');
+    }
+    out.push_str(&normal_parts.join("/"));
+    Some(out)
+}
+fn lexical_in_workspace(
+    canonical_workspace: &Path,
+    raw_path: &Path,
+    candidate: &str,
+) -> Option<String> {
+    let rel_slice = if raw_path.is_absolute() {
+        let ws_raw = canonical_workspace.to_string_lossy().replace('\\', "/");
+        let ws = if ws_raw == "/" {
+            "/"
+        } else {
+            ws_raw.trim_end_matches('/')
+        };
+        let normalized_abs = normalize_abs_components(raw_path)?;
+        let trimmed = if normalized_abs == "/" {
+            "/"
+        } else {
+            normalized_abs.trim_end_matches('/')
+        };
+        let suffix = if ws == "/" {
+            normalized_abs.trim_start_matches('/')
+        } else {
+            let eq = if cfg!(windows) {
+                trimmed.eq_ignore_ascii_case(ws)
+            } else {
+                trimmed == ws
+            };
+            if eq {
+                ""
+            } else {
+                let starts = if cfg!(windows) {
+                    normalized_abs
+                        .get(..ws.len())
+                        .is_some_and(|p| p.eq_ignore_ascii_case(ws))
+                        && normalized_abs.as_bytes().get(ws.len()) == Some(&b'/')
+                } else {
+                    normalized_abs.starts_with(ws)
+                        && normalized_abs.as_bytes().get(ws.len()) == Some(&b'/')
+                };
+                if !starts {
+                    return None;
+                }
+                normalized_abs
+                    .get(ws.len()..)
+                    .unwrap_or("")
+                    .trim_start_matches('/')
+            }
+        };
+        suffix.to_string()
+    } else {
+        if raw_path
+            .components()
+            .any(|c| matches!(c, Component::RootDir | Component::Prefix(_)))
+        {
+            return None;
+        }
+        candidate.replace('\\', "/")
+    };
+    let mut parts = Vec::new();
+    for segment in rel_slice.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    let mut prefix = canonical_workspace.to_path_buf();
+    for segment in &parts {
+        if segment.contains(['*', '?', '[', ']', '{', '}']) {
+            break;
+        }
+        prefix.push(segment);
+    }
+    if let Ok(resolved_prefix) = util::canonical(&prefix)
+        && !resolved_prefix.starts_with(canonical_workspace)
+    {
+        return None;
+    }
+    Some(if parts.is_empty() {
+        ".".into()
+    } else {
+        parts.join("/")
+    })
 }
 fn comparable_words(text: &str, name: &str) -> Vec<String> {
     let mut words = command_words(text);
@@ -706,5 +1008,158 @@ mod tests {
                 .unwrap(),
             Some(Decision::Deny)
         );
+    }
+
+    #[test]
+    fn glob_tool_shares_file_permission_rules() {
+        let mut rules = Rules::default();
+        rules
+            .extend(&json!({
+                "deny": ["read(.env)", "glob(secrets/**)"],
+                "ask": ["read(keys/*.pem)"],
+                "allow": ["read(**)"]
+            }))
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("sub")).unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        assert!(rules.has_file_denies());
+        assert_eq!(
+            rules
+                .decision(root.path(), "glob", &json!({"path": "sub/../.env"}))
+                .unwrap(),
+            Some(Decision::Deny)
+        );
+        assert_eq!(
+            rules
+                .decision(root.path(), "glob", &json!({"path": "secrets/token"}))
+                .unwrap(),
+            Some(Decision::Deny)
+        );
+        assert_eq!(
+            rules
+                .decision(root.path(), "glob", &json!({"path": "src"}))
+                .unwrap(),
+            Some(Decision::Ask)
+        );
+
+        let mut allow_only = Rules::default();
+        allow_only.extend(&json!({"allow": ["read(**)"]})).unwrap();
+        assert_eq!(
+            allow_only
+                .decision(root.path(), "glob", &json!({"path": "src"}))
+                .unwrap(),
+            Some(Decision::Allow)
+        );
+        assert_eq!(
+            Rules::grant_rule(root.path(), "glob", &json!({"path": "src"})).unwrap(),
+            Some("glob(src)".into())
+        );
+        assert!(
+            allow_only
+                .extend(&json!({"deny": ["glob(../outside)"]}))
+                .is_err()
+        );
+
+        let mut glob_deny_only = Rules::default();
+        glob_deny_only
+            .extend(&json!({"deny": ["glob(private/**)"]}))
+            .unwrap();
+        assert!(glob_deny_only.has_file_denies());
+    }
+
+    #[test]
+    fn matched_file_deny_in_command_detects_sensitive_references() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = util::canonical(root.path()).unwrap();
+        fs::create_dir(workspace.join("sub")).unwrap();
+        fs::create_dir(workspace.join("secrets")).unwrap();
+        fs::create_dir(workspace.join("keys")).unwrap();
+        fs::create_dir(workspace.join("dir with space")).unwrap();
+        fs::write(workspace.join(".env"), "SECRET=1").unwrap();
+        fs::write(workspace.join("keys/prod.pem"), "KEY").unwrap();
+        fs::write(workspace.join("dir with space/secret.pem"), "KEY").unwrap();
+
+        let mut no_file_denies = Rules::default();
+        no_file_denies
+            .extend(&json!({"deny": ["bash(rm -rf:*)"]}))
+            .unwrap();
+        assert_eq!(
+            no_file_denies.matched_file_deny_in_command(&workspace, "cat .env"),
+            None
+        );
+
+        let mut rules = Rules::default();
+        rules
+            .extend(&json!({
+                "deny": [
+                    "read(.env)",
+                    "read(**/*.pem)",
+                    "write(secrets/**)",
+                    "glob(private/**)"
+                ],
+                "allow": ["read(.env)", "bash"]
+            }))
+            .unwrap();
+
+        for (command, expected) in [
+            ("cat .env", ".env"),
+            ("echo ok && cat sub/../.env", ".env"),
+            ("ls; cat './.env' | wc -l", ".env"),
+            ("cat <.env", ".env"),
+            ("grep --file=.env SECRET", ".env"),
+            ("echo $(cat .env)", ".env"),
+            ("echo `cat .env`", ".env"),
+            ("node -e \"fs.readFileSync('.env')\"", ".env"),
+            ("[IO.File]::ReadAllText('sub/../.env')", ".env"),
+            ("Get-Content -Path:.env", ".env"),
+            ("Get-Content sub\\..\\.env", ".env"),
+            ("echo hi > secrets/token.txt", "secrets/token.txt"),
+            ("cat keys/prod.pem", "keys/prod.pem"),
+            ("cat secrets/*", "secrets/*"),
+            ("ls private/data.txt", "private/data.txt"),
+            (
+                "cat \"dir with space/secret.pem\"",
+                "dir with space/secret.pem",
+            ),
+        ] {
+            assert_eq!(
+                rules.matched_file_deny_in_command(&workspace, command),
+                Some(expected.to_string()),
+                "command: {command}"
+            );
+        }
+
+        let abs_env = workspace.join(".env");
+        assert_eq!(
+            rules.matched_file_deny_in_command(
+                &workspace,
+                &format!("cat \"{}\"", abs_env.display())
+            ),
+            Some(".env".into())
+        );
+
+        let abs_wildcard = workspace.join("secrets").join("*");
+        assert_eq!(
+            rules.matched_file_deny_in_command(
+                &workspace,
+                &format!("cat \"{}\"", abs_wildcard.display())
+            ),
+            Some("secrets/*".into())
+        );
+
+        for safe in [
+            "git status",
+            "cargo test --locked",
+            "cat README.md",
+            "cat .env.example",
+            "cat ../outside/.env",
+        ] {
+            assert_eq!(
+                rules.matched_file_deny_in_command(&workspace, safe),
+                None,
+                "safe command unexpectedly matched: {safe}"
+            );
+        }
     }
 }

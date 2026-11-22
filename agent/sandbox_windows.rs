@@ -155,7 +155,14 @@ impl Profile {
         std::fs::create_dir(&temp)?;
         profile.grant(&temp, FILE_ALL_ACCESS)?;
         for root in read_roots {
-            profile.grant(root, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)?;
+            profile
+                .grant(root, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)
+                .with_context(|| {
+                    format!(
+                        "failed to grant Windows AppContainer read-only access to shellSandbox.readOnlyPaths entry '{}'; verify the directory exists, is not a symlink/junction, and permits ACL updates",
+                        root.display()
+                    )
+                })?;
         }
         Ok(profile)
     }
@@ -434,7 +441,7 @@ pub(super) fn prepare(
         .is_some_and(|name| name.eq_ignore_ascii_case("bash.exe"))
     {
         bail!(
-            "Windows AppContainer sandbox cannot support Git Bash/MSYS global named objects; use the powershell tool. Command was not executed."
+            "Windows AppContainer sandbox cannot support Git Bash/MSYS global named objects; use the powershell tool, and add any external toolchain directories to shellSandbox.readOnlyPaths in settings.json. Command was not executed."
         )
     }
     if config.network {
@@ -611,8 +618,19 @@ pub(super) fn worker(
         )
     } == 0
     {
-        return Err(anyhow::Error::from(std::io::Error::last_os_error())
-            .context("AppContainer process could not start"));
+        let err = std::io::Error::last_os_error();
+        let hint = match program.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(dir) => format!(
+                "AppContainer process could not start ({}); if this executable or its toolchain lives outside Windows default readable directories, authorize its directory (e.g. \"{}\") via shellSandbox.readOnlyPaths in settings.json",
+                program.display(),
+                dir.display()
+            ),
+            None => format!(
+                "AppContainer process could not start ({}); authorize external toolchain directories via shellSandbox.readOnlyPaths in settings.json",
+                program.display()
+            ),
+        };
+        return Err(anyhow::Error::from(err).context(hint));
     }
     unsafe {
         if let Err(error) = std::fs::write(status, "started") {
@@ -689,16 +707,17 @@ mod tests {
         let mut profile = Profile::new_in(&leases, &workspace, &[]).unwrap();
         let marker = profile.temp_path().join("status");
         std::fs::write(marker.with_extension("owned"), "owned").unwrap();
-        assert!(
-            worker(
-                &profile.name,
-                &workspace,
-                &root.path().join("nonexistent.exe"),
-                &marker,
-                &[]
-            )
-            .is_err()
-        );
+        let err = worker(
+            &profile.name,
+            &workspace,
+            &root.path().join("nonexistent.exe"),
+            &marker,
+            &[],
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("shellSandbox.readOnlyPaths"), "{message}");
+        assert!(message.contains("nonexistent.exe"), "{message}");
         assert!(!marker.exists());
         profile.close().unwrap();
     }
@@ -764,5 +783,29 @@ mod tests {
         assert_eq!(quote("a b"), "\"a b\"");
         assert_eq!(quote("a\"b"), "\"a\\\"b\"");
         assert_eq!(quote("a\\"), "\"a\\\\\"");
+    }
+    #[test]
+    fn read_only_paths_acl_is_granted_revoked_and_errors_reference_setting() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("work");
+        let leases = root.path().join("leases");
+        let readonly = root.path().join("readonly");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&readonly).unwrap();
+        let mut profile =
+            Profile::new_in(&leases, &workspace, std::slice::from_ref(&readonly)).unwrap();
+        assert!(dacl_contains_sid(&readonly, profile.sid));
+        profile.close().unwrap();
+        assert!(!dacl_contains_sid(&readonly, profile.sid));
+
+        let err =
+            match Profile::new_in(&leases, &workspace, &[root.path().join("missing-readonly")]) {
+                Ok(_) => panic!("missing read-only root must fail"),
+                Err(err) => err,
+            };
+        assert!(
+            err.to_string().contains("shellSandbox.readOnlyPaths"),
+            "{err}"
+        );
     }
 }

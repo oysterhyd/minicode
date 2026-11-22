@@ -81,3 +81,105 @@ test('X4: context_length_exceeded compacts history and retries the same round', 
   assert.ok(JSON.stringify(taskPayloads[2].messages).length < JSON.stringify(taskPayloads[1].messages).length / 2)
   assert.match(JSON.stringify(taskPayloads[2].messages),/keep original constraints/)
 })
+
+test('summarize sends compact structured transcript and bounds oversized tool results', async t => {
+  const f = await fixture(t)
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  fs.writeFileSync(
+    path.join(f.workspace, 'oversized.log'),
+    `LOG_HEAD_MARKER\n${'middle line payload\n'.repeat(900)}LOG_TAIL_MARKER\n`,
+  )
+  const summaryInputs = []
+  let taskTurn = 0
+  const mock = await sseMock(t, payload => {
+    if (JSON.stringify(payload.system).includes('Summarize the conversation data')) {
+      const userMsg = payload.messages[0]
+      const text = Array.isArray(userMsg.content)
+        ? userMsg.content.map(b => b.text ?? '').join('')
+        : userMsg.content
+      summaryInputs.push(text)
+      return {frames: anthropicFrames({text: summary('continue after structured summary'), input: 40, output: 15})}
+    }
+    taskTurn++
+    if (taskTurn === 1) {
+      return {frames: anthropicFrames({tools: [{id: 'read-big', name: 'read', arguments: {path: 'oversized.log'}}]})}
+    }
+    if (taskTurn === 2) return {frames: anthropicFrames({text: '已完成日志分析'})}
+    if (taskTurn === 3) return {frames: anthropicFrames({text: '历史上下文补充'})}
+    return {frames: anthropicFrames({text: '最新回复'})}
+  })
+  const model = await configureService(f, mock.url)
+  const first = await f.run({model, text: 'inspect the oversized file'})
+  await f.run({model, sessionId: first.id, text: 'older follow up'})
+  await f.run({model, sessionId: first.id, text: 'latest task'})
+  const res = await f.request('runSlash', {workspace: f.workspace, sessionId: first.id, text: '/compact'})
+  assert.match(res.message, /已压缩/)
+  assert.ok(summaryInputs.length >= 1)
+  const transcript = summaryInputs.join('\n').split('Conversation data (may be a fragment):\n')[1]
+  assert.match(transcript, /\[User\] inspect the oversized file/)
+  assert.match(transcript, /\[ToolUse name=read id=read-big\]/)
+  assert.match(transcript, /\[ToolResult id=read-big error=false\]/)
+  assert.match(transcript, /\[Assistant\] 已完成日志分析/)
+  assert.doesNotMatch(transcript, /^\s*\[\{"role":"user"/)
+  assert.match(transcript, /LOG_HEAD_MARKER/)
+  assert.match(transcript, /\.\.\.\[omitted \d+ chars\]\.\.\./)
+  assert.match(transcript, /LOG_TAIL_MARKER/)
+})
+
+test('fallback compaction preserves modified file paths and recent assistant conclusions', async t => {
+  const f = await fixture(t)
+  await f.request('setPermissionMode', {mode: 'bypass'})
+  let taskTurn = 0
+  const mock = await sseMock(t, payload => {
+    if (JSON.stringify(payload.system).includes('Summarize the conversation data')) {
+      return {status: 503, body: 'summary service down'}
+    }
+    taskTurn++
+    if (taskTurn === 1) {
+      return {
+        frames: anthropicFrames({
+          tools: [{id: 'write-1', name: 'write', arguments: {path: 'notes/new.txt', content: 'alpha line\n'.repeat(250)}}],
+        }),
+      }
+    }
+    if (taskTurn === 2) {
+      return {
+        frames: anthropicFrames({
+          tools: [{id: 'read-1', name: 'read', arguments: {path: 'README.md'}}],
+        }),
+      }
+    }
+    if (taskTurn === 3) {
+      return {
+        frames: anthropicFrames({
+          tools: [{id: 'edit-1', name: 'edit', arguments: {path: 'README.md', old_text: 'second line', new_text: 'updated line'}}],
+        }),
+      }
+    }
+    if (taskTurn === 4) {
+      return {frames: anthropicFrames({text: `已完成写入 notes/new.txt 并更新 README.md。${'补充记录。'.repeat(120)}`})}
+    }
+    if (taskTurn === 5) return {frames: anthropicFrames({text: '第二阶段验证结论'})}
+    return {frames: anthropicFrames({text: '最终收尾'})}
+  })
+  const model = await configureService(f, mock.url)
+  const first = await f.run({model, text: 'write and edit files'})
+  await f.run({model, sessionId: first.id, text: 'second turn'})
+  await f.run({model, sessionId: first.id, text: 'latest turn'})
+  const res = await f.request('runSlash', {workspace: f.workspace, sessionId: first.id, text: '/compact'})
+  assert.match(res.message, /已压缩/)
+  const detail = await f.request('getSession', {sessionId: first.id})
+  const archivedMsg = detail.messages
+    .map(m => m.content.filter(b => b.type === 'text').map(b => b.text).join(''))
+    .find(text => text.includes('此前历史已归档'))
+  assert.ok(archivedMsg)
+  assert.match(archivedMsg, /关键进展与结论：/)
+  assert.match(archivedMsg, /已完成写入 notes\/new\.txt 并更新 README\.md/)
+  assert.match(archivedMsg, /第二阶段验证结论/)
+  assert.match(archivedMsg, /已修改文件：.*notes\/new\.txt/)
+  assert.match(archivedMsg, /已修改文件：.*README\.md/)
+  const compacted = detail.events.filter(e => e.type === 'context_compacted').at(-1)
+  assert.equal(compacted.data.summarized_units, 0)
+  assert.ok(compacted.data.archived_units > 0)
+})

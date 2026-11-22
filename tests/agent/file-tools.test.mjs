@@ -97,3 +97,96 @@ test('large edits reject same-length changes with a restored mtime',async t=>{
   assert.match(edit.error,/外部修改/)
   assert.equal(fs.readFileSync(path.join(f.workspace,'large.txt'),'utf8'),before.replace('old','new'))
 })
+
+test('glob finds files sorted by mtime, honors ignore files, and enforces limit',async t=>{
+  const f=await fixture(t,[{tool_calls:[
+    {id:'all_rs',name:'glob',arguments:{pattern:'**/*.rs'}},
+    {id:'limited',name:'glob',arguments:{pattern:'**/*.rs',limit:1}},
+    {id:'include_ignored',name:'glob',arguments:{pattern:'**/*.rs',include_ignored:true}}
+  ]},{text:'done'}])
+  fs.writeFileSync(path.join(f.workspace,'.gitignore'),'ignored_dir/\n*.ignored.rs\n')
+  fs.writeFileSync(path.join(f.workspace,'.ignore'),'hidden.rs\n')
+  fs.mkdirSync(path.join(f.workspace,'src'))
+  fs.mkdirSync(path.join(f.workspace,'ignored_dir'))
+  fs.mkdirSync(path.join(f.workspace,'node_modules'))
+  const files=[
+    ['old.rs',1_700_000_000],
+    ['src/new.rs',1_700_000_100],
+    ['ignored_dir/skip.rs',1_700_000_200],
+    ['skip.ignored.rs',1_700_000_200],
+    ['hidden.rs',1_700_000_200],
+    ['node_modules/pkg.rs',1_700_000_300]
+  ]
+  for(const [rel,sec] of files){
+    const full=path.join(f.workspace,rel)
+    fs.writeFileSync(full,'fn f() {}\n')
+    const time=new Date(sec*1000)
+    fs.utimesSync(full,time,time)
+  }
+  const result=await f.run()
+  const calls=Object.fromEntries(result.detail.events.filter(e=>e.type==='tool_call_result').map(e=>[e.data.call_id,e.data]))
+  assert.ok(Object.values(calls).every(c=>c.success),JSON.stringify(calls))
+  assert.equal(calls.all_rs.output_detail,'src/new.rs\nold.rs')
+  assert.match(calls.limited.output_detail,/^src\/new\.rs\n\.\.\.\[达到结果上限/)
+  assert.match(calls.include_ignored.output_detail,/ignored_dir\/skip\.rs/)
+  assert.match(calls.include_ignored.output_detail,/hidden\.rs/)
+  assert.doesNotMatch(calls.include_ignored.output_detail,/node_modules\/pkg\.rs/)
+})
+
+test('grep supports files_with_matches, count, and context_lines through the bridge',async t=>{
+  const f=await fixture(t,[{tool_calls:[
+    {id:'files',name:'grep',arguments:{pattern:'needle',output_mode:'files_with_matches'}},
+    {id:'count',name:'grep',arguments:{pattern:'needle',output_mode:'count'}},
+    {id:'context',name:'grep',arguments:{pattern:'needle',output_mode:'content',context_lines:1}}
+  ]},{text:'done'}])
+  fs.writeFileSync(path.join(f.workspace,'a.txt'),'zero\none\nneedle1\ntwo\nneedle2\nthree\nfour\nfive\nneedle3\nsix\n')
+  fs.writeFileSync(path.join(f.workspace,'b.txt'),'needle solo\n')
+  fs.writeFileSync(path.join(f.workspace,'c.txt'),'none\n')
+  const result=await f.run()
+  const calls=Object.fromEntries(result.detail.events.filter(e=>e.type==='tool_call_result').map(e=>[e.data.call_id,e.data]))
+  assert.ok(Object.values(calls).every(c=>c.success),JSON.stringify(calls))
+  assert.equal(calls.files.output_detail,'a.txt\nb.txt')
+  assert.equal(calls.count.output_detail,'a.txt: 3\nb.txt: 1')
+  assert.equal(calls.context.output_detail,[
+    'a.txt-2- one',
+    'a.txt:3: needle1',
+    'a.txt-4- two',
+    'a.txt:5: needle2',
+    'a.txt-6- three',
+    '--',
+    'a.txt-8- five',
+    'a.txt:9: needle3',
+    'a.txt-10- six',
+    'b.txt:1: needle solo'
+  ].join('\n'))
+})
+
+test('ls recursive honors ignore files while flat ls preserves direct listing',async t=>{
+  const f=await fixture(t,[{tool_calls:[
+    {id:'flat',name:'ls',arguments:{path:'.'}},
+    {id:'rec',name:'ls',arguments:{path:'.',recursive:true}},
+    {id:'rec_all',name:'ls',arguments:{path:'.',recursive:true,include_ignored:true}}
+  ]},{text:'done'}])
+  fs.writeFileSync(path.join(f.workspace,'.gitignore'),'cache/\n')
+  fs.writeFileSync(path.join(f.workspace,'.ignore'),'hidden.tmp\n')
+  fs.mkdirSync(path.join(f.workspace,'cache'))
+  fs.mkdirSync(path.join(f.workspace,'src'))
+  fs.mkdirSync(path.join(f.workspace,'node_modules'))
+  fs.writeFileSync(path.join(f.workspace,'cache/a.txt'),'x')
+  fs.writeFileSync(path.join(f.workspace,'hidden.tmp'),'x')
+  fs.writeFileSync(path.join(f.workspace,'src/main.rs'),'fn main(){}')
+  fs.writeFileSync(path.join(f.workspace,'node_modules/pkg.txt'),'x')
+  const result=await f.run()
+  const calls=Object.fromEntries(result.detail.events.filter(e=>e.type==='tool_call_result').map(e=>[e.data.call_id,e.data]))
+  assert.ok(Object.values(calls).every(c=>c.success),JSON.stringify(calls))
+  assert.match(calls.flat.output_detail,/cache\//)
+  assert.match(calls.flat.output_detail,/hidden\.tmp/)
+  assert.doesNotMatch(calls.flat.output_detail,/node_modules/)
+  assert.match(calls.rec.output_detail,/src\/main\.rs/)
+  assert.doesNotMatch(calls.rec.output_detail,/cache/)
+  assert.doesNotMatch(calls.rec.output_detail,/hidden\.tmp/)
+  assert.doesNotMatch(calls.rec.output_detail,/node_modules/)
+  assert.match(calls.rec_all.output_detail,/cache\/a\.txt/)
+  assert.match(calls.rec_all.output_detail,/hidden\.tmp/)
+  assert.doesNotMatch(calls.rec_all.output_detail,/node_modules/)
+})

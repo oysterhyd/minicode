@@ -4,7 +4,8 @@ import path from 'node:path'
 import {test} from 'node:test'
 import {setTimeout as delay} from 'node:timers/promises'
 import {spawnSync} from 'node:child_process'
-import {fixture,connect,profile,executable} from './helpers.mjs'
+import {fixture,connect,profile,executable,projectRoot} from './helpers.mjs'
+import {sseMock,anthropicFrames,configureService} from './sse-mock.mjs'
 test('fresh large file results stay intact below the context threshold',async t=>{
   const content='.bar { color: red; }\n'.repeat(1300)+'FINAL_LINE_MARKER\n';
   const f=await fixture(t,[{tool_calls:[{name:'write',arguments:{path:'page.css',content}}]},{tool_calls:[{name:'read',arguments:{path:'page.css',limit:2000}}]},{text:'verified'}]);
@@ -48,3 +49,162 @@ test('child assistant verifies evidence and shares parent budgets',async t=>{con
 test('writable child routes approvals through the parent view',async t=>{const f=await fixture(t,[{tool_calls:[{name:'delegate',arguments:{kind:'fixer',task:'write a file',writable:true}}]},{tool_calls:[{name:'write',arguments:{path:'child.txt',content:'approved'}}]},{text:JSON.stringify({summary:'done',findings:[],evidence_refs:[],unresolved:[]})},{tool_calls:[{name:'review_delegate',arguments:{delegate_call_id:'fake_tool_1',action:'discard'}}]},{text:'parent done'}]);const started=await f.request('sendPrompt',{workspace:f.workspace,text:'delegate',model:'fake',clientKey:'parent'});const approval=await f.wait(e=>e.event==='approval');assert.equal(approval.sessionId,started.sessionId);assert.equal(approval.clientKey,'parent');await f.request('resolveApproval',{sessionId:started.sessionId,approvalId:approval.approvalId,granted:true});await f.wait(e=>e.event==='run_done');assert.equal(fs.existsSync(path.join(f.workspace,'child.txt')),false);const detail=await f.request('getSession',{sessionId:started.sessionId});const child=await f.request('getSession',{sessionId:detail.events.find(e=>e.type==='subagent_start').data.child_session_id});assert.ok(child.events.some(e=>e.type==='tool_call_result'&&e.data.name==='write'&&e.data.success));})
 test('nested instructions require a new model request before writes',async t=>{const f=await fixture(t,[{tool_calls:[{name:'read',arguments:{path:'sub/target.txt'}},{name:'write',arguments:{path:'sub/target.txt',content:'premature'}}]},{text:'review loaded instructions'}]);fs.mkdirSync(path.join(f.workspace,'sub'));fs.writeFileSync(path.join(f.workspace,'sub/AGENTS.md'),'Read these rules before changing files.');fs.writeFileSync(path.join(f.workspace,'sub/target.txt'),'original');await f.request('setPermissionMode',{mode:'bypass'});const r=await f.run();assert.equal(fs.readFileSync(path.join(f.workspace,'sub/target.txt'),'utf8'),'original');assert.ok(r.detail.events.some(e=>e.type==='project_instructions'));})
 test('skill changes are live, durable and do not block cancel',async t=>{const f=await fixture(t,[{tool_calls:[{name:'write',arguments:{path:'pending.txt',content:'no'}}]}]);const skill=path.join(f.workspace,'.minicode/skills/example');fs.mkdirSync(skill,{recursive:true});fs.writeFileSync(path.join(skill,'SKILL.md'),'---\nname: example\ndescription: Test skill\n---\nRead the project carefully.');const started=await f.request('sendPrompt',{workspace:f.workspace,text:'wait',model:'fake'});await f.wait(e=>e.event==='approval');await f.request('setSkillActive',{workspace:f.workspace,sessionId:started.sessionId,name:'example',active:true});assert.ok((await f.request('getCapabilities',{workspace:f.workspace,sessionId:started.sessionId})).skills.find(s=>s.name==='example').active);await f.request('cancelTurn',{sessionId:started.sessionId});await f.wait(e=>e.event==='run_done');})
+
+test('subagent model tiering routes model and effort while preserving usage, replay and glob capability', async t => {
+  const f = await fixture(t)
+  const caps = await f.request('getCapabilities', {workspace: f.workspace})
+  for (const name of ['explore', 'review', 'test-runner', 'fixer', 'ui-designer']) {
+    const def = caps.agentDefinitions.find(a => a.name === name)
+    assert.ok(def, `missing builtin agent ${name}`)
+    assert.ok(def.tools.includes('glob'), `builtin agent ${name} missing glob tool`)
+  }
+
+  let httpCalls = 0
+  const mock = await sseMock(t, payload => {
+    httpCalls++
+    const system = JSON.stringify(payload.messages.find(m => m.role === 'system')?.content || '')
+    const isChild = system.includes('你是子助手。')
+    if (!isChild) {
+      const parentToolsDone = payload.messages.some(m => m.role === 'tool')
+      if (!parentToolsDone) {
+        return {
+          done: true,
+          frames: [{
+            choices: [{
+              delta: {
+                tool_calls: [
+                  {index: 0, id: 'call-explore', type: 'function', function: {name: 'delegate', arguments: JSON.stringify({kind: 'explore', task: 'check via subagentModel'})}},
+                  {index: 1, id: 'call-reviewer', type: 'function', function: {name: 'delegate', arguments: JSON.stringify({kind: 'fast-reviewer', task: 'check via agent model'})}},
+                ],
+              },
+              finish_reason: 'tool_calls',
+            }],
+            usage: {prompt_tokens: 100, completion_tokens: 20},
+          }],
+        }
+      }
+      return {
+        done: true,
+        frames: [{
+          choices: [{delta: {content: 'parent completed'}, finish_reason: 'stop'}],
+          usage: {prompt_tokens: 110, completion_tokens: 15},
+        }],
+      }
+    }
+    return {
+      done: true,
+      frames: [{
+        choices: [{delta: {content: JSON.stringify({summary: 'child done', findings: [], evidence_refs: [], unresolved: []})}, finish_reason: 'stop'}],
+        usage: {prompt_tokens: 40, completion_tokens: 10},
+      }],
+    }
+  })
+
+  const config = await f.request('saveService', {
+    service: {
+      name: 'Tiering mock',
+      baseUrl: `${mock.url}/v1`,
+      apiStyle: 'openai',
+      apiKey: 'tiering-key',
+      enabled: true,
+      models: [
+        {modelId: 'parent-model', name: 'Parent', contextWindow: 200000, maxOutputTokens: 8192, supportsEffort: true, capabilities: {}},
+        {modelId: 'subagent-fast', name: 'Subagent Fast', contextWindow: 200000, maxOutputTokens: 8192, supportsEffort: true, capabilities: {}},
+      ],
+    },
+  })
+  const serviceId = config.services[0].id
+  const parentModel = `${serviceId}::parent-model`
+  const subagentModel = `${serviceId}::subagent-fast`
+  const configPath = path.join(f.root, '.minicode', 'desktop-config.json')
+  const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+  saved.subagentModel = subagentModel
+  saved.agents.push({
+    name: 'fast-reviewer',
+    label: 'Fast Reviewer',
+    description: 'Uses explicit model and effort',
+    instructions: 'Review quickly.',
+    tools: ['read', 'ls', 'grep', 'glob'],
+    inheritTools: false,
+    model: subagentModel,
+    effort: 'low',
+  })
+  fs.writeFileSync(configPath, JSON.stringify(saved, null, 2))
+  await f.close()
+
+  const recording = path.join(f.root, 'tiering-provider.jsonl')
+  const live = connect(f, {MINICODE_PROVIDER_RECORD: recording})
+  await live.request('setEffort', {effort: 'high'})
+  const run = await live.run({model: parentModel, text: 'delegate with model tiering'})
+  assert.equal(run.result.exit_reason, 'completed')
+  assert.equal(httpCalls, 4)
+
+  const parentPayloads = mock.payloads.filter(p => !JSON.stringify(p.messages[0]).includes('你是子助手。'))
+  const childPayloads = mock.payloads.filter(p => JSON.stringify(p.messages[0]).includes('你是子助手。'))
+  assert.equal(parentPayloads.length, 2)
+  assert.equal(childPayloads.length, 2)
+  assert.ok(parentPayloads.every(p => p.model === 'parent-model' && p.reasoning_effort === 'high'))
+  assert.ok(childPayloads.every(p => p.model === 'subagent-fast'))
+  const reviewerPayload = childPayloads.find(p => JSON.stringify(p.messages).includes('fast-reviewer'))
+  assert.equal(reviewerPayload.reasoning_effort, 'low')
+  const explorePayload = childPayloads.find(p => JSON.stringify(p.messages).includes('check via subagentModel'))
+  assert.equal(explorePayload.reasoning_effort, 'high')
+
+  assert.equal(run.result.total_usage.input_tokens, 290)
+  assert.equal(run.result.total_usage.output_tokens, 55)
+  const starts = run.detail.events.filter(e => e.type === 'subagent_start')
+  assert.equal(starts.length, 2)
+  assert.ok(starts.every(e => e.data.model === subagentModel))
+  await live.close()
+
+  const replayOut = path.join(f.root, 'tiering-replay')
+  const replayRes = spawnSync(executable, ['replay', recording, '--output', replayOut], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    timeout: 10000,
+    windowsHide: true,
+    env: {...process.env, HOME: f.root, USERPROFILE: f.root, MINICODE_DB_PATH: f.db, MINICODE_PROVIDER_RECORD: '', MINICODE_PROVIDER_REPLAY: '', MINICODE_LOG_FILE: ''},
+  })
+  assert.equal(replayRes.status, 0, replayRes.stderr || String(replayRes.error))
+  assert.equal(httpCalls, 4, 'replay must not issue any HTTP requests')
+  const replayed = JSON.parse(fs.readFileSync(path.join(replayOut, 'result.json'), 'utf8'))
+  assert.equal(replayed.exit_reason, 'completed')
+  assert.deepEqual(replayed.total_usage, run.result.total_usage)
+})
+
+test('compact_context records summary_fallback_reason when summarize fails', async t => {
+  const f = await fixture(t)
+  const mock = await sseMock(t, payload => {
+    if (JSON.stringify(payload.system).includes('Summarize the conversation data')) {
+      return {status: 503, body: 'summary service down'}
+    }
+    return {frames: anthropicFrames({text: '长历史回复记录，保留关键上下文。'.repeat(300)})}
+  })
+  const model = await configureService(f, mock.url)
+  const first = await f.run({model, text: 'keep constraints'})
+  await f.run({model, text: 'older task', sessionId: first.id})
+  await f.run({model, text: 'latest task', sessionId: first.id})
+  const compacted = await f.request('runSlash', {workspace: f.workspace, sessionId: first.id, text: '/compact'})
+  assert.match(compacted.message, /已压缩/)
+  const detail = await f.request('getSession', {sessionId: first.id})
+  const event = detail.events.find(e => e.type === 'context_compacted')
+  assert.ok(event, 'expected context_compacted event')
+  assert.equal(event.data.summarized_units, 0)
+  assert.equal(typeof event.data.summary_fallback_reason, 'string')
+  assert.match(event.data.summary_fallback_reason, /503/)
+})
+
+test('system prompts include concise orchestration guidance and preserve placeholders', () => {
+  for (const platform of ['windows', 'posix']) {
+    const filePath = path.join(projectRoot, `agent/assets/system-${platform}.txt`)
+    const text = fs.readFileSync(filePath, 'utf8')
+    const lines = text.trimEnd().split(/\r?\n/)
+    assert.ok(lines.length >= 30 && lines.length <= 45, `${platform} prompt lines=${lines.length} must stay within 30..45`)
+    assert.ok(text.includes('{{workspace}}'))
+    assert.ok(text.includes('{{tools}}'))
+    if (platform === 'windows') assert.ok(text.includes('{{shell_info}}'))
+    for (const term of ['glob', 'grep', 'files_with_matches', 'context_lines', 'read', 'delegate', 'review_delegate', 'task_create', 'task_claim', 'task_complete', 'memory_list', 'skills_list']) {
+      assert.ok(text.includes(term), `${platform} prompt missing ${term}`)
+    }
+  }
+})

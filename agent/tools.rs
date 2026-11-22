@@ -4,7 +4,7 @@ mod shell;
 #[cfg(test)]
 use file_ops::grep_files;
 pub use file_ops::{FileLedger, Files};
-use file_ops::{edit, grep, list, observed_path, read_file, remember};
+use file_ops::{edit, glob, grep, list, observed_path, read_file, remember};
 pub(crate) use shell::{CommandCapture, decode, run_command_captured};
 #[cfg(windows)]
 pub(crate) use shell::{git_bash, windows_shell_guidance};
@@ -76,6 +76,7 @@ pub fn read_only(name: &str) -> bool {
     [
         "read",
         "ls",
+        "glob",
         "grep",
         "read_artifact",
         "bash_output",
@@ -94,6 +95,7 @@ pub fn replay_safe(name: &str) -> bool {
     [
         "read",
         "ls",
+        "glob",
         "grep",
         "read_artifact",
         "skills_list",
@@ -430,6 +432,7 @@ fn execute_sync(name: &str, args: &Value, ctx: &ToolContext) -> Result<Outcome> 
             Ok(outcome)
         }
         "ls" => list(args, ctx),
+        "glob" => glob(args, ctx),
         "grep" => grep(args, ctx),
         "write" | "edit" => edit(name, args, ctx),
         "read_artifact" => {
@@ -474,6 +477,8 @@ pub(crate) fn bounded(text: String) -> Outcome {
 }
 #[cfg(test)]
 mod output_tests {
+    use serde_json::json;
+
     #[test]
     #[ignore = "manual ignored-tree traversal benchmark"]
     fn t2_ignored_tree_benchmark() {
@@ -516,5 +521,58 @@ mod output_tests {
     fn sh3_strips_terminal_sequences_and_overwritten_progress() {
         assert_eq!(super::decode(b"\x1b[31merror\x1b[0m\x1b[K\n\x1b[2J\x1b[?25l\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x07\n10%\r20%\r100%\r\n"), "error\nlink\n100%\n");
         assert_eq!(super::decode(b"ok\x1b[31"), "ok");
+    }
+    #[test]
+    fn glob_and_schema_extensions_are_registered_and_validated() {
+        let glob_spec = super::builtins().iter().find(|s| s.name == "glob").unwrap();
+        assert!(!glob_spec.requires_approval);
+        assert!(super::read_only("glob"));
+        assert!(super::replay_safe("glob"));
+        assert!(super::parallel_read("glob"));
+        assert_eq!(super::policy("glob", "default"), "allow");
+        assert!(super::validate(glob_spec, &json!({"pattern": "**/*.rs"})).is_ok());
+        assert!(
+            super::validate(
+                glob_spec,
+                &json!({"pattern": "*auth*.ts", "path": "src", "limit": 1000, "include_ignored": true})
+            )
+            .is_ok()
+        );
+        assert!(super::validate(glob_spec, &json!({})).is_err());
+        assert!(super::validate(glob_spec, &json!({"pattern": ""})).is_err());
+        assert!(super::validate(glob_spec, &json!({"pattern": "*.rs", "limit": 0})).is_err());
+        assert!(super::validate(glob_spec, &json!({"pattern": "*.rs", "limit": 1001})).is_err());
+
+        let grep_spec = super::builtins().iter().find(|s| s.name == "grep").unwrap();
+        for mode in ["content", "files_with_matches", "count"] {
+            assert!(
+                super::validate(grep_spec, &json!({"pattern": "fn", "output_mode": mode})).is_ok()
+            );
+        }
+        assert!(
+            super::validate(
+                grep_spec,
+                &json!({"pattern": "fn", "output_mode": "invalid"})
+            )
+            .is_err()
+        );
+        assert!(super::validate(grep_spec, &json!({"pattern": "fn", "context_lines": 0})).is_ok());
+        assert!(super::validate(grep_spec, &json!({"pattern": "fn", "context_lines": 10})).is_ok());
+        assert!(
+            super::validate(grep_spec, &json!({"pattern": "fn", "context_lines": -1})).is_err()
+        );
+        assert!(
+            super::validate(grep_spec, &json!({"pattern": "fn", "context_lines": 11})).is_err()
+        );
+
+        let ls_spec = super::builtins().iter().find(|s| s.name == "ls").unwrap();
+        assert!(
+            super::validate(
+                ls_spec,
+                &json!({"path": ".", "recursive": true, "include_ignored": true})
+            )
+            .is_ok()
+        );
+        assert!(super::validate(ls_spec, &json!({"include_ignored": "yes"})).is_err());
     }
 }
