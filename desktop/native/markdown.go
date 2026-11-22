@@ -351,9 +351,9 @@ func inlineText(c *ui.Context, p palette, spans []inline, bold bool) ui.Element 
 					Weight:        weight,
 					Italic:        span.Italic,
 					Strikethrough: span.Strike,
-					Color:         p.Text,
-					Background:    p.Active,
-					Radius:        5,
+					Color:         p.AccentText,
+					Background:    p.Elevated,
+					Radius:        4,
 				})
 				if i+1 < len(spans) && !spans[i+1].Code && !startsWithSpace(spans[i+1].Text) {
 					ui.RichText(c, ui.Span{Text: " ", Size: p.font(7)})
@@ -431,7 +431,7 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 				case "divider":
 					ui.Divider(c).Margin(4, 0)
 				case "code":
-					ui.Column(c).Margin(2, 0).Radius(14).Clip().Border(1, p.CodeBorder).Background(p.Code).Font(sansFont).Children(func() {
+					ui.Column(c).Margin(2, 0).Radius(10).Clip().Border(1, p.CodeBorder).Background(p.Code).Font(sansFont).Children(func() {
 						ui.Row(c).Height(34).Padding(0, 6, 0, 14).Children(func() {
 							language := block.Language
 							if language == "" {
@@ -439,7 +439,7 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 							}
 							ui.Text(c, language).Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text3)
 							ui.Spacer(c)
-							copyCode := button(c, p, tr("复制代码"), "Copy", false).Height(24).Padding(0, 8).Radius(8).FontSize(p.font(fontCaption)).Border(0, ui.Transparent)
+							copyCode := button(c, p, tr("复制代码"), "Copy", false).Height(24).Padding(0, 8).Radius(6).FontSize(p.font(fontCaption)).Border(0, ui.Transparent)
 							if copyCode.Clicked() {
 								c.WriteClipboard(block.Text)
 							}
@@ -453,7 +453,7 @@ func (d *desktop) markdown(c *ui.Context, p palette, source string) {
 						})
 					})
 				case "table":
-					ui.Column(c).Border(1, p.Border).Radius(12).Clip().Font(sansFont).Children(func() {
+					ui.Column(c).Border(1, p.Border).Radius(10).Clip().Font(sansFont).Children(func() {
 						for rowIndex, row := range block.Table {
 							ui.Row(c).AlignItems(ui.Stretch).Background(func() ui.Color {
 								if rowIndex == 0 {

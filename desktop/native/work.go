@@ -27,7 +27,7 @@ func statusLetter(status string) string {
 
 func (d *desktop) workPanel(c *ui.Context, p palette) {
 	v := d.current()
-	ui.Row(c).MinHeight(48).Padding(8, 8, 6, 8).Gap(4).Shrink(0).Children(func() {
+	ui.Row(c).MinHeight(46).Padding(8, 8, 6, 8).Gap(4).Shrink(0).BorderWidth(0, 0, 1, 0).BorderColor(p.BorderSubtle).Children(func() {
 		d.workTabs(c, p)
 		ui.Spacer(c)
 		refresh := iconButton(c, p, "RefreshCw", tr("刷新工作区")).Shrink(0)
@@ -46,52 +46,85 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 	}
 	switch d.tab {
 	case 0:
-		a, r := 0, 0
+		a, r, staged := 0, 0, 0
 		for _, change := range v.Changes {
 			a += change.Additions
 			r += change.Deletions
+			if len(change.Status) > 0 && change.Status[0] != ' ' && change.Status[0] != '?' {
+				staged++
+			}
 		}
-		ui.Row(c).Padding(10, 12, 8, 16).Gap(8).Children(func() {
-			ui.Text(c, tr("未提交的改动")).Grow(1).FontSize(p.font(fontCaption)).FontWeight(600).TextColor(p.Text2)
-			d.diffStat(c, p, a, r)
-			if button(c, p, tr("全部暂存"), "Plus", false).Height(26).Radius(9).FontSize(p.font(fontCaption)).Padding(0, 9).Disabled(len(v.Changes) == 0).Clicked() {
-				d.stage("", true, false)
+		gitCard := ui.Column(c).Shrink(0).Margin(10, 10, 4, 10).Padding(10, 12).Gap(8).Radius(10).Background(p.Elevated).Border(1, p.Border)
+		addSpecularTop(gitCard, p, 10)
+		gitCard.Children(func() {
+			ui.Row(c).Gap(6).Children(func() {
+				icon(c, "GitBranch", 12, p.Accent)
+				branchLabel := v.State.Branch
+				if branchLabel == "" {
+					branchLabel = tr("本地工作区")
+				}
+				ui.Text(c, branchLabel).Font(monoFont).FontSize(p.font(fontSmall)).FontWeight(600).TextColor(p.Text).SingleLine().Shrink(1).MinWidth(0)
+				ui.Spacer(c)
+				if staged > 0 {
+					badge(c, p, trf("%d 个已暂存", staged), p.Success, p.SuccessSoft).Font(monoFont)
+				} else {
+					badge(c, p, tr("未暂存"), p.Text3, p.Subtle).Font(monoFont)
+				}
+			})
+			ui.Row(c).Gap(6).Children(func() {
+				ui.Text(c, trf("%d 个变更文件", len(v.Changes))).Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text3)
+				ui.Spacer(c)
+				d.diffStat(c, p, a, r)
+			})
+			ui.Row(c).Gap(6).Children(func() {
+				if button(c, p, tr("刷新改动"), "RefreshCw", false).Grow(1).Basis(0).Height(28).Radius(6).FontSize(p.font(fontCaption)).Justify(ui.Center).Clicked() {
+					d.refresh(v, true)
+				}
+				if button(c, p, tr("全部暂存"), "Plus", true).Grow(1).Basis(0).Height(28).Radius(6).FontSize(p.font(fontCaption)).Justify(ui.Center).Disabled(len(v.Changes) == 0).Clicked() {
+					d.stage("", true, false)
+				}
+			})
+		})
+		ui.Row(c).Shrink(0).Padding(8, 12, 4, 14).Gap(8).Children(func() {
+			ui.Text(c, tr("未提交的改动")).Grow(1).FontSize(p.font(fontCaption)).FontWeight(600).TextColor(p.Text3)
+			if len(v.Changes) > 0 {
+				ui.Text(c, fmtInt(len(v.Changes))).Font(monoFont).FontSize(p.font(fontMicro)).TextColor(p.Text3)
 			}
 		})
 		ui.List(c, nil, len(v.Changes), func(i int) {
 			change := v.Changes[i]
-			row := ui.ButtonBase(c).Label(basename(change.Path)+" "+dirname(change.Path)+" "+statusLetter(change.Status)).FillWidth().Height(46).Padding(6, 10).Gap(10).Radius(12).Cursor(ui.CursorDefault).Transition(fastMotion)
+			letter := statusLetter(change.Status)
+			row := ui.ButtonBase(c).Label(basename(change.Path)+" "+dirname(change.Path)+" "+letter).FillWidth().Height(42).Padding(4, 10).Gap(9).Radius(7).Cursor(ui.CursorDefault).Transition(fastMotion)
 			if row.Hovered() {
 				row.Background(p.Hover)
 			}
 			row.Children(func() {
-				ui.Box(c).Size(28, 28).Shrink(0).Radius(8).Background(p.Subtle).Border(1, p.BorderSubtle).Center().Children(func() {
-					icon(c, "FileCode2", 14, p.Text2)
+				color, bg := p.Warning, p.WarningSoft
+				switch letter {
+				case "U", "A":
+					color, bg = p.Success, p.SuccessSoft
+				case "D":
+					color, bg = p.Danger, p.DangerSoft
+				}
+				ui.Box(c).Size(20, 20).Shrink(0).Radius(5).Background(bg).Center().Children(func() {
+					ui.Text(c, letter).Font(monoFont).FontSize(p.font(fontMicro)).FontWeight(700).TextColor(color)
 				})
-				ui.Column(c).Grow(1).Gap(2).Children(func() {
-					ui.Text(c, basename(change.Path)).SingleLine().FontSize(p.font(fontSmall)).FontWeight(550)
-					muted(c, p, dirname(change.Path)).FontSize(p.font(fontCaption)).SingleLine()
+				ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(1).Children(func() {
+					ui.Text(c, basename(change.Path)).SingleLine().FontSize(p.font(fontSmall)).FontWeight(550).TextColor(p.Text)
+					ui.Text(c, dirname(change.Path)).SingleLine().Font(monoFont).FontSize(p.font(fontMicro)).TextColor(p.Text4)
 				})
 				d.diffStat(c, p, change.Additions, change.Deletions)
-				color := p.Warning
-				switch statusLetter(change.Status) {
-				case "U", "A":
-					color = p.Success
-				case "D":
-					color = p.Danger
-				}
-				ui.Text(c, statusLetter(change.Status)).Width(14).TextAlign(ui.Center).Font(monoFont).FontSize(p.font(fontMicro)).FontWeight(600).TextColor(color)
 			})
 			if row.Clicked() {
 				d.openPreview("diff", change.Path, change.Status)
 			}
-		}).Grow(1).Padding(0, 8).Children(func() {
+		}).Grow(1).Basis(0).MinHeight(0).Padding(0, 8, 8, 8).Children(func() {
 			if len(v.Changes) == 0 {
 				empty(c, p, tr("工作区没有未提交的改动。"))
 			}
 		})
 	case 1:
-		ui.Row(c).Height(32).Margin(4, 12, 8, 12).Padding(0, 10).Gap(7).Radius(10).Background(p.Active).Children(func() {
+		ui.Row(c).Height(32).Shrink(0).Margin(8, 10, 6, 10).Padding(0, 10).Gap(7).Radius(7).Background(p.Subtle).Border(1, p.BorderSubtle).Children(func() {
 			icon(c, "Search", 13, p.Text3)
 			ui.TextInputBase(c, &d.fileQuery).Label(tr("搜索文件")).Placeholder(tr("搜索文件")).Grow(1).FontSize(p.font(fontSmall))
 		})
@@ -106,13 +139,13 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 		ui.List(c, nil, len(items), func(i int) {
 			item := items[i]
 			d.terminal(c, p, model.String(item.Args["command"]), item.Output)
-		}).Grow(1).Padding(4, 12, 12, 12).Gap(10).Children(func() {
+		}).Grow(1).Basis(0).MinHeight(0).Padding(8, 12, 12, 12).Gap(10).Children(func() {
 			if len(items) == 0 {
 				empty(c, p, tr("Agent 运行的终端命令会显示在这里。"))
 			}
 		})
 	case 3:
-		ui.Scroll(c).Grow(1).Padding(6, 12, 12, 12).Gap(8).Children(func() {
+		ui.Scroll(c).Grow(1).Basis(0).MinHeight(0).Padding(8, 12, 12, 12).Gap(8).Children(func() {
 			done := 0
 			for _, task := range v.Tasks {
 				if task.Status == "done" {
@@ -121,11 +154,11 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 			}
 			ui.Row(c).Padding(2, 6).Children(func() {
 				muted(c, p, tr("任务进度")).Grow(1).FontSize(p.font(fontCaption))
-				muted(c, p, fmt.Sprintf("%d / %d", done, len(v.Tasks))).FontSize(p.font(fontCaption))
+				ui.Text(c, fmt.Sprintf("%d / %d", done, len(v.Tasks))).Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text3)
 			})
 			if len(v.Tasks) > 0 {
 				ui.Row(c).Height(6).Margin(2, 6, 8, 6).Radius(99).Clip().Background(p.Active).Children(func() {
-					ui.Box(c).WidthPercent(100 * float32(done) / float32(len(v.Tasks))).FillHeight().Radius(99).Background(p.Ink).Transition(panelMotion)
+					ui.Box(c).WidthPercent(100 * float32(done) / float32(len(v.Tasks))).FillHeight().Radius(99).Background(p.Accent).Transition(panelMotion)
 				})
 			}
 			if len(v.Tasks) > 0 {
@@ -141,13 +174,107 @@ func (d *desktop) workPanel(c *ui.Context, p palette) {
 			d.sessionUsage(c, p)
 		})
 	}
+	d.telemetryBento(c, p)
+}
+
+func (d *desktop) telemetryBento(c *ui.Context, p palette) {
+	v := d.current()
+	usage := v.State.Usage
+	stats := v.State.Statistics
+
+	inText, cacheText := "—", ""
+	if usage != nil && usage.Available {
+		inText = number(usage.Input)
+		if usage.Input > 0 {
+			pct := min(100, float64(usage.CacheRead)/float64(usage.Input)*100)
+			cacheText = fmt.Sprintf("%.0f%%", pct)
+		}
+	}
+
+	tpsText, tpsUnit := "—", ""
+	if stats != nil {
+		if stats.LastTPS != nil {
+			tpsText, tpsUnit = fmt.Sprintf("%.1f", *stats.LastTPS), "tok/s"
+		} else if stats.TPS != nil {
+			tpsText, tpsUnit = fmt.Sprintf("%.1f", *stats.TPS), "tok/s"
+		}
+	}
+
+	turnText := "—"
+	if stats != nil {
+		var secs float64
+		if len(stats.Samples) > 0 {
+			last := stats.Samples[len(stats.Samples)-1]
+			if last.Seconds != nil && *last.Seconds > 0 {
+				secs = *last.Seconds
+			} else if last.GenerationSeconds != nil {
+				secs = *last.GenerationSeconds
+				if last.FirstTokenSeconds != nil {
+					secs += *last.FirstTokenSeconds
+				}
+			}
+		} else if stats.ModelSeconds > 0 {
+			secs = stats.ModelSeconds / float64(max(1, stats.Requests))
+		}
+		if secs > 0 {
+			if secs >= 1 {
+				turnText = fmt.Sprintf("%.1fs", secs)
+			} else {
+				turnText = fmt.Sprintf("%dms", int(secs*1000))
+			}
+		}
+	}
+
+	add, del := 0, 0
+	for _, ch := range v.Changes {
+		add += ch.Additions
+		del += ch.Deletions
+	}
+
+	cell := func(label string, body func()) {
+		ui.Column(c).Grow(1).Basis(0).MinWidth(0).Padding(7, 9).Gap(2).Radius(7).Background(p.Subtle).Border(1, p.BorderSubtle).Children(func() {
+			ui.Text(c, tr(label)).SingleLine().FontSize(p.font(fontMicro)).TextColor(p.Text3)
+			ui.Row(c).Gap(5).Children(body)
+		})
+	}
+
+	ui.Column(c.Key("telemetry-bento")).Shrink(0).Padding(8, 10, 10, 10).Gap(6).
+		Background(p.Chrome.Alpha(0.55)).BorderWidth(1, 0, 0, 0).BorderColor(p.BorderSubtle).Children(func() {
+		ui.Row(c).Gap(6).Children(func() {
+			cell("输入 / 缓存命中", func() {
+				ui.Text(c, inText).Font(monoFont).FontSize(p.font(fontBody)).FontWeight(650).TextColor(p.Text).NoWrap()
+				if cacheText != "" {
+					ui.Text(c, cacheText).Font(monoFont).FontSize(p.font(fontMicro)).FontWeight(600).TextColor(p.Success).NoWrap()
+				}
+			})
+			cell("输出吞吐 TPS", func() {
+				ui.Text(c, tpsText).Font(monoFont).FontSize(p.font(fontBody)).FontWeight(650).TextColor(p.Text).NoWrap()
+				if tpsUnit != "" {
+					ui.Text(c, tpsUnit).Font(monoFont).FontSize(p.font(fontMicro)).TextColor(p.Text3).NoWrap()
+				}
+			})
+		})
+		ui.Row(c).Gap(6).Children(func() {
+			cell("最近回合耗时", func() {
+				ui.Text(c, turnText).Font(monoFont).FontSize(p.font(fontBody)).FontWeight(650).TextColor(p.Text).NoWrap()
+			})
+			cell("工作区改动", func() {
+				if len(v.Changes) > 0 {
+					d.diffStat(c, p, add, del)
+					ui.Text(c, fmt.Sprintf("(%d)", len(v.Changes))).Font(monoFont).FontSize(p.font(fontMicro)).TextColor(p.Text3).NoWrap()
+				} else {
+					ui.Text(c, tr("无改动")).Font(monoFont).FontSize(p.font(fontSmall)).FontWeight(550).TextColor(p.Text3).NoWrap()
+				}
+			})
+		})
+	})
 }
 
 // workTabs is a segmented control of the work panel's pages, with a
 // raised thumb that springs to the chosen one and counts beside them.
 func (d *desktop) workTabs(c *ui.Context, p palette) {
 	v := d.current()
-	track := ui.Row(c).Shrink(1).MinWidth(0).Wrap().Gap(1).Padding(2).Radius(11).Background(p.Active).Role(ui.RoleTabList).Label(tr("工作区"))
+	track := ui.Row(c).Shrink(1).MinWidth(0).Wrap().Gap(1).Padding(2).Radius(7).Background(p.Subtle).Border(1, p.BorderSubtle).Role(ui.RoleTabList).Label(tr("工作区"))
 	state := ui.Local(track, "tabs", func() []ui.Rect {
 		return make([]ui.Rect, len(workTabs))
 	})
@@ -161,16 +288,24 @@ func (d *desktop) workTabs(c *ui.Context, p palette) {
 		w, h := track.AnimateTo("w", selected.W, spring), track.AnimateTo("h", selected.H, spring)
 		track.Draw(func(painter *ui.Painter, r ui.Rect) {
 			thumb := ui.Rect{X: r.X + x, Y: r.Y + y, W: w, H: h}
-			painter.Shadow(thumb, 9, 0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.12))
-			painter.Fill(thumb, p.Thumb, 9)
+			painter.Shadow(thumb, 5, 0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.12))
+			painter.Fill(thumb, p.Thumb, 5)
 		})
 	}
 	track.Children(func() {
 		origin := track.Bounds()
+		termCount := 0
+		for _, item := range v.Items {
+			if item.Kind == "tool" && (item.Name == "bash" || item.Name == "powershell") {
+				termCount++
+			}
+		}
 		for i, tab := range workTabs {
 			count := ""
 			if i == 0 && len(v.Changes) > 0 {
 				count = fmtInt(len(v.Changes))
+			} else if i == 2 && termCount > 0 {
+				count = fmtInt(termCount)
 			} else if i == 3 && len(v.Tasks) > 0 {
 				done := 0
 				for _, task := range v.Tasks {
@@ -181,8 +316,8 @@ func (d *desktop) workTabs(c *ui.Context, p palette) {
 				count = fmt.Sprintf("%d/%d", done, len(v.Tasks))
 			}
 			current := i == d.tab
-			b := ui.ButtonBase(c).Label(tr(tab.Label)).Role(ui.RoleTab).Height(28).Padding(0, 6).Gap(4).Shrink(0).Radius(9).
-				FontSize(p.font(fontSmall)).TextColor(p.Text3).Cursor(ui.CursorDefault)
+			b := ui.ButtonBase(c).Label(tr(tab.Label)).Role(ui.RoleTab).Height(26).Padding(0, 6).Gap(4).Shrink(0).Radius(5).
+				FontSize(p.font(fontCaption)).TextColor(p.Text3).Cursor(ui.CursorDefault)
 			if current {
 				b.TextColor(p.Text).FontWeight(550)
 				if (*state)[i].W == 0 {
@@ -215,7 +350,7 @@ func (d *desktop) workTabs(c *ui.Context, p palette) {
 }
 
 func empty(c *ui.Context, p palette, text string) {
-	ui.Text(c, tr(text)).Padding(20).Margin(6).FontSize(p.font(fontSmall)).LineHeight(1.6).TextColor(p.Text3).TextAlign(ui.Center).Border(1, p.Border).BorderStyle(ui.BorderDashed).Radius(14)
+	ui.Text(c, tr(text)).Padding(20).Margin(6).FontSize(p.font(fontSmall)).LineHeight(1.6).TextColor(p.Text3).TextAlign(ui.Center).Border(1, p.Border).BorderStyle(ui.BorderDashed).Radius(10)
 }
 
 // taskRow is one step of the plan in the tasks page's grouped list.
@@ -361,7 +496,7 @@ func (d *desktop) fileTreeEntries(c *ui.Context, p palette, entries []treeEntry)
 				d.openPath(v.Workspace, entry.Path)
 			}
 		})
-	}).Grow(1).Padding(0, 8).Role(ui.RoleTree).Label(tr("工作区文件"))
+	}).Grow(1).Basis(0).MinHeight(0).Padding(0, 8, 8, 8).Role(ui.RoleTree).Label(tr("工作区文件"))
 }
 
 func (d *desktop) previewView(c *ui.Context, p palette) {
@@ -473,7 +608,7 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 	if stats != nil {
 		calls = stats.ToolCalls
 	}
-	card := ui.Column(c).FillWidth().Padding(12, 14).Gap(10).Radius(14).Border(1, p.BorderSubtle).Background(p.Elevated)
+	card := ui.Column(c).FillWidth().Padding(12, 14).Gap(10).Radius(10).Border(1, p.BorderSubtle).Background(p.Elevated)
 	if !p.Dark {
 		card.Shadow(0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.035))
 	}
@@ -489,7 +624,7 @@ func (d *desktop) sessionUsage(c *ui.Context, p palette) {
 				for _, value := range values[pair*2 : pair*2+2] {
 					ui.Column(c).Grow(1).Basis(0).Gap(2).Children(func() {
 						muted(c, p, value.Label).FontSize(p.font(fontCaption))
-						ui.Text(c, value.Value).FontSize(p.font(fontProse)).FontWeight(600).TextColor(p.Text)
+						ui.Text(c, value.Value).Font(monoFont).FontSize(p.font(fontProse)).FontWeight(600).TextColor(p.Text)
 					})
 				}
 			})

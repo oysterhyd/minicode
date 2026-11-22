@@ -604,6 +604,14 @@ func (d *desktop) slash(text string, v *conversation) {
 			d.permissionOpen = true
 			return
 		}
+	case "/operator":
+		tail := strings.TrimSpace(strings.TrimPrefix(text, command[0]))
+		if tail == "" {
+			v.append(&model.FeedItem{ID: fmt.Sprint("operator-", d.next.Add(1)), Kind: "notice", Text: tr("用法：/operator <需要子代理并行编排的任务描述>")})
+			return
+		}
+		d.sendAttached(tr("请使用子助手编排并执行以下任务：")+tail, v, nil)
+		return
 	case "/help":
 		var text strings.Builder
 		for _, cmd := range d.commands {

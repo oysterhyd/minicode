@@ -97,18 +97,22 @@ func allowedExternal(value string) bool {
 	return false
 }
 
+func themeSourceFor(pref string) mygo.ThemeSource {
+	switch pref {
+	case "dark", "mono-carbon", "t3-noir", "warm-ink":
+		return mygo.ThemeDark
+	case "light", "daylight", "daylight-paper":
+		return mygo.ThemeLight
+	default:
+		return mygo.ThemeSystem
+	}
+}
+
 func (d *desktop) applyAppearance() {
 	if d.window == nil {
 		return
 	}
-	source := mygo.ThemeSystem
-	switch d.preferences.Theme {
-	case "dark":
-		source = mygo.ThemeDark
-	case "light":
-		source = mygo.ThemeLight
-	}
-	mygo.Theme.SetSource(source)
+	mygo.Theme.SetSource(themeSourceFor(d.preferences.Theme))
 }
 
 // vibrancy is the material behind the window: Mica, which the sidebar and

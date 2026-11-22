@@ -22,9 +22,14 @@ type preferences struct {
 	SidebarWidth   float32 `json:"sidebarWidth"`
 	WorkWidth      float32 `json:"workWidth"`
 	ExpandTools    bool    `json:"expandTools"`
-	// ChatFont is the font of replies: "serif" (the default, also when
-	// empty), "sans" or "system".
+	// ChatFont is the font of replies: "sans" (the default, also when
+	// empty), "serif" or "system".
 	ChatFont string `json:"chatFont,omitempty"`
+	// DarkPreset remembers the preferred dark theme preset ("mono-carbon",
+	// "t3-noir" or "warm-ink") when Theme is "dark" or "system".
+	DarkPreset string `json:"darkPreset,omitempty"`
+	// SidebarMode selects "inbox" (default) or "tree" for the left sidebar.
+	SidebarMode string `json:"sidebarMode,omitempty"`
 	// SolidSidebar turns off the translucent window material (Mica) behind
 	// the sidebar.
 	SolidSidebar bool `json:"solidSidebar,omitempty"`
@@ -33,7 +38,7 @@ type preferences struct {
 }
 
 func defaultPreferences() preferences {
-	return preferences{Language: "zh", Theme: "system", SendKey: "enter", Notifications: true, FontScale: 1, SidebarWidth: 268, WorkWidth: 400}
+	return preferences{Language: "zh", Theme: "system", SendKey: "enter", Notifications: true, FontScale: 1, SidebarWidth: 272, WorkWidth: 400, DarkPreset: "mono-carbon", SidebarMode: "inbox"}
 }
 
 type savedPreferences struct {

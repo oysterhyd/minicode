@@ -683,4 +683,39 @@ API Key 保存到系统安全存储（Windows 当前用户 DPAPI / macOS Keychai
 输入与输出需同时填写非负数字，全部留空可清除|Enter non-negative numbers for input and output, or leave all blank to clear
 估算费用|Estimated cost
 估算费用 |Estimated cost\x20
+外观模式|Appearance mode
+默认无衬线|Default sans
+衬线|Serif
+切换主题预设|Cycle theme preset
+会话标签 %d：%s|Session tab %d: %s
+新建并行会话|New parallel session
+实时遥测|Live telemetry
+实时推理吞吐与会话缓存命中率|Live throughput and session cache hit rate
+切换工作台|Toggle workbench
+Inbox 线程流|Inbox stream
+工作区目录树|Workspace tree
+需要处理 · ACTIVE (%d)|NEEDS ATTENTION · ACTIVE (%d)
+已归档就绪 · SETTLED (%d)|READY · SETTLED (%d)
+提交与改动|Changes
+附件|Attach
+子代理编排|Subagent orchestration
+快速编排子代理任务 (/operator)|Orchestrate subagent task (/operator)
+当前分支|Current branch
+· %d 处改动|· %d changes
+用法：/operator <需要子代理并行编排的任务描述>|Usage: /operator <task for subagent orchestration>
+请使用子助手编排并执行以下任务：|Use a subagent to orchestrate and execute this task:\x20
+查看子会话|Open child
+按键盘快捷键可直接响应审批|Use keyboard shortcuts to respond
+本地工作区|Local workspace
+%d 个已暂存|%d staged
+未暂存|Unstaged
+%d 个变更文件|%d changed files
+刷新改动|Refresh
+输入 / 缓存命中|Input / Cache
+输出吞吐 TPS|Output TPS
+最近回合耗时|Last turn
+工作区改动|Changes
+无改动|Clean
+切换并行会话标签|Switch parallel session tab
+新建并行任务|New parallel task
 `

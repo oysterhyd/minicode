@@ -303,9 +303,9 @@ func (d *desktop) promptKey(v *conversation, k ui.TextKey) bool {
 }
 
 // popoverMaterial floats a popover of the composer on Liquid Glass, with a
-// hairline and a soft shadow, rounded as macOS 26 rounds its menus.
+// hairline and a soft shadow.
 func popoverMaterial(panel ui.Element, p palette) ui.Element {
-	return panel.Radius(18).Material(glass.Glass{Tint: p.Elevated.Alpha(0.55)}).Border(1, p.Border).Shadow(0, 18, 44, -10, ui.RGBA(0, 0, 0, 0.22))
+	return panel.Radius(10).Material(glass.Glass{Tint: p.Elevated.Alpha(0.75)}).Border(1, p.Border).Shadow(0, 18, 44, -10, ui.RGBA(0, 0, 0, 0.28))
 }
 
 func (d *desktop) composer(c *ui.Context, p palette, home bool) {
@@ -315,14 +315,14 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			if home {
 				return []float32{0}
 			}
-			return []float32{0, 32, 10, 32}
-		}()...).Gap(8).Children(func() {
+			return []float32{0, 28, 10, 28}
+		}()...).Gap(6).Children(func() {
 		notice := v.Error
 		if d.bridgeFailed {
 			notice = d.bridgeError
 		}
 		if notice != "" {
-			ui.Row(c).Padding(9, 12).Radius(14).Border(1, p.Danger.Alpha(0.25)).Background(p.DangerSoft).Gap(9).Transition(enterMotion).Children(func() {
+			ui.Row(c).Padding(9, 12).Radius(10).Border(1, p.Danger.Alpha(0.28)).Background(p.DangerSoft).Gap(9).Transition(enterMotion).Children(func() {
 				icon(c, "CircleAlert", 15, p.Danger)
 				ui.Text(c, localizeNotice(notice)).Grow(1).FontSize(p.font(fontSmall)).MaxHeight(100).Selectable()
 				if !d.bridgeFailed && iconButton(c, p, "X", tr("关闭提示")).Size(22, 22).Clicked() {
@@ -331,23 +331,23 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			})
 		}
 		if len(v.Queue) > 0 {
-			ui.Column(c).Gap(6).Children(func() {
+			ui.Column(c).Gap(5).Children(func() {
 				remove := -1
 				for i, prompt := range v.Queue {
-					chip := ui.Row(c.Key(fmt.Sprintf("queue-%d-%s", i, prompt.Text))).Height(36).Padding(0, 6, 0, 12).Gap(9).Radius(14).Transition(enterMotion)
-					glassy(chip, 14, ui.Transparent).Border(1, p.BorderSubtle)
+					chip := ui.Row(c.Key(fmt.Sprintf("queue-%d-%s", i, prompt.Text))).Height(32).Padding(0, 6, 0, 10).Gap(8).Radius(7).Transition(enterMotion)
+					glassy(chip, 7, p.Elevated.Alpha(0.84)).Border(1, p.Border)
 					chip.Children(func() {
-						icon(c, "Clock", 14, p.Text3)
-						muted(c, p, tr("排队中")).NoWrap().Shrink(0).FontSize(p.font(fontCaption))
+						icon(c, "Clock", 13, p.Accent)
+						ui.Text(c, fmt.Sprintf("QUEUED #%d", i+1)).NoWrap().Shrink(0).Font(monoFont).FontSize(p.font(fontMicro)).FontWeight(600).TextColor(p.AccentText)
 						if prompt.Mode != "" {
-							ui.Text(c, prompt.Mode).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text3)
+							ui.Text(c, prompt.Mode).NoWrap().Font(monoFont).FontSize(p.font(fontMicro)).TextColor(p.Text3)
 						}
 						text := prompt.Text
 						if len(prompt.Attachments) > 0 {
 							text += fmt.Sprintf(tr(" · %d 个附件"), len(prompt.Attachments))
 						}
 						ui.Text(c, text).Grow(1).Basis(0).SingleLine().FontSize(p.font(fontSmall)).TextColor(p.Text2)
-						if iconButton(c, p, "X", fmt.Sprintf(tr("取消排队消息 %d"), i+1)).Size(24, 24).Clicked() {
+						if iconButton(c, p, "X", fmt.Sprintf(tr("取消排队消息 %d"), i+1)).Size(22, 22).Clicked() {
 							remove = i
 						}
 					})
@@ -358,31 +358,32 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			})
 		}
 		waitingApproval := !home && d.pendingApproval() != nil
-		composer := ui.Column(c).Radius(24).Border(1, p.Border).Transition(fastMotion)
+		composer := ui.Column(c).Radius(13).Border(1, p.Border).Transition(fastMotion)
 		if waitingApproval && !composer.FocusWithin() {
-			composer.Background(p.Subtle.Alpha(0.75)).BorderColor(p.BorderSubtle)
+			composer.Background(p.Subtle.Alpha(0.82)).BorderColor(p.BorderSubtle)
 			if p.Dark {
 				composer.Shadow(0, 2, 8, -4, ui.RGBA(0, 0, 0, 0.16))
 			} else {
-				composer.Shadow(0, 2, 8, -4, ui.RGBA(31, 30, 29, 0.05))
+				composer.Shadow(0, 2, 8, -4, ui.RGBA(20, 20, 19, 0.05))
 			}
 		} else {
-			composer.Material(glass.Glass{Tint: p.Input.Alpha(0.72)})
+			composer.Material(glass.Glass{Tint: p.Input.Alpha(0.82)})
 			if p.Dark {
-				composer.Shadow(0, 10, 32, -8, ui.RGBA(0, 0, 0, 0.45))
+				composer.Shadow(0, 14, 36, -8, ui.RGBA(0, 0, 0, 0.55))
 			} else {
-				composer.Shadow(0, 10, 32, -10, ui.RGBA(31, 30, 29, 0.16))
+				composer.Shadow(0, 12, 32, -8, ui.RGBA(20, 20, 19, 0.14))
 			}
+			addSpecularTop(composer, p, 13)
 		}
 		if composer.FocusWithin() {
-			composer.BorderColor(p.BorderStrong)
+			composer.BorderColor(p.Accent)
 		}
 		composer.Children(func() {
 			if v.Uploading {
-				ui.Row(c).Padding(12, 18, 0, 18).Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在添加附件…")) })
+				ui.Row(c).Padding(12, 16, 0, 16).Gap(8).Children(func() { spinner(c, p); muted(c, p, tr("正在添加附件…")) })
 			}
 			if len(v.Attachments) > 0 {
-				ui.Column(c).Padding(12, 12, 0, 12).Gap(6).Children(func() {
+				ui.Column(c).Padding(10, 12, 0, 12).Gap(6).Children(func() {
 					ui.Scroll(c).FillWidth().MaxHeight(112).Children(func() { d.attachmentChips(c, p, v.Attachments, true) })
 					if problem := d.attachmentProblem(v, v.Attachments); problem != "" {
 						ui.Text(c, problem).FontSize(p.font(fontCaption)).TextColor(p.Warning)
@@ -398,12 +399,12 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 				placeholder = tr("回复 MiniCode…")
 			}
 			lines := strings.Count(v.Draft, "\n") + 1
-			minHeight := float32(56)
+			minHeight := float32(52)
 			if home {
-				minHeight = 72
+				minHeight = 68
 			}
-			input := ui.TextAreaBase(c, &v.Draft).Label(tr("任务输入")).Placeholder(placeholder).FillWidth().Height(min(240, float32(lines)*22.5+28)).MinHeight(minHeight).
-				Padding(16, 20, 4, 20).FontSize(p.font(fontProse)).LineHeight(1.55)
+			input := ui.TextAreaBase(c, &v.Draft).Label(tr("任务输入")).Placeholder(placeholder).FillWidth().Height(min(240, float32(lines)*22.5+24)).MinHeight(minHeight).
+				Padding(12, 16, 4, 16).FontSize(p.font(fontProse)).LineHeight(1.55)
 			if d.focusPrompt {
 				input.Focus()
 				d.focusPrompt = false
@@ -420,74 +421,110 @@ func (d *desktop) composer(c *ui.Context, p palette, home bool) {
 			if input.Focused() && !input.Composing() {
 				d.completion = d.suggestions(v, caret)
 			}
-			ui.Row(c).Padding(6, 10, 10, 10).Gap(4).Children(func() {
-				attach := iconButton(c, p, "Plus", tr("添加附件")).Size(32, 32).Radius(99).Border(1, p.Border).Disabled(v.Workspace == "" || v.Uploading)
-				if attach.Clicked() {
-					d.chooseAttachments(v)
-				}
-				if iconButton(c, p, "AtSign", tr("引用文件")).Size(32, 32).Radius(99).Disabled(v.Workspace == "").Clicked() {
-					anchor, caret := input.TextSelection()
-					var at int
-					v.Draft, at = replaceRunes(v.Draft, anchor, caret, "@")
-					d.setCaret(at)
-					d.focusPrompt = true
-				}
-				if home {
-					d.workspaceChip(c, p)
-				}
-				d.permissionMenu(c, p, home)
-				ui.Spacer(c)
-				if home {
-					// A new task has no footer; the ring alone says how full the context is.
-					d.contextMeter(c, p, true)
-				}
-				d.modelMenu(c, p, home)
-				stopping := v.Busy && strings.TrimSpace(v.Draft) == "" && len(v.Attachments) == 0
-				ready := stopping || ((strings.TrimSpace(v.Draft) != "" || len(v.Attachments) > 0) && (v.Workspace != "" || strings.HasPrefix(v.Draft, "/")) && !v.Loading && !v.Uploading && d.attachmentProblem(v, v.Attachments) == "")
-				name, label := "ArrowUp", tr("发送任务")
-				if v.Busy {
-					name, label = "ListPlus", tr("加入队列")
-				}
-				if stopping {
-					name, label = "Square", tr("停止任务")
-				}
-				send := ui.ButtonBase(c).Label(label).Size(34, 34).Shrink(0).Radius(11).Center().Disabled(!ready).Transition(fastMotion)
-				bg, color := p.Accent.Alpha(0.38), ui.Hex("#ffffff")
-				if ready {
-					bg = p.Accent
-				}
-				if stopping {
-					if waitingApproval {
-						bg, color = p.Hover, p.Text3
-						send.Border(1, p.Border)
-						if send.Hovered() {
-							bg, color = p.Active, p.Text
-						}
-					} else {
-						bg, color = p.Ink, p.InkText
+			ui.Row(c).Padding(6, 10, 8, 10).Gap(6).AlignItems(ui.End).Children(func() {
+				ui.Row(c).Grow(1).Basis(0).MinWidth(0).Wrap().Gap(4).Children(func() {
+					attach := ui.ButtonBase(c).Label(tr("添加附件")).Height(28).Padding(0, 8).Gap(5).Radius(7).Border(1, p.BorderSubtle).Background(p.Subtle).Disabled(v.Workspace == "" || v.Uploading).Transition(fastMotion)
+					if attach.Hovered() {
+						attach.Background(p.Hover).BorderColor(p.BorderStrong)
 					}
-				} else if send.Hovered() && ready {
-					bg = p.AccentHover
-				}
-				scale := float32(1)
-				if send.Pressed() {
-					scale = 0.9
-				}
-				send.AnimatePose(ui.Pose{Scale: scale}, pressMotion)
-				send.Background(bg).Children(func() {
-					if stopping {
-						ui.Box(c).Size(11, 11).Radius(3).Background(color)
-					} else {
-						icon(c, name, 17, color)
+					attach.Children(func() {
+						icon(c, "Plus", 12, p.Text2)
+						ui.Text(c, tr("附件")).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text2)
+					})
+					if attach.Clicked() {
+						d.chooseAttachments(v)
+					}
+					mention := ui.ButtonBase(c).Label(tr("引用文件")).Height(28).Padding(0, 8).Gap(4).Radius(7).Border(1, p.BorderSubtle).Background(p.Subtle).Disabled(v.Workspace == "").Transition(fastMotion)
+					if mention.Hovered() {
+						mention.Background(p.Hover).BorderColor(p.BorderStrong)
+					}
+					mention.Children(func() {
+						ui.Text(c, "@").NoWrap().Font(monoFont).FontSize(p.font(fontCaption)).FontWeight(600).TextColor(p.AccentText)
+						ui.Text(c, tr("引用文件")).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text2)
+					})
+					if mention.Clicked() {
+						anchor, caret := input.TextSelection()
+						var at int
+						v.Draft, at = replaceRunes(v.Draft, anchor, caret, "@")
+						d.setCaret(at)
+						d.focusPrompt = true
+					}
+					op := ui.ButtonBase(c).Label(tr("子代理编排")).Tooltip(tr("快速编排子代理任务 (/operator)")).Height(28).Padding(0, 9).Gap(4).Radius(7).Border(1, p.BorderSubtle).Background(p.Subtle).Transition(fastMotion)
+					if op.Hovered() {
+						op.Background(p.Hover).BorderColor(p.BorderStrong)
+					}
+					op.Children(func() {
+						ui.Text(c, "/operator").NoWrap().Font(monoFont).FontSize(p.font(fontCaption)).FontWeight(600).TextColor(p.SecondaryAccent)
+					})
+					if op.Clicked() {
+						if !strings.HasPrefix(v.Draft, "/operator ") {
+							if strings.TrimSpace(v.Draft) == "" {
+								v.Draft = "/operator "
+							} else {
+								v.Draft = "/operator " + v.Draft
+							}
+						}
+						d.setCaret(len([]rune(v.Draft)))
+						d.focusPrompt = true
+					}
+					if home {
+						d.workspaceChip(c, p)
+						d.permissionMenu(c, p, true)
 					}
 				})
-				if send.Clicked() {
-					if stopping {
-						d.cancel(v)
-					} else {
-						d.submit()
+				ui.Row(c).Shrink(0).Gap(5).Children(func() {
+					if home {
+						// A new task has no footer; the ring alone says how full the context is.
+						d.contextMeter(c, p, true)
 					}
-				}
+					d.modelMenu(c, p, home)
+					stopping := v.Busy && strings.TrimSpace(v.Draft) == "" && len(v.Attachments) == 0
+					ready := stopping || ((strings.TrimSpace(v.Draft) != "" || len(v.Attachments) > 0) && (v.Workspace != "" || strings.HasPrefix(v.Draft, "/")) && !v.Loading && !v.Uploading && d.attachmentProblem(v, v.Attachments) == "")
+					name, label := "ArrowUp", tr("发送任务")
+					if v.Busy {
+						name, label = "ListPlus", tr("加入队列")
+					}
+					if stopping {
+						name, label = "Square", tr("停止任务")
+					}
+					send := ui.ButtonBase(c).Label(label).Size(30, 30).Shrink(0).Radius(7).Center().Disabled(!ready).Transition(fastMotion)
+					bg, color := p.Accent.Alpha(0.38), ui.Hex("#ffffff")
+					if ready {
+						bg = p.Accent
+					}
+					if stopping {
+						if waitingApproval {
+							bg, color = p.Hover, p.Text3
+							send.Border(1, p.Border)
+							if send.Hovered() {
+								bg, color = p.Active, p.Text
+							}
+						} else {
+							bg, color = p.Ink, p.InkText
+						}
+					} else if send.Hovered() && ready {
+						bg = p.AccentHover
+					}
+					scale := float32(1)
+					if send.Pressed() {
+						scale = 0.9
+					}
+					send.AnimatePose(ui.Pose{Scale: scale}, pressMotion)
+					send.Background(bg).Children(func() {
+						if stopping {
+							ui.Box(c).Size(10, 10).Radius(2).Background(color)
+						} else {
+							icon(c, name, 15, color)
+						}
+					})
+					if send.Clicked() {
+						if stopping {
+							d.cancel(v)
+						} else {
+							d.submit()
+						}
+					}
+				})
 			})
 			if d.completion != nil && !d.completion.Dismissed {
 				d.suggestionOverlay(c, p, composer, input, home)
@@ -530,47 +567,79 @@ func (d *desktop) workspaceChip(c *ui.Context, p palette) {
 	if v.Workspace == "" {
 		workspace = tr("选择工作区")
 	}
-	chip := ui.ButtonBase(c).Label(tr("选择工作区")).Height(32).Padding(0, 10, 0, 9).Gap(6).Radius(99).Shrink(1).MinWidth(34).Clip().Transition(fastMotion)
+	chip := ui.ButtonBase(c).Label(tr("选择工作区")).Height(28).Padding(0, 9, 0, 8).Gap(5).Radius(7).Border(1, p.BorderSubtle).Background(p.Subtle).Shrink(1).MinWidth(34).Clip().Transition(fastMotion)
 	if chip.Hovered() {
-		chip.Background(p.Hover)
+		chip.Background(p.Hover).BorderColor(p.BorderStrong)
 	}
 	chip.Children(func() {
-		icon(c, "Folder", 14, p.Text3)
-		ui.Text(c, workspace).SingleLine().MaxWidth(160).MinWidth(0).Shrink(1).FontSize(p.font(fontSmall)).TextColor(p.Text2)
-		icon(c, "ChevronDown", 12, p.Text4)
+		icon(c, "Folder", 13, p.Text3)
+		ui.Text(c, workspace).SingleLine().MaxWidth(160).MinWidth(0).Shrink(1).Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text2)
+		icon(c, "ChevronDown", 11, p.Text4)
 	})
 	if chip.Clicked() {
 		d.chooseWorkspace()
 	}
 }
 
-// composerFoot says where the conversation works, under the composer: the
-// folder, the changes made there, and how full the context is.
+// composerFoot is the T3 Pinned Context Bar directly below the composer.
 func (d *desktop) composerFoot(c *ui.Context, p palette, v *conversation) {
-	ui.Row(c).Height(26).Justify(ui.Center).Gap(6).Children(func() {
-		dim := func(text string) { ui.Text(c, text).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text4) }
-		if v.Workspace != "" {
-			icon(c, "Folder", 12, p.Text4)
-			dim(basename(v.Workspace))
-		}
-		if len(v.Changes) > 0 {
-			dim("·")
-			changes := ui.ButtonBase(c).Label(tr("查看改动")).Height(22).Padding(0, 6).Radius(99)
-			if changes.Hovered() {
-				changes.Background(p.Hover)
+	ui.Row(c).FillWidth().Height(26).Padding(0, 4).Gap(8).Children(func() {
+		ui.Row(c).Grow(1).Basis(0).MinWidth(0).Gap(6).Children(func() {
+			if v.Workspace != "" {
+				ws := ui.ButtonBase(c).Label(tr("选择工作区")).Height(22).Padding(0, 6).Gap(4).Radius(5).Shrink(1).MinWidth(0).Transition(fastMotion)
+				if ws.Hovered() {
+					ws.Background(p.Hover)
+				}
+				ws.Children(func() {
+					icon(c, "Folder", 11, p.Text3)
+					ui.Text(c, basename(v.Workspace)).SingleLine().Shrink(1).MinWidth(0).Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text3)
+				})
+				if ws.Clicked() {
+					d.chooseWorkspace()
+				}
 			}
-			changes.Children(func() { dim(trf("%d 处改动", len(v.Changes))) })
-			if changes.Clicked() {
-				d.tab = 0
-				d.preview = nil
-				d.preferences.RightCollapsed = false
-				d.persist()
+			if v.State.Branch != "" {
+				br := ui.ButtonBase(c).Label(tr("当前分支")).Height(22).Padding(0, 6).Gap(4).Radius(5).Shrink(0).Background(p.Subtle).Border(1, p.BorderSubtle).Transition(fastMotion)
+				if br.Hovered() {
+					br.Background(p.Hover).BorderColor(p.BorderStrong)
+				}
+				br.Children(func() {
+					icon(c, "GitBranch", 11, p.Accent)
+					ui.Text(c, v.State.Branch).NoWrap().Font(monoFont).FontSize(p.font(fontCaption)).FontWeight(600).TextColor(p.Text2)
+				})
+				if br.Clicked() {
+					d.tab = 0
+					d.preview = nil
+					d.preferences.RightCollapsed = false
+					d.persist()
+				}
 			}
-		}
-		if v.Workspace != "" {
-			dim("·")
-		}
-		d.contextMeter(c, p, false)
+			d.permissionMenu(c, p, false)
+		})
+		ui.Row(c).Gap(6).Shrink(0).Children(func() {
+			if len(v.Changes) > 0 {
+				add, del := 0, 0
+				for _, ch := range v.Changes {
+					add += ch.Additions
+					del += ch.Deletions
+				}
+				changes := ui.ButtonBase(c).Label(tr("查看改动")).Height(22).Padding(0, 6).Gap(5).Radius(5).Transition(fastMotion)
+				if changes.Hovered() {
+					changes.Background(p.Hover)
+				}
+				changes.Children(func() {
+					d.diffStat(c, p, add, del)
+					ui.Text(c, trf("· %d 处改动", len(v.Changes))).NoWrap().Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text3)
+				})
+				if changes.Clicked() {
+					d.tab = 0
+					d.preview = nil
+					d.preferences.RightCollapsed = false
+					d.persist()
+				}
+			}
+			d.contextMeter(c, p, false)
+		})
 	})
 }
 
@@ -595,7 +664,7 @@ func (d *desktop) suggestionOverlay(c *ui.Context, p palette, anchor, input ui.E
 				muted(c, p, tr("↑↓ 选择 · Tab 插入")).FontSize(p.font(fontCaption))
 			})
 			for i, item := range state.Items {
-				row := ui.ButtonBase(c).Label(item.Value+" "+item.Detail).Height(34).Radius(10).Padding(0, 10).Gap(10).Role(ui.RoleListItem)
+				row := ui.ButtonBase(c).Label(item.Value+" "+item.Detail).Height(34).Radius(7).Padding(0, 10).Gap(10).Role(ui.RoleListItem)
 				if i == state.Index || row.Hovered() {
 					row.Background(p.Hover)
 				}
@@ -652,22 +721,23 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 	if label == "" {
 		label = tr("配置模型")
 	}
-	chip := ui.ButtonBase(c).Label(tr("切换模型")).Height(32).Padding(0, 9, 0, 11).Gap(5).Radius(99).MaxWidth(280).Shrink(0).Transition(fastMotion)
+	chip := ui.ButtonBase(c).Label(tr("切换模型")).Height(28).Padding(0, 8, 0, 9).Gap(5).Radius(7).Border(1, p.BorderSubtle).Background(p.Subtle).MaxWidth(280).Shrink(0).Transition(fastMotion)
 	if chip.Hovered() || d.modelOpen {
-		chip.Background(p.Hover)
+		chip.Background(p.Hover).BorderColor(p.BorderStrong)
 	}
 	chip.Children(func() {
-		textWidth, _ := c.MeasureText(0, ui.Span{Text: label, Size: p.font(fontSmall), Weight: 500})
-		ui.Text(c, label).SingleLine().Width(min(190, textWidth+2)).Shrink(1).FontSize(p.font(fontSmall)).TextColor(p.Text2).Tooltip(label)
+		ui.Box(c).Size(6, 6).Radius(99).Background(p.Success).Shrink(0)
+		textWidth, _ := c.MeasureText(0, ui.Span{Text: label, Font: monoFont, Size: p.font(fontCaption), Weight: 500})
+		ui.Text(c, label).SingleLine().Width(min(175, textWidth+2)).Shrink(1).Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text2).Tooltip(label)
 		if v.State.Effort != "" && v.State.Effort != "off" && supports {
 			for _, effort := range effortOptions {
 				if effort.Value == v.State.Effort {
-					ui.Text(c, tr(effort.Label)).NoWrap().FontSize(p.font(fontCaption)).TextColor(p.Text4)
+					ui.Text(c, "· "+tr(effort.Label)).NoWrap().Font(monoFont).FontSize(p.font(fontCaption)).FontWeight(600).TextColor(p.AccentText)
 				}
 			}
 		}
 		if svg := icons["ChevronDown"]; svg != nil {
-			arrow := ui.Icon(c, svg).FontSize(12).TextColor(p.Text3)
+			arrow := ui.Icon(c, svg).FontSize(11).TextColor(p.Text3)
 			target := float32(0)
 			if d.modelOpen {
 				target = 180
@@ -693,7 +763,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 						name = shortModel(m.ID)
 					}
 					selected := m.ID == v.State.Model
-					row := ui.ButtonBase(c).Label(tr("切换至 ")+m.ID).FillWidth().Height(52).Padding(8, 10).Gap(10).Justify(ui.Start).Radius(12).
+					row := ui.ButtonBase(c).Label(tr("切换至 ")+m.ID).FillWidth().Height(52).Padding(8, 10).Gap(10).Justify(ui.Start).Radius(7).
 						Role(ui.RoleRadio).Checked(selected).Disabled(!m.Available).Transition(fastMotion)
 					if selected {
 						row.AutoFocus()
@@ -724,7 +794,7 @@ func (d *desktop) modelMenu(c *ui.Context, p palette, home bool) {
 				effortSlider(c, p, v.State.Effort, supports, func(value string) { d.changeState("setEffort", map[string]any{"effort": value}) })
 			})
 		}
-		manage := ui.ButtonBase(c).Label(tr("管理模型与服务")).FillWidth().Height(36).Padding(0, 10).Gap(9).Radius(10).Justify(ui.Start).Margin(2, 0, 0, 0)
+		manage := ui.ButtonBase(c).Label(tr("管理模型与服务")).FillWidth().Height(36).Padding(0, 10).Gap(9).Radius(7).Justify(ui.Start).Margin(2, 0, 0, 0)
 		if manage.Hovered() {
 			manage.Background(p.Hover)
 		}
@@ -764,17 +834,28 @@ func (d *desktop) permissionMenu(c *ui.Context, p palette, home bool) {
 			index = i
 		}
 	}
-	chip := ui.ButtonBase(c).Label(tr("权限模式")).Height(32).Padding(0, 9, 0, 9).Gap(6).Radius(99).Shrink(1).MinWidth(34).Clip().Transition(fastMotion)
+	chip := ui.ButtonBase(c).Label(tr("权限模式")).Height(28).Padding(0, 8, 0, 8).Gap(5).Radius(7).Border(1, p.BorderSubtle).Background(p.Subtle).Shrink(0).Transition(fastMotion)
+	if !home {
+		chip.Height(22).Padding(0, 6).Radius(5).Border(0, ui.Transparent).Background(ui.Transparent)
+	}
 	if chip.Hovered() || d.permissionOpen {
 		chip.Background(p.Hover)
+		if home {
+			chip.BorderColor(p.BorderStrong)
+		}
 	}
 	chip.Children(func() {
-		color := p.Text3
-		if index == 2 {
-			color = p.Warning
+		color := p.Warning
+		if index == 1 {
+			color = p.AccentText
+		} else if index == 0 {
+			color = p.Text3
 		}
-		icon(c, []string{"Shield", "ShieldCheck", "ShieldOff"}[index], 14, color)
-		ui.Text(c, label).SingleLine().MinWidth(0).Shrink(1).FontSize(p.font(fontSmall)).TextColor(p.Text2)
+		icon(c, []string{"Shield", "ShieldCheck", "ShieldOff"}[index], 12, color)
+		text := ui.Text(c, label).NoWrap().Shrink(0).FontSize(p.font(fontCaption)).TextColor(p.Text2)
+		if !home {
+			text.Font(monoFont)
+		}
 	})
 	if chip.Clicked() {
 		d.permissionOpen = !d.permissionOpen
@@ -804,18 +885,31 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 	if v.State.ContextWindow > 0 {
 		percent = int(math.Round(min(1, float64(v.State.ContextTokens)/float64(v.State.ContextWindow)) * 100))
 	}
-	chip := ui.ButtonBase(c).Label(tr("上下文窗口详情")).Height(22).Radius(99).Padding(0, 7, 0, 5).Gap(5).TextColor(p.Text4).Transition(fastMotion)
+	chip := ui.ButtonBase(c).Label(tr("上下文窗口详情")).Height(22).Radius(5).Padding(0, 6).Gap(6).TextColor(p.Text3).Transition(fastMotion)
 	if chip.Hovered() {
 		chip.Background(p.Hover)
 	}
 	chip.Children(func() {
-		contextRing(c, p, percent)
-		if !home {
-			ui.Text(c, trf("上下文 %d%%", percent)).FontSize(p.font(fontCaption)).NoWrap()
+		if home {
+			contextRing(c, p, percent)
+		} else {
+			barColor := p.Success
+			if percent >= 65 {
+				barColor = p.Warning
+			}
+			if percent >= 85 {
+				barColor = p.Danger
+			}
+			ui.Row(c).Width(44).Height(4).Radius(99).Clip().Background(p.Active).Children(func() {
+				ui.Box(c).WidthPercent(float32(max(0, min(100, percent)))).FillHeight().Radius(99).Background(barColor)
+			})
+			ui.Text(c, fmt.Sprintf("%d%% · %s", percent, number(v.State.ContextTokens))).Font(monoFont).FontSize(p.font(fontCaption)).TextColor(p.Text3).NoWrap()
 		}
 	})
 	if home {
-		chip.Size(30, 30).Padding(0).Center().Tooltip(trf("上下文 %d%%", percent))
+		chip.Size(28, 28).Radius(7).Padding(0).Center().Tooltip(trf("上下文 %d%%", percent))
+	} else {
+		chip.Tooltip(trf("上下文 %d%%", percent))
 	}
 	if chip.Clicked() {
 		d.contextOpen = !d.contextOpen
@@ -829,7 +923,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 		ui.Scroll(c).FillWidth().MaxHeight(available - 28).Children(func() {
 			ui.Row(c).Children(func() {
 				ui.Text(c, tr("上下文窗口")).FontSize(p.font(fontSmall)).Grow(1)
-				ui.Text(c, fmt.Sprintf("%s / %s", number(v.State.ContextTokens), number(v.State.ContextWindow))).FontSize(p.font(fontSmall)).Bold()
+				ui.Text(c, fmt.Sprintf("%s / %s", number(v.State.ContextTokens), number(v.State.ContextWindow))).Font(monoFont).FontSize(p.font(fontSmall)).Bold()
 			})
 			parts := []struct {
 				Key, Label string
@@ -844,7 +938,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 				ui.Row(c).Height(23).Gap(8).Children(func() {
 					ui.Box(c).Size(7, 7).Radius(2).Background(entry.Color)
 					muted(c, p, entry.Label).Grow(1).FontSize(p.font(fontCaption))
-					ui.Text(c, number(v.State.Breakdown[entry.Key])).FontSize(p.font(fontCaption))
+					ui.Text(c, number(v.State.Breakdown[entry.Key])).Font(monoFont).FontSize(p.font(fontCaption))
 				})
 			}
 			usage := v.State.Usage
@@ -856,7 +950,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 				}
 				ui.Row(c).Margin(10, 0, 0, 0).Children(func() {
 					muted(c, p, tr("本会话累计")).Grow(1)
-					ui.Text(c, value).FontSize(p.font(fontSmall)).FontWeight(550)
+					ui.Text(c, value).Font(monoFont).FontSize(p.font(fontSmall)).FontWeight(550)
 				})
 			}
 			metrics := []struct{ Label, Value string }{{tr("缓存命中率"), tr("未报告")}, {tr("最近生成 TPS"), tr("未记录")}, {tr("缓存读取 / 写入"), tr("未报告")}, {tr("平均生成 TPS"), tr("未记录")}, {tr("请求整体速度"), tr("未记录")}}
@@ -891,7 +985,7 @@ func (d *desktop) contextMeter(c *ui.Context, p palette, home bool) {
 					for _, metric := range metrics[pair*2 : min(len(metrics), pair*2+2)] {
 						ui.Column(c).Grow(1).Basis(0).Gap(3).Children(func() {
 							muted(c, p, metric.Label).FontSize(p.font(fontCaption))
-							ui.Text(c, metric.Value).FontSize(p.font(fontSmall)).FontWeight(550)
+							ui.Text(c, metric.Value).Font(monoFont).FontSize(p.font(fontSmall)).FontWeight(550)
 						})
 					}
 				})

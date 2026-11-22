@@ -202,7 +202,7 @@ func fixtureChanges() []model.Change {
 	return []model.Change{{Path: "desktop/src/App.tsx", Status: " M", Additions: 12, Deletions: 3}, {Path: "desktop/src/styles/index.css", Status: "??", Additions: 40}, {Path: "desktop/src/components/Sidebar.tsx", Status: "M ", Additions: 5, Deletions: 5}}
 }
 func fixtureCommands() []model.Command {
-	return []model.Command{{Name: "/help", Usage: "/help", Summary: "查看命令"}, {Name: "/model", Usage: "/model <模型>", Summary: "切换模型"}, {Name: "/effort", Usage: "/effort <强度>", Summary: "思考强度"}, {Name: "/permissions", Usage: "/permissions <模式>", Summary: "权限模式"}, {Name: "/new", Summary: "新建任务"}, {Name: "/clear", Summary: "清空视图"}, {Name: "/compact", Summary: "压缩上下文"}, {Name: "/resume", Summary: "恢复会话"}, {Name: "/continue", Summary: "继续任务"}, {Name: "/skill", Summary: "加载技能"}}
+	return []model.Command{{Name: "/help", Usage: "/help", Summary: "查看命令"}, {Name: "/operator", Usage: "/operator <任务>", Summary: "子代理编排"}, {Name: "/model", Usage: "/model <模型>", Summary: "切换模型"}, {Name: "/effort", Usage: "/effort <强度>", Summary: "思考强度"}, {Name: "/permissions", Usage: "/permissions <模式>", Summary: "权限模式"}, {Name: "/new", Summary: "新建任务"}, {Name: "/clear", Summary: "清空视图"}, {Name: "/compact", Summary: "压缩上下文"}, {Name: "/resume", Summary: "恢复会话"}, {Name: "/continue", Summary: "继续任务"}, {Name: "/skill", Summary: "加载技能"}}
 }
 func fixtureDiff() string {
 	return "diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx\n--- a/desktop/src/App.tsx\n+++ b/desktop/src/App.tsx\n@@ -12,3 +12,4 @@\n export default function App() {\n-  const [theme] = useState(\"dark\")\n+  const [theme, setTheme] = useState(\"system\")\n+  // Follow the system appearance\n }"
@@ -220,12 +220,22 @@ func loadFixture(d *desktop, page string) {
 	models := []model.Model{{ID: "fake", Provider: "offline", Available: true}, {ID: "deepseek/deepseek-v4.1-flash", Provider: "commandcode", Available: true, SupportsEffort: true}, {ID: "claude-sonnet-4-6", Provider: "anthropic"}}
 	state := initialState()
 	state.Model = "fake"
+	state.Branch = "wt/ui-v3"
 	state.ContextTokens = 18400
 	state.Breakdown = map[string]int{"system": 6200, "tools": 9800, "messages": 2400}
-	state.Usage = &model.Usage{Input: 42000, Output: 3100, Available: true}
+	state.Usage = &model.Usage{Input: 42000, Output: 3100, CacheRead: 38600, Available: true}
+	ptr := func(val float64) *float64 { return &val }
+	state.Statistics = &model.Statistics{
+		Requests: 4, ToolCalls: 4, ModelSeconds: 7.2,
+		TPS: ptr(84.2), LastTPS: ptr(84.2), RequestTPS: ptr(61.5), Cost: ptr(0.042),
+		Samples: []model.UsageSample{
+			{Round: 1, Input: 18000, Output: 1400, Cached: 16200, Available: true, Seconds: ptr(2.1), FirstTokenSeconds: ptr(0.38), GenerationSeconds: ptr(1.72), TPS: ptr(81.4)},
+			{Round: 2, Input: 24000, Output: 1700, Cached: 22400, Available: true, Seconds: ptr(1.8), FirstTokenSeconds: ptr(0.34), GenerationSeconds: ptr(1.46), TPS: ptr(84.2)},
+		},
+	}
 	assistant := "### 审查结果\n\n已检查事件流与界面更新，主要涉及以下文件：\n\n- `App.tsx`：流式消息按批更新，降低渲染频率。\n- `WorkPanel.tsx`：切换文件时丢弃过期的读取结果。\n\n```tsx\nconst active = useRef(true)\nif (active.current) setContent(result)\n```\n\n| 文件 | 结论 |\n| --- | --- |\n| App.tsx | 通过 |\n\n建议继续检查**连续切换工作区**时的任务状态。"
 	items := []*model.FeedItem{
-		{ID: "user-1", Kind: "user", Text: "帮我审查当前工作区的改动，重点关注事件流与界面交互。"},
+		{ID: "user-1", Kind: "user", Text: "帮我审查 @desktop/src/App.tsx 的改动，重点关注事件流与界面交互。", StartedAt: now.Add(-12 * time.Minute)},
 		{ID: "c1", Kind: "tool", Name: "read", Args: map[string]any{"path": "desktop/src/App.tsx"}, Output: "1\texport default function App() {", Success: true},
 		{ID: "c2", Kind: "tool", Name: "grep", Args: map[string]any{"pattern": "useState", "path": "desktop/src"}, Output: "desktop/src/App.tsx:12: useState", Success: true},
 		{ID: "c3", Kind: "tool", Name: "edit", Args: map[string]any{"path": "desktop/src/App.tsx", "old_text": `const [theme] = useState("dark")`, "new_text": "const [theme, setTheme] = useState(\"system\")\n// Follow the system appearance"}, Output: "edited desktop/src/App.tsx", Success: true},
@@ -272,24 +282,39 @@ func loadFixture(d *desktop, page string) {
 		d.config.Services = nil
 		v.State.Model = ""
 		d.settings = &settingsState{Tab: "model", Budget: [3]string{"0", "0", "0"}, OpenModels: map[int]bool{}}
-	case page == "conversation" || page == "approval":
+	case page == "conversation" || page == "approval" || page == "handoff":
 		v.SessionID = "audit"
 		v.State.SessionID = "audit"
 		v.Items = items
 		v.rebuildRows()
-		if page == "conversation" {
-			d.tab = 3
+		if page == "conversation" || page == "handoff" {
+			d.tab = 0
 			v.Tasks = []model.Task{{ID: "t1", Title: "读取改动文件", Status: "done"}, {ID: "t2", Title: "运行构建", Status: "done"}, {ID: "t3", Title: "整理结论", Status: "running"}}
 			v.Open["group-"+v.Rows[1].ID] = true
 			v.Open["tool-c3"] = true
 			v.State.Model = "deepseek/deepseek-v4.1-flash"
 			v.State.Effort = "high"
 			v.State.PermissionMode = "accept_edits"
+			bg := newConversation("bridge", root, initialState())
+			bg.SessionID = "bridge"
+			bg.Busy = true
+			bg.State.Branch = "wt/bridge-bench"
+			bg.Changes = []model.Change{{Path: "agent/bridge.rs", Status: " M", Additions: 64, Deletions: 11}}
+			d.views["bridge"] = bg
+			if page == "handoff" {
+				v.append(&model.FeedItem{
+					ID: "delegate-1", Kind: "tool", Name: "delegate", Success: true,
+					Args:           map[string]any{"kind": "UI-Token-Auditor", "task": "校验 4 套主题预设在 100% / 150% DPI 下的对比度"},
+					ChildSessionID: "bridge",
+					ChildStatus:    "completed",
+					ChildProgress:  []model.ChildStep{{ID: "s1", Name: "read", Status: "completed"}},
+				})
+			}
 		}
 		if page == "approval" {
 			v.Busy = true
 			v.StartedAt = now.Add(-5 * time.Second)
-			v.append(&model.FeedItem{ID: "approval-1", Kind: "approval", Name: "bash", Args: map[string]any{"command": "python -m pytest tests -q"}, ApprovalID: "approval-1"})
+			v.append(&model.FeedItem{ID: "approval-1", Kind: "approval", Name: "edit", Args: map[string]any{"path": "desktop/native/theme.go", "old_text": "t.Radius = 10\nApp: h(\"#1f1e1d\")", "new_text": "t.Radius = 8\nApp: h(\"#090a0d\"), Chrome: h(\"#0d0f13\")"}, ApprovalID: "approval-1", GrantRule: "edit(desktop/native/**)"})
 		}
 	case page == "files":
 		d.tab = 1

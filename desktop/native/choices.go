@@ -12,9 +12,9 @@ func permissionChoice(c *ui.Context, p palette, value string, index int, compact
 	option := permissionOptions[index]
 	selected := value
 	row := ui.RadioBase(c, &selected, option.Value).Label(tr(option.Label)).Description(tr(option.Detail)).
-		FillWidth().Justify(ui.Start).Padding(12, 14).Gap(12).Radius(14).Border(1, p.BorderSubtle).Transition(fastMotion)
+		FillWidth().Justify(ui.Start).Padding(12, 14).Gap(12).Radius(10).Border(1, p.BorderSubtle).Transition(fastMotion)
 	if compact {
-		row.Border(0, ui.Transparent).Padding(10).Radius(12)
+		row.Border(0, ui.Transparent).Padding(10).Radius(7)
 	}
 	active := value == option.Value
 	if active {
@@ -33,7 +33,7 @@ func permissionChoice(c *ui.Context, p palette, value string, index int, compact
 		if active {
 			color = p.Text
 		}
-		ui.Box(c).Size(30, 30).Shrink(0).Radius(9).Background(p.Subtle).Border(1, p.BorderSubtle).Center().Children(func() {
+		ui.Box(c).Size(30, 30).Shrink(0).Radius(7).Background(p.Subtle).Border(1, p.BorderSubtle).Center().Children(func() {
 			icon(c, name, 15, color)
 		})
 		ui.Column(c).Grow(1).Basis(0).MinWidth(0).Gap(4).Children(func() {

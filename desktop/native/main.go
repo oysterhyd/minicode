@@ -122,14 +122,7 @@ func main() {
 		if *theme != "" {
 			d.preferences.Theme = *theme
 		}
-		source := mygo.ThemeSystem
-		switch d.preferences.Theme {
-		case "dark":
-			source = mygo.ThemeDark
-		case "light":
-			source = mygo.ThemeLight
-		}
-		mygo.Theme.SetSource(source)
+		mygo.Theme.SetSource(themeSourceFor(d.preferences.Theme))
 		if *fixture {
 			loadFixture(d, *fixturePage)
 		} else {
@@ -142,9 +135,15 @@ func main() {
 				d.client = client
 			}
 		}
-		background := "#f3f1ea"
-		if mygo.Theme.IsDark() {
-			background = "#1f1e1d"
+		preset := resolveThemePreset(d.preferences.Theme, d.preferences.DarkPreset, mygo.Theme.IsDark())
+		background := "#ebe9e2"
+		switch preset {
+		case "mono-carbon":
+			background = "#090a0d"
+		case "t3-noir":
+			background = "#0b0910"
+		case "warm-ink":
+			background = "#161514"
 		}
 		d.window = mygo.NewWindow(mygo.WindowOptions{
 			Title: "MiniCode", Width: 1500, Height: 940, MinWidth: 1030, MinHeight: 680,

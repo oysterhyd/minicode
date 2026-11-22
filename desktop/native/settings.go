@@ -74,7 +74,7 @@ func section(c *ui.Context, p palette, title, description string, fn func()) {
 func group(c *ui.Context, p palette, fn func()) {
 	saved := settingsRows
 	settingsRows = 0
-	e := ui.Column(c).FillWidth().Padding(10, 16).Gap(12).Radius(14).Background(p.Elevated).Border(1, p.BorderSubtle)
+	e := ui.Column(c).FillWidth().Padding(10, 16).Gap(12).Radius(10).Background(p.Elevated).Border(1, p.BorderSubtle)
 	if !p.Dark {
 		e.Shadow(0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.035))
 	}
@@ -148,7 +148,7 @@ type segmentedState struct{ X, W []float32 }
 // thumb that springs from the old choice to the new.
 func segmented(c *ui.Context, p palette, label, value string, options [][2]string, changed func(string)) {
 	selected := value
-	row := ui.Row(c).Gap(2).Padding(2).Radius(10).Background(p.Active).Role(ui.RoleRadioGroup).FocusGroup(ui.Horizontal).Label(tr(label))
+	row := ui.Row(c).Gap(2).Padding(2).Radius(7).Background(p.Active).Role(ui.RoleRadioGroup).FocusGroup(ui.Horizontal).Label(tr(label))
 	state := ui.Local(row, "segments", func() segmentedState { return segmentedState{} })
 	if len(state.X) != len(options) {
 		state.X, state.W = make([]float32, len(options)), make([]float32, len(options))
@@ -162,14 +162,14 @@ func segmented(c *ui.Context, p palette, label, value string, options [][2]strin
 		x, w := row.AnimateTo("x", state.X[index], spring), row.AnimateTo("w", state.W[index], spring)
 		row.Draw(func(painter *ui.Painter, r ui.Rect) {
 			thumb := ui.Rect{X: r.X + x, Y: r.Y + 2, W: w, H: r.H - 4}
-			painter.Shadow(thumb, 8, 0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.14))
-			painter.Fill(thumb, p.Thumb, 8)
+			painter.Shadow(thumb, 6, 0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.14))
+			painter.Fill(thumb, p.Thumb, 6)
 		})
 	}
 	row.Children(func() {
 		origin := row.Bounds()
 		for i, option := range options {
-			e := ui.RadioBase(c, &selected, option[0]).Label(tr(option[1])).Height(26).Padding(0, 12).Radius(8).Center().
+			e := ui.RadioBase(c, &selected, option[0]).Label(tr(option[1])).Height(26).Padding(0, 12).Radius(6).Center().
 				FontSize(p.font(fontSmall)).TextColor(p.Text3).Cursor(ui.CursorDefault)
 			if option[0] == value {
 				e.TextColor(p.Text).FontWeight(550)
@@ -190,19 +190,21 @@ func segmented(c *ui.Context, p palette, label, value string, options [][2]strin
 	})
 }
 
-// appearanceCard is one choice of theme, shown as a little window.
+// appearanceCard is one choice of theme preset, shown as a little window.
 func appearanceCard(c *ui.Context, p palette, label, kind string, selected bool) ui.Element {
 	e := ui.ButtonBase(c).Label(tr(label)).Column().Gap(8).AlignItems(ui.Center).Cursor(ui.CursorDefault)
 	e.Children(func() {
-		frame := ui.Box(c).Size(136, 86).Padding(3).Radius(14).Border(2, ui.Transparent).Transition(fastMotion)
+		frame := ui.Box(c).Size(132, 84).Padding(3).Radius(10).Border(2, ui.Transparent).Transition(fastMotion)
 		if selected {
-			frame.BorderColor(p.Ink)
+			frame.BorderColor(p.Accent)
 		} else if e.Hovered() {
 			frame.BorderColor(p.BorderStrong)
 		}
 		frame.Children(func() {
-			ui.Box(c).FillWidth().FillHeight().Radius(10).Border(1, p.Border).Draw(func(painter *ui.Painter, r ui.Rect) {
+			ui.Box(c).FillWidth().FillHeight().Radius(7).Border(1, p.Border).Draw(func(painter *ui.Painter, r ui.Rect) {
 				switch kind {
+				case "mono-carbon", "t3-noir", "warm-ink", "daylight-paper":
+					miniWindow(painter, r, paletteFor(kind), 0, 0)
 				case "dark":
 					miniWindow(painter, r, colors(true), 0, 0)
 				case "light":
@@ -229,29 +231,36 @@ func appearanceCard(c *ui.Context, p palette, label, kind string, selected bool)
 // miniWindow paints MiniCode in miniature in palette k: a sidebar, the
 // conversation card and a reply.
 func miniWindow(painter *ui.Painter, r ui.Rect, k palette, _, _ float32) {
-	painter.Fill(r, k.App, 9)
+	painter.Fill(r, k.App, 7)
+	painter.Fill(ui.Rect{X: r.X, Y: r.Y, W: 36, H: r.H}, k.Chrome, 0)
 	for i := range 4 {
-		painter.Fill(ui.Rect{X: r.X + 8, Y: r.Y + 14 + float32(i)*9, W: 22 - float32(i%2)*6, H: 3}, k.Text4.Alpha(0.6), 2)
+		c := k.Text4.Alpha(0.6)
+		if i == 0 {
+			c = k.Accent.Alpha(0.75)
+		}
+		painter.Fill(ui.Rect{X: r.X + 7, Y: r.Y + 13 + float32(i)*9, W: 21 - float32(i%2)*5, H: 3}, c, 1.5)
 	}
 	card := ui.Rect{X: r.X + 38, Y: r.Y + 6, W: r.W - 44, H: r.H - 12}
-	painter.Shadow(card, 6, 0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.08))
-	painter.Fill(card, k.Main, 6)
-	painter.Fill(ui.Rect{X: card.X + card.W - 36, Y: card.Y + 8, W: 28, H: 8}, k.Subtle, 4)
+	painter.Shadow(card, 5, 0, 1, 3, 0, ui.RGBA(0, 0, 0, 0.08))
+	painter.Fill(card, k.Main, 5)
+	painter.Stroke(card, k.BorderSubtle, 5, 1)
+	painter.Fill(ui.Rect{X: card.X + card.W - 36, Y: card.Y + 8, W: 28, H: 8}, k.Elevated, 3)
+	painter.Fill(ui.Rect{X: card.X + 8, Y: card.Y + 8, W: 6, H: 6}, k.SecondaryAccent, 3)
 	for i, w := range []float32{0.72, 0.6, 0.44} {
-		painter.Fill(ui.Rect{X: card.X + 8, Y: card.Y + 24 + float32(i)*7, W: (card.W - 16) * w, H: 3}, k.Text3.Alpha(0.55), 2)
+		painter.Fill(ui.Rect{X: card.X + 8, Y: card.Y + 24 + float32(i)*7, W: (card.W - 16) * w, H: 3}, k.Text3.Alpha(0.55), 1.5)
 	}
 	input := ui.Rect{X: card.X + 6, Y: card.Y + card.H - 16, W: card.W - 12, H: 11}
-	painter.Fill(input, k.Elevated, 5)
-	painter.Stroke(input, k.Border, 5, 1)
-	painter.Fill(ui.Rect{X: input.X + input.W - 10, Y: input.Y + 2, W: 7, H: 7}, k.Accent, 4)
+	painter.Fill(input, k.Elevated, 4)
+	painter.Stroke(input, k.Border, 4, 1)
+	painter.Fill(ui.Rect{X: input.X + input.W - 10, Y: input.Y + 2, W: 7, H: 7}, k.Accent, 3)
 }
 
 // fontCard is one choice of the replies' typeface, shown as "Aa 文".
 func fontCard(c *ui.Context, p palette, label, font string, selected bool) ui.Element {
-	e := ui.ButtonBase(c).Label(tr(label)).Grow(1).Basis(0).MinHeight(104).Padding(16, 12).Gap(6).Radius(14).Column().Center().
+	e := ui.ButtonBase(c).Label(tr(label)).Grow(1).Basis(0).MinHeight(104).Padding(16, 12).Gap(6).Radius(10).Column().Center().
 		Background(p.Main).Border(1, p.Border).Cursor(ui.CursorDefault).Transition(fastMotion)
 	if selected {
-		e.Border(2, p.Ink).Background(p.Elevated)
+		e.Border(2, p.Accent).Background(p.Elevated)
 	} else if e.Hovered() {
 		e.BorderColor(p.BorderStrong)
 	}
@@ -280,7 +289,7 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 	ui.DialogBase(c, &open, func(back, panel ui.Element) {
 		back.Material(modalBackdrop{p.Overlay})
 		_, height := c.Size()
-		panel.Width(980).MaxWidthPercent(95).Height(min(740, height-64)).Padding(0).Radius(22).Clip().Background(p.Main).Border(1, p.Border).
+		panel.Width(980).MaxWidthPercent(95).Height(min(740, height-64)).Padding(0).Radius(13).Clip().Background(p.Main).Border(1, p.Border).
 			Shadow(0, 30, 80, -12, ui.RGBA(0, 0, 0, 0.32)).Label(tr("设置")).Row().
 			Transition(ui.ElementTransition{Duration: 260 * time.Millisecond, Ease: ui.CubicBezier(0.2, 0.9, 0.25, 1), Enter: &ui.Motion{Scale: 0.96, Opacity: 0}, Exit: &ui.Motion{Scale: 0.98, Opacity: 0}})
 		d.settingsNav(c, p, s)
@@ -292,17 +301,17 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 				}
 			}
 			ui.Row(c).Height(64).Shrink(0).Padding(0, 14, 0, 36).Children(func() {
-				ui.Text(c, tr(label)).Font(serifFont).FontSize(p.font(fontTitle)).FontWeight(500).Grow(1)
+				ui.Text(c, tr(label)).Font(sansFont).FontSize(p.font(fontTitle)).FontWeight(600).Grow(1)
 				if iconButton(c, p, "X", tr("关闭设置")).Clicked() {
 					open = false
 				}
 			})
 			ui.Scroll(c.Key(fmt.Sprintf("%s-%t", s.Tab, s.Service != nil))).Grow(1).Basis(0).MinHeight(0).Padding(4, 36, 32, 36).Children(func() {
 				if s.Error != "" {
-					ui.Text(c, localizeNotice(s.Error)).Margin(0, 0, 12, 0).Padding(10, 14).Radius(12).Background(p.DangerSoft).FontSize(p.font(fontSmall))
+					ui.Text(c, localizeNotice(s.Error)).Margin(0, 0, 12, 0).Padding(10, 14).Radius(10).Background(p.DangerSoft).FontSize(p.font(fontSmall))
 				}
 				if d.current().Busy {
-					ui.Text(c, tr("模型与思考强度在下一次请求生效，预算在下一回合生效。")).Margin(0, 0, 12, 0).Padding(10, 14).Radius(12).Background(p.WarningSoft).FontSize(p.font(fontSmall))
+					ui.Text(c, tr("模型与思考强度在下一次请求生效，预算在下一回合生效。")).Margin(0, 0, 12, 0).Padding(10, 14).Radius(10).Background(p.WarningSoft).FontSize(p.font(fontSmall))
 				}
 				d.settingsContent(c, p, s)
 			})
@@ -326,9 +335,9 @@ func (d *desktop) settingsView(c *ui.Context, p palette) {
 // settingsNav is the sheet's sidebar: a serif title, a search field, and
 // the pages, the current one on a pill that slides between them.
 func (d *desktop) settingsNav(c *ui.Context, p palette, s *settingsState) {
-	ui.Column(c).Width(232).Shrink(0).FillHeight().Padding(20, 12).Gap(12).BorderWidth(0, 1, 0, 0).BorderColor(p.BorderSubtle).Background(p.Subtle.Alpha(0.7)).Children(func() {
-		ui.Text(c, tr("设置")).Padding(0, 10).Font(serifFont).FontSize(p.font(fontTitle)).FontWeight(500)
-		ui.Row(c).Height(32).Padding(0, 10).Gap(7).Radius(10).Background(p.Active).Children(func() {
+	ui.Column(c).Width(232).Shrink(0).FillHeight().Padding(20, 12).Gap(12).BorderWidth(0, 1, 0, 0).BorderColor(p.BorderSubtle).Background(p.Chrome.Alpha(0.82)).Children(func() {
+		ui.Text(c, tr("设置")).Padding(0, 10).Font(sansFont).FontSize(p.font(fontTitle)).FontWeight(600)
+		ui.Row(c).Height(32).Padding(0, 10).Gap(7).Radius(7).Background(p.Active).Children(func() {
 			icon(c, "Search", 13, p.Text3)
 			ui.TextInput(c, &s.NavQuery).Label(tr("搜索设置")).Placeholder(tr("搜索设置")).Grow(1).Basis(0).MinWidth(0).Height(30).Padding(0).
 				Background(ui.Transparent).Border(0, ui.Transparent).FontSize(p.font(fontSmall))
@@ -352,12 +361,12 @@ func (d *desktop) settingsNav(c *ui.Context, p palette, s *settingsState) {
 			list.Draw(func(painter *ui.Painter, r ui.Rect) {
 				pill := ui.Rect{X: r.X, Y: r.Y + y, W: r.W, H: 32}
 				if p.Dark {
-					painter.Fill(pill, p.Active, 10)
+					painter.Fill(pill, p.Active, 7)
 					return
 				}
-				painter.Shadow(pill, 10, 0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.06))
-				painter.Fill(pill, p.Elevated, 10)
-				painter.Stroke(pill, p.BorderSubtle, 10, 1)
+				painter.Shadow(pill, 7, 0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.06))
+				painter.Fill(pill, p.Elevated, 7)
+				painter.Stroke(pill, p.BorderSubtle, 7, 1)
 			})
 		}
 		list.Children(func() {
@@ -366,7 +375,7 @@ func (d *desktop) settingsNav(c *ui.Context, p palette, s *settingsState) {
 					continue
 				}
 				current := s.Tab == tab.ID
-				b := ui.ButtonBase(c).Label(tr(tab.Label)).FillWidth().Height(32).Padding(0, 10).Gap(10).Radius(10).Justify(ui.Start).
+				b := ui.ButtonBase(c).Label(tr(tab.Label)).FillWidth().Height(32).Padding(0, 10).Gap(10).Radius(7).Justify(ui.Start).
 					FontSize(p.font(fontBody)).TextColor(p.Text2).Cursor(ui.CursorDefault).Transition(fastMotion)
 				if current {
 					b.TextColor(p.Text).FontWeight(550)
@@ -400,10 +409,27 @@ func (d *desktop) settingsContent(c *ui.Context, p palette, s *settingsState) {
 	switch s.Tab {
 	case "general":
 		section(c, p, tr("外观"), tr("跟随系统时会随 Windows 深浅色切换"), func() {
-			ui.Row(c).Gap(14).Padding(6, 0).Role(ui.RoleRadioGroup).Label(tr("主题")).Children(func() {
-				for _, option := range [][3]string{{"light", "浅色", "light"}, {"dark", "深色", "dark"}, {"system", "跟随系统", "system"}} {
-					if appearanceCard(c, p, option[1], option[2], d.preferences.Theme == option[0]).Clicked() && d.preferences.Theme != option[0] {
-						d.preferences.Theme = option[0]
+			mode := "system"
+			switch d.preferences.Theme {
+			case "light", "daylight", "daylight-paper":
+				mode = "light"
+			case "dark", "mono-carbon", "t3-noir", "warm-ink":
+				mode = "dark"
+			}
+			settingsRow(c, p, tr("外观模式"), "", func() {
+				segmented(c, p, tr("外观模式"), mode, [][2]string{{"light", "浅色"}, {"dark", "深色"}, {"system", "跟随系统"}}, func(value string) {
+					d.preferences.Theme = value
+					d.applyAppearance()
+					d.persist()
+				})
+			})
+			ui.Row(c).Wrap().Gap(12).Padding(6, 0).Role(ui.RoleRadioGroup).Label(tr("主题")).Children(func() {
+				for _, preset := range themePresets {
+					if appearanceCard(c, p, preset.Label, preset.ID, p.Preset == preset.ID).Clicked() && p.Preset != preset.ID {
+						d.preferences.Theme = preset.ID
+						if preset.ID != "daylight-paper" {
+							d.preferences.DarkPreset = preset.ID
+						}
 						d.applyAppearance()
 						d.persist()
 					}
@@ -434,10 +460,10 @@ func (d *desktop) settingsContent(c *ui.Context, p palette, s *settingsState) {
 		})
 		section(c, p, tr("对话字体"), tr("MiniCode 回复所用的字体"), func() {
 			ui.Row(c).FillWidth().Gap(10).Padding(6, 0).Children(func() {
-				for _, option := range [][2]string{{"serif", "默认衬线"}, {"sans", "无衬线"}, {"system", "系统"}} {
+				for _, option := range [][2]string{{"sans", "默认无衬线"}, {"serif", "衬线"}, {"system", "系统"}} {
 					choice := d.preferences.ChatFont
 					if choice == "" {
-						choice = "serif"
+						choice = "sans"
 					}
 					if fontCard(c, p, option[1], proseFont(option[0]), choice == option[0]).Clicked() {
 						d.preferences.ChatFont = option[0]
@@ -762,12 +788,12 @@ func initialsAvatar(c *ui.Context, p palette, name string, on bool) {
 		initial = strings.ToUpper(string(r))
 		break
 	}
-	tile := ui.Box(c).Size(32, 32).Shrink(0).Radius(10).Center().Background(p.Subtle).Border(1, p.BorderSubtle)
+	tile := ui.Box(c).Size(32, 32).Shrink(0).Radius(7).Center().Background(p.Subtle).Border(1, p.BorderSubtle)
 	color := p.Text2
 	if !on {
 		color = p.Text4
 	}
-	tile.Children(func() { ui.Text(c, initial).Font(serifFont).FontSize(p.font(fontProse)).FontWeight(600).TextColor(color) })
+	tile.Children(func() { ui.Text(c, initial).Font(monoFont).FontSize(p.font(fontProse)).FontWeight(650).TextColor(color) })
 }
 
 func (d *desktop) serviceEditor(c *ui.Context, p palette, s *settingsState) {

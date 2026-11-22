@@ -130,7 +130,7 @@ func (d *desktop) attachmentChips(c *ui.Context, p palette, files []model.Attach
 	}
 	row.Children(func() {
 		for _, file := range files {
-			card := ui.Row(c.Key(file.AssetID)).Height(48).Gap(2).Padding(0, 4, 0, 0).Radius(14).Border(1, p.Border).Background(p.Elevated).Transition(enterMotion)
+			card := ui.Row(c.Key(file.AssetID)).Height(48).Gap(2).Padding(0, 4, 0, 0).Radius(10).Border(1, p.Border).Background(p.Elevated).Transition(enterMotion)
 			card.Children(func() {
 				b := ui.ButtonBase(c).Label(tr("打开附件 ")+file.Name).Description(tr(mediaLabels[file.Kind])).Height(46).Padding(0, 10, 0, 7).Gap(9)
 				b.Children(func() {
@@ -141,7 +141,7 @@ func (d *desktop) attachmentChips(c *ui.Context, p palette, files []model.Attach
 					case "audio", "video":
 						name = "Files"
 					}
-					ui.Box(c).Size(32, 32).Radius(9).Background(p.Subtle).Center().Children(func() { icon(c, name, 15, p.Text3) })
+					ui.Box(c).Size(32, 32).Radius(7).Background(p.Subtle).Center().Children(func() { icon(c, name, 15, p.Text3) })
 					ui.Column(c).Gap(0).Children(func() {
 						ui.Text(c, file.Name).SingleLine().MaxWidth(170).FontSize(p.font(fontSmall)).FontWeight(550).TextColor(p.Text)
 						ui.Text(c, tr(mediaLabels[file.Kind])).SingleLine().FontSize(p.font(fontCaption)).TextColor(p.Text3)
