@@ -72,6 +72,8 @@ MiniCode 支持接入自己的 OpenAI 兼容服务或 Anthropic 服务，并通�
 
 3.2.0 将 Go 原生桌面端升级至 UI v3：引入 `Mono Carbon` / `T3 Noir` / `Warm Ink` / `Daylight Paper` 四套主题预设、顶栏多会话标签复用器与实时 `TPS · Cache` 遥测胶囊、左侧栏 `Inbox 线程流 / 工作区目录树` 双模切换、`/operator` 子代理编排与底部常驻分支/改动/上下文控制栏、Prompt 结构化卡片、子代理交接卡、双列行号 Diff、键帽式审批栏以及右栏常驻 Git 汇总卡与 2×2 实时遥测 Bento 面板。
 
+3.2.1 全面升级 Rust Agent Runtime 核心与工具链：新增 `.gitignore` 感知并按修改时间排序的 `glob` 工具，`grep` 支持 `files_with_matches` / `count` / `context_lines`，`ls(recursive=true)` 默认遵循忽略规则；重构可写子代理隔离工作区，采用单次流式快照与按需基准加载消除双倍全量读写开销；Shell 捕获引入 `Notify` 事件唤醒消除 50ms 轮询尾延迟，增强 `readOnlyPaths` 沙箱校验与复合命令文件拒绝检测；上下文压缩改用结构化紧凑 Transcript 切块、流式零分配 SHA-256 指纹与更完整的本地降级摘要；只读子代理放开至 4 并发并支持独立模型/思考强度分级路由，同步强化系统提示词的高阶工具编排准则。
+
 发行包不包含模型账户或 API key，调用费用由所接入的服务收取。安装包目前未作 Windows 代码签名，更新归档使用 Ed25519 签名，
 可使用 Release 中的 `SHA256SUMS.txt` 校验下载文件。
 

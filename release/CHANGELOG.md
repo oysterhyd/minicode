@@ -1,5 +1,12 @@
 # MiniCode
 
+## 3.2.1 - 2026-11-22
+
+- 检索与文件系统工具链升级：新增内置只读 `glob` 工具（遵循 `.gitignore` / `.ignore`、按文件修改时间倒序排列并记录观测证据）；`grep` 新增 `output_mode`（`content` / `files_with_matches` / `count`）与 `context_lines`（0–10 行上下文窗口合并）；`ls(recursive=true)` 默认遵循忽略文件规则。
+- 子代理隔离工作区与并发/模型分级路由：`delegate_workspace` 采用单次流式读取快照与按需基准加载，仅对实际发生变更的文件读取 `base` 生成 Diff 与合并回滚；连续只读 `delegate` 放开至每批最多 4 并发，并支持按子代理配置独立 `model`（或全局 `subagentModel`）与 `effort` 分级路由。
+- 沙箱权限、Shell 事件唤醒与上下文压缩：`shell.rs` 引入 `Notify` 管道闭合即时唤醒机制消除 50ms 轮询尾延迟；`permissions.rs` 支持 `glob` 路径规则与复合命令敏感文件拒绝检测；`sandbox.rs` 强化 `readOnlyPaths` 绝对路径与未展开环境变量校验；`Provider::summarize` 改用结构化紧凑 Transcript 按消息边界切块（超时放宽至 60s 并记录 `summary_fallback_reason`），`prompt_fingerprint` 改为流式零分配 SHA-256，本地降级归档保留近期 Assistant 结论与已修改文件清单。
+- 认知编排提示词与升级兼容：扩充 `system-windows.txt` 与 `system-posix.txt` 的检索优先级、子代理委派、任务 DAG 与技能/记忆协同准则；继续兼容既有配置、schema 7 会话、附件、记忆、`3.2.x` 插件锁与原有 Ed25519 更新签名公钥。
+
 ## 3.2.0 - 2026-11-22
 
 - 多主题引擎与几何排印收敛：新增 `Mono Carbon`（默认深色）、`T3 Noir`、`Warm Ink` 与 `Daylight Paper` 四套内置主题预设及顶部 `1px` 镜面高光描边；设置页支持独立“外观模式（浅色 / 深色 / 跟随系统）”与预设卡片切换，并支持 `Ctrl+Shift+L` 循环切换预设；正文默认切换为高清晰度无衬线体（`sansFont`），路径/分支/Diff 行号/遥测指标统一使用等宽字体（`monoFont`），并将主面板、输入框与组件圆角收敛至 `13px / 10px / 6–7px`。

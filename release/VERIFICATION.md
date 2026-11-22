@@ -1,3 +1,11 @@
+# v3.2.1 Agent Runtime 架构升级与发行核验
+
+2026-11-22，Windows x64 / PowerShell 7，Rust stable MSVC、Go 1.27.1、Node.js 22.22.0。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.2.1，沿用既有 Ed25519 更新签名公钥（`4Ykb7FjKNYD3nPbz3ogPgB8KlxYTN4uflE/MO8EEJo0=`）。
+
+本机 `3.2.1` 发行前核验：Rust `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`（268 通过、0 失败、2 项手动基准按配置忽略）与 `cargo build --locked` 通过；`node scripts/check-doc-paths.mjs`、`node release/audit.mjs --source --history .`（1,789 文件、7,176 个 Git blobs）通过；`evals/generate-tasks.mjs --verify` 与 60 次任务 + 9 次场景评测全部符合预期（`counter_retry` 的 B0/B1 为预设首轮失败、B2 通过）。Wave 1 与 Wave 2 新增及更新的 `file-tools`、`subagent-isolation`、`permissions`、`context`、`providers`、`concurrency`、`runtime` 等后端集成套件全部通过。
+
+正式 Windows 安装包构建、原公钥 Ed25519 签名、差分包生成、烟测与安装卸载验收由 GitHub Actions `.github/workflows/release.yml`（`mygo@v0.5.5` + 仓库 Secret `MYGO_UPDATER_PRIVATE_KEY`）及 `.github/workflows/tests.yml` 在远端干净环境执行并发布到 `v3.2.1` Release。
+
 # v3.2.0 原生桌面端 UI v3 升级与发行核验
 
 2026-11-22，Windows x64 / PowerShell 7，Rust stable MSVC、Go 1.27.1、Node.js 22.22.0。统一 Rust、TUI、Native Desktop、更新清单与安装器版本为 3.2.0，沿用既有 Ed25519 更新签名公钥（`4Ykb7FjKNYD3nPbz3ogPgB8KlxYTN4uflE/MO8EEJo0=`）。
